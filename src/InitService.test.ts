@@ -1947,6 +1947,54 @@ describe("InitService scaffold", () => {
         access(join(dir, ".sandcastle", "Containerfile")),
       ).rejects.toThrow();
     });
+
+    it("selecting podman rewrites the main file to import and call podman", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: podmanProvider });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain(
+        'import { podman } from "@ai-hero/sandcastle/sandboxes/podman"',
+      );
+      expect(mainTs).toContain("sandbox: podman()");
+      expect(mainTs).not.toContain("docker");
+    });
+
+    it("selecting podman rewrites every docker() call site", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        sandboxProvider: podmanProvider,
+        templateName: "parallel-planner",
+      });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).not.toContain("docker");
+      // parallel-planner calls the factory three times
+      expect(mainTs.match(/sandbox: podman\(\)/g)).toHaveLength(3);
+    });
+
+    it("selecting docker leaves the main file importing and calling docker", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: dockerProvider });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain(
+        'import { run, claudeCode } from "@ai-hero/sandcastle"',
+      );
+      expect(mainTs).toContain(
+        'import { docker } from "@ai-hero/sandcastle/sandboxes/docker"',
+      );
+      expect(mainTs).toContain("sandbox: docker()");
+    });
   });
 });
 

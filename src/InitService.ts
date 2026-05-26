@@ -446,15 +446,17 @@ const copyTemplateFiles = (
   });
 
 /**
- * Replace the agent factory import and call in a scaffolded main.ts.
+ * Replace the agent factory and sandbox provider in a scaffolded main.ts.
  *
- * Templates use `claudeCode` as the default factory. When a different agent or
- * model is selected, this function rewrites the import and factory calls.
+ * Templates use `claudeCode` as the default agent factory and `docker` as the
+ * default sandbox provider. When a different agent, model, or sandbox provider
+ * is selected, this function rewrites the imports and factory calls.
  */
 const rewriteMainTs = (
   configDir: string,
   agent: AgentEntry,
   model: string,
+  sandboxProvider: SandboxProviderEntry,
   mainFilename: string,
 ): Effect.Effect<void, Error, FileSystem.FileSystem> =>
   Effect.gen(function* () {
@@ -489,6 +491,14 @@ const rewriteMainTs = (
       factoryCallRe,
       `${agent.factoryImport}("${model}")`,
     );
+
+    // Replace the sandbox provider. Templates always use `docker` as the
+    // placeholder, where the registry name doubles as both the factory function
+    // name and the `/sandboxes/<name>` import subpath segment. A single
+    // case-sensitive word-boundary replace therefore rewrites the named import,
+    // the import subpath, and every factory call site — and is a no-op when
+    // docker is selected.
+    content = content.replace(/\bdocker\b/g, sandboxProvider.name);
 
     yield* fs
       .writeFileString(mainTsPath, content)
@@ -693,8 +703,14 @@ export const scaffold = (
       { concurrency: "unbounded" },
     );
 
-    // Rewrite main file with the selected agent factory and model
-    yield* rewriteMainTs(configDir, agent, model, mainFilename);
+    // Rewrite main file with the selected agent factory, model, and sandbox provider
+    yield* rewriteMainTs(
+      configDir,
+      agent,
+      model,
+      sandboxProvider,
+      mainFilename,
+    );
 
     // Replace backlog manager template arguments in all text files (must run before label stripping)
     yield* substituteTemplateArgs(configDir, backlogManager);
