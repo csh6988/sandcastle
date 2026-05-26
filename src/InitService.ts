@@ -281,7 +281,9 @@ const BACKLOG_MANAGER_REGISTRY: BacklogManagerEntry[] = [
       CLOSE_TASK_COMMAND: `gh issue close <ID> --comment "Completed by Sandcastle"`,
       BACKLOG_MANAGER_TOOLS: GITHUB_CLI_TOOLS,
     },
-    envExample: `# GitHub personal access token
+    envExample: `# GitHub personal access token — the agent uses it to read and manage GitHub Issues
+# Create a fine-grained token: https://github.com/settings/personal-access-tokens/new
+# Required repository permissions: Issues (Read and write) and Metadata (Read)
 GH_TOKEN=`,
   },
   {

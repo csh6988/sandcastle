@@ -186,6 +186,11 @@ describe("InitService scaffold", () => {
       "utf-8",
     );
     expect(envExample).toContain("GH_TOKEN=");
+    expect(envExample).toContain(
+      "https://github.com/settings/personal-access-tokens/new",
+    );
+    expect(envExample).toContain("Issues");
+    expect(envExample).toContain("Metadata");
   });
 
   it("generates .env.example without GH_TOKEN when backlog manager is beads", async () => {
