@@ -65,7 +65,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -100,7 +100,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -133,7 +133,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -166,7 +166,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -201,7 +201,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -234,7 +234,7 @@ RUN apt-get update && apt-get install -y \\
   jq \\
   && rm -rf /var/lib/apt/lists/*
 
-{{BACKLOG_MANAGER_TOOLS}}
+{{ISSUE_TRACKER_TOOLS}}
 
 # Build-args for UID/GID alignment: sandcastle docker build-image
 # defaults these to the host user's UID/GID so image-built files
@@ -322,19 +322,19 @@ GITHUB_TOKEN=`,
 export const listAgents = (): AgentEntry[] => AGENT_REGISTRY;
 
 // ---------------------------------------------------------------------------
-// Backlog manager registry (internal — not part of public API)
+// Issue tracker registry (internal — not part of public API)
 // ---------------------------------------------------------------------------
 
-export interface BacklogManagerEntry {
+export interface IssueTrackerEntry {
   readonly name: string;
   readonly label: string;
   readonly templateArgs: {
     readonly LIST_TASKS_COMMAND: string;
     readonly VIEW_TASK_COMMAND: string;
     readonly CLOSE_TASK_COMMAND: string;
-    readonly BACKLOG_MANAGER_TOOLS: string;
+    readonly ISSUE_TRACKER_TOOLS: string;
   };
-  /** Lines to append to `.env.example` for this backlog manager, or empty string if none needed. */
+  /** Lines to append to `.env.example` for this issue tracker, or empty string if none needed. */
   readonly envExample: string;
 }
 
@@ -360,7 +360,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/i
 
 RUN corepack enable`;
 
-const BACKLOG_MANAGER_REGISTRY: BacklogManagerEntry[] = [
+const ISSUE_TRACKER_REGISTRY: IssueTrackerEntry[] = [
   {
     name: "github-issues",
     label: "GitHub Issues",
@@ -368,7 +368,7 @@ const BACKLOG_MANAGER_REGISTRY: BacklogManagerEntry[] = [
       LIST_TASKS_COMMAND: `gh issue list --state open --label Sandcastle --limit 100 --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`,
       VIEW_TASK_COMMAND: "gh issue view <ID>",
       CLOSE_TASK_COMMAND: `gh issue close <ID> --comment "Completed by Sandcastle"`,
-      BACKLOG_MANAGER_TOOLS: GITHUB_CLI_TOOLS,
+      ISSUE_TRACKER_TOOLS: GITHUB_CLI_TOOLS,
     },
     envExample: `# GitHub personal access token — the agent uses it to read and manage GitHub Issues
 # Create a fine-grained token: https://github.com/settings/personal-access-tokens/new
@@ -382,19 +382,17 @@ GH_TOKEN=`,
       LIST_TASKS_COMMAND: "bd ready --json",
       VIEW_TASK_COMMAND: "bd show <ID>",
       CLOSE_TASK_COMMAND: `bd close <ID> --reason="Completed by Sandcastle"`,
-      BACKLOG_MANAGER_TOOLS: BEADS_TOOLS,
+      ISSUE_TRACKER_TOOLS: BEADS_TOOLS,
     },
     envExample: "",
   },
 ];
 
-export const listBacklogManagers = (): BacklogManagerEntry[] =>
-  BACKLOG_MANAGER_REGISTRY;
+export const listIssueTrackers = (): IssueTrackerEntry[] =>
+  ISSUE_TRACKER_REGISTRY;
 
-export const getBacklogManager = (
-  name: string,
-): BacklogManagerEntry | undefined =>
-  BACKLOG_MANAGER_REGISTRY.find((b) => b.name === name);
+export const getIssueTracker = (name: string): IssueTrackerEntry | undefined =>
+  ISSUE_TRACKER_REGISTRY.find((b) => b.name === name);
 
 export const getAgent = (name: string): AgentEntry | undefined =>
   AGENT_REGISTRY.find((a) => a.name === name);
@@ -659,12 +657,12 @@ const isTextFile = (filename: string): boolean => {
 };
 
 /**
- * Replace `{{KEY}}` template arguments from the backlog manager's
+ * Replace `{{KEY}}` template arguments from the issue tracker's
  * `templateArgs` map in all text files in the scaffolded config directory.
  */
 const substituteTemplateArgs = (
   configDir: string,
-  backlogManager: BacklogManagerEntry,
+  issueTracker: IssueTrackerEntry,
 ): Effect.Effect<void, Error, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -681,7 +679,7 @@ const substituteTemplateArgs = (
             .pipe(Effect.mapError((e) => new Error(e.message)));
           const original = content;
           for (const [key, value] of Object.entries(
-            backlogManager.templateArgs,
+            issueTracker.templateArgs,
           )) {
             content = content.replace(
               new RegExp(`\\{\\{${key}\\}\\}`, "g"),
@@ -708,7 +706,7 @@ export interface ScaffoldOptions {
   model: string;
   templateName?: string;
   createLabel?: boolean;
-  backlogManager?: BacklogManagerEntry;
+  issueTracker?: IssueTrackerEntry;
   sandboxProvider?: SandboxProviderEntry;
 }
 
@@ -751,7 +749,7 @@ export const scaffold = (
       model,
       templateName = "blank",
       createLabel = true,
-      backlogManager = BACKLOG_MANAGER_REGISTRY[0]!, // default: github-issues
+      issueTracker = ISSUE_TRACKER_REGISTRY[0]!, // default: github-issues
       sandboxProvider = SANDBOX_PROVIDER_REGISTRY[0]!, // default: docker
     } = options;
     const fs = yield* FileSystem.FileSystem;
@@ -776,10 +774,10 @@ export const scaffold = (
 
     const templateDir = yield* getTemplateDir(templateName);
 
-    // Build .env.example from agent + backlog manager env blocks
+    // Build .env.example from agent + issue tracker env blocks
     const envExampleParts = [agent.envExample];
-    if (backlogManager.envExample) {
-      envExampleParts.push(backlogManager.envExample);
+    if (issueTracker.envExample) {
+      envExampleParts.push(issueTracker.envExample);
     }
     const envExampleContent = envExampleParts.join("\n") + "\n";
 
@@ -811,8 +809,8 @@ export const scaffold = (
       mainFilename,
     );
 
-    // Replace backlog manager template arguments in all text files (must run before label stripping)
-    yield* substituteTemplateArgs(configDir, backlogManager);
+    // Replace issue tracker template arguments in all text files (must run before label stripping)
+    yield* substituteTemplateArgs(configDir, issueTracker);
 
     // Strip --label Sandcastle from prompt files when the user declined label creation
     if (!createLabel) {
