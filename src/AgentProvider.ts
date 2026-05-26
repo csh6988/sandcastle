@@ -610,8 +610,9 @@ export const opencode = (
 // ---------------------------------------------------------------------------
 
 /**
- * Copilot CLI print mode passes the prompt as the `-p` argv argument; the CLI
- * accepts only command-line *options* on stdin, not the prompt itself. Linux
+ * Copilot CLI print mode passes the prompt as the `-p` argv argument. (The CLI
+ * can also read a prompt piped on stdin — `echo "..." | copilot` — but we use
+ * the `-p` argv form here for parity with the tested print-command path.) Linux
  * enforces a per-argument limit (~128 KiB, ARG_MAX stack). Stay slightly under
  * so users get a clear error instead of spawn E2BIG. Mirrors the Cursor guard.
  */
@@ -621,7 +622,7 @@ function assertCopilotPrintPromptFitsArgv(prompt: string): void {
   const n = Buffer.byteLength(prompt, "utf8");
   if (n > COPILOT_PRINT_PROMPT_MAX_BYTES) {
     throw new Error(
-      `Copilot print-mode prompt is ${n} bytes (max ${COPILOT_PRINT_PROMPT_MAX_BYTES} bytes). The Copilot CLI accepts the prompt only as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
+      `Copilot print-mode prompt is ${n} bytes (max ${COPILOT_PRINT_PROMPT_MAX_BYTES} bytes). This provider passes the prompt as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
     );
   }
 }
@@ -741,7 +742,12 @@ export const copilot = (
 
   buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
     const args = ["copilot", "--model", model];
-    if (prompt) args.push("-p", prompt);
+    // Seed the interactive session with `-i`/`--interactive`, NOT `-p`. The
+    // `-p`/`--prompt` flag runs the prompt programmatically and exits after
+    // completion; since interactive() attaches these args to the real TTY,
+    // `-p` would print-and-exit instead of launching the TUI. `-i` starts an
+    // interactive session and auto-executes the prompt without exiting.
+    if (prompt) args.push("-i", prompt);
     return args;
   },
 

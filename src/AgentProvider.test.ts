@@ -1420,6 +1420,17 @@ describe("copilot factory", () => {
     expect(args).toContain("hello");
   });
 
+  it("buildInteractiveArgs seeds the prompt with -i, not -p", () => {
+    // `-p`/`--prompt` runs programmatically and exits; interactive sessions
+    // must use `-i`/`--interactive` to launch the TUI without exiting.
+    const provider = copilot("claude-sonnet-4.5");
+    const args = provider.buildInteractiveArgs!(opts("hello"));
+    expect(args).toContain("-i");
+    expect(args).not.toContain("-p");
+    // The prompt immediately follows the -i flag.
+    expect(args[args.indexOf("-i") + 1]).toBe("hello");
+  });
+
   it("parseStreamLine returns empty array for non-JSON and unrecognised input", () => {
     const provider = copilot("claude-sonnet-4.5");
     expect(provider.parseStreamLine("some output text")).toEqual([]);
