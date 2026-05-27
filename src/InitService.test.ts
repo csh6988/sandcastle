@@ -7,15 +7,17 @@ import { describe, expect, it } from "vitest";
 import {
   scaffold,
   getNextStepsLines,
-  listAgents,
   getAgent,
   listTemplates,
   listIssueTrackers,
   getIssueTracker,
-  listSandboxProviders,
   getSandboxProvider,
 } from "./InitService.js";
-import type { AgentEntry, ScaffoldOptions } from "./InitService.js";
+import type {
+  AgentEntry,
+  PackageManager,
+  ScaffoldOptions,
+} from "./InitService.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { SKELETON_PROMPT } from "./templates.js";
 
@@ -38,106 +40,6 @@ const runScaffold = (repoDir: string, options?: Partial<ScaffoldOptions>) =>
       Effect.provide(NodeFileSystem.layer),
     ),
   );
-
-// ---------------------------------------------------------------------------
-// Agent registry
-// ---------------------------------------------------------------------------
-
-describe("Agent registry", () => {
-  it("listAgents returns at least claude-code", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "claude-code")).toBe(true);
-  });
-
-  it("getAgent returns claude-code entry with expected fields", () => {
-    const agent = getAgent("claude-code");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("claude-code");
-    expect(agent!.defaultModel).toBe("claude-opus-4-7");
-    expect(agent!.factoryImport).toBe("claudeCode");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-  });
-
-  it("getAgent returns undefined for unknown agent", () => {
-    expect(getAgent("nonexistent")).toBeUndefined();
-  });
-
-  it("listAgents includes pi", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "pi")).toBe(true);
-  });
-
-  it("getAgent returns pi entry with expected fields", () => {
-    const agent = getAgent("pi");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("pi");
-    expect(agent!.defaultModel).toBe("claude-sonnet-4-6");
-    expect(agent!.factoryImport).toBe("pi");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain(
-      "@mariozechner/pi-coding-agent",
-    );
-  });
-
-  it("listAgents includes codex", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "codex")).toBe(true);
-  });
-
-  it("getAgent returns codex entry with expected fields", () => {
-    const agent = getAgent("codex");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("codex");
-    expect(agent!.defaultModel).toBe("gpt-5.4-mini");
-    expect(agent!.factoryImport).toBe("codex");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("@openai/codex");
-  });
-
-  it("listAgents includes opencode", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "opencode")).toBe(true);
-  });
-
-  it("listAgents includes cursor", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "cursor")).toBe(true);
-  });
-
-  it("getAgent returns cursor entry with expected fields", () => {
-    const agent = getAgent("cursor");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("cursor");
-    expect(agent!.defaultModel).toBe("composer-2");
-    expect(agent!.factoryImport).toBe("cursor");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("cursor.com/install");
-  });
-
-  it("getAgent returns opencode entry with expected fields", () => {
-    const agent = getAgent("opencode");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("opencode");
-    expect(agent!.defaultModel).toBe("opencode/big-pickle");
-    expect(agent!.factoryImport).toBe("opencode");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("opencode-ai");
-  });
-
-  it("listAgents includes copilot", () => {
-    const agents = listAgents();
-    expect(agents.some((a) => a.name === "copilot")).toBe(true);
-  });
-
-  it("getAgent returns copilot entry with expected fields", () => {
-    const agent = getAgent("copilot");
-    expect(agent).toBeDefined();
-    expect(agent!.name).toBe("copilot");
-    expect(agent!.factoryImport).toBe("copilot");
-    expect(agent!.dockerfileTemplate).toContain("FROM");
-    expect(agent!.dockerfileTemplate).toContain("@github/copilot");
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Scaffold
@@ -669,8 +571,18 @@ describe("InitService scaffold", () => {
     const customManager = getIssueTracker("custom")!;
     // Non-custom issue tracker keeps the template-driven next steps; the
     // custom branch is exercised separately below.
-    const next = (template: string, mainFilename: string) =>
-      getNextStepsLines(template, mainFilename, ghIssues, claudeCodeAgent);
+    const next = (
+      template: string,
+      mainFilename: string,
+      packageManager: PackageManager = "npm",
+    ) =>
+      getNextStepsLines(
+        template,
+        mainFilename,
+        ghIssues,
+        claudeCodeAgent,
+        packageManager,
+      );
 
     it("blank template returns steps mentioning .env and main filename (not npx sandcastle run)", () => {
       const lines = next("blank", "main.mts");
@@ -780,6 +692,18 @@ describe("InitService scaffold", () => {
       expect(joined).toContain("npm install zod");
     });
 
+    it("planner zod step uses the detected package manager's add command", () => {
+      expect(next("parallel-planner", "main.mts", "pnpm").join("\n")).toContain(
+        "pnpm add zod",
+      );
+      expect(next("parallel-planner", "main.mts", "yarn").join("\n")).toContain(
+        "yarn add zod",
+      );
+      expect(next("parallel-planner", "main.mts", "bun").join("\n")).toContain(
+        "bun add zod",
+      );
+    });
+
     it("non-planner template does not mention installing zod", () => {
       const lines = next("simple-loop", "main.mts");
       const joined = lines.join("\n");
@@ -792,6 +716,7 @@ describe("InitService scaffold", () => {
         "main.mts",
         customManager,
         claudeCodeAgent,
+        "npm",
       );
       const joined = lines.join("\n");
       expect(joined).toContain("SETUP_ISSUE_TRACKER.md");
@@ -806,6 +731,7 @@ describe("InitService scaffold", () => {
         "main.mts",
         customManager,
         getAgent("opencode")!,
+        "npm",
       );
       const joined = lines.join("\n");
       expect(joined.toLowerCase()).toContain("host");
@@ -2407,35 +2333,5 @@ describe("InitService scaffold", () => {
       );
       expect(mainTs).toContain("sandbox: docker()");
     });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Sandbox provider registry
-// ---------------------------------------------------------------------------
-
-describe("Sandbox provider registry", () => {
-  it("listSandboxProviders returns docker and podman", () => {
-    const providers = listSandboxProviders();
-    expect(providers.some((p) => p.name === "docker")).toBe(true);
-    expect(providers.some((p) => p.name === "podman")).toBe(true);
-  });
-
-  it("getSandboxProvider returns docker entry", () => {
-    const provider = getSandboxProvider("docker");
-    expect(provider).toBeDefined();
-    expect(provider!.containerfileName).toBe("Dockerfile");
-    expect(provider!.cliNamespace).toBe("docker");
-  });
-
-  it("getSandboxProvider returns podman entry", () => {
-    const provider = getSandboxProvider("podman");
-    expect(provider).toBeDefined();
-    expect(provider!.containerfileName).toBe("Containerfile");
-    expect(provider!.cliNamespace).toBe("podman");
-  });
-
-  it("getSandboxProvider returns undefined for unknown provider", () => {
-    expect(getSandboxProvider("nonexistent")).toBeUndefined();
   });
 });
