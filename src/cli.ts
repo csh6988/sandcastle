@@ -3,7 +3,6 @@ import { FileSystem } from "@effect/platform";
 import { Effect } from "effect";
 import * as clack from "@clack/prompts";
 import { execSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { styleText } from "node:util";
 
@@ -35,9 +34,7 @@ import type {
   SandboxProviderEntry,
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
-
-const require = createRequire(import.meta.url);
-const VERSION = (require("../package.json") as { version: string }).version;
+import { VERSION } from "./version.js";
 
 // --- Shared options ---
 

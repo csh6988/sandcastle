@@ -49,7 +49,7 @@ export type {
   OutputObjectDefinition,
   OutputStringDefinition,
 } from "./Output.js";
-export { CwdError } from "./resolveCwd.js";
+export { CwdError } from "./CwdError.js";
 export {
   claudeCode,
   codex,
