@@ -52,9 +52,12 @@ sandbox→host channel (`format-patch`/`am`) carries commits, not refs.
 
 ## Consequences
 
-- The same ref is read by `SandboxLifecycle` to compute the "Syncing N commits
-  to host" count, which was previously also poisoned by host-HEAD on run 2+.
-  The ref name lives in a single shared constant to avoid drift.
+- The "Syncing N commits to host" count shown by `SandboxLifecycle` was
+  previously computed against host HEAD and silently degraded to `0` on run 2+
+  (the host SHA is unknown inside the sandbox, so its `git rev-list` exits
+  non-zero). It now comes from a shared `countCommitsToSync` helper exported by
+  `syncOut`, so base resolution (the ref-or-host-HEAD fallback) lives in exactly
+  one place instead of being duplicated at the lifecycle call site.
 - Reversible in principle, but reverting the base to host HEAD silently
   reintroduces the data-loss bug — so the indirection is deliberate, not
   incidental.
