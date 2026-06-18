@@ -1,5 +1,21 @@
 # @ai-hero/sandcastle
 
+## 0.11.0
+
+### Minor Changes
+
+- 9f3f6d5: Add `maxRetries` to `Output.object` and `Output.string` for built-in retry of structured-output runs. When extraction or validation fails, `run()` resumes the failed agent session and feeds back a token-efficient description of the error so the agent can re-emit a corrected tag, up to `maxRetries` extra attempts (default: `0`). Retries require an agent provider that supports session resumption (`claudeCode`, `codex`, `pi`); calling `run()` with `maxRetries > 0` against a non-resumable provider (`cursor`, `opencode`, `copilot`) fails at entry with a clear error.
+- bce86dd: Add `resumeSession` to `sandbox.run()` and expose `.resume(prompt, options?)` / `.fork(prompt, options?)` on `SandboxRunResult`. The new options mirror `RunOptions.resumeSession` and `RunResult.resume()/fork()`, but continue the agent session _inside an existing long-lived `createSandbox()` container_ — so the container, worktree, and on-ready dependencies stay warm across implement → review → edit phases instead of each phase paying container boot. Resume is gated on the session-capture fix in this release; non-bind-mount providers skip capture and therefore have nothing to resume from.
+
+### Patch Changes
+
+- bce86dd: Fix `createSandbox().run()` and `createWorktree().run()` not capturing the agent session on bind-mount providers — `iterations[].usage` stayed `undefined`, and the resulting `"Context window: NNNk"` line never printed. The `reuseFactoryLayer` that both entry points install was dropping `bindMountHandle` from the `SandboxInfo` it passed to the orchestrator, so the session-capture gate (`provider.captureSessions && provider.sessionStorage && sessionId && bindMountHandle`) silently no-op'd. The handle is now plumbed through, gated on `sandbox.tag === "bind-mount"` so isolated and no-sandbox providers still bypass capture cleanly.
+- f7879c5: Fix `createWorktree({ branchStrategy: { type: "merge-to-head" } })` not merging the agent's commits back to the host's current branch. `wt.run()`, `wt.interactive()`, and `wt.createSandbox()` previously forwarded the worktree's temp branch as an explicit branch, which routed `SandboxLifecycle` through its "explicit branch" path and skipped the merge step entirely — commits landed on the temp branch but never on HEAD. They now pass `branch: undefined` (so the lifecycle records the host's current branch and merges back to it) while keeping the worktree's source branch alive for subsequent calls.
+- 0e1df92: Fix Cursor Dockerfile failing on macOS hosts where the user's GID is `20` (already used by the `dialout` group in `node:22-bookworm`). `groupmod`/`usermod` in the Cursor template now use `-o` (`--non-unique`), matching the other agent templates.
+- 702d829: Fix `noSandbox()` failing with `spawn sh ENOENT` in PowerShell / `cmd.exe` on Windows. The provider now routes `exec` commands through `cmd.exe /d /s /c` on Windows and spawns interactive agents with `shell: true` so npm `.cmd`/`.ps1` wrappers (e.g. `claude.cmd`) resolve via `PATHEXT`. POSIX hosts are unchanged.
+- 9a895ba: Fix Docker bind-mount sandbox failing on Windows hosts with `too many colons` when launched via `interactive()` (non-head strategy), `worktree.interactive()`, or `worktree.run()`. These three entry points called `resolveGitMounts` but skipped the `patchGitMountsForWindows` step, so the parent `.git` mount kept its `C:\...` sandbox path and Docker rejected the resulting volume string. They now mirror the existing wiring in `SandboxFactory` and `createSandbox`.
+- 595e21e: Improve the `WorktreeManager` error raised when the requested branch is already checked out in the host's main working tree (or any other unmanaged worktree). The message now explains why this happens — sandcastle's branch and merge-to-head strategies run the agent in a git worktree under `.sandcastle/worktrees/`, and git refuses to check out the same branch in two worktrees at once — and tells the caller to pick a different branch or switch the main working tree first. No behaviour change: sandcastle still does not attempt smart recovery here.
+
 ## 0.10.0
 
 ### Minor Changes
