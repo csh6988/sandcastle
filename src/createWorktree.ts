@@ -725,7 +725,7 @@ export const createWorktree = async (
       hooks: opts.hooks,
       copyToWorktree: opts.copyToWorktree,
       timeouts: opts.timeouts,
-      keepSourceBranch: isMergeToHead,
+      branchStrategy: options.branchStrategy,
       _test: opts._test,
     });
   };
