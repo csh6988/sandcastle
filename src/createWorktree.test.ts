@@ -782,6 +782,112 @@ describe("worktree.run()", () => {
     }
   });
 
+  it("merge-to-head: agent commits advance host's current branch", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "ws-run-mth-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+
+    const { stdout: hostHeadBefore } = await execAsync("git rev-parse HEAD", {
+      cwd: hostDir,
+    });
+
+    const sandbox = makeRunTestProvider(async (cwd) => {
+      execSync('echo "agent file" > agent.txt', { cwd });
+      execSync("git add agent.txt", { cwd });
+      execSync('git commit -m "agent commit"', { cwd });
+      return "done";
+    });
+
+    const ws = await createWorktree({
+      branchStrategy: { type: "merge-to-head" },
+      cwd: hostDir,
+    });
+
+    try {
+      const result = await ws.run({
+        agent: claudeCode("claude-opus-4-7"),
+        sandbox,
+        prompt: "create a file",
+        maxIterations: 1,
+      });
+
+      // The result branch is the host's current branch (main), not the temp branch
+      expect(result.branch).toBe("main");
+      expect(result.commits.length).toBeGreaterThanOrEqual(1);
+
+      // Host's main has advanced to include the agent's commit
+      const { stdout: hostHeadAfter } = await execAsync("git rev-parse HEAD", {
+        cwd: hostDir,
+      });
+      expect(hostHeadAfter.trim()).not.toBe(hostHeadBefore.trim());
+
+      // The commit is reachable from main's HEAD
+      const { stdout: log } = await execAsync("git log --format=%s -n 1 HEAD", {
+        cwd: hostDir,
+      });
+      expect(log.trim()).toBe("agent commit");
+
+      // The worktree's source branch must survive so the worktree handle is reusable
+      expect(existsSync(ws.worktreePath)).toBe(true);
+      const { stdout: worktreeBranch } = await execAsync(
+        "git rev-parse --abbrev-ref HEAD",
+        { cwd: ws.worktreePath },
+      );
+      expect(worktreeBranch.trim()).toBe(ws.branch);
+    } finally {
+      await ws.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
+  it("merge-to-head: two sequential run() calls both land on host", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "ws-run-mth-2x-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "init.txt", "init", "initial commit");
+
+    let iter = 0;
+    const sandbox = makeRunTestProvider(async (cwd) => {
+      iter += 1;
+      const name = `iter${iter}.txt`;
+      execSync(`echo "iter ${iter}" > ${name}`, { cwd });
+      execSync(`git add ${name}`, { cwd });
+      execSync(`git commit -m "agent commit ${iter}"`, { cwd });
+      return "done";
+    });
+
+    const ws = await createWorktree({
+      branchStrategy: { type: "merge-to-head" },
+      cwd: hostDir,
+    });
+
+    try {
+      await ws.run({
+        agent: claudeCode("claude-opus-4-7"),
+        sandbox,
+        prompt: "first",
+        maxIterations: 1,
+      });
+
+      // Second run() reuses the same worktree handle — the source branch must
+      // still exist on disk for the iteration to find HEAD inside the sandbox.
+      await ws.run({
+        agent: claudeCode("claude-opus-4-7"),
+        sandbox,
+        prompt: "second",
+        maxIterations: 1,
+      });
+
+      const { stdout: log } = await execAsync("git log --format=%s -n 2 HEAD", {
+        cwd: hostDir,
+      });
+      const messages = log.trim().split("\n");
+      expect(messages).toEqual(["agent commit 2", "agent commit 1"]);
+    } finally {
+      await ws.close();
+      await rm(hostDir, { recursive: true, force: true });
+    }
+  });
+
   it("sandbox is required (type error if omitted)", () => {
     // This test validates at the type level — sandbox is required in WorktreeRunOptions
     const _options = {

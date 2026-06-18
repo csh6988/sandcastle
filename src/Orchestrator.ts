@@ -285,6 +285,8 @@ export interface OrchestrateOptions {
   readonly skipPromptExpansion?: boolean;
   /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
   readonly timeouts?: Timeouts;
+  /** Forwarded to `withSandboxLifecycle` — see `SandboxLifecycleOptions.keepSourceBranch`. */
+  readonly keepSourceBranch?: boolean;
 }
 
 /** Per-iteration result carrying an optional session ID. */
@@ -369,6 +371,7 @@ export const orchestrate = (
               applyToHost,
               signal: options.signal,
               timeouts: options.timeouts,
+              keepSourceBranch: options.keepSourceBranch,
             },
             sandbox,
             (ctx) =>

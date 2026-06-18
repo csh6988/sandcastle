@@ -47,6 +47,8 @@ import type {
   BindMountSandboxHandle,
   IsolatedSandboxHandle,
   NoSandboxHandle,
+  MergeToHeadBranchStrategy,
+  NamedBranchStrategy,
 } from "./SandboxProvider.js";
 import { startSandbox } from "./startSandbox.js";
 import { syncOut } from "./syncOut.js";
@@ -197,6 +199,12 @@ interface SandboxHandleContext {
     | undefined;
   readonly applyToHost: () => Effect.Effect<void, any>;
   readonly timeouts?: Timeouts;
+  /** Worktree branch strategy. Set only when the handle is backed by a
+   *  `createWorktree(...)` handle; absent for top-level `createSandbox()`,
+   *  which is always explicit-branch. When `type === "merge-to-head"`, each
+   *  run()/interactive() routes through the lifecycle's merge step and the
+   *  worktree's source branch is preserved across calls. */
+  readonly branchStrategy?: MergeToHeadBranchStrategy | NamedBranchStrategy;
 }
 
 /**
@@ -218,7 +226,14 @@ const buildSandboxHandle = (
     providerHandle,
     applyToHost,
     timeouts,
+    branchStrategy,
   } = ctx;
+  // Routing for the lifecycle: in merge-to-head mode pass `branch: undefined`
+  // (so the lifecycle records host's current branch and merges back) and keep
+  // the worktree's source branch alive for subsequent calls. In all other
+  // cases (top-level createSandbox, named-branch worktree) forward `branch`
+  // as-is and let the lifecycle delete the temp branch normally.
+  const mergeToHead = branchStrategy?.type === "merge-to-head";
 
   const sandboxHandle: Sandbox = {
     branch,
@@ -335,7 +350,7 @@ const buildSandboxHandle = (
               hostRepoDir,
               iterations: maxIterations,
               prompt: resolvedPrompt,
-              branch,
+              branch: mergeToHead ? undefined : branch,
               provider,
               completionSignal: runOptions.completionSignal,
               idleTimeoutSeconds: runOptions.idleTimeoutSeconds,
@@ -344,6 +359,7 @@ const buildSandboxHandle = (
               signal: runOptions.signal,
               skipPromptExpansion: isInlinePrompt,
               timeouts,
+              keepSourceBranch: mergeToHead,
             });
 
             const completion = buildCompletionMessage(
@@ -437,10 +453,11 @@ const buildSandboxHandle = (
               {
                 hostRepoDir,
                 sandboxRepoDir,
-                branch,
+                branch: mergeToHead ? undefined : branch,
                 hostWorktreePath: worktreePath,
                 applyToHost,
                 timeouts,
+                keepSourceBranch: mergeToHead,
               },
               sandbox,
               (ctx) =>
@@ -528,6 +545,12 @@ export interface CreateSandboxFromWorktreeOptions {
   readonly hooks?: SandboxHooks;
   readonly copyToWorktree?: string[];
   readonly timeouts?: Timeouts;
+  /** Forwarded to the Sandbox handle. Set by `createWorktree` so the handle
+   *  can route run()/interactive() correctly: for `merge-to-head`, each call
+   *  merges back to the host's current branch and the worktree's source
+   *  branch is preserved; for `branch`, the lifecycle is driven as
+   *  explicit-branch mode. Absent for top-level `createSandbox()`. */
+  readonly branchStrategy?: MergeToHeadBranchStrategy | NamedBranchStrategy;
   readonly _test?: {
     readonly buildSandbox?: (sandboxDir: string) => SandboxService;
   };
@@ -677,6 +700,7 @@ export const createSandboxFromWorktree = async (
       providerHandle,
       applyToHost,
       timeouts: options.timeouts,
+      branchStrategy: options.branchStrategy,
     },
     async () => {
       if (closed) return { preservedWorktreePath: undefined };
