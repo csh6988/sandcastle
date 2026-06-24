@@ -481,7 +481,14 @@ const initCommand = Command.make(
       const providerLabel = selectedSandboxProvider.label;
       if (selectedIssueTracker.name === "custom") {
         yield* d.status(
-          "Init complete! Your custom issue tracker isn't configured yet — see the steps below before building.",
+          selectedSandboxProvider.buildsImage
+            ? "Init complete! Your custom issue tracker isn't configured yet — see the steps below before building."
+            : "Init complete! Your custom issue tracker isn't configured yet — see the steps below before running.",
+          "success",
+        );
+      } else if (!selectedSandboxProvider.buildsImage) {
+        yield* d.status(
+          "Init complete! No sandbox image was generated because the agent will run on the host.",
           "success",
         );
       } else {
@@ -526,6 +533,7 @@ const initCommand = Command.make(
         selectedIssueTracker,
         selectedAgent,
         packageManager,
+        selectedSandboxProvider,
       );
       for (const [i, line] of nextSteps.entries()) {
         yield* d.text(i === 0 ? line : styleText("dim", line));

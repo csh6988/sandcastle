@@ -101,6 +101,7 @@ describe("sandcastle CLI", () => {
       expect(output).toContain("nonexistent");
       expect(output).toContain("docker");
       expect(output).toContain("podman");
+      expect(output).toContain("no-sandbox");
     }
   });
 
@@ -241,6 +242,24 @@ describe("sandcastle CLI", () => {
     const entries = await readdir(join(hostDir, ".sandcastle"));
     expect(entries).toContain("Dockerfile");
     expect(entries).toContain("prompt.md");
+  });
+
+  it("init --sandbox no-sandbox scaffolds without requiring --build-image", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const { stdout } = await runCli(
+      "init --agent claude-code --template blank --sandbox no-sandbox --issue-tracker beads",
+      hostDir,
+    );
+
+    expect(stdout).toContain("No sandbox image was generated");
+    const entries = await readdir(join(hostDir, ".sandcastle"));
+    expect(entries).toContain("prompt.md");
+    expect(entries).toContain("main.mts");
+    expect(entries).not.toContain("Dockerfile");
+    expect(entries).not.toContain("Containerfile");
   });
 
   it("init without --agent fails fast with a clear non-interactive error message", async () => {

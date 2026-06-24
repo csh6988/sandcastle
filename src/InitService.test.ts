@@ -1606,6 +1606,22 @@ describe("InitService scaffold", () => {
       expect(setup).not.toContain("sandcastle docker build-image");
     });
 
+    it("custom SETUP doc omits build-image steps for no-sandbox", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "simple-loop",
+        issueTracker: customManager,
+        sandboxProvider: getSandboxProvider("no-sandbox"),
+      });
+
+      const setup = await readFile(
+        join(dir, ".sandcastle", "SETUP_ISSUE_TRACKER.md"),
+        "utf-8",
+      );
+      expect(setup).toContain("Host environment");
+      expect(setup).not.toContain("build-image");
+    });
+
     it("non-custom issue trackers do not scaffold SETUP_ISSUE_TRACKER.md", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
@@ -2294,6 +2310,7 @@ describe("InitService scaffold", () => {
   describe("sandbox provider", () => {
     const dockerProvider = getSandboxProvider("docker")!;
     const podmanProvider = getSandboxProvider("podman")!;
+    const noSandboxProvider = getSandboxProvider("no-sandbox")!;
 
     it("selecting docker writes Dockerfile to .sandcastle/", async () => {
       const dir = await makeDir();
@@ -2339,6 +2356,19 @@ describe("InitService scaffold", () => {
       ).rejects.toThrow();
     });
 
+    it("selecting no-sandbox does not write Dockerfile or Containerfile", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: noSandboxProvider });
+
+      const { access } = await import("node:fs/promises");
+      await expect(
+        access(join(dir, ".sandcastle", "Dockerfile")),
+      ).rejects.toThrow();
+      await expect(
+        access(join(dir, ".sandcastle", "Containerfile")),
+      ).rejects.toThrow();
+    });
+
     it("selecting podman rewrites the main file to import and call podman", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { sandboxProvider: podmanProvider });
@@ -2368,6 +2398,36 @@ describe("InitService scaffold", () => {
       expect(mainTs).not.toContain("docker");
       // parallel-planner calls the factory three times
       expect(mainTs.match(/sandbox: podman\(\)/g)).toHaveLength(3);
+    });
+
+    it("selecting no-sandbox rewrites the main file to import and call noSandbox", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { sandboxProvider: noSandboxProvider });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toMatch(
+        /import \{ noSandbox \} from "@(?:ai-hero|chenshaohui6988)\/sandcastle\/sandboxes\/no-sandbox"/,
+      );
+      expect(mainTs).toContain("sandbox: noSandbox()");
+      expect(mainTs).not.toContain("docker");
+    });
+
+    it("selecting no-sandbox rewrites every docker() call site", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        sandboxProvider: noSandboxProvider,
+        templateName: "parallel-planner",
+      });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).not.toContain("docker");
+      expect(mainTs.match(/sandbox: noSandbox\(\)/g)).toHaveLength(3);
     });
 
     it("selecting docker leaves the main file importing and calling docker", async () => {

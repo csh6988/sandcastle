@@ -587,9 +587,12 @@ export interface SandboxProviderEntry {
   readonly name: string;
   readonly label: string;
   /** Filename written to .sandcastle/ (e.g. "Dockerfile" or "Containerfile") */
-  readonly containerfileName: string;
+  readonly containerfileName?: string;
   /** CLI namespace for build/remove commands (e.g. "docker" or "podman") */
-  readonly cliNamespace: string;
+  readonly cliNamespace?: string;
+  readonly factoryImport: string;
+  readonly importSubpath: string;
+  readonly buildsImage: boolean;
 }
 
 const SANDBOX_PROVIDER_REGISTRY: SandboxProviderEntry[] = [
@@ -598,12 +601,25 @@ const SANDBOX_PROVIDER_REGISTRY: SandboxProviderEntry[] = [
     label: "Docker",
     containerfileName: "Dockerfile",
     cliNamespace: "docker",
+    factoryImport: "docker",
+    importSubpath: "docker",
+    buildsImage: true,
   },
   {
     name: "podman",
     label: "Podman",
     containerfileName: "Containerfile",
     cliNamespace: "podman",
+    factoryImport: "podman",
+    importSubpath: "podman",
+    buildsImage: true,
+  },
+  {
+    name: "no-sandbox",
+    label: "No sandbox (run on host)",
+    factoryImport: "noSandbox",
+    importSubpath: "no-sandbox",
+    buildsImage: false,
   },
 ];
 
@@ -625,20 +641,25 @@ export function getNextStepsLines(
   issueTracker: IssueTrackerEntry,
   agent: AgentEntry,
   packageManager: PackageManager,
+  sandboxProvider: SandboxProviderEntry = SANDBOX_PROVIDER_REGISTRY[0]!,
 ): string[] {
   // The custom issue tracker scaffolds a broken-until-configured project, so
   // its next steps are about running the setup prompt — not the template's
   // normal "set env vars and go" flow. This branch wins over template-specific
   // steps regardless of the chosen template.
   if (issueTracker.name === "custom") {
-    return [
+    const lines = [
       "Next steps:",
       "1. Your custom issue tracker isn't wired up yet — runs hard-fail until you configure it.",
       `2. Feed the setup prompt to ${agent.label} on your host to finish wiring it up:`,
       `   ${agent.setupCommand}`,
       `   (Runs on the host — you need the ${agent.label} CLI installed locally, since the sandbox image isn't built yet.)`,
-      `3. Follow .sandcastle/${SETUP_ISSUE_TRACKER_DOC} to edit the scaffolded files in place, build the image, and verify.`,
+      `3. Follow .sandcastle/${SETUP_ISSUE_TRACKER_DOC} to edit the scaffolded files in place and verify.`,
     ];
+    if (sandboxProvider.buildsImage) {
+      lines[5] = `3. Follow .sandcastle/${SETUP_ISSUE_TRACKER_DOC} to edit the scaffolded files in place, build the image, and verify.`;
+    }
+    return lines;
   }
   if (template === "blank") {
     const lines = [
@@ -656,6 +677,11 @@ export function getNextStepsLines(
       `4. Add "sandcastle": "npx tsx .sandcastle/${mainFilename}" to your package.json scripts`,
       "5. Run `npm run sandcastle` to start the agent",
     );
+    if (!sandboxProvider.buildsImage) {
+      lines.push(
+        "   No sandbox was selected, so the agent runs directly on the host without container isolation.",
+      );
+    }
     return lines;
   } else {
     const hasReviewer = template.includes("review");
@@ -688,6 +714,11 @@ export function getNextStepsLines(
       );
     }
     lines.push(`${step++}. Run \`npm run sandcastle\` to start the agent`);
+    if (!sandboxProvider.buildsImage) {
+      lines.push(
+        `   No sandbox was selected, so the agent runs directly on the host without container isolation.`,
+      );
+    }
     return lines;
   }
 }
@@ -802,12 +833,22 @@ const rewriteMainTs = (
     );
 
     // Replace the sandbox provider. Templates always use `docker` as the
-    // placeholder, where the registry name doubles as both the factory function
-    // name and the `/sandboxes/<name>` import subpath segment. A single
-    // case-sensitive word-boundary replace therefore rewrites the named import,
-    // the import subpath, and every factory call site — and is a no-op when
-    // docker is selected.
-    content = content.replace(/\bdocker\b/g, sandboxProvider.name);
+    // placeholder import and factory call.
+    content = content.replace(
+      /import \{ docker \} from "(@(?:ai-hero|chenshaohui6988)\/sandcastle)\/sandboxes\/docker";/,
+      `import { ${sandboxProvider.factoryImport} } from "$1/sandboxes/${sandboxProvider.importSubpath}";`,
+    );
+    content = content.replace(
+      /\bdocker\(\)/g,
+      `${sandboxProvider.factoryImport}()`,
+    );
+    if (!sandboxProvider.buildsImage) {
+      content = content.replace(
+        /runs the agent inside an isolated container/g,
+        "runs the agent directly on the host",
+      );
+      content = content.replace(/the sandbox starts/g, "the agent starts");
+    }
 
     yield* fs
       .writeFileString(mainTsPath, content)
@@ -913,10 +954,35 @@ const substituteTemplateArgs = (
  * Build the `SETUP_ISSUE_TRACKER.md` prompt scaffolded for the `custom` issue
  * tracker. It addresses the user's coding agent and walks it through wiring up
  * the tracker by editing the scaffolded files in place. The build command is
- * provider-parameterized so it names the actual CLI namespace (docker/podman).
+ * provider-parameterized so it names the actual CLI namespace (docker/podman)
+ * and is omitted when no sandbox image is generated.
  */
-const buildSetupIssueTrackerDoc = (cliNamespace: string): string =>
-  `# Set up your custom issue tracker
+const buildSetupIssueTrackerDoc = (
+  sandboxProvider: SandboxProviderEntry,
+): string => {
+  const sandboxToolsStep = sandboxProvider.containerfileName
+    ? `- **${sandboxProvider.containerfileName}** — replace the line
+
+  \`\`\`
+  ${CUSTOM_TRACKER_TOOLS}
+  \`\`\`
+
+  with the install steps for your tracker's CLI (if it needs one).`
+    : `- **Host environment** — no sandbox image is generated. Install any tracker CLI or authentication helper on the host before running Sandcastle.`;
+  const buildStep =
+    sandboxProvider.buildsImage && sandboxProvider.cliNamespace
+      ? `## 4. Build the image
+
+Once the files are wired up, build the sandbox image:
+
+\`\`\`
+sandcastle ${sandboxProvider.cliNamespace} build-image
+\`\`\`
+
+## 5. Verify`
+      : `## 4. Verify`;
+
+  return `# Set up your custom issue tracker
 
 You are a coding agent. Finish wiring up the **custom issue tracker** for this Sandcastle project. It was scaffolded in a deliberately broken-until-configured state: until you complete the steps below, every Sandcastle run hard-fails with a pointer back to this file.
 
@@ -941,13 +1007,7 @@ Work out, together with the user, the shell commands for:
 
 ## 3. Edit the scaffolded files in place
 
-- **Dockerfile / Containerfile** — replace the line
-
-  \`\`\`
-  ${CUSTOM_TRACKER_TOOLS}
-  \`\`\`
-
-  with the install steps for your tracker's CLI (if it needs one).
+${sandboxToolsStep}
 
 - **Prompt files (\`.sandcastle/*.md\`)** — replace the sentinel
 
@@ -959,18 +1019,11 @@ Work out, together with the user, the shell commands for:
 
 - **\`.env.example\`** — replace the \`# TODO\` block with the real env var(s) your tracker needs, then tell the user to set them in \`.sandcastle/.env\`.
 
-## 4. Build the image
+${buildStep}
 
-Once the files are wired up, build the sandbox image:
-
-\`\`\`
-sandcastle ${cliNamespace} build-image
-\`\`\`
-
-## 5. Verify
-
-Run your **list** command inside the built image and confirm it returns the open tasks as JSON. If it errors, fix the command or the auth and rebuild.
+Run your **list** command in the target execution environment and confirm it returns the open tasks as JSON. If it errors, fix the command or the auth and retry.
 `;
+};
 
 // ---------------------------------------------------------------------------
 // Main scaffold function
@@ -1058,12 +1111,14 @@ export const scaffold = (
 
     yield* Effect.all(
       [
-        fs
-          .writeFileString(
-            join(configDir, sandboxProvider.containerfileName),
-            agent.dockerfileTemplate,
-          )
-          .pipe(Effect.mapError((e) => new Error(e.message))),
+        sandboxProvider.containerfileName
+          ? fs
+              .writeFileString(
+                join(configDir, sandboxProvider.containerfileName),
+                agent.dockerfileTemplate,
+              )
+              .pipe(Effect.mapError((e) => new Error(e.message)))
+          : Effect.void,
         fs
           .writeFileString(join(configDir, ".gitignore"), GITIGNORE)
           .pipe(Effect.mapError((e) => new Error(e.message))),
@@ -1100,7 +1155,7 @@ export const scaffold = (
       yield* fs
         .writeFileString(
           join(configDir, SETUP_ISSUE_TRACKER_DOC),
-          buildSetupIssueTrackerDoc(sandboxProvider.cliNamespace),
+          buildSetupIssueTrackerDoc(sandboxProvider),
         )
         .pipe(Effect.mapError((e) => new Error(e.message)));
     }
