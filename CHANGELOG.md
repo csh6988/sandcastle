@@ -1,5 +1,11 @@
 # @ai-hero/sandcastle
 
+## 0.13.1
+
+### Patch Changes
+
+- Fix `sandcastle board` rendering a blank screen. The embedded frontend no longer uses `String.raw`, which emitted invalid escaped template backticks into the browser module, and React inline styles are now object props instead of strings.
+
 ## 0.13.0
 
 ### Minor Changes

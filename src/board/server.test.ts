@@ -128,6 +128,9 @@ describe("startBoardServer", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body).toContain("Sandcastle Board");
+    expect(body).toContain("return html`");
+    expect(body).not.toContain("html\\`");
+    expect(body).not.toMatch(/\sstyle="/);
   });
 
   it("serves the runs API as JSON", async () => {

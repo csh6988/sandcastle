@@ -7,7 +7,7 @@
  * loaded from an ESM CDN and `htm` provides JSX-like templating without a
  * compiler.
  */
-export const BOARD_FRONTEND_HTML = String.raw`<!doctype html>
+export const BOARD_FRONTEND_HTML = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -151,8 +151,8 @@ export const BOARD_FRONTEND_HTML = String.raw`<!doctype html>
           const e = r.event;
           if (e.type === "agent-text") return html\`<div class="row text" key=\${r.seq}>\${e.message}</div>\`;
           if (e.type === "agent-tool-call") return html\`<div class="row tool" key=\${r.seq}>→ \${e.name} \${e.formattedArgs}</div>\`;
-          if (e.type === "iteration-started") return html\`<div class="row" key=\${r.seq} style="color:var(--muted)">— iteration \${e.iteration}/\${e.maxIterations} —</div>\`;
-          if (e.type === "commit") return html\`<div class="row" key=\${r.seq} style="color:var(--succeeded)">✓ commit \${e.sha.slice(0,9)}</div>\`;
+          if (e.type === "iteration-started") return html\`<div class="row" key=\${r.seq} style=\${{ color: "var(--muted)" }}>— iteration \${e.iteration}/\${e.maxIterations} —</div>\`;
+          if (e.type === "commit") return html\`<div class="row" key=\${r.seq} style=\${{ color: "var(--succeeded)" }}>✓ commit \${e.sha.slice(0,9)}</div>\`;
           return null;
         })}</div>\`;
       }
@@ -224,9 +224,9 @@ export const BOARD_FRONTEND_HTML = String.raw`<!doctype html>
           <div class="sub">\${run.agent}\${run.model ? " · " + run.model : ""} · \${run.sandbox} · \${run.branch}</div>
           <div class="section">
             <span class="badge \${run.status}">\${run.status}</span>
-            \${run.repo ? html\`<span class="badge" style="background:var(--panel-2);color:var(--muted)">\${run.repo}</span>\` : null}
-            \${run.completionSignal ? html\`<span style="color:var(--muted);margin-left:8px">completed in \${run.iterationsRun} iter</span>\` : null}
-            \${run.error ? html\`<div style="color:var(--failed);margin-top:8px">\${run.error}</div>\` : null}
+            \${run.repo ? html\`<span class="badge" style=\${{ background: "var(--panel-2)", color: "var(--muted)" }}>\${run.repo}</span>\` : null}
+            \${run.completionSignal ? html\`<span style=\${{ color: "var(--muted)", marginLeft: "8px" }}>completed in \${run.iterationsRun} iter</span>\` : null}
+            \${run.error ? html\`<div style=\${{ color: "var(--failed)", marginTop: "8px" }}>\${run.error}</div>\` : null}
           </div>
           <div class="section">
             <div class="title">Tokens by model</div>
@@ -317,7 +317,7 @@ export const BOARD_FRONTEND_HTML = String.raw`<!doctype html>
               <h1>🏰 Sandcastle Board</h1>
               <span class="dot">\${runs.length} run\${runs.length === 1 ? "" : "s"} · \${tasks.length} task\${tasks.length === 1 ? "" : "s"}</span>
             </div>
-            <div style="display:flex;align-items:center">
+            <div style=\${{ display: "flex", alignItems: "center" }}>
               <div class="toggle">
                 <button class=\${view === "task" ? "on" : ""} onClick=\${() => setView("task")}>By task</button>
                 <button class=\${view === "status" ? "on" : ""} onClick=\${() => setView("status")}>By status</button>
