@@ -1,0 +1,284 @@
+src/cli.ts
+  b40456fb662af17b 13-14,55-56,883-954,969-1253,2413-2417,2420
+  204d02e0f002d545 6-12,57-60,63-65,1254-1344,1346-1369,1372-1377,1379-1382,1388-1389,1391-1407,1409-1417,1422-1426,1433-1438,1446,1449-1475,1577-1646,1684-1810,1815-1818,1820-1823,1860-1902,1904,1906-1935,1946-1949,1951-1953,1958-1961,1964-2031,2034-2045,2048-2059,2061,2063-2077,2090,2101-2106,2111,2114,2117-2119,2123-2125,2127-2168,2170-2179,2211-2265,2418
+  c55420b9ca7e7e73 18-27,95-129,214-227,249-250,262-263,269-271,517,528-534,578,614,639-733,955-968,1345,1427-1432,1439-1445,1448,1476-1576,1647-1683,1905,1936-1945,1950,1954-1957,1962-1963,2062,2091-2100,2107-2110,2112-2113,2115-2116,2122,2126,2169
+  5216833164ddb92e 61-62,1370-1371,1378,1383-1387,1390,1408,1418-1421,1811-1814,1819,1824-1859,1903,2032-2033,2046-2047,2060,2078-2089,2120-2121,2180-2210
+  d872ea247a4be6ba 67-69,2266-2401,2419
+docs/adr/0009-templates-no-shared-code.md
+  3a8469d3df22cec4 5,7,9,13,16
+src/run.ts
+  d872ea247a4be6ba 34,366-376,707-721,726,818-828,835-839,845-850
+.sandcastle/agent-workflows/update-branch/update-branch.ts
+  3a8469d3df22cec4 4-5
+.sandcastle/test-interactive.ts
+  3a8469d3df22cec4 1-2
+.changeset/local-issues-no-sandbox.md
+  b40456fb662af17b 1,3-5
+  204d02e0f002d545 2
+src/templates/parallel-planner/main.mts
+  3a8469d3df22cec4 19-20
+src/board/BoardStore.test.ts
+  d872ea247a4be6ba 1-269
+src/board/router.ts
+  d872ea247a4be6ba 1-91
+src/board/server.ts
+  d872ea247a4be6ba 1-72,74-131
+.changeset/workspace-public-default-models.md
+  c55420b9ca7e7e73 1-5
+.sandcastle/agent-workflows/implement-pr/implement-pr.ts
+  3a8469d3df22cec4 3-4
+src/cli.test.ts
+  204d02e0f002d545 38,150-156,168-180,208-266
+  c55420b9ca7e7e73 2,269-316
+  d872ea247a4be6ba 157-167
+  5216833164ddb92e 181-207,412
+.sandcastle/test-vercel.ts
+  3a8469d3df22cec4 1-2
+CLAUDE.md
+  ad9e3fc59fec0420 1,3-6,8,10-12,14,16-26,28-29,31,33-34,36-73,75-235
+AGENTS.md
+  ad9e3fc59fec0420 1-17,19-352
+src/AgentProvider.ts
+  d872ea247a4be6ba 266-267,635,781,846,969,1120,1193
+.changeset/init-prd-file-and-plan.md
+  c55420b9ca7e7e73 1-8
+src/board/BoardStore.ts
+  d872ea247a4be6ba 1-495
+src/runWorkspaceTask.ts
+  d872ea247a4be6ba 21-659
+src/board/launchTask.test.ts
+  d872ea247a4be6ba 1-48,50-160
+src/InitService.ts
+  c55420b9ca7e7e73 482,684-692,740,778,1096-1101,1108-1135,1173,1220-1223
+.changeset/workspace-env-from-user-repo.md
+  c55420b9ca7e7e73 1-5
+src/runWorkspace.ts
+  d872ea247a4be6ba 35-811
+docs/content/docs/meta.json
+  d872ea247a4be6ba 8-9
+.sandcastle/.env.example
+  b40456fb662af17b 1-7
+.sandcastle/run.ts
+  c55420b9ca7e7e73 2,12,62,143
+  3a8469d3df22cec4 1
+  5cc03ce965710841 14,77,89,146
+  b40456fb662af17b 74,86
+src/board/frontendHtml.ts
+  d872ea247a4be6ba 1-361
+reference/0001-prd-to-delivery-flow.html
+  d872ea247a4be6ba 172-175
+src/templates/sequential-reviewer/main.mts
+  3a8469d3df22cec4 24-25
+src/templates/blank/main.mts
+  3a8469d3df22cec4 1-2
+.sandcastle/agent-workflows/review/review.ts
+  3a8469d3df22cec4 3-4
+docs/content/docs/index.mdx
+  3a8469d3df22cec4 22,27,30
+.changeset/createsandbox-expose-exec.md
+  204d02e0f002d545 2
+src/InitService.test.ts
+  91677f63bcf236b7 309-337
+  c55420b9ca7e7e73 284-308,869-889
+  5216833164ddb92e 261-283,338,346,416,424,477,485,1103,1111,1206,1214,2314,2359,2479,2540,2543
+src/templates/parallel-planner-with-review/main.mts
+  3a8469d3df22cec4 24-25
+src/sandboxes/daytona.ts
+  3a8469d3df22cec4 75
+.sandcastle/agent-workflows/explore/explore.ts
+  3a8469d3df22cec4 3-4
+.sandcastle/Dockerfile
+  5cc03ce965710841 26-29
+src/Orchestrator.test.ts
+  d872ea247a4be6ba 37,1372-1633
+.changeset/bump-codex-default-to-5-5.md
+  c55420b9ca7e7e73 1-5
+.changeset/run-workspace.md
+  204d02e0f002d545 1-5
+src/run.test.ts
+  d872ea247a4be6ba 1506-1636
+.changeset/bump-default-opus-to-4-8.md
+  204d02e0f002d545 2
+src/board/server.test.ts
+  d872ea247a4be6ba 1-58,60-64,66-71,73-74,76-83,85-170
+src/InitService.agents.test.ts
+  c55420b9ca7e7e73 49
+docs/content/docs/board.mdx
+  d872ea247a4be6ba 1-24,26-95
+.sandcastle/test-podman.ts
+  3a8469d3df22cec4 1-2
+.changeset/init-next-steps-prd-plan-tip.md
+  c55420b9ca7e7e73 1-5
+package.json
+  5216833164ddb92e 3
+  204d02e0f002d545 37-39
+  3a8469d3df22cec4 2
+src/Orchestrator.ts
+  d872ea247a4be6ba 1,3,21,23,247-249,331-339,368-373,446-453,470-478,608-625
+src/index.ts
+  d872ea247a4be6ba 57
+src/RunEvent.ts
+  d872ea247a4be6ba 1-112
+src/board/launchTask.ts
+  d872ea247a4be6ba 1-83
+.gitignore
+  d872ea247a4be6ba 5-7
+README.md
+  b40456fb662af17b 1125-1150
+  91677f63bcf236b7 30-35,72-100,102-163,1041,1067,1074,1077-1122
+  c55420b9ca7e7e73 1058-1059,1075-1076,1170,1344,1410
+  d872ea247a4be6ba 1209-1231
+  3a8469d3df22cec4 39,42,45,62-63,170-173,178-181,207-208,227-228,330-331,396-397,539-540,558-559,697,724,871,959-960,1500,1600,1716-1717,1745
+  204d02e0f002d545 204,222-226,229-320,322-329,332-391,1151-1155,1157-1166,1169,1171,1174-1181,1183-1208
+  5216833164ddb92e 168-169,321,1002-1006,1052,1068,1073,1167-1168,1172-1173,1182
+docs/adr/0021-run-event-stream.md
+  d872ea247a4be6ba 1-59
+src/cli.envFile.test.ts
+  c55420b9ca7e7e73 1-35
+CONTEXT.md
+  d872ea247a4be6ba 216,218-235
+.changeset/workflow-board.md
+  d872ea247a4be6ba 1-5
+.sandcastle/agent-workflows/implement/implement.ts
+  3a8469d3df22cec4 2-3
+.sandcastle/agent-workflows/shared/run-with-extraction.ts
+  3a8469d3df22cec4 6
+src/templates/simple-loop/main.mts
+  3a8469d3df22cec4 1-2
+docs/adr/0022-workflow-board-task-source.md
+  d872ea247a4be6ba 1-15,17-55,57-62
+.sandcastle/agent-workflows/shared/common.ts
+  3a8469d3df22cec4 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "4e7cf1f2d3bd85c1dd4b4e85975d568509849c11",
+  "prompts": {
+    "204d02e0f002d545": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eeefb-5f40-7a31-8406-d98085c36311",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3174,
+      "overriden_lines": 11,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/064e73eac6c0542d88a013b2f05b90c84854baa2282f0cea810551aba1d55971"
+    },
+    "3a8469d3df22cec4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef78f-5871-78f2-a6b1-39525c02b517",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 125,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0a410b5de4bb3b986e9647cf3ce1683d1c60e4fecebad2194ef6be9f02b96d3f"
+    },
+    "5216833164ddb92e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef7bf-8aeb-7e53-bb7c-ce87ebf7d938",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 171,
+      "total_deletions": 29,
+      "accepted_lines": 700,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e148c192a8b77cd0f94ea89dcd6747c883f405d273f7b6b15fde6fed4d4c6e23"
+    },
+    "5cc03ce965710841": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed988-ae01-71e3-b306-00a3cbac4f0e",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    },
+    "91677f63bcf236b7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef8ed-947b-7ed2-9149-211bab203c28",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 188,
+      "total_deletions": 14,
+      "accepted_lines": 174,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/1d42930c66aecd934168d7ecb0ad75cb1a9f1ce969c2d1e53f0c90e17b4298a8"
+    },
+    "ad9e3fc59fec0420": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "17c86876-b6f5-4e7c-8355-0260df02deb2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 584,
+      "total_deletions": 18,
+      "accepted_lines": 576,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/369424bf47436e2ef14989ec6c6330d7733327c6e998aec0c4aa44d3d3e8b65a"
+    },
+    "b40456fb662af17b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eed1b-3275-74e0-b4e2-44fccbc2ed4e",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 25289,
+      "overriden_lines": 23,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2e9bb9c6f8f1075d898fbe435d6069c54bd67b990010387ba4df83f9e2f53b17"
+    },
+    "c55420b9ca7e7e73": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "a3b109ed-6802-4cac-9926-1b9fa4f68da0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 577,
+      "total_deletions": 105,
+      "accepted_lines": 575,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/bcc5e88f8d4a49518e7959bb1c249beec2d183dee0a11ff40e0eb1ada4cbf6d6"
+    },
+    "d872ea247a4be6ba": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "77f62094-86ad-4663-8bc1-233af0f7c1ee",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 2931,
+      "total_deletions": 59,
+      "accepted_lines": 2889,
+      "overriden_lines": 10,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/c2bff40bdb7167e73f18bc11cc35644e2b35c6dd31fa97e6dddb505516d23690"
+    }
+  }
+}
