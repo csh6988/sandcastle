@@ -1,6 +1,6 @@
 {
-  "name": "@ai-hero/sandcastle",
-  "version": "0.11.0",
+  "name": "@chenshaohui6988/sandcastle",
+  "version": "0.12.0",
   "description": "CLI for orchestrating AI agents in isolated sandbox environments",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,6 +33,9 @@
   },
   "bin": {
     "sandcastle": "dist/main.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsup",

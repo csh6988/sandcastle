@@ -1,6 +1,6 @@
 import { FileSystem } from "@effect/platform";
 import { Effect } from "effect";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 
@@ -16,6 +16,52 @@ worktrees/
  */
 const SETUP_ISSUE_TRACKER_DOC = "SETUP_ISSUE_TRACKER.md";
 const SETUP_ISSUE_TRACKER_PATH = `.sandcastle/${SETUP_ISSUE_TRACKER_DOC}`;
+
+const SKILL_ROUTER = `# Sandcastle Skill Router
+
+Use this file before starting project work. It is a routing guide, not a fixed
+list of skills to load blindly.
+
+## First Step
+
+1. Read the target repository's \`AGENTS.md\` and \`CLAUDE.md\` when present.
+2. If the repository lacks project-specific agent guidance, or the guidance is
+   stale for the requested workflow, update the appropriate file before coding.
+3. Choose the smallest matching skill flow below, then load only the selected
+   skill instructions and their task-specific references.
+
+## Main Flow: Idea To Shippable Work
+
+- Use \`grill-with-docs\` when the request is still ambiguous and this repository
+  should retain the clarified context in docs.
+- Use \`to-prd\` then \`to-issues\` when the work is large enough to split into
+  independently executable issues.
+- Use \`implement\` for a scoped, already-understood issue.
+- Use \`handoff\` when context must cross sessions or another agent will resume.
+
+## On-Ramps
+
+- Use \`triage\` for raw incoming bugs or feature requests that are not yet
+  agent-ready.
+- Use \`review\` for branch, PR, diff, or WIP review.
+- Use \`resolving-merge-conflicts\` for in-progress merge or rebase conflicts.
+- Use \`diagnosing-bugs\` or \`diagnose\` for hard bugs and regressions.
+
+## Engineering Loops
+
+- Use \`tdd\` for behavior changes where a focused test seam exists.
+- Use \`terminal-ops\` when the task is mostly command execution and evidence
+  collection.
+- Use domain or framework-specific skills named by the target repository before
+  generic implementation guidance.
+
+## Agent-Specific Setup
+
+- Codex: mirror the chosen skill names into the active Codex skill profile or a
+  local \`.codex/skills.profile\`.
+- Claude Code: copy or sync the matching \`SKILL.md\` directories into
+  \`.claude/skills/\` so Claude Code can discover them natively.
+`;
 
 export interface TemplateMetadata {
   name: string;
@@ -433,7 +479,7 @@ ANTHROPIC_API_KEY=`,
   {
     name: "codex",
     label: "Codex",
-    defaultModel: "gpt-5.4",
+    defaultModel: "gpt-5.5",
     factoryImport: "codex",
     dockerfileTemplate: CODEX_DOCKERFILE,
     envExample: `# OpenAI API key
@@ -635,6 +681,15 @@ export const getSandboxProvider = (
 // Next steps
 // ---------------------------------------------------------------------------
 
+/**
+ * Discoverability hint for the PRD-first workflow. Init always writes a
+ * `.sandcastle/workspace.json`, so `sandcastle workspace plan --prd-file` can
+ * turn a PRD into plan artifacts right away — but nothing in the scaffold
+ * pointed users at it, so they had to find the command in the README.
+ */
+const WORKSPACE_PRD_TIP =
+  "Have a PRD or product request? Run `sandcastle workspace plan --prd-file <path>` to generate PRD alignment, a technical plan, and per-repository issues under .scratch/ — then `sandcastle workspace execute` runs them (or `sandcastle workspace run` does both in one step).";
+
 export function getNextStepsLines(
   template: string,
   mainFilename: string,
@@ -682,6 +737,7 @@ export function getNextStepsLines(
         "   No sandbox was selected, so the agent runs directly on the host without container isolation.",
       );
     }
+    lines.push(WORKSPACE_PRD_TIP);
     return lines;
   } else {
     const hasReviewer = template.includes("review");
@@ -719,6 +775,7 @@ export function getNextStepsLines(
         `   No sandbox was selected, so the agent runs directly on the host without container isolation.`,
       );
     }
+    lines.push(WORKSPACE_PRD_TIP);
     return lines;
   }
 }
@@ -1036,11 +1093,45 @@ export interface ScaffoldOptions {
   createLabel?: boolean;
   issueTracker?: IssueTrackerEntry;
   sandboxProvider?: SandboxProviderEntry;
+  /**
+   * Optional PRD path recorded into `.sandcastle/workspace.json` as `prdFile`,
+   * so `workspace plan/run` can default to it without re-passing `--prd-file`.
+   * Stored verbatim (relative paths stay relative to the repo root).
+   */
+  prdFile?: string;
 }
 
 export interface ScaffoldResult {
   mainFilename: string;
 }
+
+const defaultWorkspaceRepositoryName = (repoDir: string): string => {
+  const sanitized = basename(repoDir)
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "app";
+};
+
+const buildDefaultWorkspaceConfig = (
+  repoDir: string,
+  prdFile?: string,
+): string =>
+  `${JSON.stringify(
+    {
+      repositories: [
+        {
+          name: defaultWorkspaceRepositoryName(repoDir),
+          cwd: ".",
+          description: "Current repository",
+        },
+      ],
+      // Recorded by `sandcastle init --prd-file` so that `workspace plan/run`
+      // can default to this PRD without re-passing --prd-file each time.
+      ...(prdFile ? { prdFile } : {}),
+    },
+    null,
+    2,
+  )}\n`;
 
 /**
  * Detect whether the project's package.json has `"type": "module"`.
@@ -1079,6 +1170,7 @@ export const scaffold = (
       createLabel = true,
       issueTracker = ISSUE_TRACKER_REGISTRY[0]!, // default: github-issues
       sandboxProvider = SANDBOX_PROVIDER_REGISTRY[0]!, // default: docker
+      prdFile,
     } = options;
     const fs = yield* FileSystem.FileSystem;
     const configDir = join(repoDir, ".sandcastle");
@@ -1124,6 +1216,15 @@ export const scaffold = (
           .pipe(Effect.mapError((e) => new Error(e.message))),
         fs
           .writeFileString(join(configDir, ".env.example"), envExampleContent)
+          .pipe(Effect.mapError((e) => new Error(e.message))),
+        fs
+          .writeFileString(
+            join(configDir, "workspace.json"),
+            buildDefaultWorkspaceConfig(repoDir, prdFile),
+          )
+          .pipe(Effect.mapError((e) => new Error(e.message))),
+        fs
+          .writeFileString(join(configDir, "SKILL_ROUTER.md"), SKILL_ROUTER)
           .pipe(Effect.mapError((e) => new Error(e.message))),
         copyTemplateFiles(templateDir, configDir, mainFilename),
       ],

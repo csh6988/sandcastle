@@ -175,11 +175,11 @@ export interface SandboxLifecycleResult<A> {
   readonly commits: { sha: string }[];
 }
 
-export const withSandboxLifecycle = <A>(
+export const withSandboxLifecycle = <A, E = SandboxError, R = Display>(
   options: SandboxLifecycleOptions,
   sandbox: SandboxService,
-  work: (ctx: SandboxContext) => Effect.Effect<A, SandboxError, Display>,
-): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> =>
+  work: (ctx: SandboxContext) => Effect.Effect<A, E, R>,
+): Effect.Effect<SandboxLifecycleResult<A>, SandboxError | E, Display | R> =>
   Effect.gen(function* () {
     const display = yield* Display;
     const { hostRepoDir, sandboxRepoDir, hooks, branch, hostWorktreePath } =

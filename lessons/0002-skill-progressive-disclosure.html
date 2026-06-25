@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skills 的渐进式披露</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Skills 的渐进式披露</h1>
+      <p class="lede">
+        本课只学一个判断：skill
+        不是一开始把所有说明都塞进模型上下文，而是先暴露索引，再按任务逐层读取需要的正文、引用和脚本。
+      </p>
+
+      <p>
+        先打开速查表：
+        <a href="../reference/0002-skill-progressive-disclosure.html"
+          >Skills 渐进式披露速查</a
+        >。 这个概念和上一课的 executor context isolation
+        是同一种工程取舍：planner 可以看见目录，执行时只加载当前需要的内容。
+      </p>
+
+      <h2>三层披露</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3>1. Skill 索引</h3>
+          <p>
+            模型先看到每个 skill
+            的名字、描述和入口路径。这里足够做路由，但不够执行细节。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>2. Skill 正文</h3>
+          <p>
+            当用户点名 skill，或任务明显匹配描述时，模型才读取对应
+            <code>SKILL.md</code> 的完整内容。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>3. 附属材料</h3>
+          <p>
+            如果
+            <code>SKILL.md</code>
+            指向格式文件、脚本、模板或资产，再按当前任务选择相关文件读取。
+          </p>
+        </div>
+      </div>
+
+      <h2>为什么这样设计</h2>
+      <div class="callout">
+        <p>
+          渐进式披露保护的是模型的工作记忆。模型需要足够的信息做正确路由，但不应该被所有技能的完整说明、模板和脚本淹没。
+          所以第一屏是“可发现性”，真正执行时才扩展成“可操作性”。
+        </p>
+      </div>
+
+      <h2>执行算法</h2>
+      <pre><code>用户请求
+  -> 看 active skills 的名字、描述、路径
+  -> 判断是否点名或明显匹配某个 skill
+  -> 读取该 skill 的 SKILL.md 到 EOF
+  -> 如果 SKILL.md 引用相对文件，按 skill 目录解析
+  -> 只读取当前任务需要的引用、脚本、模板、资产
+  -> 用这些局部上下文执行任务</code></pre>
+
+      <h2>和 Sandcastle 的类比</h2>
+      <p>
+        Sandcastle 里 planner 需要跨仓库视角，所以它可以看到候选 repo；executor
+        只处理一个 repo-local issue。 Skills 也是类似：模型先看到 skill
+        catalogue，像 planner 看到候选 repo；真正执行时只展开被选中的 skill，像
+        executor 只拿到批准后的局部任务。
+      </p>
+
+      <h2>常见误解</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3>误解：所有 skill 都常驻</h3>
+          <p>不对。常驻的是轻量索引，不是每个 skill 的完整正文。</p>
+        </div>
+        <div class="panel">
+          <h3>误解：模型可以凭记忆用 skill</h3>
+          <p>不对。被选中的 <code>SKILL.md</code> 必须先完整读取，再执行。</p>
+        </div>
+        <div class="panel">
+          <h3>误解：引用文件全读更稳</h3>
+          <p>不对。引用文件也要按需读取，否则又回到上下文污染。</p>
+        </div>
+      </div>
+
+      <h2>小测</h2>
+      <div class="quiz" data-quiz>
+        <div class="question" data-answer="索引层">
+          <p>
+            模型看到 skill 的
+            name、description、path，用来判断是否命中任务。这是哪一层？
+          </p>
+          <div class="choices">
+            <button data-choice="索引层">索引层</button>
+            <button data-choice="正文层">正文层</button>
+            <button data-choice="引用层">引用层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="question" data-answer="正文层">
+          <p>
+            用户显式使用 <code>$teach</code> 后，模型读取
+            <code>teach/SKILL.md</code>。这是哪一层？
+          </p>
+          <div class="choices">
+            <button data-choice="索引层">索引层</button>
+            <button data-choice="正文层">正文层</button>
+            <button data-choice="引用层">引用层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="question" data-answer="引用层">
+          <p>
+            <code>SKILL.md</code> 要求写 learning
+            record，于是模型再读取格式文件。这是哪一层？
+          </p>
+          <div class="choices">
+            <button data-choice="索引层">索引层</button>
+            <button data-choice="正文层">正文层</button>
+            <button data-choice="引用层">引用层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <h2>主资源</h2>
+      <ul class="source-list">
+        <li>
+          <a href="file:///Users/chenshaohui/.codex/skills/teach/SKILL.md"
+            >teach/SKILL.md</a
+          >: 本课使用的真实 skill 入口，展示了正文读取后如何继续按需读取
+          mission、resources、assets 和格式文件。
+        </li>
+        <li>
+          <a href="../MISSION.md">MISSION.md</a>: 当前教学
+          mission，用来把本课连接到 Sandcastle 的多仓库上下文隔离模型。
+        </li>
+      </ul>
+
+      <p>
+        下一步可以问我：一个 task 同时命中多个 skill 时怎么排序，或者 skill 和
+        MCP tool 的披露边界有什么不同。
+      </p>
+    </main>
+    <script src="../assets/quiz.js"></script>
+  </body>
+</html>

@@ -34,6 +34,7 @@ import {
   agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
+import { runEventEmitterLayer, type RunEvent } from "./RunEvent.js";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 const noopAgentStreamEmitterLayer = agentStreamEmitterLayer();
@@ -1365,6 +1366,268 @@ describe("Orchestrator agent stream emitter", () => {
     ]);
     expect(rawEvents[0]!.iteration).toBe(1);
     expect(rawEvents[0]!.timestamp).toBeInstanceOf(Date);
+  });
+});
+
+describe("Orchestrator run-event emitter", () => {
+  const makeClaudeStreamFactory = (
+    hostDir: string,
+    lines: string[],
+  ): ReturnType<typeof makeTestSandboxFactory> =>
+    makeTestSandboxFactory(hostDir, (dir) => {
+      const real = makeLocalSandbox(dir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            for (const line of lines) onLine(line);
+            return Effect.succeed({
+              stdout: lines.join("\n"),
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    });
+
+  it("emits iteration-started, agent-text and agent-tool-call events with iteration index and timestamps", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const events: RunEvent[] = [];
+    const runEventLayer = runEventEmitterLayer((e) => {
+      events.push(e);
+    });
+
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "Working now" },
+            { type: "tool_use", name: "Bash", input: { command: "ls" } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        result: "<promise>COMPLETE</promise>",
+      }),
+    ];
+
+    const mockLayer = makeClaudeStreamFactory(hostDir, lines);
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            noopAgentStreamEmitterLayer,
+            runEventLayer,
+          ),
+        ),
+      ),
+    );
+
+    const iterationStarted = events.filter(
+      (e) => e.type === "iteration-started",
+    );
+    expect(iterationStarted).toHaveLength(1);
+    expect(iterationStarted[0]).toMatchObject({
+      iteration: 1,
+      maxIterations: 1,
+    });
+
+    const textEvents = events.filter((e) => e.type === "agent-text");
+    expect(textEvents.length).toBeGreaterThan(0);
+    expect(textEvents[0]!.message).toContain("Working now");
+    expect(textEvents[0]!.iteration).toBe(1);
+
+    const toolEvents = events.filter((e) => e.type === "agent-tool-call");
+    expect(toolEvents).toHaveLength(1);
+    expect(toolEvents[0]).toMatchObject({
+      name: "Bash",
+      formattedArgs: "ls",
+      iteration: 1,
+    });
+
+    for (const e of events) {
+      expect(e.timestamp).toBeInstanceOf(Date);
+    }
+  });
+
+  it("emits a usage event carrying the provider model name", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-usage-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const events: RunEvent[] = [];
+    const runEventLayer = runEventEmitterLayer((e) => {
+      events.push(e);
+    });
+
+    // Codex surfaces token usage on its `turn.completed` stream event, so the
+    // usage RunEvent flows without session capture.
+    const codexProvider = codexFactory("test-codex-model", {
+      captureSessions: false,
+    });
+    const lines = [
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "<promise>COMPLETE</promise>" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 5,
+        },
+      }),
+    ];
+
+    const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
+      const real = makeLocalSandbox(dir);
+      return {
+        exec: (command, options) => {
+          if (command.startsWith("codex ") && options?.onLine) {
+            const onLine = options.onLine;
+            for (const line of lines) onLine(line);
+            return Effect.succeed({
+              stdout: lines.join("\n"),
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return real.exec(command, options);
+        },
+        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
+        copyFileOut: (sandboxPath, hostPath) =>
+          real.copyFileOut(sandboxPath, hostPath),
+      };
+    });
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: codexProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            noopAgentStreamEmitterLayer,
+            runEventLayer,
+          ),
+        ),
+      ),
+    );
+
+    const usageEvents = events.filter((e) => e.type === "usage");
+    expect(usageEvents).toHaveLength(1);
+    expect(usageEvents[0]).toMatchObject({
+      model: "test-codex-model",
+      iteration: 1,
+    });
+  });
+
+  it("is fully optional — orchestrate runs with no emitter layer provided", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-none-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const mockLayer = makeClaudeStreamFactory(hostDir, [
+      JSON.stringify({
+        type: "result",
+        result: "<promise>COMPLETE</promise>",
+      }),
+    ]);
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            noopAgentStreamEmitterLayer,
+          ),
+        ),
+      ),
+    );
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+  });
+
+  it("swallows errors thrown by the run-event callback", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-err-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const runEventLayer = runEventEmitterLayer(() => {
+      throw new Error("run-event callback intentionally broken");
+    });
+
+    const mockLayer = makeClaudeStreamFactory(hostDir, [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Hello there" }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        result: "<promise>COMPLETE</promise>",
+      }),
+    ]);
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            noopAgentStreamEmitterLayer,
+            runEventLayer,
+          ),
+        ),
+      ),
+    );
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
 });
 

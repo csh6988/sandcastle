@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skills 渐进式披露速查</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Skills 渐进式披露速查</h1>
+      <p class="lede">
+        把 skill
+        想成三层上下文：索引用于发现，正文用于执行，附属文件用于当前任务的细节。
+      </p>
+
+      <section class="flow" aria-label="skill progressive disclosure flow">
+        <div class="step">
+          <strong>1. 索引</strong>
+          <span>name、description、path 进入模型上下文，用于路由。</span>
+        </div>
+        <div class="step">
+          <strong>2. 命中</strong>
+          <span>用户点名 skill，或任务明显匹配 skill 描述。</span>
+        </div>
+        <div class="step">
+          <strong>3. 正文</strong>
+          <span>读取匹配 skill 的 <code>SKILL.md</code>，必须读到 EOF。</span>
+        </div>
+        <div class="step">
+          <strong>4. 解析</strong>
+          <span>相对路径以 <code>SKILL.md</code> 所在目录为基准。</span>
+        </div>
+        <div class="step">
+          <strong>5. 附件</strong>
+          <span
+            >只读取当前任务需要的 reference、scripts、assets、templates。</span
+          >
+        </div>
+        <div class="step">
+          <strong>6. 执行</strong>
+          <span>用展开后的局部上下文完成任务，并保留验证结果。</span>
+        </div>
+      </section>
+
+      <h2>关键规则</h2>
+      <ul>
+        <li>不要把所有下载的 skill 都当成 active skill。</li>
+        <li>active skill 的轻量索引可以常驻；完整正文按需读取。</li>
+        <li>
+          用户显式点名 skill 时，必须使用该 skill，并完整读取
+          <code>SKILL.md</code>。
+        </li>
+        <li><code>SKILL.md</code> 引用的相对路径，先按 skill 目录解析。</li>
+        <li>附属文件不是全量展开；只读取和当前任务相关的文件。</li>
+        <li>脚本和模板存在时，优先复用，而不是手写一份相似实现。</li>
+      </ul>
+
+      <h2>一句话模型</h2>
+      <div class="callout">
+        <p>
+          Progressive disclosure = catalogue first, selected instruction next,
+          task-specific materials last.
+        </p>
+      </div>
+
+      <h2>和 Sandcastle 的对应关系</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3>Skill catalogue</h3>
+          <p>像候选 repo 列表：足够 planner 做选择，但还不是完整执行上下文。</p>
+        </div>
+        <div class="panel">
+          <h3>Selected SKILL.md</h3>
+          <p>像被批准的 repo issue：一旦命中，就进入可执行说明。</p>
+        </div>
+        <div class="panel">
+          <h3>Referenced files</h3>
+          <p>像 executor 的局部材料：按任务读取，避免上下文互相污染。</p>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

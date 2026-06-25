@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>从 PRD 到多 repo 交付验证</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>从 PRD 到多 repo 交付验证</h1>
+      <p class="lede">
+        本课只学一个判断：Sandcastle 的多项目流程不是“一个 agent
+        随便改所有仓库”，而是“产品输入先变成可审计划，再变成 repo-local
+        issue，最后并行执行并回收结果”。
+      </p>
+
+      <p>
+        先打开速查表：
+        <a href="../reference/0001-prd-to-delivery-flow.html"
+          >PRD 到交付验证速查</a
+        >。 主要源码入口是
+        <a href="../src/runWorkspaceTask.ts">runWorkspaceTask.ts</a>、
+        <a href="../src/runWorkspace.ts">runWorkspace.ts</a> 和
+        <a href="../src/cli.ts">cli.ts</a>。
+      </p>
+
+      <h2>先把项目拿到本地</h2>
+      <p>
+        拉源码和安装 npm 包是两条路。你要改 Sandcastle 本身，就从 GitHub
+        clone；你要在别的项目里消费 Sandcastle，就用 npm 安装已发布包。
+      </p>
+      <div class="grid">
+        <div class="panel">
+          <h3>开发 Sandcastle 源码</h3>
+          <pre><code>git clone https://github.com/mattpocock/sandcastle.git
+cd sandcastle
+npm install
+npm run typecheck</code></pre>
+        </div>
+        <div class="panel">
+          <h3>在业务 repo 使用 Sandcastle</h3>
+          <pre><code>npm install --save-dev @chenshaohui6988/sandcastle
+npx @chenshaohui6988/sandcastle init
+npx tsx .sandcastle/main.ts</code></pre>
+        </div>
+      </div>
+
+      <h2><code>init</code> 为什么没有 no sandbox</h2>
+      <p>
+        当前 <code>init</code> 向导的 sandbox registry 只有 Docker 和
+        Podman，因为它的工作是 scaffold <code>.sandcastle/</code>、写
+        Dockerfile/Containerfile，并可选构建镜像。
+        <code>noSandbox()</code> 不需要镜像，它是运行时 provider：agent 直接在
+        host 上跑。
+      </p>
+      <p>
+        如果你想让生成的 runner 走 no sandbox，可以手动把
+        <code>.sandcastle/main.ts</code> 改成：
+      </p>
+      <pre><code>import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { noSandbox } from "@chenshaohui6988/sandcastle/sandboxes/no-sandbox";
+
+await run({
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: noSandbox(),
+  promptFile: "./.sandcastle/prompt.md",
+});</code></pre>
+      <p>
+        这会减少 Docker/Podman 依赖，但隔离边界也会消失：agent 能直接访问 host
+        repo 和 host 环境。
+      </p>
+
+      <h2>核心思路</h2>
+      <div class="callout">
+        <p>
+          高层接口是 <code>runWorkspaceTask()</code>：它把 PRD 或产品请求交给
+          planner，planner 只能输出机器可读的
+          <code>&lt;workspace_plan&gt;</code>。 这个 plan 经过校验后，再由
+          executor 按 repo 并行执行。每个 repo issue 都会启动一次独立的
+          <code>run()</code>， 所以有自己的 prompt、agent
+          invocation、branch、worktree、commits 和结果条目。
+        </p>
+      </div>
+
+      <h2>不要把三层画成单链路</h2>
+      <p>
+        真实关系是“规划集中、执行隔离”。<code>runWorkspaceTask()</code>
+        规划阶段调用 <code>runWorkspace()</code>，因为 planner 需要跨 repo
+        视角；执行阶段调用 <code>executeWorkspaceTaskPlan()</code>，内部对每个
+        planned repo 用 <code>Promise.all(...)</code> 并行调用
+        <code>run()</code>。
+      </p>
+      <pre><code>runWorkspaceTask()
+  planner: runWorkspace(candidate repos)
+  validate: extractWorkspaceTaskPlan(stdout)
+  executors: Promise.all(planned repos.map(repo => run(repo)))</code></pre>
+
+      <h2>业务流程</h2>
+      <ol>
+        <li>
+          <strong>候选仓库进入配置。</strong> 每个 repo 有
+          `name`、`cwd`、`kind`、`description`，这决定 planner 能选择哪些 repo。
+        </li>
+        <li>
+          <strong>PRD 进入 planner。</strong> planner 产出
+          alignment、technicalPlan、repositories。
+        </li>
+        <li>
+          <strong>plan 被结构化校验。</strong> 未知 repo、重复 repo、缺少
+          task、非法 issue 会直接失败。
+        </li>
+        <li>
+          <strong>repo task 进入 executor。</strong> 每个 repo issue
+          对应一次独立 executor invocation，只允许在自己的 repo
+          工作，并被要求提交 commit 和跑验证。
+        </li>
+        <li>
+          <strong>结果按 repo 汇总。</strong> 成功返回 branch 和
+          commits；失败返回 error；脏 worktree 会被保留。
+        </li>
+      </ol>
+
+      <h2>三层 API 怎么选</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3>单 repo</h3>
+          <p>
+            用 <code>run()</code>。适合一个仓库内的 issue、bugfix、review
+            pipeline。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>多 repo 原语</h3>
+          <p>
+            用
+            <code>runWorkspace()</code>。适合你已经知道跨仓库怎么改，只需要一个
+            agent 同时看到多个 repo。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>PRD 到交付</h3>
+          <p>
+            用 <code>runWorkspaceTask()</code> 或 CLI 的
+            <code>workspace plan/execute/run</code>。适合产品需求先拆解再执行。
+          </p>
+        </div>
+      </div>
+
+      <h2>推荐操作流</h2>
+      <pre><code>sandcastle workspace plan --prd-file ./prd.md
+# review .scratch/&lt;prd-name&gt;/alignment.md
+# review .scratch/&lt;prd-name&gt;/technical-plan.md
+# review .scratch/&lt;prd-name&gt;/issues/*.md
+sandcastle workspace execute --plan-file .scratch/&lt;prd-name&gt;/workspace-plan.json
+npm run typecheck</code></pre>
+
+      <p>
+        如果你愿意全自动，可以用
+        <code>sandcastle workspace run --prd-file ./prd.md</code>。
+        但从交付验证角度，先 plan 再 execute 更稳，因为中间有一次人审
+        alignment、技术方案和 repo-local issue 的机会。
+      </p>
+
+      <h2>小测</h2>
+      <div class="quiz" data-quiz>
+        <div class="question" data-answer="规划层">
+          <p>“检查 planner 有没有引用不存在的 repo”，属于哪一层？</p>
+          <div class="choices">
+            <button data-choice="规划层">规划层</button>
+            <button data-choice="执行层">执行层</button>
+            <button data-choice="验证层">验证层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="question" data-answer="执行层">
+          <p>“为每个被选中的 repo 创建 branch 并运行 agent”，属于哪一层？</p>
+          <div class="choices">
+            <button data-choice="规划层">规划层</button>
+            <button data-choice="执行层">执行层</button>
+            <button data-choice="验证层">验证层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="question" data-answer="验证层">
+          <p>
+            “查看每个 repo 的 status、branch、commit 数和 error”，属于哪一层？
+          </p>
+          <div class="choices">
+            <button data-choice="规划层">规划层</button>
+            <button data-choice="执行层">执行层</button>
+            <button data-choice="验证层">验证层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+
+        <div class="question" data-answer="执行层">
+          <p>
+            “每个 repo issue 用独立 executor
+            invocation，避免上下文互相污染”，属于哪一层？
+          </p>
+          <div class="choices">
+            <button data-choice="规划层">规划层</button>
+            <button data-choice="执行层">执行层</button>
+            <button data-choice="验证层">验证层</button>
+          </div>
+          <div class="feedback" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <h2>主资源</h2>
+      <p>
+        先读 <a href="../README.md">README.md</a> 的
+        <code>runWorkspaceTask()</code> 和
+        <code>sandcastle workspace</code> 部分；读代码时从
+        <a href="../src/runWorkspaceTask.ts">src/runWorkspaceTask.ts</a> 的
+        <code>runWorkspaceTask()</code> 函数开始。
+      </p>
+
+      <p>
+        下一步可以问我：planner prompt 怎么设计、CLI artifact 怎么落盘、或者
+        executor 的验证闭环还能怎么加强。
+      </p>
+    </main>
+    <script src="../assets/quiz.js"></script>
+  </body>
+</html>

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sandcastle PRD 到交付验证速查</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Sandcastle PRD 到交付验证速查</h1>
+      <p class="lede">
+        这张速查表把当前仓库的多项目流程压缩成六步：输入、规划、拆分、执行、收集、验证。
+      </p>
+
+      <section class="flow" aria-label="PRD to delivery flow">
+        <div class="step">
+          <strong>0. 准备</strong>
+          <span>源码开发用 git clone；消费包用 npm install。</span>
+        </div>
+        <div class="step">
+          <strong>1. 输入</strong>
+          <span>PRD、prompt、prompt file，或唯一 ready local issue。</span>
+        </div>
+        <div class="step">
+          <strong>2. 规划</strong>
+          <span
+            >`runWorkspaceTask()` 调 planner，生成
+            alignment、technicalPlan、repo issues。</span
+          >
+        </div>
+        <div class="step">
+          <strong>3. 审批</strong>
+          <span>`workspace plan` 写 `.scratch/...`，人可以先看再改。</span>
+        </div>
+        <div class="step">
+          <strong>4. 执行</strong>
+          <span
+            >`executeWorkspaceTaskPlan()` 为每个被选中的 repo 并行跑
+            agent。</span
+          >
+        </div>
+        <div class="step">
+          <strong>5. 隔离</strong>
+          <span
+            >每个 repo 有自己的 worktree、branch、commits、dirty
+            preservation。</span
+          >
+        </div>
+        <div class="step">
+          <strong>6. 验证</strong>
+          <span
+            >executor prompt 要求测试；结果返回
+            status、branch、commits、error。</span
+          >
+        </div>
+      </section>
+
+      <h2>拉取与安装</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3>开发这个项目</h3>
+          <pre><code>git clone https://github.com/mattpocock/sandcastle.git
+cd sandcastle
+npm install
+npm run typecheck</code></pre>
+        </div>
+        <div class="panel">
+          <h3>在别的项目里使用</h3>
+          <pre><code>npm install --save-dev @chenshaohui6988/sandcastle
+npx @chenshaohui6988/sandcastle init
+npx tsx .sandcastle/main.ts</code></pre>
+        </div>
+      </div>
+
+      <div class="callout">
+        <p>
+          注意：当前 <code>sandcastle init</code> 的 sandbox 选择只注册了 Docker
+          和 Podman。 <code>noSandbox()</code> 是运行时
+          provider，不走容器镜像，也不需要 Dockerfile/Containerfile；
+          如果要用它，需要在生成的 <code>.sandcastle/main.ts</code> 里手动改
+          import 和 <code>sandbox</code>。
+        </p>
+      </div>
+
+      <h2>API 分层</h2>
+      <div class="grid">
+        <div class="panel">
+          <h3><code>run()</code></h3>
+          <p>
+            单仓库、单 agent 迭代。负责 sandbox 生命周期、prompt、completion
+            signal、commit 收集。
+          </p>
+        </div>
+        <div class="panel">
+          <h3><code>runWorkspace()</code></h3>
+          <p>
+            底层多 repo 原语。一个 agent 在同一个 sandbox 内看到多个 worktree
+            mount。
+          </p>
+        </div>
+        <div class="panel">
+          <h3><code>runWorkspaceTask()</code></h3>
+          <p>产品/PRD 流水线。先规划，再拆 repo issue，再按 repo 并行执行。</p>
+        </div>
+      </div>
+
+      <h2>真实调用关系</h2>
+      <div class="callout">
+        <p>
+          这里不是简单的
+          <code>runWorkspaceTask() -> runWorkspace() -> run()</code> 嵌套链。
+          <code>runWorkspaceTask()</code> 先用 <code>runWorkspace()</code> 跑
+          planner，让 planner 看见候选 repo 并产出统一 plan； 然后用
+          <code>Promise.all(...)</code> 为每个被选中的 repo issue 启动一次独立的
+          <code>run()</code> executor。
+        </p>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <h3>Planner</h3>
+          <p>
+            需要跨 repo 视角，所以用 <code>runWorkspace()</code>，同一个 sandbox
+            内能看到多个 repo worktree。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>Executor N</h3>
+          <p>
+            每个 repo issue 单独调用 <code>run()</code>，有自己的 prompt、agent
+            invocation、worktree、branch 和 result。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>隔离边界</h3>
+          <p>
+            executor prompt 会带完整 plan 和 alignment，但明确要求只在当前 repo
+            工作，避免执行上下文互相污染。
+          </p>
+        </div>
+      </div>
+
+      <h2>关键文件</h2>
+      <ul class="source-list">
+        <li><a href="../CONTEXT.md">CONTEXT.md</a>: 项目术语边界。</li>
+        <li>
+          <a href="../src/runWorkspaceTask.ts">src/runWorkspaceTask.ts</a>: PRD
+          到 repo task 的主流程。
+        </li>
+        <li>
+          <a href="../src/runWorkspace.ts">src/runWorkspace.ts</a>: 多 repo
+          worktree、mount、sandbox 执行。
+        </li>
+        <li>
+          <a href="../src/Orchestrator.ts">src/Orchestrator.ts</a>: agent
+          invocation、completion signal、timeout、commit 收集。
+        </li>
+        <li>
+          <a href="../src/cli.ts">src/cli.ts</a>: `workspace plan` / `execute` /
+          `run` 的命令层。
+        </li>
+        <li>
+          <a href="../src/runWorkspaceTask.test.ts"
+            >src/runWorkspaceTask.test.ts</a
+          >: 规划、dry run、执行已有 plan 的行为样例。
+        </li>
+      </ul>
+
+      <h2>交付验证抓手</h2>
+      <ul>
+        <li>
+          规划验证：planner 输出必须是 `&lt;workspace_plan&gt;` JSON，且 repo
+          name 必须在候选列表内。
+        </li>
+        <li>
+          人工验证：`workspace plan` 生成
+          alignment、technical-plan、issues，先审再执行。
+        </li>
+        <li>
+          执行验证：每个 executor prompt 都带 acceptance criteria 和
+          verification 要求。
+        </li>
+        <li>
+          结果验证：每个 repo 返回
+          `status`、`branch`、`commits`、`stdout`、`error`、`preservedWorktreePath`。
+        </li>
+        <li>代码验证：项目规则要求用 `npm run typecheck` 做类型检查。</li>
+      </ul>
+    </main>
+  </body>
+</html>

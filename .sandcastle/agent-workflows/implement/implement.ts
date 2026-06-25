@@ -1,6 +1,6 @@
 import * as path from "node:path";
-import * as sandcastle from "@ai-hero/sandcastle";
-import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
+import * as sandcastle from "@chenshaohui6988/sandcastle";
+import { noSandbox } from "@chenshaohui6988/sandcastle/sandboxes/no-sandbox";
 import { claudeAgent, fail, required, safeSh, sh } from "../shared/common";
 
 const ISSUE_NUMBER = required("ISSUE_NUMBER");

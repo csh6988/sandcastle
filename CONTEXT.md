@@ -213,5 +213,23 @@ The display mode where Sandcastle renders an interactive UI in the terminal with
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
 
 **Agent stream event**:
-A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`.
+A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`. Narrower than a **run event**, which is its logging-mode-independent superset.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)
+
+**Run event**:
+A single item in a run's structured lifecycle stream surfaced to the caller of `run()` via the `onRunEvent` callback, working in **both** display modes. A superset of the **agent stream event**: covers run lifecycle (`run-started`/`run-finished`/`run-failed`), `iteration-started`, `agent-text`, `agent-tool-call`, token `usage` (with the **agent**'s model), and `commit`. A plain (Effect-free) discriminated union so it can be consumed by non-Effect hosts such as the **workflow board**. See ADR 0021.
+_Avoid_: "agent stream event" (narrower), "log event", "lifecycle event" (too generic)
+
+### Workflow board
+
+**Workflow board**:
+A local web view of runs, started with `sandcastle board`. Consumes the **run event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
+_Avoid_: "dashboard" (too generic), "UI", "console"
+
+**Board run**:
+A single `run()` invocation as recorded on the **workflow board** -- its metadata plus fields derived from the **run event** stream (status, completion, commit count, token usage). Linked to a **board task** when launched from one.
+_Avoid_: "job", "session" (overloaded), conflating with the JS **iteration**
+
+**Board task**:
+A unit of work created on the **workflow board** (title + prompt/PRD) that is fanned out into per-repository **board runs** via `runWorkspaceTask`. The board acts as a **task** source that writes back into the orchestration core. See ADR 0022.
+_Avoid_: "ticket", "issue" (reserved for the **issue tracker**), "job"

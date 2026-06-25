@@ -3,10 +3,28 @@ import { FileSystem } from "@effect/platform";
 import { Effect, Option } from "effect";
 import * as clack from "@clack/prompts";
 import { execSync } from "node:child_process";
-import { join } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { styleText } from "node:util";
 
 import { Display } from "./Display.js";
+import {
+  claudeCode,
+  codex,
+  copilot,
+  cursor,
+  opencode,
+  pi,
+} from "./AgentProvider.js";
+import type { AgentProvider } from "./AgentProvider.js";
+import type { SandboxProvider } from "./SandboxProvider.js";
 import { buildImage, removeImage } from "./DockerLifecycle.js";
 import {
   buildImage as podmanBuildImage,
@@ -34,7 +52,21 @@ import type {
   SandboxProviderEntry,
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
+import { noSandbox } from "./sandboxes/no-sandbox.js";
+import { run } from "./run.js";
+import {
+  executeWorkspaceTaskPlan,
+  runWorkspaceTask,
+  type WorkspaceTaskPlan,
+  type WorkspaceTaskRepositoryOptions,
+  type WorkspaceTaskWorkspace,
+} from "./runWorkspaceTask.js";
+import { docker } from "./sandboxes/docker.js";
+import { podman } from "./sandboxes/podman.js";
 import { VERSION } from "./version.js";
+import { BoardStore } from "./board/BoardStore.js";
+import { startBoardServer } from "./board/server.js";
+import { createTaskLauncher } from "./board/launchTask.js";
 
 // --- Shared options ---
 
@@ -58,6 +90,41 @@ const defaultUidBuildArgs = (): Record<string, string> => {
   if (uid !== undefined) args.AGENT_UID = String(uid);
   if (gid !== undefined) args.AGENT_GID = String(gid);
   return args;
+};
+
+// --- Agent factory registry (by InitService factoryImport name) ---
+
+type AgentFactory = (
+  model: string,
+  options?: { env?: Record<string, string> },
+) => AgentProvider;
+
+const AGENT_FACTORY_BY_NAME: Record<string, AgentFactory> = {
+  claudeCode,
+  codex,
+  copilot,
+  cursor,
+  opencode,
+  pi,
+};
+
+/**
+ * Build an agent provider from an InitService agent entry (its `factoryImport`
+ * names one of the exported factories). Used by `init --plan` so the planner
+ * runs with the same agent the user selected during init.
+ */
+const buildAgentFromEntry = (
+  entry: AgentEntry,
+  model: string,
+  env: Record<string, string>,
+): AgentProvider => {
+  const factory = AGENT_FACTORY_BY_NAME[entry.factoryImport];
+  if (!factory) {
+    throw new InitError({
+      message: `No agent factory registered for "${entry.factoryImport}".`,
+    });
+  }
+  return factory(model, { env });
 };
 
 // --- Config directory check ---
@@ -144,6 +211,20 @@ const installTemplateDepsOption = Options.choice("install-template-deps", [
   Options.optional,
 );
 
+const initPrdFileOption = Options.text("prd-file").pipe(
+  Options.withDescription(
+    "Path to a PRD file to record in .sandcastle/workspace.json so `workspace plan/run` default to it",
+  ),
+  Options.optional,
+);
+
+const initPlanOption = Options.choice("plan", ["true", "false"]).pipe(
+  Options.withDescription(
+    "Whether to run the planner after init to generate plan artifacts (requires --prd-file and a built docker/podman image)",
+  ),
+  Options.optional,
+);
+
 /**
  * Translate an `Options.choice("flag", ["true", "false"]).optional` value into
  * a tri-state boolean. None when the flag was absent; otherwise the parsed bool.
@@ -165,6 +246,8 @@ const initCommand = Command.make(
     createLabel: createLabelOption,
     buildImage: buildImageOption,
     installTemplateDeps: installTemplateDepsOption,
+    prdFile: initPrdFileOption,
+    plan: initPlanOption,
   },
   ({
     imageName: imageNameFlag,
@@ -176,11 +259,16 @@ const initCommand = Command.make(
     createLabel: createLabelFlag,
     buildImage: buildImageFlag,
     installTemplateDeps: installTemplateDepsFlag,
+    prdFile: prdFileFlag,
+    plan: planFlag,
   }) =>
     Effect.gen(function* () {
       const d = yield* Display;
       const cwd = process.cwd();
       const imageName = resolveImageName(imageNameFlag, cwd);
+      const resolvedPrdFile =
+        prdFileFlag._tag === "Some" ? prdFileFlag.value : undefined;
+      const planChoice = choiceToTriBool(planFlag);
 
       // Early validation of CLI flags before interactive prompts
       const templates = listTemplates();
@@ -426,6 +514,7 @@ const initCommand = Command.make(
           createLabel: shouldCreateLabel,
           issueTracker: selectedIssueTracker,
           sandboxProvider: selectedSandboxProvider,
+          prdFile: resolvedPrdFile,
         }).pipe(
           Effect.mapError(
             (e) =>
@@ -435,6 +524,13 @@ const initCommand = Command.make(
           ),
         ),
       );
+
+      if (resolvedPrdFile && !existsSync(resolve(cwd, resolvedPrdFile))) {
+        yield* d.status(
+          `Recorded prdFile "${resolvedPrdFile}" in .sandcastle/workspace.json, but no file exists there yet. Create it before running \`sandcastle workspace plan\`.`,
+          "warn",
+        );
+      }
 
       // Detect the host package manager so the zod offer below and the next
       // steps below both use the right install command.
@@ -479,6 +575,7 @@ const initCommand = Command.make(
       // (and silently ignore --build-image) and let the next steps point the
       // user at the setup doc.
       const providerLabel = selectedSandboxProvider.label;
+      let imageBuilt = false;
       if (selectedIssueTracker.name === "custom") {
         yield* d.status(
           selectedSandboxProvider.buildsImage
@@ -514,6 +611,7 @@ const initCommand = Command.make(
               }),
             );
           }
+          imageBuilt = true;
           yield* d.status(
             "Init complete! Image built successfully.",
             "success",
@@ -537,6 +635,101 @@ const initCommand = Command.make(
       );
       for (const [i, line] of nextSteps.entries()) {
         yield* d.text(i === 0 ? line : styleText("dim", line));
+      }
+
+      // Feature 2: optionally run the planner now to generate plan artifacts.
+      // The planner runs the selected agent inside a bind-mount sandbox, so it
+      // needs a docker/podman image built in this run and a non-custom tracker
+      // (custom scaffolds an intentionally unbuildable Dockerfile).
+      const planPrereqsMet =
+        resolvedPrdFile !== undefined &&
+        selectedSandboxProvider.buildsImage &&
+        selectedIssueTracker.name !== "custom" &&
+        imageBuilt;
+
+      let shouldPlan = false;
+      if (planChoice._tag === "Some") {
+        shouldPlan = planChoice.value;
+        if (shouldPlan && !planPrereqsMet) {
+          yield* d.status(
+            "Skipping --plan: it needs --prd-file, a docker/podman sandbox, a non-custom issue tracker, and an image built in this run. Run `sandcastle workspace plan --prd-file <path>` once those are ready.",
+            "warn",
+          );
+          shouldPlan = false;
+        }
+      } else if (planPrereqsMet && isInteractive) {
+        const confirmed = yield* Effect.promise(() =>
+          clack.confirm({
+            message: `Run the planner now with ${resolvedPrdFile} to generate plan artifacts?`,
+            initialValue: true,
+          }),
+        );
+        shouldPlan = !clack.isCancel(confirmed) && confirmed === true;
+      }
+
+      if (shouldPlan && resolvedPrdFile !== undefined) {
+        const configPath = join(cwd, CONFIG_DIR, "workspace.json");
+        const workspaceConfig = readWorkspaceConfig(configPath);
+        const repositories = normalizeWorkspaceRepositories(
+          configPath,
+          workspaceConfig,
+          cwd,
+        );
+        const agentEnv = parseEnvFileForCli(resolveWorkspaceEnvFile(cwd));
+        const plannerAgent = buildAgentFromEntry(
+          selectedAgent,
+          selectedModel,
+          agentEnv,
+        );
+        const sandboxProvider =
+          selectedSandboxProvider.name === "podman" ? podman() : docker();
+        const artifactsDir = defaultWorkspaceArtifactsDir(
+          cwd,
+          Option.some(resolvedPrdFile),
+        );
+
+        const planOutcome = yield* Effect.promise(() =>
+          planWorkspaceToArtifacts({
+            repositories,
+            promptFile: resolvedPrdFile,
+            agent: plannerAgent,
+            plannerAgent,
+            sandbox: sandboxProvider,
+            branchPrefix:
+              typeof workspaceConfig.branchPrefix === "string"
+                ? workspaceConfig.branchPrefix
+                : undefined,
+            maxIterations:
+              typeof workspaceConfig.maxIterations === "number"
+                ? workspaceConfig.maxIterations
+                : undefined,
+            artifactsDir,
+            name: "init plan",
+          }).then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({
+              ok: false as const,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          ),
+        );
+
+        if (planOutcome.ok) {
+          const { artifacts } = planOutcome.value;
+          yield* d.text(`Generated workspace plan: ${artifacts.planJsonPath}`);
+          yield* d.text(`Generated PRD alignment: ${artifacts.alignmentPath}`);
+          yield* d.text(
+            `Generated technical plan: ${artifacts.technicalPlanPath}`,
+          );
+          for (const issuePath of artifacts.issuePaths) {
+            yield* d.text(`Generated issue: ${issuePath}`);
+          }
+        } else {
+          yield* d.status(
+            `Planner run failed: ${planOutcome.message}. Retry later with \`sandcastle workspace plan --prd-file ${resolvedPrdFile}\` (check .sandcastle/.env credentials and that the image is built).`,
+            "warn",
+          );
+        }
       }
     }),
 );
@@ -687,6 +880,1525 @@ const podmanCommand = Command.make("podman", {}, () =>
   Command.withSubcommands([podmanBuildImageCommand, podmanRemoveImageCommand]),
 );
 
+// --- Local issue command ---
+
+const localIssuePathOption = Options.text("issue").pipe(
+  Options.withDescription(
+    "Path to a local markdown issue, relative to the target repo. Defaults to the only ready issue under .scratch/",
+  ),
+  Options.optional,
+);
+
+const localIssueBranchOption = Options.text("branch").pipe(
+  Options.withDescription("Branch for the agent worktree"),
+  Options.optional,
+);
+
+const localIssueBaseBranchOption = Options.text("base-branch").pipe(
+  Options.withDescription("Base branch to create the agent branch from"),
+  Options.optional,
+);
+
+const localIssueQa1ConfigOption = Options.text("qa1-config").pipe(
+  Options.withDescription(
+    "Path to the local QA1 Apollo config cache, relative to the target repo",
+  ),
+  Options.optional,
+);
+
+const localIssueAgentOption = Options.choice("agent", ["codex", "claude"]).pipe(
+  Options.withDescription("Agent provider to use for implementation"),
+  Options.optional,
+);
+
+const localIssueModelOption = Options.text("model").pipe(
+  Options.withDescription("Model to use for the implementation agent"),
+  Options.optional,
+);
+
+const localIssueReviewOption = Options.choice("review", ["true", "false"]).pipe(
+  Options.withDescription("Whether to run a reviewer agent after commits"),
+  Options.optional,
+);
+
+const localIssueDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Print resolved settings without running an agent"),
+);
+
+const parseEnvFileForCli = (filePath: string): Record<string, string> => {
+  if (!existsSync(filePath)) return {};
+  const vars: Record<string, string> = {};
+  for (const rawLine of readFileSync(filePath, "utf8").split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eqIndex = line.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = line.slice(0, eqIndex).trim();
+    let value = line.slice(eqIndex + 1).trim();
+    const quoted =
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"));
+    if (quoted) value = value.slice(1, -1);
+    vars[key] = value || process.env[key] || "";
+  }
+  return Object.fromEntries(Object.entries(vars).filter(([, value]) => value));
+};
+
+const resolveSandcastleEnvFile = (): string => {
+  if (process.env.SANDCASTLE_ENV_FILE) {
+    return resolve(process.env.SANDCASTLE_ENV_FILE);
+  }
+  const sourceDir = dirname(fileURLToPath(import.meta.url));
+  return resolve(sourceDir, "..", ".sandcastle", ".env");
+};
+
+/**
+ * Resolve the `.env` for workspace/init agent runs. Unlike
+ * `resolveSandcastleEnvFile` (which is relative to the installed package and
+ * only works when the package *is* the repo, i.e. dogfooding), this reads the
+ * user's repo at `<cwd>/.sandcastle/.env` — where `sandcastle init` writes it.
+ * `SANDCASTLE_ENV_FILE` still overrides for scripted setups.
+ */
+export const resolveWorkspaceEnvFile = (cwd: string): string => {
+  if (process.env.SANDCASTLE_ENV_FILE) {
+    return resolve(process.env.SANDCASTLE_ENV_FILE);
+  }
+  return resolve(cwd, CONFIG_DIR, ".env");
+};
+
+const findMarkdownFiles = (dir: string): string[] => {
+  if (!existsSync(dir)) return [];
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...findMarkdownFiles(entryPath));
+    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      files.push(entryPath);
+    }
+  }
+  return files;
+};
+
+const isReadyForAgentIssue = (filePath: string): boolean =>
+  /^status:\s*ready-for-agent\s*$/im.test(readFileSync(filePath, "utf8"));
+
+type LocalIssueResolution =
+  | { readonly _tag: "success"; readonly path: string }
+  | { readonly _tag: "failure"; readonly error: InitError };
+
+const resolveLocalIssuePath = (
+  cwd: string,
+  issue: Option.Option<string>,
+): LocalIssueResolution => {
+  if (issue._tag === "Some") {
+    return { _tag: "success", path: resolve(cwd, issue.value) };
+  }
+
+  const scratchDir = resolve(cwd, ".scratch");
+  const readyIssues =
+    findMarkdownFiles(scratchDir).filter(isReadyForAgentIssue);
+
+  if (readyIssues.length === 1) {
+    return { _tag: "success", path: readyIssues[0]! };
+  }
+
+  if (readyIssues.length === 0) {
+    return {
+      _tag: "failure",
+      error: new InitError({
+        message: `No ready local issues found under ${scratchDir}. Pass --issue <path> to choose one.`,
+      }),
+    };
+  }
+
+  return {
+    _tag: "failure",
+    error: new InitError({
+      message: `Multiple ready local issues found under ${scratchDir}. Pass --issue <path> to choose one:\n${readyIssues
+        .map((path) => `  - ${relative(cwd, path)}`)
+        .join("\n")}`,
+    }),
+  };
+};
+
+const sanitizeBranchSegment = (value: string): string => {
+  const sanitized = value
+    .replace(/^\d+[-_]/, "")
+    .replace(/[^A-Za-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "local-issue";
+};
+
+const defaultLocalIssueBranch = (cwd: string, issuePath: string): string => {
+  const relativeIssuePath = relative(cwd, issuePath);
+  const parts = relativeIssuePath.split(/[\\/]+/);
+  const scratchIndex = parts.indexOf(".scratch");
+  const issueTopic = parts[scratchIndex + 1];
+
+  if (scratchIndex >= 0 && issueTopic && parts[scratchIndex + 2] === "issues") {
+    return `sandcastle/${sanitizeBranchSegment(issueTopic)}`;
+  }
+
+  const stem = basename(issuePath, extname(issuePath));
+  return `sandcastle/${sanitizeBranchSegment(stem)}`;
+};
+
+const buildLocalIssuePrompt = (options: {
+  issueBody: string;
+  issuePath: string;
+  branch: string;
+  qa1ConfigPath: string;
+}): string => `# TASK
+
+Implement the local issue below.
+
+You are working in this repository on branch \`${options.branch}\`.
+
+<local-issue path="${options.issuePath}">
+${options.issueBody}
+</local-issue>
+
+# PROJECT RULES
+
+Read and follow \`AGENTS.md\` before editing.
+
+- Follow the target repository's project-specific agent rules and skills.
+- If changing Java/Spring backend code, follow \`java-backend-senior-engineer\` rules when available or required by the target repo.
+- Keep changes surgical.
+- Do not refactor unrelated code.
+- Use MapStruct for cross-model mapping when mapping is needed.
+- Do not log secrets, raw Apollo config values, tokens, user questions, or raw external payloads.
+
+# LOCAL ISSUE TRACKER
+
+The issue source is local markdown under \`.scratch/\`. Do not publish to GitHub or any external tracker. Do not create or edit PRs.
+
+# QA1 APOLLO CONFIG
+
+QA1 Apollo config cache is available on the local host at:
+
+\`${options.qa1ConfigPath}\`
+
+Use it only when runtime or local verification needs QA1-compatible configuration. Do not print config values. Do not copy secrets into committed files, prompts, logs, exceptions, tests, or generated docs.
+
+# EXECUTION
+
+1. Inspect the relevant code and project rules.
+2. Implement the smallest correct change for the issue.
+3. Add or update focused tests if there is an existing suitable seam.
+4. Run targeted verification for the target repository.
+5. Commit the implementation on the current branch.
+
+When complete, output \`<promise>COMPLETE</promise>\`.
+`;
+
+const buildLocalIssueReviewPrompt = (options: {
+  issueBody: string;
+  issuePath: string;
+  branch: string;
+  qa1ConfigPath: string;
+}): string => `# TASK
+
+Review the committed changes for the local issue below.
+
+You are working in this repository on branch \`${options.branch}\`.
+
+<local-issue path="${options.issuePath}">
+${options.issueBody}
+</local-issue>
+
+# REVIEW FOCUS
+
+Read and follow \`AGENTS.md\`.
+
+Check specifically:
+
+- The implementation satisfies the local issue acceptance criteria.
+- Existing behavior outside the issue remains unchanged.
+- The design is extensible where the issue asks for future growth.
+- Project-specific backend rules are followed.
+- No secrets or raw QA1 Apollo config values from \`${options.qa1ConfigPath}\` are logged, committed, or exposed.
+- Verification evidence is present or failures are clearly explained.
+
+If fixes are needed, apply them and commit. If the implementation is clean, do not make a commit.
+
+When complete, output \`<promise>COMPLETE</promise>\`.
+`;
+
+const localIssueCommand = Command.make(
+  "local-issue",
+  {
+    issue: localIssuePathOption,
+    branch: localIssueBranchOption,
+    baseBranch: localIssueBaseBranchOption,
+    qa1Config: localIssueQa1ConfigOption,
+    agent: localIssueAgentOption,
+    model: localIssueModelOption,
+    review: localIssueReviewOption,
+    dryRun: localIssueDryRunOption,
+  },
+  ({ issue, branch, baseBranch, qa1Config, agent, model, review, dryRun }) =>
+    Effect.gen(function* () {
+      const d = yield* Display;
+      const cwd = process.cwd();
+      const issueResolution = resolveLocalIssuePath(cwd, issue);
+
+      if (issueResolution._tag === "failure") {
+        yield* Effect.fail(issueResolution.error);
+        return;
+      }
+
+      const issuePath = issueResolution.path;
+      const qa1ConfigPath = resolve(
+        cwd,
+        qa1Config._tag === "Some" ? qa1Config.value : "config-cache",
+      );
+      const resolvedBranch =
+        branch._tag === "Some"
+          ? branch.value
+          : defaultLocalIssueBranch(cwd, issuePath);
+      const resolvedBaseBranch =
+        baseBranch._tag === "Some" ? baseBranch.value : "sit";
+      const resolvedAgent = agent._tag === "Some" ? agent.value : "claude";
+      const shouldReview =
+        review._tag === "Some" ? review.value === "true" : true;
+      const sandcastleEnvFile = resolveSandcastleEnvFile();
+
+      if (!existsSync(issuePath)) {
+        yield* Effect.fail(
+          new InitError({ message: `Local issue not found: ${issuePath}` }),
+        );
+      }
+      if (!existsSync(qa1ConfigPath)) {
+        yield* Effect.fail(
+          new InitError({
+            message: `QA1 Apollo config cache not found: ${qa1ConfigPath}`,
+          }),
+        );
+      }
+
+      const agentEnv = parseEnvFileForCli(sandcastleEnvFile);
+      const issueBody = readFileSync(issuePath, "utf8");
+      const issuePathForPrompt = relative(cwd, issuePath);
+
+      if (dryRun) {
+        yield* d.text("Local issue run settings:");
+        yield* d.text(`  repo: ${cwd}`);
+        yield* d.text(`  issue: ${issuePathForPrompt}`);
+        yield* d.text(`  branch: ${resolvedBranch}`);
+        yield* d.text(`  base branch: ${resolvedBaseBranch}`);
+        yield* d.text(`  sandbox: no-sandbox`);
+        yield* d.text(`  QA1 Apollo config: ${qa1ConfigPath}`);
+        yield* d.text(`  Sandcastle env file: ${sandcastleEnvFile}`);
+        yield* d.text(`  agent: ${resolvedAgent}`);
+        yield* d.text(`  review: ${shouldReview}`);
+        return;
+      }
+
+      const implementationAgent =
+        resolvedAgent === "claude"
+          ? claudeCode(
+              model._tag === "Some" ? model.value : "x6/claude-opus-4-8",
+              {
+                env: agentEnv,
+              },
+            )
+          : codex(model._tag === "Some" ? model.value : "x5/gpt-5.5", {
+              env: agentEnv,
+            });
+
+      const promptOptions = {
+        issueBody,
+        issuePath: issuePathForPrompt,
+        branch: resolvedBranch,
+        qa1ConfigPath,
+      };
+
+      const implementation = yield* Effect.promise(() =>
+        run({
+          cwd,
+          name: "Implement local issue",
+          agent: implementationAgent,
+          sandbox: noSandbox({ env: agentEnv }),
+          branchStrategy: {
+            type: "branch",
+            branch: resolvedBranch,
+            baseBranch: resolvedBaseBranch,
+          },
+          prompt: buildLocalIssuePrompt(promptOptions),
+          logging: { type: "stdout" },
+        }),
+      );
+
+      if (shouldReview && implementation.commits.length > 0) {
+        yield* Effect.promise(() =>
+          run({
+            cwd,
+            name: "Review local issue",
+            agent: codex("x5/gpt-5.5", { env: agentEnv }),
+            sandbox: noSandbox({ env: agentEnv }),
+            branchStrategy: {
+              type: "branch",
+              branch: resolvedBranch,
+              baseBranch: resolvedBaseBranch,
+            },
+            prompt: buildLocalIssueReviewPrompt(promptOptions),
+            logging: { type: "stdout" },
+          }),
+        );
+      }
+    }),
+);
+
+// --- Workspace command ---
+
+const workspaceConfigOption = Options.text("config").pipe(
+  Options.withDescription(
+    "Workspace JSON config path. Defaults to .sandcastle/workspace.json",
+  ),
+  Options.optional,
+);
+
+const workspacePromptOption = Options.text("prompt").pipe(
+  Options.withDescription("Workspace task prompt"),
+  Options.optional,
+);
+
+const workspacePromptFileOption = Options.text("prompt-file").pipe(
+  Options.withDescription("Path to a workspace task prompt file"),
+  Options.optional,
+);
+
+const workspacePrdOption = Options.text("prd").pipe(
+  Options.withDescription("Inline product requirements document"),
+  Options.optional,
+);
+
+const workspacePrdFileOption = Options.text("prd-file").pipe(
+  Options.withDescription("Path to a product requirements document file"),
+  Options.optional,
+);
+
+const workspaceArtifactsDirOption = Options.text("artifacts-dir").pipe(
+  Options.withDescription(
+    "Directory for generated technical plan and repository issues",
+  ),
+  Options.optional,
+);
+
+const workspacePlanFileOption = Options.text("plan-file").pipe(
+  Options.withDescription("Workspace plan JSON file to execute"),
+  Options.optional,
+);
+
+const workspaceBranchPrefixOption = Options.text("branch-prefix").pipe(
+  Options.withDescription(
+    "Branch prefix for per-repository execution branches",
+  ),
+  Options.optional,
+);
+
+const workspaceAgentOption = Options.choice("agent", ["codex", "claude"]).pipe(
+  Options.withDescription("Agent provider to use for planning and execution"),
+  Options.optional,
+);
+
+const workspaceModelOption = Options.text("model").pipe(
+  Options.withDescription("Model to use for the execution agent"),
+  Options.optional,
+);
+
+const workspacePlannerModelOption = Options.text("planner-model").pipe(
+  Options.withDescription("Model to use for the planner agent"),
+  Options.optional,
+);
+
+const workspaceSandboxOption = Options.choice("sandbox", [
+  "docker",
+  "podman",
+]).pipe(
+  Options.withDescription("Bind-mount sandbox provider for workspace runs"),
+  Options.optional,
+);
+
+const workspaceMaxIterationsOption = Options.integer("max-iterations").pipe(
+  Options.withDescription("Maximum iterations for each repository executor"),
+  Options.optional,
+);
+
+const workspaceDryRunOption = Options.boolean("dry-run").pipe(
+  Options.withDescription("Plan the workspace task without executing repos"),
+);
+
+type WorkspaceCliConfig = {
+  readonly repositories?: ReadonlyArray<{
+    readonly name?: unknown;
+    readonly cwd?: unknown;
+    readonly kind?: unknown;
+    readonly description?: unknown;
+    readonly copyToWorktree?: unknown;
+    readonly branchStrategy?: unknown;
+  }>;
+  readonly branchPrefix?: unknown;
+  readonly maxIterations?: unknown;
+  readonly prdFile?: unknown;
+};
+
+const readWorkspaceConfig = (configPath: string): WorkspaceCliConfig => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (error) {
+    throw new InitError({
+      message: `Failed to read workspace config ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new InitError({
+      message: `Workspace config ${configPath} must be a JSON object`,
+    });
+  }
+
+  return parsed as WorkspaceCliConfig;
+};
+
+const normalizeWorkspaceRepositories = (
+  configPath: string,
+  config: WorkspaceCliConfig,
+  cwd: string,
+): WorkspaceTaskRepositoryOptions[] => {
+  if (!Array.isArray(config.repositories) || config.repositories.length === 0) {
+    throw new InitError({
+      message: `Workspace config ${configPath} must contain a non-empty repositories array`,
+    });
+  }
+
+  const names = new Set<string>();
+  return config.repositories.map((repo, index) => {
+    if (typeof repo.name !== "string" || !repo.name.trim()) {
+      throw new InitError({
+        message: `Workspace config repository at index ${index} must include a name`,
+      });
+    }
+    if (names.has(repo.name)) {
+      throw new InitError({
+        message: `Workspace config ${configPath} has duplicate repository name "${repo.name}"`,
+      });
+    }
+    names.add(repo.name);
+    if (typeof repo.cwd !== "string" || !repo.cwd.trim()) {
+      throw new InitError({
+        message: `Workspace config repository "${repo.name}" must include a cwd`,
+      });
+    }
+    if (
+      repo.copyToWorktree !== undefined &&
+      (!Array.isArray(repo.copyToWorktree) ||
+        repo.copyToWorktree.some((item: unknown) => typeof item !== "string"))
+    ) {
+      throw new InitError({
+        message: `Workspace config repository "${repo.name}" copyToWorktree must be an array of strings`,
+      });
+    }
+
+    return {
+      name: repo.name,
+      cwd: resolve(cwd, repo.cwd),
+      ...(typeof repo.kind === "string" ? { kind: repo.kind } : {}),
+      ...(typeof repo.description === "string"
+        ? { description: repo.description }
+        : {}),
+      ...(Array.isArray(repo.copyToWorktree)
+        ? { copyToWorktree: repo.copyToWorktree as string[] }
+        : {}),
+      ...(typeof repo.branchStrategy === "object" &&
+      repo.branchStrategy !== null
+        ? {
+            branchStrategy:
+              repo.branchStrategy as WorkspaceTaskRepositoryOptions["branchStrategy"],
+          }
+        : {}),
+    };
+  });
+};
+
+// Public default models for the workspace commands, sourced from the agent
+// registry so there is a single place to bump them. (The internal `x6/`/`x5/`
+// routing slugs are not used here — external users get public model slugs.)
+const DEFAULT_WORKSPACE_CLAUDE_MODEL = getAgent("claude-code")!.defaultModel;
+const DEFAULT_WORKSPACE_CODEX_MODEL = getAgent("codex")!.defaultModel;
+
+const buildWorkspaceCliAgent = (
+  agentName: "codex" | "claude",
+  model: Option.Option<string>,
+  env: Record<string, string>,
+) =>
+  agentName === "claude"
+    ? claudeCode(
+        model._tag === "Some" ? model.value : DEFAULT_WORKSPACE_CLAUDE_MODEL,
+        { env },
+      )
+    : codex(
+        model._tag === "Some" ? model.value : DEFAULT_WORKSPACE_CODEX_MODEL,
+        {
+          env,
+        },
+      );
+
+const sanitizeArtifactSegment = (value: string): string => {
+  const sanitized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "workspace-task";
+};
+
+const defaultWorkspaceArtifactsDir = (
+  cwd: string,
+  prdFile: Option.Option<string>,
+): string => {
+  if (prdFile._tag === "Some") {
+    const resolved = resolve(cwd, prdFile.value);
+    const filename = basename(resolved, extname(resolved));
+    const segment = /^(prd|requirements?|product-requirements?)$/i.test(
+      filename,
+    )
+      ? basename(dirname(resolved))
+      : filename;
+    return resolve(cwd, ".scratch", sanitizeArtifactSegment(segment));
+  }
+
+  return resolve(cwd, ".scratch", "workspace-task");
+};
+
+type WorkspaceInputResolution =
+  | { readonly _tag: "error"; readonly error: InitError }
+  | {
+      readonly _tag: "ok";
+      readonly prompt?: string;
+      readonly promptFile?: string;
+      /** PRD path used for artifacts-dir naming; None when not PRD-driven. */
+      readonly prdArtifactsBasis: Option.Option<string>;
+      /** Whether the input came from a PRD (inline, file, or configured). */
+      readonly isPrdDriven: boolean;
+    };
+
+/**
+ * Resolve which workspace input source to use, with precedence:
+ * explicit CLI flag (`--prompt`/`--prompt-file`/`--prd`/`--prd-file`) >
+ * `workspace.json` `prdFile` (recorded by `init --prd-file`) >
+ * the only ready local issue under `.scratch/`. Passing more than one explicit
+ * flag is an error.
+ */
+const resolveWorkspaceInput = (params: {
+  readonly cwd: string;
+  readonly prompt: Option.Option<string>;
+  readonly promptFile: Option.Option<string>;
+  readonly prd: Option.Option<string>;
+  readonly prdFile: Option.Option<string>;
+  readonly configPrdFile: string | undefined;
+}): WorkspaceInputResolution => {
+  const explicitPromptSources = [
+    params.prompt._tag === "Some" ? "--prompt" : undefined,
+    params.promptFile._tag === "Some" ? "--prompt-file" : undefined,
+    params.prd._tag === "Some" ? "--prd" : undefined,
+    params.prdFile._tag === "Some" ? "--prd-file" : undefined,
+  ].filter(Boolean) as string[];
+  if (explicitPromptSources.length > 1) {
+    return {
+      _tag: "error",
+      error: new InitError({
+        message: `Pass only one workspace input source: ${explicitPromptSources.join(", ")}`,
+      }),
+    };
+  }
+
+  if (params.prompt._tag === "Some") {
+    return {
+      _tag: "ok",
+      prompt: params.prompt.value,
+      prdArtifactsBasis: Option.none(),
+      isPrdDriven: false,
+    };
+  }
+  if (params.promptFile._tag === "Some") {
+    return {
+      _tag: "ok",
+      promptFile: params.promptFile.value,
+      prdArtifactsBasis: Option.none(),
+      isPrdDriven: false,
+    };
+  }
+  if (params.prd._tag === "Some") {
+    return {
+      _tag: "ok",
+      prompt: `# Product Requirements Document\n\n${params.prd.value}`,
+      prdArtifactsBasis: Option.none(),
+      isPrdDriven: true,
+    };
+  }
+  if (params.prdFile._tag === "Some") {
+    return {
+      _tag: "ok",
+      promptFile: params.prdFile.value,
+      prdArtifactsBasis: params.prdFile,
+      isPrdDriven: true,
+    };
+  }
+  if (params.configPrdFile !== undefined) {
+    return {
+      _tag: "ok",
+      promptFile: params.configPrdFile,
+      prdArtifactsBasis: Option.some(params.configPrdFile),
+      isPrdDriven: true,
+    };
+  }
+
+  const defaultIssue = resolveLocalIssuePath(params.cwd, Option.none());
+  if (defaultIssue._tag === "failure") {
+    return { _tag: "error", error: defaultIssue.error };
+  }
+  return {
+    _tag: "ok",
+    promptFile: defaultIssue.path,
+    prdArtifactsBasis: Option.none(),
+    isPrdDriven: false,
+  };
+};
+
+/** Read the optional `prdFile` recorded in a workspace config. */
+const configuredPrdFile = (config: WorkspaceCliConfig): string | undefined =>
+  typeof config.prdFile === "string" && config.prdFile.trim()
+    ? config.prdFile
+    : undefined;
+
+const issueBodyFor = (
+  repo: WorkspaceTaskPlan["repositories"][number],
+): string => {
+  if (repo.issue) {
+    return `# ${repo.issue.title}
+
+${repo.issue.body}
+`;
+  }
+
+  return `# ${repo.name}: ${repo.task}
+
+Status: ready-for-agent
+
+## What to build
+
+${repo.task}
+
+## Acceptance criteria
+
+- [ ] Implement the repository-local task.
+- [ ] Keep changes scoped to ${repo.name}.
+- [ ] Run focused verification when feasible.
+
+## Notes
+
+${repo.reason ?? "No planner reason was provided."}
+`;
+};
+
+const writeWorkspaceArtifacts = (
+  dir: string,
+  plan: WorkspaceTaskPlan,
+): {
+  readonly planJsonPath: string;
+  readonly alignmentPath: string;
+  readonly technicalPlanPath: string;
+  readonly issuePaths: string[];
+} => {
+  const issuesDir = resolve(dir, "issues");
+  mkdirSync(issuesDir, { recursive: true });
+
+  const planJsonPath = resolve(dir, "workspace-plan.json");
+  writeFileSync(planJsonPath, `${JSON.stringify(plan, null, 2)}\n`);
+
+  const alignmentPath = resolve(dir, "alignment.md");
+  writeFileSync(alignmentPath, workspaceAlignmentMarkdown(plan));
+
+  const technicalPlanPath = resolve(dir, "technical-plan.md");
+  writeFileSync(
+    technicalPlanPath,
+    `# Workspace Technical Plan
+
+${plan.technicalPlan ?? "The planner did not provide a separate technical plan."}
+
+## Repository Issues
+
+${plan.repositories.map((repo) => `- ${repo.name}: ${repo.task}`).join("\n")}
+`,
+  );
+
+  const issuePaths = plan.repositories.map((repo) => {
+    const path = resolve(issuesDir, `${sanitizeArtifactSegment(repo.name)}.md`);
+    writeFileSync(path, issueBodyFor(repo));
+    return path;
+  });
+
+  return { planJsonPath, alignmentPath, technicalPlanPath, issuePaths };
+};
+
+/**
+ * Run the planner (dry run) and write the resulting plan artifacts to disk.
+ * Shared by `sandcastle workspace plan` and `sandcastle init --plan` so both
+ * produce the same `workspace-plan.json` + alignment/technical-plan/issue files.
+ */
+const planWorkspaceToArtifacts = async (opts: {
+  readonly repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions>;
+  readonly prompt?: string;
+  readonly promptFile?: string;
+  readonly agent: AgentProvider;
+  readonly plannerAgent?: AgentProvider;
+  readonly sandbox: SandboxProvider;
+  readonly branchPrefix?: string;
+  readonly maxIterations?: number;
+  readonly artifactsDir: string;
+  readonly name: string;
+}): Promise<{
+  readonly plan: WorkspaceTaskPlan;
+  readonly artifacts: ReturnType<typeof writeWorkspaceArtifacts>;
+}> => {
+  const result = await runWorkspaceTask({
+    repositories: opts.repositories,
+    prompt: opts.prompt,
+    promptFile: opts.promptFile,
+    agent: opts.agent,
+    plannerAgent: opts.plannerAgent,
+    sandbox: opts.sandbox,
+    branchPrefix: opts.branchPrefix,
+    maxIterations: opts.maxIterations,
+    logging: { type: "stdout" },
+    name: opts.name,
+    dryRun: true,
+  });
+  const artifacts = writeWorkspaceArtifacts(opts.artifactsDir, result.plan);
+  return { plan: result.plan, artifacts };
+};
+
+const workspaceAlignmentMarkdown = (plan: WorkspaceTaskPlan): string => {
+  const alignment = plan.alignment;
+  return `# Workspace PRD Alignment
+
+## Summary
+
+${alignment?.summary ?? "The planner did not provide a separate alignment summary."}
+
+## Assumptions
+
+${
+  alignment?.assumptions?.length
+    ? alignment.assumptions.map((item) => `- ${item}`).join("\n")
+    : "- None recorded."
+}
+
+## Open Questions
+
+${
+  alignment?.openQuestions?.length
+    ? alignment.openQuestions.map((item) => `- ${item}`).join("\n")
+    : "- None blocking."
+}
+
+## Domain Terms
+
+${
+  alignment?.domainTerms?.length
+    ? alignment.domainTerms
+        .map((item) => `- ${item.term}: ${item.meaning}`)
+        .join("\n")
+    : "- None recorded."
+}
+
+## ADR Candidates
+
+${
+  alignment?.adrCandidates?.length
+    ? alignment.adrCandidates
+        .map((item) => `- ${item.title}: ${item.reason}`)
+        .join("\n")
+    : "- None recorded."
+}
+`;
+};
+
+const readWorkspacePlan = (planPath: string): WorkspaceTaskPlan => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(planPath, "utf8"));
+  } catch (error) {
+    throw new InitError({
+      message: `Failed to read workspace plan ${planPath}: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !Array.isArray((parsed as { repositories?: unknown }).repositories)
+  ) {
+    throw new InitError({
+      message: `Workspace plan ${planPath} must contain a repositories array`,
+    });
+  }
+
+  const repositories = (parsed as { repositories: unknown[] }).repositories.map(
+    (entry, index) => {
+      if (typeof entry !== "object" || entry === null) {
+        throw new InitError({
+          message: `Workspace plan repository at index ${index} must be an object`,
+        });
+      }
+      const repo = entry as {
+        name?: unknown;
+        task?: unknown;
+        reason?: unknown;
+        issue?: unknown;
+      };
+      if (typeof repo.name !== "string" || !repo.name.trim()) {
+        throw new InitError({
+          message: `Workspace plan repository at index ${index} must include a name`,
+        });
+      }
+      if (typeof repo.task !== "string" || !repo.task.trim()) {
+        throw new InitError({
+          message: `Workspace plan repository "${repo.name}" must include a task`,
+        });
+      }
+
+      let issue: WorkspaceTaskPlan["repositories"][number]["issue"];
+      if (repo.issue !== undefined) {
+        if (typeof repo.issue !== "object" || repo.issue === null) {
+          throw new InitError({
+            message: `Workspace plan repository "${repo.name}" issue must be an object`,
+          });
+        }
+        const candidate = repo.issue as { title?: unknown; body?: unknown };
+        if (
+          typeof candidate.title !== "string" ||
+          typeof candidate.body !== "string"
+        ) {
+          throw new InitError({
+            message: `Workspace plan repository "${repo.name}" issue must include title and body`,
+          });
+        }
+        issue = { title: candidate.title, body: candidate.body };
+      }
+
+      return {
+        name: repo.name,
+        task: repo.task,
+        ...(typeof repo.reason === "string" ? { reason: repo.reason } : {}),
+        ...(issue ? { issue } : {}),
+      };
+    },
+  );
+
+  const technicalPlan =
+    typeof (parsed as { technicalPlan?: unknown }).technicalPlan === "string"
+      ? (parsed as { technicalPlan: string }).technicalPlan
+      : undefined;
+  const alignment =
+    typeof (parsed as { alignment?: unknown }).alignment === "object" &&
+    (parsed as { alignment?: unknown }).alignment !== null
+      ? (parsed as { alignment: WorkspaceTaskPlan["alignment"] }).alignment
+      : undefined;
+  const workspace = parseWorkspacePlanSnapshot(
+    planPath,
+    (parsed as { workspace?: unknown }).workspace,
+  );
+
+  return {
+    ...(alignment ? { alignment } : {}),
+    ...(technicalPlan ? { technicalPlan } : {}),
+    ...(workspace ? { workspace } : {}),
+    repositories,
+  };
+};
+
+const parseWorkspacePlanSnapshot = (
+  planPath: string,
+  value: unknown,
+): WorkspaceTaskWorkspace | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw new InitError({
+      message: `Workspace plan ${planPath} workspace must be an object`,
+    });
+  }
+  const snapshot = value as {
+    repositories?: unknown;
+    branchPrefix?: unknown;
+    maxIterations?: unknown;
+  };
+  if (
+    !Array.isArray(snapshot.repositories) ||
+    snapshot.repositories.length === 0
+  ) {
+    throw new InitError({
+      message: `Workspace plan ${planPath} workspace must contain a non-empty repositories array`,
+    });
+  }
+
+  return {
+    repositories:
+      snapshot.repositories as WorkspaceTaskWorkspace["repositories"],
+    ...(typeof snapshot.branchPrefix === "string"
+      ? { branchPrefix: snapshot.branchPrefix }
+      : {}),
+    ...(typeof snapshot.maxIterations === "number"
+      ? { maxIterations: snapshot.maxIterations }
+      : {}),
+  };
+};
+
+const workspaceRunCommand = Command.make(
+  "run",
+  {
+    config: workspaceConfigOption,
+    prompt: workspacePromptOption,
+    promptFile: workspacePromptFileOption,
+    prd: workspacePrdOption,
+    prdFile: workspacePrdFileOption,
+    artifactsDir: workspaceArtifactsDirOption,
+    branchPrefix: workspaceBranchPrefixOption,
+    agent: workspaceAgentOption,
+    model: workspaceModelOption,
+    plannerModel: workspacePlannerModelOption,
+    sandbox: workspaceSandboxOption,
+    maxIterations: workspaceMaxIterationsOption,
+    dryRun: workspaceDryRunOption,
+  },
+  ({
+    config,
+    prompt,
+    promptFile,
+    prd,
+    prdFile,
+    artifactsDir,
+    branchPrefix,
+    agent,
+    model,
+    plannerModel,
+    sandbox,
+    maxIterations,
+    dryRun,
+  }) =>
+    Effect.gen(function* () {
+      const d = yield* Display;
+      const cwd = process.cwd();
+      const configPath = resolve(
+        cwd,
+        config._tag === "Some" ? config.value : ".sandcastle/workspace.json",
+      );
+      const workspaceConfig = readWorkspaceConfig(configPath);
+      const repositories = normalizeWorkspaceRepositories(
+        configPath,
+        workspaceConfig,
+        cwd,
+      );
+      const agentEnv = parseEnvFileForCli(resolveWorkspaceEnvFile(cwd));
+      const resolvedAgentName = agent._tag === "Some" ? agent.value : "claude";
+      const executionAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        model,
+        agentEnv,
+      );
+      const plannerAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        plannerModel._tag === "Some" ? plannerModel : model,
+        agentEnv,
+      );
+      const sandboxProvider =
+        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
+          ? podman()
+          : docker();
+
+      const resolvedBranchPrefix =
+        branchPrefix._tag === "Some"
+          ? branchPrefix.value
+          : typeof workspaceConfig.branchPrefix === "string"
+            ? workspaceConfig.branchPrefix
+            : undefined;
+
+      const resolvedMaxIterations =
+        maxIterations._tag === "Some"
+          ? maxIterations.value
+          : typeof workspaceConfig.maxIterations === "number"
+            ? workspaceConfig.maxIterations
+            : undefined;
+
+      const inputResolution = resolveWorkspaceInput({
+        cwd,
+        prompt,
+        promptFile,
+        prd,
+        prdFile,
+        configPrdFile: configuredPrdFile(workspaceConfig),
+      });
+      if (inputResolution._tag === "error") {
+        yield* Effect.fail(inputResolution.error);
+        return;
+      }
+
+      const shouldWriteArtifacts =
+        inputResolution.isPrdDriven || artifactsDir._tag === "Some";
+      const resolvedArtifactsDir =
+        artifactsDir._tag === "Some"
+          ? resolve(cwd, artifactsDir.value)
+          : defaultWorkspaceArtifactsDir(
+              cwd,
+              inputResolution.prdArtifactsBasis,
+            );
+
+      const result = yield* Effect.promise(() =>
+        runWorkspaceTask({
+          repositories,
+          prompt: inputResolution.prompt,
+          promptFile: inputResolution.promptFile,
+          agent: executionAgent,
+          plannerAgent,
+          sandbox: sandboxProvider,
+          branchPrefix: resolvedBranchPrefix,
+          maxIterations: resolvedMaxIterations,
+          logging: { type: "stdout" },
+          name: "workspace task",
+          dryRun,
+        }),
+      );
+
+      yield* d.text("Workspace plan:");
+      for (const planned of result.plan.repositories) {
+        yield* d.text(`  - ${planned.name}: ${planned.task}`);
+      }
+      if (result.plan.technicalPlan) {
+        yield* d.text("Technical plan:");
+        yield* d.text(result.plan.technicalPlan);
+      }
+
+      if (shouldWriteArtifacts) {
+        const artifacts = writeWorkspaceArtifacts(
+          resolvedArtifactsDir,
+          result.plan,
+        );
+        yield* d.text(`Generated workspace plan: ${artifacts.planJsonPath}`);
+        yield* d.text(`Generated PRD alignment: ${artifacts.alignmentPath}`);
+        yield* d.text(
+          `Generated technical plan: ${artifacts.technicalPlanPath}`,
+        );
+        for (const issuePath of artifacts.issuePaths) {
+          yield* d.text(`Generated issue: ${issuePath}`);
+        }
+      }
+
+      if (dryRun) {
+        yield* d.text("Dry run complete: execution was skipped.");
+        return;
+      }
+
+      yield* d.text("Workspace execution results:");
+      for (const [name, repo] of Object.entries(result.repositories)) {
+        yield* d.text(
+          `  - ${name}: ${repo.status} on ${repo.branch} (${repo.commits.length} commit(s))`,
+        );
+        if (repo.error) {
+          yield* d.text(`    error: ${repo.error}`);
+        }
+        if (repo.preservedWorktreePath) {
+          yield* d.text(`    preserved: ${repo.preservedWorktreePath}`);
+        }
+      }
+    }),
+);
+
+const workspacePlanCommand = Command.make(
+  "plan",
+  {
+    config: workspaceConfigOption,
+    prompt: workspacePromptOption,
+    promptFile: workspacePromptFileOption,
+    prd: workspacePrdOption,
+    prdFile: workspacePrdFileOption,
+    artifactsDir: workspaceArtifactsDirOption,
+    agent: workspaceAgentOption,
+    model: workspaceModelOption,
+    plannerModel: workspacePlannerModelOption,
+    sandbox: workspaceSandboxOption,
+    branchPrefix: workspaceBranchPrefixOption,
+    maxIterations: workspaceMaxIterationsOption,
+  },
+  ({
+    config,
+    prompt,
+    promptFile,
+    prd,
+    prdFile,
+    artifactsDir,
+    agent,
+    model,
+    plannerModel,
+    sandbox,
+    branchPrefix,
+    maxIterations,
+  }) =>
+    Effect.gen(function* () {
+      const d = yield* Display;
+      const cwd = process.cwd();
+      const configPath = resolve(
+        cwd,
+        config._tag === "Some" ? config.value : ".sandcastle/workspace.json",
+      );
+      const workspaceConfig = readWorkspaceConfig(configPath);
+      const repositories = normalizeWorkspaceRepositories(
+        configPath,
+        workspaceConfig,
+        cwd,
+      );
+      const agentEnv = parseEnvFileForCli(resolveWorkspaceEnvFile(cwd));
+      const resolvedAgentName = agent._tag === "Some" ? agent.value : "claude";
+      const executionAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        model,
+        agentEnv,
+      );
+      const plannerAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        plannerModel._tag === "Some" ? plannerModel : model,
+        agentEnv,
+      );
+      const sandboxProvider =
+        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
+          ? podman()
+          : docker();
+      const resolvedBranchPrefix =
+        branchPrefix._tag === "Some"
+          ? branchPrefix.value
+          : typeof workspaceConfig.branchPrefix === "string"
+            ? workspaceConfig.branchPrefix
+            : undefined;
+      const resolvedMaxIterations =
+        maxIterations._tag === "Some"
+          ? maxIterations.value
+          : typeof workspaceConfig.maxIterations === "number"
+            ? workspaceConfig.maxIterations
+            : undefined;
+
+      const inputResolution = resolveWorkspaceInput({
+        cwd,
+        prompt,
+        promptFile,
+        prd,
+        prdFile,
+        configPrdFile: configuredPrdFile(workspaceConfig),
+      });
+      if (inputResolution._tag === "error") {
+        yield* Effect.fail(inputResolution.error);
+        return;
+      }
+
+      const resolvedArtifactsDir =
+        artifactsDir._tag === "Some"
+          ? resolve(cwd, artifactsDir.value)
+          : defaultWorkspaceArtifactsDir(
+              cwd,
+              inputResolution.prdArtifactsBasis,
+            );
+
+      const { plan: planResult, artifacts } = yield* Effect.promise(() =>
+        planWorkspaceToArtifacts({
+          repositories,
+          prompt: inputResolution.prompt,
+          promptFile: inputResolution.promptFile,
+          agent: executionAgent,
+          plannerAgent,
+          sandbox: sandboxProvider,
+          branchPrefix: resolvedBranchPrefix,
+          maxIterations: resolvedMaxIterations,
+          artifactsDir: resolvedArtifactsDir,
+          name: "workspace plan",
+        }),
+      );
+      const result = { plan: planResult };
+      yield* d.text("Workspace plan:");
+      for (const planned of result.plan.repositories) {
+        yield* d.text(`  - ${planned.name}: ${planned.task}`);
+      }
+      if (result.plan.technicalPlan) {
+        yield* d.text("Technical plan:");
+        yield* d.text(result.plan.technicalPlan);
+      }
+      yield* d.text(`Generated workspace plan: ${artifacts.planJsonPath}`);
+      yield* d.text(`Generated PRD alignment: ${artifacts.alignmentPath}`);
+      yield* d.text(`Generated technical plan: ${artifacts.technicalPlanPath}`);
+      for (const issuePath of artifacts.issuePaths) {
+        yield* d.text(`Generated issue: ${issuePath}`);
+      }
+    }),
+);
+
+const workspaceExecuteCommand = Command.make(
+  "execute",
+  {
+    config: workspaceConfigOption,
+    planFile: workspacePlanFileOption,
+    artifactsDir: workspaceArtifactsDirOption,
+    branchPrefix: workspaceBranchPrefixOption,
+    agent: workspaceAgentOption,
+    model: workspaceModelOption,
+    sandbox: workspaceSandboxOption,
+    maxIterations: workspaceMaxIterationsOption,
+  },
+  ({
+    config,
+    planFile,
+    artifactsDir,
+    branchPrefix,
+    agent,
+    model,
+    sandbox,
+    maxIterations,
+  }) =>
+    Effect.gen(function* () {
+      const d = yield* Display;
+      const cwd = process.cwd();
+      const agentEnv = parseEnvFileForCli(resolveWorkspaceEnvFile(cwd));
+      const resolvedAgentName = agent._tag === "Some" ? agent.value : "claude";
+      const executionAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        model,
+        agentEnv,
+      );
+      const sandboxProvider =
+        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
+          ? podman()
+          : docker();
+      const resolvedPlanFile =
+        planFile._tag === "Some"
+          ? resolve(cwd, planFile.value)
+          : resolve(
+              artifactsDir._tag === "Some"
+                ? resolve(cwd, artifactsDir.value)
+                : defaultWorkspaceArtifactsDir(cwd, Option.none()),
+              "workspace-plan.json",
+            );
+      const plan = readWorkspacePlan(resolvedPlanFile);
+      const configPath = resolve(
+        cwd,
+        config._tag === "Some" ? config.value : ".sandcastle/workspace.json",
+      );
+      const workspaceConfig =
+        plan.workspace !== undefined
+          ? ({
+              repositories: plan.workspace.repositories,
+              branchPrefix: plan.workspace.branchPrefix,
+              maxIterations: plan.workspace.maxIterations,
+            } satisfies WorkspaceCliConfig)
+          : readWorkspaceConfig(configPath);
+      const workspaceConfigPath =
+        plan.workspace !== undefined
+          ? `${resolvedPlanFile}#workspace`
+          : configPath;
+      const repositories = normalizeWorkspaceRepositories(
+        workspaceConfigPath,
+        workspaceConfig,
+        cwd,
+      );
+      const resolvedBranchPrefix =
+        branchPrefix._tag === "Some"
+          ? branchPrefix.value
+          : typeof workspaceConfig.branchPrefix === "string"
+            ? workspaceConfig.branchPrefix
+            : undefined;
+      const resolvedMaxIterations =
+        maxIterations._tag === "Some"
+          ? maxIterations.value
+          : typeof workspaceConfig.maxIterations === "number"
+            ? workspaceConfig.maxIterations
+            : undefined;
+
+      const repositoriesResult = yield* Effect.promise(() =>
+        executeWorkspaceTaskPlan({
+          repositories,
+          plan,
+          taskPrompt: `Execute approved workspace plan from ${resolvedPlanFile}.`,
+          agent: executionAgent,
+          sandbox: sandboxProvider,
+          branchPrefix: resolvedBranchPrefix,
+          maxIterations: resolvedMaxIterations,
+          logging: { type: "stdout" },
+          name: "workspace execute",
+        }),
+      );
+
+      yield* d.text("Workspace execution results:");
+      for (const [name, repo] of Object.entries(repositoriesResult)) {
+        yield* d.text(
+          `  - ${name}: ${repo.status} on ${repo.branch} (${repo.commits.length} commit(s))`,
+        );
+        if (repo.error) {
+          yield* d.text(`    error: ${repo.error}`);
+        }
+        if (repo.preservedWorktreePath) {
+          yield* d.text(`    preserved: ${repo.preservedWorktreePath}`);
+        }
+      }
+    }),
+);
+
+const workspaceCommand = Command.make("workspace", {}, () =>
+  Effect.gen(function* () {
+    const d = yield* Display;
+    yield* d.status("Use `sandcastle workspace plan --help`.", "info");
+  }),
+).pipe(
+  Command.withSubcommands([
+    workspacePlanCommand,
+    workspaceExecuteCommand,
+    workspaceRunCommand,
+  ]),
+);
+
+// --- Board command ---
+
+const boardPortOption = Options.integer("port").pipe(
+  Options.withDescription("Port for the board server (default: 4318)"),
+  Options.optional,
+);
+
+const boardDataDirOption = Options.text("data-dir").pipe(
+  Options.withDescription(
+    "Directory for board run/event/task data (default: .sandcastle/board)",
+  ),
+  Options.optional,
+);
+
+const boardCommand = Command.make(
+  "board",
+  {
+    port: boardPortOption,
+    dataDir: boardDataDirOption,
+    config: workspaceConfigOption,
+    agent: workspaceAgentOption,
+    model: workspaceModelOption,
+    plannerModel: workspacePlannerModelOption,
+    sandbox: workspaceSandboxOption,
+    branchPrefix: workspaceBranchPrefixOption,
+    maxIterations: workspaceMaxIterationsOption,
+  },
+  ({
+    port,
+    dataDir,
+    config,
+    agent,
+    model,
+    plannerModel,
+    sandbox,
+    branchPrefix,
+    maxIterations,
+  }) =>
+    Effect.gen(function* () {
+      const d = yield* Display;
+      const cwd = process.cwd();
+
+      const resolvedDataDir =
+        dataDir._tag === "Some"
+          ? resolve(cwd, dataDir.value)
+          : resolve(cwd, ".sandcastle", "board");
+      const store = new BoardStore(resolvedDataDir);
+
+      // Resolve the workspace config lazily so the board still starts (in
+      // read-only mode) when no workspace.json exists. Task launching requires
+      // a valid workspace; surface the error to the task when it is created.
+      const configPath = resolve(
+        cwd,
+        config._tag === "Some" ? config.value : ".sandcastle/workspace.json",
+      );
+      const agentEnv = parseEnvFileForCli(resolveWorkspaceEnvFile(cwd));
+      const resolvedAgentName = agent._tag === "Some" ? agent.value : "claude";
+      const executionAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        model,
+        agentEnv,
+      );
+      const plannerAgent = buildWorkspaceCliAgent(
+        resolvedAgentName,
+        plannerModel._tag === "Some" ? plannerModel : model,
+        agentEnv,
+      );
+      const sandboxProvider =
+        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
+          ? podman()
+          : docker();
+      const resolvedBranchPrefix =
+        branchPrefix._tag === "Some" ? branchPrefix.value : undefined;
+      const resolvedMaxIterations =
+        maxIterations._tag === "Some" ? maxIterations.value : undefined;
+
+      const launchTask = createTaskLauncher({
+        store,
+        run: async ({ prompt, title, onRepoRunEvent, onPlan }) => {
+          const workspaceConfig = readWorkspaceConfig(configPath);
+          const repositories = normalizeWorkspaceRepositories(
+            configPath,
+            workspaceConfig,
+            cwd,
+          );
+          const result = await runWorkspaceTask({
+            repositories,
+            prompt,
+            agent: executionAgent,
+            plannerAgent,
+            sandbox: sandboxProvider,
+            branchPrefix: resolvedBranchPrefix,
+            maxIterations: resolvedMaxIterations,
+            name: title,
+            onRepoRunEvent,
+            // Surface the planner phase as its own per-task run.
+            onPlannerRunEvent: (event) => onRepoRunEvent("(planner)", event),
+            // Show the plan as soon as it is ready, before execution finishes.
+            onPlan: (plan) =>
+              onPlan({
+                ...(plan.alignment?.summary
+                  ? { alignmentSummary: plan.alignment.summary }
+                  : {}),
+                ...(plan.technicalPlan
+                  ? { technicalPlan: plan.technicalPlan }
+                  : {}),
+                repositories: plan.repositories.map((repo) => ({
+                  name: repo.name,
+                  task: repo.task,
+                  ...(repo.reason ? { reason: repo.reason } : {}),
+                })),
+              }),
+          });
+          return { repositories: result.repositories };
+        },
+      });
+
+      const server = yield* Effect.promise(() =>
+        startBoardServer({
+          store,
+          port: port._tag === "Some" ? port.value : 4318,
+          launchTask,
+        }),
+      );
+
+      yield* d.status(`Sandcastle board running at ${server.url}`, "success");
+      yield* d.status(`Data directory: ${resolvedDataDir}`, "info");
+      yield* d.status("Press Ctrl+C to stop.", "info");
+
+      // Keep the server alive until the process is interrupted; close on exit.
+      yield* Effect.never.pipe(
+        Effect.ensuring(Effect.promise(() => server.close())),
+      );
+    }),
+);
+
 // --- Root command ---
 
 const rootCommand = Command.make("sandcastle", {}, () =>
@@ -698,7 +2410,14 @@ const rootCommand = Command.make("sandcastle", {}, () =>
 );
 
 export const sandcastle = rootCommand.pipe(
-  Command.withSubcommands([initCommand, dockerCommand, podmanCommand]),
+  Command.withSubcommands([
+    initCommand,
+    dockerCommand,
+    podmanCommand,
+    localIssueCommand,
+    workspaceCommand,
+    boardCommand,
+  ]),
 );
 
 export const cli = Command.run(sandcastle, {

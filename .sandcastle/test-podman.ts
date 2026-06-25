@@ -1,5 +1,5 @@
-import * as sandcastle from "@ai-hero/sandcastle";
-import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
+import * as sandcastle from "@chenshaohui6988/sandcastle";
+import { podman } from "@chenshaohui6988/sandcastle/sandboxes/podman";
 
 const { commits, branch } = await sandcastle.run({
   sandbox: podman(),

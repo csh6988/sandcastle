@@ -2,6 +2,10 @@
 
 Review the code changes on branch `{{BRANCH}}` and improve code clarity, consistency, and maintainability while preserving exact functionality.
 
+# SKILLS
+
+Read `.sandcastle/SKILL_ROUTER.md`, choose the matching skill flow, and update `AGENTS.md` or `CLAUDE.md` first if the target repository lacks accurate agent guidance.
+
 # CONTEXT
 
 ## Branch diff

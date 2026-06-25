@@ -1503,3 +1503,134 @@ describe("output.maxRetries end-to-end", () => {
     ).rejects.toBeInstanceOf(StructuredOutputError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// onRunEvent structured run-event stream (ADR 0021)
+// ---------------------------------------------------------------------------
+
+describe("run() onRunEvent", () => {
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
+  const completingSandbox = () =>
+    createBindMountSandboxProvider({
+      name: "completing-agent",
+      create: async () => ({
+        worktreePath: process.cwd(),
+        exec: async (
+          _command: string,
+          options?: { onLine?: (line: string) => void },
+        ) => {
+          if (options?.onLine) {
+            options.onLine(
+              `{"type":"system","subtype":"init","session_id":"sess-evt"}`,
+            );
+            options.onLine(
+              '{"type":"result","result":"<promise>COMPLETE</promise>"}',
+            );
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        copyFileIn: async () => {},
+        copyFileOut: async () => {},
+        close: async () => {},
+      }),
+    });
+
+  const throwingSandbox = () =>
+    createBindMountSandboxProvider({
+      name: "throwing-agent",
+      create: async () => ({
+        worktreePath: process.cwd(),
+        exec: async (
+          _command: string,
+          options?: { onLine?: (line: string) => void },
+        ) => {
+          if (options?.onLine) {
+            throw new Error("agent boom");
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        copyFileIn: async () => {},
+        copyFileOut: async () => {},
+        close: async () => {},
+      }),
+    });
+
+  it.each(["file", "default"] as const)(
+    "emits run lifecycle events in %s logging mode",
+    async (mode) => {
+      const logDir = mkdtempSync(join(tmpdir(), "sandcastle-evt-"));
+      const events: import("./RunEvent.js").RunEvent[] = [];
+      try {
+        await run({
+          agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
+          sandbox: completingSandbox(),
+          prompt: "do the thing",
+          branchStrategy: { type: "head" },
+          name: "evt-run",
+          onRunEvent: (e) => events.push(e),
+          ...(mode === "file"
+            ? { logging: { type: "file", path: join(logDir, "run.log") } }
+            : {}),
+        });
+      } finally {
+        rmSync(logDir, { recursive: true, force: true });
+      }
+
+      const types = events.map((e) => e.type);
+      expect(types).toContain("run-started");
+      expect(types).toContain("iteration-started");
+      expect(types).toContain("run-finished");
+
+      const started = events.find((e) => e.type === "run-started");
+      expect(started).toMatchObject({
+        type: "run-started",
+        name: "evt-run",
+        agent: "claude-code",
+        model: "claude-opus-4-8",
+        maxIterations: DEFAULT_MAX_ITERATIONS,
+      });
+      const finished = events.find((e) => e.type === "run-finished");
+      expect(finished).toMatchObject({
+        type: "run-finished",
+        completionSignal: "<promise>COMPLETE</promise>",
+      });
+    },
+  );
+
+  it("emits run-failed and rethrows when the agent errors", async () => {
+    const events: import("./RunEvent.js").RunEvent[] = [];
+    await expect(
+      run({
+        agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
+        sandbox: throwingSandbox(),
+        prompt: "do the thing",
+        branchStrategy: { type: "head" },
+        onRunEvent: (e) => events.push(e),
+      }),
+    ).rejects.toThrow();
+
+    const failed = events.find((e) => e.type === "run-failed");
+    expect(failed).toBeDefined();
+    expect(events.map((e) => e.type)).toContain("run-started");
+  });
+
+  it("a throwing observer does not abort the run", async () => {
+    const result = await run({
+      agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
+      sandbox: completingSandbox(),
+      prompt: "do the thing",
+      branchStrategy: { type: "head" },
+      onRunEvent: () => {
+        throw new Error("observer boom");
+      },
+    });
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+  });
+});

@@ -1,0 +1,95 @@
+---
+title: Workflow Board
+description: Watch and manage Sandcastle runs from a local web board instead of the terminal.
+---
+
+## What is the board?
+
+The **workflow board** is a local web app that visualizes Sandcastle runs and
+lets you create tasks from a browser instead of watching the terminal. It
+persists runs, their event streams, and tasks to a file-backed store under
+`.sandcastle/board/`, then serves a kanban with live agent activity (text and
+tool calls), per-repository progress, and per-model token counts.
+
+Creating a task on the board fans it out into per-repository runs via
+`runWorkspaceTask`, using your `.sandcastle/workspace.json`.
+
+## Starting the board
+
+```bash
+sandcastle board                 # http://127.0.0.1:4318
+sandcastle board --port 5000
+```
+
+| Option             | Required | Default                      | Description                                    |
+| ------------------ | -------- | ---------------------------- | ---------------------------------------------- |
+| `--port`           | No       | `4318`                       | Port for the board server                      |
+| `--data-dir`       | No       | `.sandcastle/board`          | Directory for board run/event/task data        |
+| `--config`         | No       | `.sandcastle/workspace.json` | Workspace config used to fan out tasks         |
+| `--agent`          | No       | `claude`                     | Agent for task execution (`claude` or `codex`) |
+| `--model`          | No       | provider default             | Model passed to the execution agent            |
+| `--planner-model`  | No       | execution model              | Model passed to the planner agent              |
+| `--sandbox`        | No       | `docker`                     | Sandbox provider (`docker` or `podman`)        |
+| `--branch-prefix`  | No       | —                            | Branch prefix for per-repository task runs     |
+| `--max-iterations` | No       | —                            | Max iterations per repository run              |
+
+The server binds to localhost only.
+
+## Views
+
+- **By task** — groups per-repository runs under their parent task, shows the
+  planner phase as its own `(planner)` run, and renders the workspace plan
+  (alignment summary, technical plan, and per-repository tasks) as soon as the
+  planner produces it.
+- **By status** — a kanban of every run grouped into `running`, `succeeded`,
+  and `failed`.
+
+Selecting a run opens a detail panel with its live activity stream and a
+per-model token table.
+
+## Creating tasks
+
+Use **New task** to submit a title and a prompt/PRD. The board runs the planner
+against your workspace, displays the plan, then executes each affected
+repository as its own run. Task and run status update live.
+
+## Data directory
+
+The board stores everything under the data directory (default
+`.sandcastle/board/`):
+
+- `runs/<id>.json` — run metadata (status, branch, commit count, links to a task)
+- `runs/<id>.events.ndjson` — the run's structured event stream
+- `tasks/<id>.json` — task metadata, including the plan once planning completes
+
+No database is used, so there is no native dependency to install. A board
+server also watches this directory, so runs written by other processes (for
+example a `sandcastle run` pointed at the same data directory) appear without a
+manual refresh.
+
+## Programmatic run events
+
+The board is built on the same `onRunEvent` callback that `run()` exposes.
+Unlike the file-mode-only `onAgentStreamEvent`, `onRunEvent` fires in **both**
+display modes and emits the full run shape — `run-started` / `run-finished` /
+`run-failed`, `iteration-started`, `agent-text`, `agent-tool-call`, token
+`usage` (carrying the agent model), and `commit`:
+
+```ts
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+
+await run({
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: docker(),
+  prompt: "implement the feature",
+  onRunEvent: (event) => {
+    // forward to your own dashboard / observability system
+    console.log(event.type, event.timestamp);
+  },
+});
+```
+
+`runWorkspaceTask()` forwards the same stream per repository via
+`onRepoRunEvent`, and the planner phase via `onPlannerRunEvent`. See ADR 0021
+(run-event stream) and ADR 0022 (workflow board) for the design rationale.

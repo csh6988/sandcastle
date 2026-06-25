@@ -3,7 +3,7 @@ import {
   type OutputObjectDefinition,
   type RunOptions,
   type RunResult,
-} from "@ai-hero/sandcastle";
+} from "@chenshaohui6988/sandcastle";
 
 export interface RunWithExtractionOptions<T> extends Omit<
   RunOptions,

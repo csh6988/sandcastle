@@ -1,5 +1,6 @@
-import { Deferred, Duration, Effect, Fiber } from "effect";
+import { Deferred, Duration, Effect, Fiber, Option } from "effect";
 import { AgentStreamEmitter } from "./AgentStreamEmitter.js";
+import { RunEventEmitter, type RunEvent } from "./RunEvent.js";
 import { Display } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import {
@@ -17,9 +18,9 @@ import { TextDeltaBuffer } from "./TextDeltaBuffer.js";
 
 export type { ParsedStreamEvent, IterationUsage } from "./AgentProvider.js";
 
-const IDLE_WARNING_INTERVAL_MS = 60_000;
+export const IDLE_WARNING_INTERVAL_MS = 60_000;
 
-const invokeAgent = (
+export const invokeAgent = (
   sandbox: SandboxService,
   sandboxRepoDir: string,
   prompt: string,
@@ -243,9 +244,9 @@ const invokeAgent = (
     );
   });
 
-const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
-const DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60; // 600 seconds
-const DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60;
+export const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
+export const DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60; // 600 seconds
+export const DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60;
 
 export interface OrchestrateOptions {
   readonly hostRepoDir: string;
@@ -327,6 +328,15 @@ export const orchestrate = (
     const factory = yield* SandboxFactory;
     const display = yield* Display;
     const streamEmitter = yield* AgentStreamEmitter;
+    // Optional run-event emitter: used when a layer is provided (e.g. by run()
+    // with onRunEvent), silently absent otherwise. Read via serviceOption so it
+    // adds no requirement to orchestrate's signature. See ADR 0021.
+    const runEmitterOpt = yield* Effect.serviceOption(RunEventEmitter);
+    const emitRun = (event: RunEvent): Effect.Effect<void> =>
+      Option.match(runEmitterOpt, {
+        onNone: () => Effect.void,
+        onSome: (e) => e.emit(event),
+      });
     const { hostRepoDir, iterations, hooks, prompt, branch, provider } =
       options;
     let completionSignals: string[];
@@ -355,6 +365,12 @@ export const orchestrate = (
     for (let i = 1; i <= iterations; i++) {
       yield* checkAbort();
       yield* display.status(label(`Iteration ${i}/${iterations}`), "info");
+      yield* emitRun({
+        type: "iteration-started",
+        iteration: i,
+        maxIterations: iterations,
+        timestamp: new Date(),
+      });
 
       const sandboxResult = yield* factory.withSandbox(
         (
@@ -427,6 +443,14 @@ export const orchestrate = (
                       timestamp: new Date(),
                     }),
                   );
+                  Effect.runPromise(
+                    emitRun({
+                      type: "agent-text",
+                      message: chunk,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
                 });
                 const onText = (text: string) => {
                   textBuffer.write(text);
@@ -437,6 +461,15 @@ export const orchestrate = (
                   Effect.runPromise(
                     streamEmitter.emit({
                       type: "toolCall",
+                      name,
+                      formattedArgs,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                  Effect.runPromise(
+                    emitRun({
+                      type: "agent-tool-call",
                       name,
                       formattedArgs,
                       iteration: i,
@@ -571,6 +604,24 @@ export const orchestrate = (
         sessionFilePath: lifecycleResult.result.sessionFilePath,
         usage: lifecycleResult.result.usage,
       });
+
+      if (lifecycleResult.result.usage) {
+        yield* emitRun({
+          type: "usage",
+          usage: lifecycleResult.result.usage,
+          model: provider.model,
+          iteration: i,
+          timestamp: new Date(),
+        });
+      }
+      for (const commit of lifecycleResult.commits) {
+        yield* emitRun({
+          type: "commit",
+          sha: commit.sha,
+          iteration: i,
+          timestamp: new Date(),
+        });
+      }
 
       if (lifecycleResult.result.completionSignal !== undefined) {
         yield* display.status(

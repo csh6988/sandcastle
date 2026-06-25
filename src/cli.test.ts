@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -35,7 +35,7 @@ describe("sandcastle CLI", () => {
     expect(stdout).toContain("sandcastle");
     expect(stdout).toContain("docker");
     expect(stdout).toContain("init");
-    expect(stdout).not.toContain("run");
+    expect(stdout).toContain("workspace");
     expect(stdout).not.toContain("interactive");
     // build-image and remove-image are namespaced under docker, not top-level
     expect(stdout).toContain("docker build-image");
@@ -147,6 +147,173 @@ describe("sandcastle CLI", () => {
     expect(stdout).toContain("podman remove-image");
   });
 
+  it("workspace --help shows run subcommand", async () => {
+    const { stdout } = await runCli("workspace --help", process.cwd());
+    expect(stdout).toContain("plan");
+    expect(stdout).toContain("execute");
+    expect(stdout).toContain("run");
+  });
+
+  it("--help shows the board command", async () => {
+    const { stdout } = await runCli("--help", process.cwd());
+    expect(stdout).toContain("board");
+  });
+
+  it("board --help exposes the port and data-dir options", async () => {
+    const { stdout } = await runCli("board --help", process.cwd());
+    expect(stdout).toContain("--port");
+    expect(stdout).toContain("--data-dir");
+  });
+
+  it("workspace plan --help exposes PRD input options", async () => {
+    const { stdout } = await runCli("workspace plan --help", process.cwd());
+    expect(stdout).toContain("--prd");
+    expect(stdout).toContain("--prd-file");
+    expect(stdout).toContain("--artifacts-dir");
+  });
+
+  it("workspace execute --help exposes plan input options", async () => {
+    const { stdout } = await runCli("workspace execute --help", process.cwd());
+    expect(stdout).toContain("--plan-file");
+    expect(stdout).toContain("--artifacts-dir");
+  });
+
+  it("workspace execute uses the plan workspace snapshot without requiring workspace config", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-workspace-"));
+    await mkdir(join(hostDir, ".scratch", "workspace-task"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(hostDir, ".scratch", "workspace-task", "workspace-plan.json"),
+      JSON.stringify({
+        workspace: {
+          repositories: [{ name: "other", cwd: "." }],
+        },
+        repositories: [{ name: "app", task: "Implement app behavior" }],
+      }),
+    );
+
+    try {
+      await runCli("workspace execute", hostDir);
+      expect.fail("Expected command to fail before starting an agent");
+    } catch (err: unknown) {
+      const { stdout, stderr } = err as { stdout: string; stderr: string };
+      const output = stdout + stderr;
+      expect(output).toContain('unknown repository "app"');
+      expect(output).not.toContain("Failed to read workspace config");
+      expect(output).not.toContain(".sandcastle/workspace.json");
+    }
+  });
+
+  it("workspace run --help exposes PRD input options", async () => {
+    const { stdout } = await runCli("workspace run --help", process.cwd());
+    expect(stdout).toContain("--prd");
+    expect(stdout).toContain("--prd-file");
+    expect(stdout).toContain("--artifacts-dir");
+  });
+
+  it("workspace run uses the only ready local issue as the default prompt file", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-workspace-"));
+    await mkdir(join(hostDir, ".sandcastle"), { recursive: true });
+    await mkdir(join(hostDir, ".scratch", "feature", "issues"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(hostDir, ".sandcastle", "workspace.json"),
+      JSON.stringify({
+        repositories: [
+          { name: "app", cwd: "." },
+          { name: "app", cwd: "." },
+        ],
+      }),
+    );
+    await writeFile(
+      join(hostDir, ".scratch", "feature", "issues", "01-feature.md"),
+      "# Feature\n\nStatus: ready-for-agent\n\nImplement it.\n",
+    );
+
+    try {
+      await runCli("workspace run --dry-run", hostDir);
+      expect.fail("Expected command to fail before starting an agent");
+    } catch (err: unknown) {
+      const { stdout, stderr } = err as { stdout: string; stderr: string };
+      const output = stdout + stderr;
+      expect(output).toContain('duplicate repository name "app"');
+      expect(output).not.toContain("--prompt");
+      expect(output).not.toContain("--prompt-file");
+    }
+  });
+
+  it("workspace run rejects multiple workspace input sources", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-workspace-"));
+    await mkdir(join(hostDir, ".sandcastle"), { recursive: true });
+    await writeFile(
+      join(hostDir, ".sandcastle", "workspace.json"),
+      JSON.stringify({
+        repositories: [{ name: "app", cwd: "." }],
+      }),
+    );
+
+    try {
+      await runCli('workspace run --prd "prd" --prompt "prompt"', hostDir);
+      expect.fail("Expected command to fail");
+    } catch (err: unknown) {
+      const { stdout, stderr } = err as { stdout: string; stderr: string };
+      const output = stdout + stderr;
+      expect(output).toContain("Pass only one workspace input source");
+      expect(output).toContain("--prompt");
+      expect(output).toContain("--prd");
+    }
+  });
+
+  it("init --help exposes the PRD recording and planning flags", async () => {
+    const { stdout } = await runCli("init --help", process.cwd());
+    expect(stdout).toContain("--prd-file");
+    expect(stdout).toContain("--plan");
+  });
+
+  it("init records --prd-file into the workspace config", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-init-prd-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    await runCli(
+      "init --agent claude-code --sandbox docker --issue-tracker github-issues " +
+        "--template blank --create-label false --build-image false " +
+        "--prd-file docs/prd.md --plan false",
+      hostDir,
+    );
+
+    const workspaceConfig = JSON.parse(
+      await readFile(join(hostDir, ".sandcastle", "workspace.json"), "utf-8"),
+    ) as { prdFile?: string };
+    expect(workspaceConfig.prdFile).toBe("docs/prd.md");
+  });
+
+  it("workspace plan falls back to the configured prdFile when no source is passed", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-workspace-prd-"));
+    await mkdir(join(hostDir, ".sandcastle"), { recursive: true });
+    await writeFile(
+      join(hostDir, ".sandcastle", "workspace.json"),
+      JSON.stringify({
+        repositories: [{ name: "app", cwd: "." }],
+        prdFile: "missing-prd.md",
+      }),
+    );
+
+    try {
+      await runCli("workspace plan", hostDir);
+      expect.fail("Expected command to fail reading the configured PRD");
+    } catch (err: unknown) {
+      const { stdout, stderr } = err as { stdout: string; stderr: string };
+      const output = stdout + stderr;
+      // It used the configured prdFile (and failed reading it) rather than
+      // falling back to the local-issue lookup.
+      expect(output).toContain("missing-prd.md");
+      expect(output).not.toContain("No ready local issues");
+    }
+  });
+
   it("podman --help shows build-image and remove-image subcommands", async () => {
     const { stdout } = await runCli("podman --help", process.cwd());
     expect(stdout).toContain("build-image");
@@ -242,6 +409,7 @@ describe("sandcastle CLI", () => {
     const entries = await readdir(join(hostDir, ".sandcastle"));
     expect(entries).toContain("Dockerfile");
     expect(entries).toContain("prompt.md");
+    expect(entries).toContain("workspace.json");
   });
 
   it("init --sandbox no-sandbox scaffolds without requiring --build-image", async () => {

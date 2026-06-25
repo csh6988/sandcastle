@@ -2,6 +2,8 @@
 
 Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
 
+Read `.sandcastle/SKILL_ROUTER.md`, choose the matching skill flow, and update `AGENTS.md` or `CLAUDE.md` first if the target repository lacks accurate agent guidance.
+
 Pull in the issue using `{{VIEW_TASK_COMMAND}}`. If it has a parent PRD, pull that in too.
 
 Only work on the issue specified.

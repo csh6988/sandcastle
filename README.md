@@ -27,16 +27,22 @@ Sandcastle is provider-agnostic — it ships with built-in providers for Docker,
 
 ## Quick start
 
+By the end of this path, you should know three things:
+
+- how to scaffold a Sandcastle runner for a repository
+- how the runner chooses the right agent skill flow before coding
+- when to use single-repo `run()`, PRD-driven `runWorkspaceTask()`, or lower-level `runWorkspace()`
+
 1. Install the package:
 
 ```bash
-npm install --save-dev @ai-hero/sandcastle
+npm install --save-dev @chenshaohui6988/sandcastle
 ```
 
-2. Run `npx @ai-hero/sandcastle init`. This scaffolds a `.sandcastle` directory with all the files needed.
+2. Run `npx @chenshaohui6988/sandcastle init`. This scaffolds a `.sandcastle` directory with all the files needed.
 
 ```bash
-npx @ai-hero/sandcastle init
+npx @chenshaohui6988/sandcastle init
 ```
 
 3. Edit `.sandcastle/.env` and fill in your default values for `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` on your host to get one). To use an Anthropic API key instead, uncomment and fill in `ANTHROPIC_API_KEY`.
@@ -53,8 +59,8 @@ npx tsx .sandcastle/main.ts
 
 ```typescript
 // 3. Run the agent via the JS API
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 await run({
   agent: claudeCode("claude-opus-4-8"),
@@ -63,24 +69,116 @@ await run({
 });
 ```
 
+## Agent Skill Routing
+
+Sandcastle scaffolds `.sandcastle/SKILL_ROUTER.md` as a companion workflow guide. Before an agent starts project work, it should read the router, choose the matching skill flow, and make sure the target repository's `AGENTS.md` or `CLAUDE.md` accurately describes the project-specific rules.
+
+Think of the router as a table of contents for agent work. It does not install every skill, and it does not replace project guidance. It helps the agent answer one question first: "What kind of work is this?"
+
+Codex and Claude Code can load skills differently, but the Sandcastle habit is the same: choose first, load second. Codex should keep the selected skills active in its skill profile. Claude Code should have the matching `SKILL.md` directories available under `.claude/skills/` so its native skill discovery can read only the skills needed for the task.
+
+This is the recommended entry sequence:
+
+1. Run `sandcastle init`.
+2. Review `.sandcastle/SKILL_ROUTER.md`.
+3. Sync the selected skills into the active agent setup.
+4. Update `AGENTS.md` or `CLAUDE.md` when project guidance is missing or stale.
+5. Start implementation only after the workflow is selected.
+
+See [`sandcastle init`](#sandcastle-init) for the full business flow diagram and best practices.
+
+## Learn The Workflow
+
+Sandcastle is easiest to learn as a sequence, not as an API catalog.
+
+### 1. Start With The Smallest Runner
+
+Use `sandcastle init` first. It creates the local runner files under `.sandcastle/` and gives the agent a prompt file to read. Do not start by writing a custom orchestration script unless you already know which lifecycle you need.
+
+After init, inspect these files:
+
+| File                          | What to learn from it                                                    |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `.sandcastle/main.ts`         | Which agent, sandbox provider, branch strategy, and prompt file will run |
+| `.sandcastle/prompt.md`       | What the agent is asked to do each iteration                             |
+| `.sandcastle/SKILL_ROUTER.md` | Which skill flow should be selected before project work starts           |
+| `.sandcastle/workspace.json`  | Which repositories are candidates for multi-repository planning          |
+| `.sandcastle/.env.example`    | Which host-side credentials the selected agent and issue tracker need    |
+
+### 2. Pick The Right Execution Shape
+
+Choose the smallest API that matches the work:
+
+| Situation                                      | Use this                 | Why                                                             |
+| ---------------------------------------------- | ------------------------ | --------------------------------------------------------------- |
+| One prompt, one repository                     | `run()`                  | Starts an agent once or for a bounded number of iterations      |
+| Several agent passes on the same branch        | `createSandbox()`        | Reuses one sandbox for implement-then-review or repair loops    |
+| You need a managed branch before running agent | `createWorktree()`       | Gives you direct control over worktree lifecycle                |
+| One request may touch several repositories     | `runWorkspaceTask()`     | Plans alignment, technical work, repo issues, and execution     |
+| One agent must see several repos at once       | `runWorkspace()`         | Lower-level multi-repo sandbox primitive                        |
+| A local markdown issue should be implemented   | `sandcastle local-issue` | Runs a scoped host-side issue flow without per-repo scaffolding |
+
+### 3. Do A First Practice Run
+
+For a safe first pass, use a read-only prompt:
+
+```markdown
+# Task
+
+Read this repository's AGENTS.md, CLAUDE.md, and .sandcastle/SKILL_ROUTER.md.
+Explain which skill flow should be used for a small bug fix.
+
+# Done
+
+Output <promise>COMPLETE</promise> when finished.
+```
+
+Run it with:
+
+```bash
+npx tsx .sandcastle/main.ts
+```
+
+You should see the agent explain the selected flow without changing code. A good first result names the likely flow, says whether `AGENTS.md` or `CLAUDE.md` needs an update, and stops before implementation. After that, replace the prompt with a real issue or use the workspace commands for PRD-driven work.
+
+### 4. Avoid Common Mistakes
+
+- Do not copy every available skill into the active agent. Load the skill flow selected by `.sandcastle/SKILL_ROUTER.md`.
+- Do not put project facts in the router. Put build commands, repo boundaries, terminology, and verification rules in `AGENTS.md` or `CLAUDE.md`.
+- Do not start with `runWorkspaceTask()` for a one-repo bug fix. Use `run()` until the task actually needs multi-repo planning.
+- Do not let chat history be the only source of instructions. If future agents need the rule, write it into project guidance.
+- Do not skip the read-only practice run when teaching a new team or a new repository. It confirms the agent can find the router and explain the workflow before it writes code.
+
+### Check Your Understanding
+
+Before you let an agent write code, you should be able to answer:
+
+- Which file tells the agent how to choose a skill flow?
+- Which file holds project-specific rules?
+- Which API creates reusable sandboxes?
+- Which command turns a PRD into repository-specific issues?
+- Where will generated workspace planning artifacts be written?
+
+If any answer is unclear, read [`sandcastle init`](#sandcastle-init), [`runWorkspaceTask()`](#runworkspacetask--plan-and-execute-across-repositories), and [`sandcastle workspace plan`](#sandcastle-workspace-plan) before running implementation.
+
 ## Sandbox Providers
 
 Sandcastle uses a `SandboxProvider` to create isolated environments. The `sandbox` option on `run()`, `interactive()`, and `createSandbox()` accepts any provider, including `noSandbox()` — opt in to running the agent directly on the host when container isolation is undesired. Built-in providers:
 
-| Provider   | Import path                                | Type       | Accepted by                                 |
-| ---------- | ------------------------------------------ | ---------- | ------------------------------------------- |
-| Docker     | `@ai-hero/sandcastle/sandboxes/docker`     | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
-| Podman     | `@ai-hero/sandcastle/sandboxes/podman`     | Bind-mount | `run()`, `createSandbox()`, `interactive()` |
-| Vercel     | `@ai-hero/sandcastle/sandboxes/vercel`     | Isolated   | `run()`, `createSandbox()`, `interactive()` |
-| No-sandbox | `@ai-hero/sandcastle/sandboxes/no-sandbox` | None       | `run()`, `createSandbox()`, `interactive()` |
+| Provider   | Import path                                        | Type       | Accepted by                                                   |
+| ---------- | -------------------------------------------------- | ---------- | ------------------------------------------------------------- |
+| Docker     | `@chenshaohui6988/sandcastle/sandboxes/docker`     | Bind-mount | `run()`, `runWorkspace()`, `createSandbox()`, `interactive()` |
+| Podman     | `@chenshaohui6988/sandcastle/sandboxes/podman`     | Bind-mount | `run()`, `runWorkspace()`, `createSandbox()`, `interactive()` |
+| Vercel     | `@chenshaohui6988/sandcastle/sandboxes/vercel`     | Isolated   | `run()`, `createSandbox()`, `interactive()`                   |
+| No-sandbox | `@chenshaohui6988/sandcastle/sandboxes/no-sandbox` | None       | `run()`, `createSandbox()`, `interactive()`                   |
 
 Worktree methods (`wt.run()`, `wt.interactive()`, `wt.createSandbox()`) accept the same providers as their top-level counterparts. `wt.interactive()` defaults to `noSandbox()` when no sandbox is specified.
 
 ```typescript
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
-import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
-import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
-import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+import { podman } from "@chenshaohui6988/sandcastle/sandboxes/podman";
+import { vercel } from "@chenshaohui6988/sandcastle/sandboxes/vercel";
+import { noSandbox } from "@chenshaohui6988/sandcastle/sandboxes/no-sandbox";
 
 // Docker, Podman, and Vercel are interchangeable in run() and createSandbox():
 await run({
@@ -103,11 +201,11 @@ You can also [create your own provider](#custom-sandbox-providers) using `create
 
 ## API
 
-Sandcastle exports a programmatic `run()` function for use in scripts, CI pipelines, or custom tooling. The examples below use `docker()`, but any `SandboxProvider` works in its place.
+Sandcastle exports programmatic APIs for use in scripts, CI pipelines, or custom tooling. Use `run()` for one repository, `runWorkspaceTask()` when one product request may affect multiple repositories, and `runWorkspace()` when you need the lower-level multi-repository sandbox primitive directly. The examples below use `docker()`, but any compatible `SandboxProvider` works in its place.
 
 ```typescript
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 const result = await run({
   agent: claudeCode("claude-opus-4-8"),
@@ -121,11 +219,182 @@ console.log(result.commits); // array of { sha } for commits created
 console.log(result.branch); // target branch name
 ```
 
+### `runWorkspaceTask()` — plan and execute across repositories
+
+Use `runWorkspaceTask()` when you have a PRD or product request and a set of candidate repositories. Sandcastle runs a planner agent first, asks it to produce PRD alignment notes, a technical plan, and repository-local issues, then runs one executor agent per selected repository in parallel. Each executor gets its own managed worktree, branch, commits, dirty preservation, and result entry.
+
+```typescript
+import { runWorkspaceTask, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+
+const result = await runWorkspaceTask({
+  repositories: [
+    {
+      name: "vocimcore",
+      cwd: "/Users/me/IdeaProjects/vocimcore",
+      kind: "backend",
+      description: "Core domain model, API contract, and shared types",
+    },
+    {
+      name: "vocsearchmng",
+      cwd: "/Users/me/IdeaProjects/vocsearchmng",
+      kind: "backend",
+      description: "Search service integration",
+    },
+    {
+      name: "vocimmng",
+      cwd: "/Users/me/IdeaProjects/vocimmng",
+      kind: "backend",
+      description: "IM management backend",
+    },
+    {
+      name: "vocmngweb",
+      cwd: "/Users/me/IdeaProjects/vocmngweb",
+      kind: "frontend",
+      description: "Management UI",
+    },
+    {
+      name: "vocprod",
+      cwd: "/Users/me/IdeaProjects/vocprod",
+      kind: "frontend",
+      description: "Product-facing UI",
+    },
+  ],
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: docker(),
+  branchPrefix: "codex/01-add-im-session-robot-source",
+  prompt: "Implement IM session robot source support.",
+});
+
+console.log(result.plan.alignment); // automatic PRD alignment notes
+console.log(result.plan.technicalPlan); // cross-repository technical plan
+console.log(result.plan.repositories); // repository issues selected by the planner
+console.log(result.repositories.vocimcore?.commits);
+console.log(result.repositories.vocmngweb?.status);
+```
+
+The planner must emit a `<workspace_plan>` JSON block containing `alignment`, a `technicalPlan`, and per-repository issue bodies. Sandcastle validates that every planned repository exists in the candidate list and rejects duplicate or unknown repository names before execution.
+
+Execution result entries are grouped by repository:
+
+```typescript
+type WorkspaceTaskRepositoryResult = {
+  task: string;
+  reason?: string;
+  status: "success" | "failed";
+  branch: string;
+  commits: Array<{ sha: string }>;
+  stdout?: string;
+  preservedWorktreePath?: string;
+  error?: string;
+};
+```
+
+You can run the same flow from the CLI with a JSON config instead of writing a TypeScript runner:
+
+```json
+{
+  "branchPrefix": "codex/01-add-im-session-robot-source",
+  "repositories": [
+    {
+      "name": "vocimcore",
+      "cwd": "../vocimcore",
+      "kind": "backend",
+      "description": "Core domain model, API contract, and shared types"
+    },
+    {
+      "name": "vocmngweb",
+      "cwd": "../vocmngweb",
+      "kind": "frontend",
+      "description": "Management UI"
+    }
+  ]
+}
+```
+
+```bash
+sandcastle workspace plan --prd-file ./prd.md
+# Review .scratch/<prd-name>/alignment.md, technical-plan.md, and issues/*.md
+sandcastle workspace execute --plan-file .scratch/<prd-name>/workspace-plan.json
+```
+
+For PRD-first workflows, `workspace plan --prd-file ./prd.md` writes `.scratch/<prd-name>/workspace-plan.json`, `.scratch/<prd-name>/alignment.md`, `.scratch/<prd-name>/technical-plan.md`, and `.scratch/<prd-name>/issues/<repo>.md`. The plan JSON snapshots the workspace chosen for that PRD, so later execution uses the repositories recorded in the plan instead of whatever `.sandcastle/workspace.json` contains at that time. Review those artifacts, then run `workspace execute --plan-file .scratch/<prd-name>/workspace-plan.json` to execute the approved repository issues in parallel.
+
+`workspace run --prd-file ./prd.md` is the fully automatic pipeline: PRD alignment, technical plan, repository issue generation, and execution in one command. When the current repo has exactly one ready local issue under `.scratch/`, `workspace run` can still use that issue as the prompt file automatically. Pass one of `--prd`, `--prd-file`, `--prompt`, or `--prompt-file` to override it.
+
+### `runWorkspace()` — multi-repository tasks
+
+Use `runWorkspace()` when you need the lower-level primitive: one agent invocation sees several managed repositories in the same sandbox. Sandcastle creates one managed worktree per repository, bind-mounts all of them into the same sandbox under `/home/agent/repos/<name>`, runs the agent from the primary repository, and returns commits grouped by repository.
+
+```typescript
+import { runWorkspace, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+
+const result = await runWorkspace({
+  repositories: [
+    {
+      name: "vocimcore",
+      cwd: "/Users/me/IdeaProjects/vocimcore",
+      branchStrategy: {
+        type: "branch",
+        branch: "codex/01-add-im-session-robot-source-core",
+      },
+      copyToWorktree: ["node_modules"],
+    },
+    {
+      name: "vocmngweb",
+      cwd: "/Users/me/IdeaProjects/vocmngweb",
+      branchStrategy: {
+        type: "branch",
+        branch: "codex/01-add-im-session-robot-source-web",
+      },
+    },
+  ],
+  primaryRepository: "vocimcore",
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: docker(),
+  prompt: "Implement the cross-repo feature.",
+  maxIterations: 1,
+});
+
+console.log(result.repositories.vocimcore.commits);
+console.log(result.repositories.vocmngweb.commits);
+```
+
+The agent prompt is automatically appended with a workspace manifest listing every repository name, sandbox path, branch, and the primary repository. For example, `vocimcore` is available at `/home/agent/repos/vocimcore` and `vocmngweb` at `/home/agent/repos/vocmngweb`.
+
+Each repository has its own `cwd`, `branchStrategy`, `copyToWorktree`, and `hooks`. If `branchStrategy` is omitted, Sandcastle uses `{ type: "merge-to-head" }` for that repository. `{ type: "branch", branch }` is supported. `{ type: "head" }` is rejected because `runWorkspace()` always uses managed worktrees.
+
+The result is grouped by repository:
+
+```typescript
+type RunWorkspaceResult = {
+  repositories: {
+    [name: string]: {
+      branch: string;
+      worktreePath: string;
+      commits: Array<{ sha: string }>;
+      preservedWorktreePath?: string;
+    };
+  };
+  stdout: string;
+  iterations: IterationResult[];
+  completionSignal?: string;
+  logFilePath?: string;
+};
+```
+
+V1 limitations:
+
+- `runWorkspace()` supports bind-mount sandbox providers only, such as Docker and Podman. Isolated providers throw a clear error.
+- The lower-level `runWorkspace()` primitive has no direct CLI. Use `sandcastle workspace run` for the product-level planner/executor workflow.
+- Extra provider mounts are still provider-level mounts. Repositories that need git lifecycle management must be listed in `repositories`.
+
 ### All options
 
 ```typescript
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 const result = await run({
   // Agent provider — required. Pass a model string to claudeCode().
@@ -267,8 +536,8 @@ Use `run()` instead when you only need a single one-shot invocation — it handl
 #### Basic single-run usage
 
 ```typescript
-import { createSandbox, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { createSandbox, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 await using sandbox = await createSandbox({
   branch: "agent/fix-42",
@@ -286,8 +555,8 @@ console.log(result.commits); // [{ sha: "abc123" }]
 #### Multi-run implement-then-review
 
 ```typescript
-import { createSandbox, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { createSandbox, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 await using sandbox = await createSandbox({
   branch: "agent/fix-42",
@@ -425,7 +694,7 @@ Only `branch` and `merge-to-head` strategies are accepted; `head` is a compile-t
 Pass `cwd` to target a repo other than `process.cwd()`. Relative paths resolve against `process.cwd()`; absolute paths pass through. A `CwdError` is thrown if the path does not exist or is not a directory.
 
 ```typescript
-import { createWorktree } from "@ai-hero/sandcastle";
+import { createWorktree } from "@chenshaohui6988/sandcastle";
 
 await using wt = await createWorktree({
   branchStrategy: { type: "branch", branch: "agent/fix-42" },
@@ -452,7 +721,7 @@ const result = await wt.run({
 console.log(result.commits); // commits made during the run
 
 // Create a long-lived sandbox from the worktree
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 await using sandbox = await wt.createSandbox({
   sandbox: docker(),
@@ -599,7 +868,7 @@ If any command exits with a non-zero code, the run fails immediately with an err
 Use `{{KEY}}` placeholders in your prompt to inject values from the `promptArgs` option. This is useful for reusing the same prompt file across multiple runs with different parameters.
 
 ```typescript
-import { run } from "@ai-hero/sandcastle";
+import { run } from "@chenshaohui6988/sandcastle";
 
 await run({
   promptFile: "./my-prompt.md",
@@ -687,8 +956,8 @@ This is independent of `idleTimeoutSeconds`. They cover different phases: `idleT
 Use `Output.object()` to extract a typed, schema-validated JSON payload from the agent's stdout. The agent emits its answer inside an XML tag you specify, and Sandcastle parses, validates, and returns it on `result.output`. The schema can be any [Standard Schema](https://standardschema.dev) validator — the examples below use [Zod](https://zod.dev), but Valibot, ArkType, and others work identically. See [ADR 0010](docs/adr/0010-structured-output.md) for design rationale.
 
 ```ts
-import { run, Output, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, Output, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 import { z } from "zod";
 
 const result = await run({
@@ -730,7 +999,11 @@ const result = await run({
 If you need to drive the retry loop manually — for example, to customise the feedback prompt or rotate models on each attempt — leave `maxRetries` at its default of `0` and resume the failed session yourself:
 
 ```ts
-import { run, Output, StructuredOutputError } from "@ai-hero/sandcastle";
+import {
+  run,
+  Output,
+  StructuredOutputError,
+} from "@chenshaohui6988/sandcastle";
 
 try {
   return await run({ ...opts, output });
@@ -765,23 +1038,25 @@ Select a template during `sandcastle init` when prompted, or re-run init in a fr
 
 ### `sandcastle init`
 
-Scaffolds the `.sandcastle/` config directory. This is the first command you run in a new repo. You choose a sandbox provider during init: Docker writes a `Dockerfile`, Podman writes a `Containerfile`, and no-sandbox writes no container file because the agent runs directly on the host. Image build prompts are skipped when no-sandbox is selected.
+Scaffolds the `.sandcastle/` config directory. This is the first command you run in a new repo. You choose a sandbox provider during init: Docker writes a `Dockerfile`, Podman writes a `Containerfile`, and no-sandbox writes no container file because the agent runs directly on the host. Init also writes a default single-repository `.sandcastle/workspace.json`, so `sandcastle workspace plan/run` has a starter candidate workspace without hand-authoring the config first. Init also writes `.sandcastle/SKILL_ROUTER.md`, a companion guide that tells agents how to choose the right skill flow and when to update `AGENTS.md` or `CLAUDE.md` before starting project work. Image build prompts are skipped when no-sandbox is selected.
 
 Init detects your host package manager (npm, pnpm, yarn, or bun) from a `packageManager` field or lockfile, defaulting to npm. Templates whose `main` file imports a host dependency — the planner templates import [Zod](https://zod.dev) for their `<plan>` output schema — prompt you to install it with that package manager when it isn't already in your `package.json`, so the first `npx tsx .sandcastle/main.ts` doesn't fail with `ERR_MODULE_NOT_FOUND`.
 
 Every interactive prompt has a paired `--flag` so the entire init can run non-interactively (e.g. in CI or a scripted setup). When stdin is not a TTY and a required flag is missing, init fails fast with a clear error rather than wedging on a prompt.
 
-| Option                    | Required | Default                      | Description                                                                                                    |
-| ------------------------- | -------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--image-name`            | No       | `sandcastle:<repo-dir-name>` | Docker image name                                                                                              |
-| `--agent`                 | No       | Interactive prompt           | Agent to use (`claude-code`, `pi`, `codex`, `cursor`, `opencode`, `copilot`)                                   |
-| `--model`                 | No       | Agent's default model        | Model to use (e.g. `claude-sonnet-4-6`). Defaults to agent's default                                           |
-| `--sandbox`               | No       | Interactive prompt           | Sandbox provider to use (`docker`, `podman`, `no-sandbox`)                                                     |
-| `--template`              | No       | Interactive prompt           | Template to scaffold (e.g. `blank`, `simple-loop`)                                                             |
-| `--issue-tracker`         | No       | Interactive prompt           | Issue tracker to use (`github-issues`, `beads`, `custom`)                                                      |
-| `--create-label`          | No       | Interactive prompt           | `true` / `false` — whether to create the `Sandcastle` GitHub label (only with `--issue-tracker github-issues`) |
-| `--build-image`           | No       | Interactive prompt           | `true` / `false` — whether to build the sandbox image now (silently ignored with `--issue-tracker custom`)     |
-| `--install-template-deps` | No       | Interactive prompt           | `true` / `false` — whether to install template host deps (e.g. `zod` for the planner templates)                |
+| Option                    | Required | Default                            | Description                                                                                                                                                            |
+| ------------------------- | -------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--image-name`            | No       | `sandcastle:<repo-dir-name>`       | Docker image name                                                                                                                                                      |
+| `--agent`                 | No       | Interactive prompt                 | Agent to use (`claude-code`, `pi`, `codex`, `cursor`, `opencode`, `copilot`)                                                                                           |
+| `--model`                 | No       | Agent's default model              | Model to use (e.g. `claude-sonnet-4-6`). Defaults to agent's default                                                                                                   |
+| `--sandbox`               | No       | Interactive prompt                 | Sandbox provider to use (`docker`, `podman`, `no-sandbox`)                                                                                                             |
+| `--template`              | No       | Interactive prompt                 | Template to scaffold (e.g. `blank`, `simple-loop`)                                                                                                                     |
+| `--issue-tracker`         | No       | Interactive prompt                 | Issue tracker to use (`github-issues`, `beads`, `custom`)                                                                                                              |
+| `--create-label`          | No       | Interactive prompt                 | `true` / `false` — whether to create the `Sandcastle` GitHub label (only with `--issue-tracker github-issues`)                                                         |
+| `--build-image`           | No       | Interactive prompt                 | `true` / `false` — whether to build the sandbox image now (silently ignored with `--issue-tracker custom`)                                                             |
+| `--install-template-deps` | No       | Interactive prompt                 | `true` / `false` — whether to install template host deps (e.g. `zod` for the planner templates)                                                                        |
+| `--prd-file`              | No       | —                                  | PRD path recorded as `prdFile` in `workspace.json`, so `workspace plan/run` default to it without re-passing it                                                        |
+| `--plan`                  | No       | Interactive prompt (when eligible) | `true` / `false` — run the planner after init to generate plan artifacts (needs `--prd-file`, a docker/podman image built in this run, and a non-custom issue tracker) |
 
 Creates the following files:
 
@@ -789,11 +1064,170 @@ Creates the following files:
 .sandcastle/
 ├── Dockerfile      # Sandbox environment (customize as needed)
 ├── prompt.md       # Agent instructions
+├── SKILL_ROUTER.md # Skill-flow router for Codex / Claude Code setups
+├── workspace.json  # Default single-repository workspace config
 ├── .env.example    # Token placeholders
 └── .gitignore      # Ignores .env, logs/
 ```
 
+For multi-repository workflows, edit `workspace.json` and add each repository to the `repositories` array. For single-repository workflows, the generated `cwd: "."` entry is enough. This file is the default candidate workspace; each `workspace plan` or PRD-driven `workspace run` writes the selected workspace into that task's `workspace-plan.json`.
+
+If you pass `sandcastle init --prd-file <path>`, init also records a top-level `prdFile` field in `workspace.json`. When you then run `workspace plan` or `workspace run` without an explicit input flag, they default to that PRD instead of looking for a ready local issue under `.scratch/`. Precedence is: explicit `--prompt`/`--prompt-file`/`--prd`/`--prd-file` > the configured `prdFile` > the only ready `.scratch/` issue. With `--plan true` (and a docker/podman image built during init), init runs the planner once at the end to write the plan artifacts immediately — equivalent to running `sandcastle workspace plan --prd-file <path>` yourself.
+
+`SKILL_ROUTER.md` is intentionally a router, not a bundled skill installer. Keep it next to your Sandcastle runner so humans and agents can first choose the right flow (`grill-with-docs`, `to-prd`, `to-issues`, `implement`, `triage`, `review`, and related flows), then ensure the target repo's `AGENTS.md` or `CLAUDE.md` reflects that workflow before coding. For Codex, keep the selected skills active in the Codex skill profile. For Claude Code, copy or sync the matching `SKILL.md` directories into `.claude/skills/` so Claude Code can discover them with its native progressive-loading mechanism.
+
+Recommended skill-routing flow:
+
+```mermaid
+flowchart TD
+  A["Run sandcastle init"] --> B["Scaffold .sandcastle/"]
+  B --> C["Create SKILL_ROUTER.md"]
+  B --> D["Create prompt, runner, workspace config"]
+  E["Start a project task"] --> F["Read .sandcastle/SKILL_ROUTER.md"]
+  F --> G["Read AGENTS.md / CLAUDE.md"]
+  G --> H{"Repo guidance accurate?"}
+  H -- "No" --> I["Update AGENTS.md or CLAUDE.md first"]
+  H -- "Yes" --> J["Choose matching skill flow"]
+  I --> J
+  J --> K{"Task shape"}
+  K -- "Ambiguous idea" --> L["grill-with-docs"]
+  K -- "Large feature" --> M["to-prd -> to-issues"]
+  K -- "Ready issue" --> N["implement / tdd"]
+  K -- "Raw backlog" --> O["triage"]
+  K -- "Review" --> P["review"]
+  K -- "Hard bug" --> Q["diagnosing-bugs / diagnose"]
+  K -- "Merge conflict" --> R["resolving-merge-conflicts"]
+  L --> S["Write durable project context"]
+  M --> S
+  O --> S
+  S --> N
+  Q --> N
+  R --> N
+```
+
+Read the diagram in three passes:
+
+1. Setup: `sandcastle init` writes the runner, prompt, workspace config, and skill router.
+2. Context: every real task starts by reading the router plus `AGENTS.md` or `CLAUDE.md`, then fixing missing guidance before code changes.
+3. Execution: the task shape selects the flow. Ambiguous ideas go through planning, scoped issues go through implementation, and special situations such as reviews, hard bugs, or merge conflicts use their own focused flows.
+
+Best practices:
+
+- Treat `SKILL_ROUTER.md` as the first stop for Sandcastle-driven work, not as a static list to load wholesale.
+- Keep project-specific rules in `AGENTS.md` and `CLAUDE.md`; use `SKILL_ROUTER.md` only to decide which workflow should run.
+- Update stale or missing agent guidance before implementation. A short accurate `AGENTS.md` is better than relying on chat history.
+- Sync only the selected skills into the active agent. Codex uses active skill profiles; Claude Code discovers skills from `.claude/skills/<name>/SKILL.md`.
+- Prefer planning flows (`grill-with-docs`, `to-prd`, `to-issues`) before implementation when the work spans modules, APIs, data models, or multiple repositories.
+- Prefer focused execution flows (`implement`, `tdd`, `review`, `diagnosing-bugs`, `resolving-merge-conflicts`) when the task is already scoped.
+
 Errors if `.sandcastle/` already exists to prevent overwriting customizations.
+
+### `sandcastle local-issue`
+
+Runs an agent against a local markdown issue in the target repository without scaffolding a per-repo `.sandcastle/` runner and without Docker. Invoke it from the target repo using this Sandcastle checkout's CLI.
+
+When `--issue` is omitted, Sandcastle searches `.scratch/**/issues/*.md` for the only issue containing `status: ready-for-agent`. It creates a host worktree with `noSandbox()` and branch strategy `branch`; for `.scratch/<topic>/issues/*.md`, the default branch is `sandcastle/<topic>`.
+
+The command expects a local QA1 Apollo config cache at `config-cache/` by default. The path is passed to the agent as local context only; config values are not printed by Sandcastle.
+
+| Option          | Required | Default                            | Description                                                     |
+| --------------- | -------- | ---------------------------------- | --------------------------------------------------------------- |
+| `--issue`       | No       | Only ready issue under `.scratch/` | Local markdown issue path, relative to the target repo          |
+| `--branch`      | No       | `sandcastle/<issue-topic>`         | Branch for the agent worktree                                   |
+| `--base-branch` | No       | `sit`                              | Base branch to create the agent branch from                     |
+| `--qa1-config`  | No       | `config-cache`                     | Local QA1 Apollo config cache path, relative to the target repo |
+| `--agent`       | No       | `claude`                           | Implementation agent (`codex` or `claude`)                      |
+| `--model`       | No       | Agent-specific default             | Model for the implementation agent                              |
+| `--review`      | No       | `true`                             | Whether to run a reviewer agent after implementation commits    |
+| `--dry-run`     | No       | `false`                            | Print resolved settings without running an agent                |
+
+Example:
+
+```bash
+cd /path/to/target-repo
+/path/to/sandcastle/node_modules/.bin/tsx /path/to/sandcastle/src/main.ts local-issue --dry-run
+```
+
+### `sandcastle workspace plan`
+
+Turns a PRD or product request into an approved-workflow artifact set. The config is data, not an execution script: it lists candidate repositories and optional metadata. Sandcastle runs the planner and writes automatic PRD alignment notes, a technical plan, and repository-local issues, but does not execute code changes.
+
+| Option             | Required | Default                          | Description                                         |
+| ------------------ | -------- | -------------------------------- | --------------------------------------------------- |
+| `--config`         | No       | `.sandcastle/workspace.json`     | Workspace JSON config path                          |
+| `--prompt`         | No\*     | Local ready issue                | Inline product request                              |
+| `--prompt-file`    | No\*     | Local ready issue                | Product request file                                |
+| `--prd`            | No\*     | —                                | Inline product requirements document                |
+| `--prd-file`       | No\*     | —                                | Product requirements document file                  |
+| `--artifacts-dir`  | No       | `.scratch/<prd-name>`            | Output directory for technical plan and repo issues |
+| `--agent`          | No       | `claude`                         | Agent provider (`claude` or `codex`)                |
+| `--model`          | No       | Agent-specific default           | Execution model                                     |
+| `--planner-model`  | No       | `--model`                        | Planner model                                       |
+| `--sandbox`        | No       | `docker`                         | Bind-mount sandbox provider (`docker` or `podman`)  |
+| `--branch-prefix`  | No       | Config or `codex/workspace-task` | Prefix to snapshot for generated execution branches |
+| `--max-iterations` | No       | Config or `1`                    | Maximum executor iterations to snapshot             |
+
+`--prd`, `--prd-file`, `--prompt`, and `--prompt-file` are mutually exclusive. If none are passed, Sandcastle falls back to the `prdFile` recorded in `workspace.json` (by `sandcastle init --prd-file`); if there is no configured `prdFile`, it uses the only ready local issue under `.scratch/`. If zero or multiple ready issues exist (and no `prdFile` is configured), the command fails with the paths to fix or choose from. The same precedence applies to `sandcastle workspace run`.
+
+The generated `workspace-plan.json` includes a `workspace` snapshot. That is the workspace used for the specific PRD or issue, so different PRDs can safely target different repository sets without sharing one mutable execution config.
+
+Example:
+
+```bash
+sandcastle workspace plan --prd-file ./prd.md
+```
+
+### `sandcastle workspace execute`
+
+Executes a previously generated workspace plan without re-running the planner. New plans execute against their embedded `workspace` snapshot. Older plans without that field fall back to `.sandcastle/workspace.json` or `--config`.
+
+| Option             | Required | Default                                       | Description                                        |
+| ------------------ | -------- | --------------------------------------------- | -------------------------------------------------- |
+| `--config`         | No       | `.sandcastle/workspace.json`                  | Workspace JSON config path                         |
+| `--plan-file`      | No       | `.scratch/workspace-task/workspace-plan.json` | Workspace plan JSON file to execute                |
+| `--artifacts-dir`  | No       | `.scratch/workspace-task`                     | Directory containing `workspace-plan.json`         |
+| `--branch-prefix`  | No       | Config or `codex/workspace-task`              | Prefix for generated per-repository branches       |
+| `--agent`          | No       | `claude`                                      | Agent provider (`claude` or `codex`)               |
+| `--model`          | No       | Agent-specific default                        | Execution model                                    |
+| `--sandbox`        | No       | `docker`                                      | Bind-mount sandbox provider (`docker` or `podman`) |
+| `--max-iterations` | No       | `1`                                           | Maximum iterations per repository executor         |
+
+Example:
+
+```bash
+sandcastle workspace execute --plan-file .scratch/my-feature/workspace-plan.json
+```
+
+### `sandcastle workspace run`
+
+Fully automatic PRD-to-commits pipeline: alignment, planning, repository issue generation, and execution in one command. Use `workspace plan` plus `workspace execute` when you want to inspect or edit the generated alignment, technical plan, and repository issues first.
+
+```bash
+sandcastle workspace run --prd-file ./prd.md
+```
+
+### `sandcastle board`
+
+Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, and tasks to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, surfaces the planner phase as its own `(planner)` run, and renders the workspace plan (alignment summary, technical plan, per-repository tasks); and a **by-status** kanban. Selecting a run shows its live agent activity (text + tool calls) and per-model token counts. Creating a task on the board fans it out into per-repository runs via `runWorkspaceTask` using your `.sandcastle/workspace.json`. The server also watches its data directory, so runs written by other processes appear without a manual refresh.
+
+```bash
+sandcastle board                 # http://127.0.0.1:4318
+sandcastle board --port 5000
+```
+
+| Option             | Required | Default                      | Description                                    |
+| ------------------ | -------- | ---------------------------- | ---------------------------------------------- |
+| `--port`           | No       | `4318`                       | Port for the board server                      |
+| `--data-dir`       | No       | `.sandcastle/board`          | Directory for board run/event/task data        |
+| `--config`         | No       | `.sandcastle/workspace.json` | Workspace config used to fan out tasks         |
+| `--agent`          | No       | `claude`                     | Agent for task execution (`claude` or `codex`) |
+| `--model`          | No       | provider default             | Model passed to the execution agent            |
+| `--planner-model`  | No       | `--model`                    | Model passed to the planner agent              |
+| `--sandbox`        | No       | `docker`                     | Sandbox provider (`docker` or `podman`)        |
+| `--branch-prefix`  | No       | —                            | Branch prefix for per-repository task runs     |
+| `--max-iterations` | No       | —                            | Max iterations per repository run              |
+
+Programmatically, `run()` accepts an `onRunEvent` callback that emits the same structured `RunEvent` stream (run lifecycle, iterations, agent text/tool calls, token usage with the model, and commits) in **both** logging modes — use it to forward runs to your own observability system. `runWorkspace()` accepts the same `onRunEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRunEvent`, the planner phase via `onPlannerRunEvent`, and the extracted plan via `onPlan`. See ADR 0021.
 
 ### `sandcastle docker build-image`
 
@@ -907,7 +1341,7 @@ You can also continue the last captured session from a result:
 
 ```typescript
 const first = await run({
-  agent: codex("gpt-5.4"),
+  agent: codex("gpt-5.5"),
   sandbox: docker(),
   prompt: "Draft a plan",
 });
@@ -973,7 +1407,7 @@ agent: claudeCode("claude-opus-4-8", { effort: "high" });
 The `codex()` factory accepts an optional second argument for provider-specific options:
 
 ```typescript
-agent: codex("gpt-5.4", { effort: "high" });
+agent: codex("gpt-5.5", { effort: "high" });
 ```
 
 | Option              | Type                                           | Default | Description                                                                                                                                                                                                           |
@@ -1063,7 +1497,7 @@ import {
   type BindMountCreateOptions,
   type BindMountSandboxHandle,
   type ExecResult,
-} from "@ai-hero/sandcastle";
+} from "@chenshaohui6988/sandcastle";
 import { execFile, spawn } from "node:child_process";
 import { copyFile as fsCopyFile, mkdir as fsMkdir } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -1163,7 +1597,7 @@ import {
   createIsolatedSandboxProvider,
   type IsolatedSandboxHandle,
   type ExecResult,
-} from "@ai-hero/sandcastle";
+} from "@chenshaohui6988/sandcastle";
 import { execFile, spawn } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1279,8 +1713,8 @@ A branch strategy controls where the agent's commits land. Configure it when con
 Branch strategy is now configured on `run()`, not on the provider:
 
 ```typescript
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 // head — direct write, bind-mount only (default for bind-mount providers)
 await run({
@@ -1308,7 +1742,7 @@ await run({
 Pass your custom provider via the `sandbox` option — it works the same as the built-in `docker()` provider:
 
 ```typescript
-import { run, claudeCode } from "@ai-hero/sandcastle";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
 
 const result = await run({
   agent: claudeCode("claude-opus-4-8"),

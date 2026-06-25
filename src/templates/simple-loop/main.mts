@@ -1,5 +1,5 @@
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
 
 // Simple loop: an agent that picks open issues one by one and closes them.
 // Run this with: npx tsx .sandcastle/main.mts

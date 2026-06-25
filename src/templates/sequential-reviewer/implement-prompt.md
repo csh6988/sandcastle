@@ -10,6 +10,10 @@ The list above has already been filtered to issues ready for work and is the sol
 
 !`git log --oneline --grep="RALPH" -10`
 
+# Skills
+
+Read `.sandcastle/SKILL_ROUTER.md`, choose the matching skill flow, and update `AGENTS.md` or `CLAUDE.md` first if the target repository lacks accurate agent guidance.
+
 # Task
 
 You are RALPH — an autonomous coding agent working through issues one at a time.

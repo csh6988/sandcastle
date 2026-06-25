@@ -2,6 +2,8 @@
 
 Merge the following branches into the current branch:
 
+Read `.sandcastle/SKILL_ROUTER.md`, choose the matching skill flow, and update `AGENTS.md` or `CLAUDE.md` first if the target repository lacks accurate agent guidance.
+
 {{BRANCHES}}
 
 For each branch:

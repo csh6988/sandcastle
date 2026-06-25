@@ -7,6 +7,27 @@ export type {
   IterationUsage,
   Timeouts,
 } from "./run.js";
+export { runWorkspace } from "./runWorkspace.js";
+export type {
+  RunWorkspaceOptions,
+  RunWorkspaceResult,
+  WorkspaceRepositoryOptions,
+  WorkspaceRepositoryResult,
+} from "./runWorkspace.js";
+export {
+  executeWorkspaceTaskPlan,
+  runWorkspaceTask,
+} from "./runWorkspaceTask.js";
+export type {
+  ExecuteWorkspaceTaskPlanOptions,
+  RunWorkspaceTaskOptions,
+  RunWorkspaceTaskResult,
+  WorkspaceTaskAlignment,
+  WorkspaceTaskPlan,
+  WorkspaceTaskPlanRepository,
+  WorkspaceTaskRepositoryOptions,
+  WorkspaceTaskRepositoryResult,
+} from "./runWorkspaceTask.js";
 export { interactive } from "./interactive.js";
 export type { InteractiveOptions, InteractiveResult } from "./interactive.js";
 export { createSandbox } from "./createSandbox.js";
@@ -33,6 +54,7 @@ export type {
 } from "./createWorktree.js";
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
+export type { RunEvent } from "./RunEvent.js";
 export {
   transferClaudeSession,
   transferCodexSession,

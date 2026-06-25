@@ -31,6 +31,7 @@ import {
   agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
+import { runEventEmitterLayer, type RunEvent } from "./RunEvent.js";
 import type { SandboxHooks } from "./SandboxLifecycle.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
@@ -362,6 +363,17 @@ export interface RunOptions<A extends AgentProvider = AgentProvider> {
   readonly promptArgs?: PromptArgs;
   /** Logging mode (default: { type: 'file' } with auto-generated path under .sandcastle/logs/) */
   readonly logging?: LoggingOption;
+  /**
+   * Optional callback invoked for each structured run event (run lifecycle,
+   * iteration boundaries, agent text/tool activity, token usage, commits).
+   *
+   * Unlike `logging.onAgentStreamEvent` — which is file-mode-only and carries
+   * agent stdout activity only — this callback works in **both** logging modes
+   * and covers the full run shape. Intended for forwarding a run to an external
+   * observability system or workflow board. Errors thrown by the callback are
+   * swallowed. See ADR 0021.
+   */
+  readonly onRunEvent?: (event: RunEvent) => void;
   /** Substring(s) the agent emits to stop the iteration loop early. Matched via `includes` against agent output. (default: `"<promise>COMPLETE</promise>"`) */
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. If the agent produces no output for this long, it fails. Default: 600 (10 minutes) */
@@ -692,10 +704,26 @@ export async function run(
     buildAgentStreamHandler(resolvedLogging),
   );
 
+  // Run-event stream — works regardless of logging mode. A thrown callback
+  // error is swallowed by the layer so a broken observer cannot kill the run.
+  const runEventLayer = runEventEmitterLayer(options.onRunEvent);
+
+  // Safe, synchronous emit for run-level lifecycle events (started/finished/
+  // failed) that happen outside the orchestrate Effect context.
+  const emitRunEvent = (event: RunEvent): void => {
+    if (!options.onRunEvent) return;
+    try {
+      options.onRunEvent(event);
+    } catch {
+      // Swallow — a broken observer must not kill the run.
+    }
+  };
+
   const runLayer = Layer.mergeAll(
     factoryLayer,
     displayLayer,
     streamEmitterLayer,
+    runEventLayer,
   );
 
   const baseEffect = Effect.gen(function* () {
@@ -787,16 +815,39 @@ export async function run(
         )
       : baseEffect;
 
+  emitRunEvent({
+    type: "run-started",
+    name: options.name ?? agentName,
+    agent: agentName,
+    model: provider.model,
+    sandbox: options.sandbox.name,
+    branch: resolvedBranch,
+    maxIterations,
+    timestamp: new Date(),
+  });
+
   let result: OrchestrateResult;
   try {
     result = await Effect.runPromise(
       withErrorLog.pipe(Effect.provide(runLayer)),
     );
   } catch (error: unknown) {
+    emitRunEvent({
+      type: "run-failed",
+      message: error instanceof Error ? error.message : String(error),
+      timestamp: new Date(),
+    });
     // If the signal was aborted, surface its reason verbatim (no wrapping)
     options.signal?.throwIfAborted();
     throw error;
   }
+
+  emitRunEvent({
+    type: "run-finished",
+    completionSignal: result.completionSignal,
+    iterationsRun: result.iterations.length,
+    timestamp: new Date(),
+  });
 
   const baseResult = {
     ...result,

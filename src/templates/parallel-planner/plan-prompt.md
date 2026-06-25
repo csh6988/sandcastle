@@ -10,6 +10,10 @@ Here are the open issues in the repo:
 
 The list above has already been filtered to issues ready for work.
 
+# SKILLS
+
+Read `.sandcastle/SKILL_ROUTER.md`, choose the matching skill flow, and update `AGENTS.md` or `CLAUDE.md` first if the target repository lacks accurate agent guidance.
+
 # TASK
 
 Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
