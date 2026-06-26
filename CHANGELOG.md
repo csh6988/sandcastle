@@ -1,5 +1,13 @@
 # @ai-hero/sandcastle
 
+## 0.13.3
+
+### Patch Changes
+
+- e00ad5a: Add an opt-in LangGraph workflow engine for board tasks with plan approval,
+  SQLite checkpoint resume, and conservative repository retry handling.
+- e00ad5a: Refresh the workflow board with a richer dark console visual design.
+
 ## 0.13.1
 
 ### Patch Changes
