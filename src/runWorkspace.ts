@@ -701,6 +701,9 @@ export async function runWorkspace(
                   ),
                 );
               };
+              const onToolResult = () => {
+                // Workspace CLI output remains concise; board runs surface tool results.
+              };
               const rawAgentPrompt =
                 resolvedPrompt.source === "inline"
                   ? prompt
@@ -722,6 +725,7 @@ export async function runWorkspace(
                 completionSignals,
                 onText,
                 onToolCall,
+                onToolResult,
                 onRawLine,
                 onIdleWarning,
                 onCompletionTimeout,

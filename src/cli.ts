@@ -25,6 +25,7 @@ import {
 } from "./AgentProvider.js";
 import type { AgentProvider } from "./AgentProvider.js";
 import type { SandboxProvider } from "./SandboxProvider.js";
+import { createBindMountSandboxProvider } from "./SandboxProvider.js";
 import { buildImage, removeImage } from "./DockerLifecycle.js";
 import {
   buildImage as podmanBuildImage,
@@ -64,9 +65,14 @@ import {
 import { docker } from "./sandboxes/docker.js";
 import { podman } from "./sandboxes/podman.js";
 import { VERSION } from "./version.js";
-import { BoardStore } from "./board/BoardStore.js";
+import { BoardStore, type BoardTaskRecord } from "./board/BoardStore.js";
 import { startBoardServer } from "./board/server.js";
 import { createTaskLauncher } from "./board/launchTask.js";
+import {
+  createLangGraphTaskWorkflow,
+  workspacePlanToBoardPlan,
+} from "./board/langGraphTaskRunner.js";
+import { BoardTerminalManager } from "./board/terminalSession.js";
 
 // --- Shared options ---
 
@@ -1317,8 +1323,9 @@ const workspacePlannerModelOption = Options.text("planner-model").pipe(
 const workspaceSandboxOption = Options.choice("sandbox", [
   "docker",
   "podman",
+  "no-sandbox",
 ]).pipe(
-  Options.withDescription("Bind-mount sandbox provider for workspace runs"),
+  Options.withDescription("Sandbox provider for workspace runs"),
   Options.optional,
 );
 
@@ -1427,8 +1434,8 @@ const normalizeWorkspaceRepositories = (
 // Public default models for the workspace commands, sourced from the agent
 // registry so there is a single place to bump them. (The internal `x6/`/`x5/`
 // routing slugs are not used here — external users get public model slugs.)
-const DEFAULT_WORKSPACE_CLAUDE_MODEL = getAgent("claude-code")!.defaultModel;
 const DEFAULT_WORKSPACE_CODEX_MODEL = getAgent("codex")!.defaultModel;
+const DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS = 90;
 
 const buildWorkspaceCliAgent = (
   agentName: "codex" | "claude",
@@ -1436,10 +1443,7 @@ const buildWorkspaceCliAgent = (
   env: Record<string, string>,
 ) =>
   agentName === "claude"
-    ? claudeCode(
-        model._tag === "Some" ? model.value : DEFAULT_WORKSPACE_CLAUDE_MODEL,
-        { env },
-      )
+    ? claudeCode(model._tag === "Some" ? model.value : undefined, { env })
     : codex(
         model._tag === "Some" ? model.value : DEFAULT_WORKSPACE_CODEX_MODEL,
         {
@@ -1447,12 +1451,83 @@ const buildWorkspaceCliAgent = (
         },
       );
 
+const buildWorkspaceSandboxProvider = (
+  sandbox: Option.Option<"docker" | "podman" | "no-sandbox">,
+  env: Record<string, string>,
+): SandboxProvider => {
+  const value = sandbox._tag === "Some" ? sandbox.value : "docker";
+  if (value === "podman") return podman();
+  if (value === "no-sandbox") {
+    return createBindMountSandboxProvider({
+      name: "no-sandbox",
+      env,
+      create: async (options) => {
+        const host = await noSandbox({ env }).create({
+          worktreePath: options.worktreePath,
+          env: options.env,
+        });
+        const pathMap = new Map(
+          options.mounts.map((mount) => [mount.sandboxPath, mount.hostPath]),
+        );
+        const translate = (value: string | undefined): string | undefined => {
+          if (value === undefined) return undefined;
+          let translated = value;
+          for (const [sandboxPath, hostPath] of pathMap) {
+            translated = translated.split(sandboxPath).join(hostPath);
+          }
+          return translated;
+        };
+        return {
+          worktreePath: translate(host.worktreePath) ?? host.worktreePath,
+          exec: (command, execOptions) =>
+            host.exec(translate(command) ?? command, {
+              ...execOptions,
+              cwd: translate(execOptions?.cwd),
+              stdin: translate(execOptions?.stdin),
+            }),
+          interactiveExec: (args, execOptions) =>
+            host.interactiveExec(
+              args.map((arg) => translate(arg) ?? arg),
+              {
+                ...execOptions,
+                cwd: translate(execOptions.cwd),
+              },
+            ),
+          copyFileIn: async () => {},
+          copyFileOut: async () => {},
+          close: () => host.close(),
+        };
+      },
+    });
+  }
+  return docker();
+};
+
 const sanitizeArtifactSegment = (value: string): string => {
   const sanitized = value
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return sanitized || "workspace-task";
+};
+
+export const resolveBoardPlanningConfig = (
+  configPath: string,
+  cwd: string,
+  explicitConfig: boolean,
+): { readonly configPath: string; readonly config: WorkspaceCliConfig } => {
+  if (existsSync(configPath) || explicitConfig) {
+    return { configPath, config: readWorkspaceConfig(configPath) };
+  }
+
+  return {
+    configPath: `${cwd}#planning-repository`,
+    config: {
+      repositories: [
+        { name: sanitizeArtifactSegment(basename(cwd)), cwd: "." },
+      ],
+    },
+  };
 };
 
 const defaultWorkspaceArtifactsDir = (
@@ -1914,10 +1989,7 @@ const workspaceRunCommand = Command.make(
         plannerModel._tag === "Some" ? plannerModel : model,
         agentEnv,
       );
-      const sandboxProvider =
-        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
-          ? podman()
-          : docker();
+      const sandboxProvider = buildWorkspaceSandboxProvider(sandbox, agentEnv);
 
       const resolvedBranchPrefix =
         branchPrefix._tag === "Some"
@@ -2071,10 +2143,7 @@ const workspacePlanCommand = Command.make(
         plannerModel._tag === "Some" ? plannerModel : model,
         agentEnv,
       );
-      const sandboxProvider =
-        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
-          ? podman()
-          : docker();
+      const sandboxProvider = buildWorkspaceSandboxProvider(sandbox, agentEnv);
       const resolvedBranchPrefix =
         branchPrefix._tag === "Some"
           ? branchPrefix.value
@@ -2173,10 +2242,7 @@ const workspaceExecuteCommand = Command.make(
         model,
         agentEnv,
       );
-      const sandboxProvider =
-        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
-          ? podman()
-          : docker();
+      const sandboxProvider = buildWorkspaceSandboxProvider(sandbox, agentEnv);
       const resolvedPlanFile =
         planFile._tag === "Some"
           ? resolve(cwd, planFile.value)
@@ -2277,11 +2343,22 @@ const boardDataDirOption = Options.text("data-dir").pipe(
   Options.optional,
 );
 
+const boardWorkflowOption = Options.choice("workflow", [
+  "legacy",
+  "langgraph",
+]).pipe(
+  Options.withDescription(
+    "Workflow engine for board tasks (legacy or langgraph; default: legacy)",
+  ),
+  Options.optional,
+);
+
 const boardCommand = Command.make(
   "board",
   {
     port: boardPortOption,
     dataDir: boardDataDirOption,
+    workflow: boardWorkflowOption,
     config: workspaceConfigOption,
     agent: workspaceAgentOption,
     model: workspaceModelOption,
@@ -2293,6 +2370,7 @@ const boardCommand = Command.make(
   ({
     port,
     dataDir,
+    workflow,
     config,
     agent,
     model,
@@ -2311,9 +2389,9 @@ const boardCommand = Command.make(
           : resolve(cwd, ".sandcastle", "board");
       const store = new BoardStore(resolvedDataDir);
 
-      // Resolve the workspace config lazily so the board still starts (in
-      // read-only mode) when no workspace.json exists. Task launching requires
-      // a valid workspace; surface the error to the task when it is created.
+      // Resolve the planner context lazily so the board starts without a
+      // workspace config. The PRD planner still determines the task workspace;
+      // this context is only what the planner can inspect first.
       const configPath = resolve(
         cwd,
         config._tag === "Some" ? config.value : ".sandcastle/workspace.json",
@@ -2330,61 +2408,181 @@ const boardCommand = Command.make(
         plannerModel._tag === "Some" ? plannerModel : model,
         agentEnv,
       );
-      const sandboxProvider =
-        (sandbox._tag === "Some" ? sandbox.value : "docker") === "podman"
-          ? podman()
-          : docker();
+      const sandboxProvider = buildWorkspaceSandboxProvider(sandbox, agentEnv);
       const resolvedBranchPrefix =
         branchPrefix._tag === "Some" ? branchPrefix.value : undefined;
       const resolvedMaxIterations =
         maxIterations._tag === "Some" ? maxIterations.value : undefined;
 
-      const launchTask = createTaskLauncher({
-        store,
-        run: async ({ prompt, title, onRepoRunEvent, onPlan }) => {
-          const workspaceConfig = readWorkspaceConfig(configPath);
-          const repositories = normalizeWorkspaceRepositories(
-            configPath,
-            workspaceConfig,
-            cwd,
-          );
-          const result = await runWorkspaceTask({
-            repositories,
-            prompt,
-            agent: executionAgent,
-            plannerAgent,
-            sandbox: sandboxProvider,
-            branchPrefix: resolvedBranchPrefix,
-            maxIterations: resolvedMaxIterations,
-            name: title,
-            onRepoRunEvent,
-            // Surface the planner phase as its own per-task run.
-            onPlannerRunEvent: (event) => onRepoRunEvent("(planner)", event),
-            // Show the plan as soon as it is ready, before execution finishes.
-            onPlan: (plan) =>
-              onPlan({
-                ...(plan.alignment?.summary
-                  ? { alignmentSummary: plan.alignment.summary }
-                  : {}),
-                ...(plan.technicalPlan
-                  ? { technicalPlan: plan.technicalPlan }
-                  : {}),
-                repositories: plan.repositories.map((repo) => ({
-                  name: repo.name,
-                  task: repo.task,
-                  ...(repo.reason ? { reason: repo.reason } : {}),
-                })),
-              }),
+      const resolvePlannerRepositories = () => {
+        const plannerContext = resolveBoardPlanningConfig(
+          configPath,
+          cwd,
+          config._tag === "Some",
+        );
+        return normalizeWorkspaceRepositories(
+          plannerContext.configPath,
+          plannerContext.config,
+          cwd,
+        );
+      };
+
+      const resolveExecutionRepositories = (plan: WorkspaceTaskPlan) => {
+        const workspaceConfig =
+          plan.workspace !== undefined
+            ? ({
+                repositories: plan.workspace.repositories,
+                branchPrefix: plan.workspace.branchPrefix,
+                maxIterations: plan.workspace.maxIterations,
+              } satisfies WorkspaceCliConfig)
+            : resolveBoardPlanningConfig(
+                configPath,
+                cwd,
+                config._tag === "Some",
+              ).config;
+        const workspaceConfigPath =
+          plan.workspace !== undefined
+            ? `${resolvedDataDir}/${plan.repositories
+                .map((repo) => repo.name)
+                .join("-")}#workspace`
+            : configPath;
+        return normalizeWorkspaceRepositories(
+          workspaceConfigPath,
+          workspaceConfig,
+          cwd,
+        );
+      };
+
+      const legacyTaskRunner = async ({
+        prompt,
+        title,
+        onRepoRunEvent,
+        onPlan,
+      }: Parameters<typeof createTaskLauncher>[0]["run"] extends (
+        args: infer A,
+      ) => unknown
+        ? A
+        : never) => {
+        const result = await runWorkspaceTask({
+          repositories: resolvePlannerRepositories(),
+          prompt,
+          agent: executionAgent,
+          plannerAgent,
+          sandbox: sandboxProvider,
+          branchPrefix: resolvedBranchPrefix,
+          maxIterations: resolvedMaxIterations,
+          allowPlannerWorkspace: true,
+          name: title,
+          idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+          onRepoRunEvent,
+          // Surface the planner phase as its own per-task run.
+          onPlannerRunEvent: (event) => onRepoRunEvent("(planner)", event),
+          // Show the plan as soon as it is ready, before execution finishes.
+          onPlan: (plan) => onPlan(workspacePlanToBoardPlan(plan)),
+        });
+        return { repositories: result.repositories };
+      };
+
+      const workflowEngine =
+        workflow._tag === "Some" ? workflow.value : "legacy";
+      const langGraphWorkflow =
+        workflowEngine === "langgraph"
+          ? createLangGraphTaskWorkflow({
+              store,
+              checkpointPath: resolve(resolvedDataDir, "workflows.sqlite"),
+              plan: async ({ prompt, title, onPlannerRunEvent }) => {
+                const result = await runWorkspaceTask({
+                  repositories: resolvePlannerRepositories(),
+                  prompt,
+                  agent: executionAgent,
+                  plannerAgent,
+                  sandbox: sandboxProvider,
+                  branchPrefix: resolvedBranchPrefix,
+                  maxIterations: resolvedMaxIterations,
+                  allowPlannerWorkspace: true,
+                  name: title,
+                  idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+                  dryRun: true,
+                  onPlannerRunEvent,
+                });
+                return {
+                  plan: result.plan,
+                  plannerStdout: result.plannerStdout,
+                };
+              },
+              execute: async ({ prompt, title, plan, onRepoRunEvent }) =>
+                executeWorkspaceTaskPlan({
+                  repositories: resolveExecutionRepositories(plan),
+                  plan,
+                  taskPrompt: prompt,
+                  agent: executionAgent,
+                  sandbox: sandboxProvider,
+                  branchPrefix:
+                    resolvedBranchPrefix ?? plan.workspace?.branchPrefix,
+                  maxIterations:
+                    resolvedMaxIterations ?? plan.workspace?.maxIterations,
+                  name: title,
+                  idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+                  onRepoRunEvent,
+                }),
+            })
+          : undefined;
+
+      const terminalManager = new BoardTerminalManager(store);
+      const launchTask = (task: BoardTaskRecord) => {
+        try {
+          if (!executionAgent.buildInteractiveArgs) {
+            store.updateTask(task.id, {
+              status: "failed",
+              finishedAt: new Date().toISOString(),
+              error: `Agent provider "${executionAgent.name}" does not support interactive sessions.`,
+            });
+            return;
+          }
+          const args = executionAgent.buildInteractiveArgs({
+            prompt: task.prompt,
+            dangerouslySkipPermissions: true,
           });
-          return { repositories: result.repositories };
-        },
-      });
+          const [command, ...rest] = args;
+          if (!command) {
+            store.updateTask(task.id, {
+              status: "failed",
+              finishedAt: new Date().toISOString(),
+              error: `Agent provider "${executionAgent.name}" did not produce an interactive command.`,
+            });
+            return;
+          }
+          const resolvedCommand =
+            command.includes("/") || command !== "claude"
+              ? command
+              : execSync("command -v claude", { encoding: "utf8" }).trim();
+          terminalManager.start({
+            task,
+            command: resolvedCommand,
+            args: rest,
+            cwd,
+            env: agentEnv,
+          });
+        } catch (error) {
+          store.updateTask(task.id, {
+            status: "failed",
+            finishedAt: new Date().toISOString(),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
 
       const server = yield* Effect.promise(() =>
         startBoardServer({
           store,
           port: port._tag === "Some" ? port.value : 4318,
           launchTask,
+          terminalManager,
+          resumeTask: langGraphWorkflow
+            ? (task, decision) => {
+                void langGraphWorkflow.resume(task.id, decision);
+              }
+            : undefined,
         }),
       );
 

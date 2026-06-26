@@ -12,6 +12,8 @@ export interface TaskRunResult {
   readonly repositories: Record<string, { readonly status: string }>;
   /** The workspace plan, when the runner produced one. */
   readonly plan?: BoardTaskPlan;
+  /** Non-terminal result used by workflow-backed tasks that paused. */
+  readonly status?: "awaiting-approval";
 }
 
 /**
@@ -21,6 +23,7 @@ export interface TaskRunResult {
  * and forwards per-repo run events via `onRepoRunEvent`.
  */
 export type TaskRunner = (args: {
+  readonly taskId: string;
   readonly prompt: string;
   readonly title: string;
   readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
@@ -61,8 +64,27 @@ export const createTaskLauncher = (deps: {
     };
 
     deps
-      .run({ prompt: task.prompt, title: task.title, onRepoRunEvent, onPlan })
+      .run({
+        taskId: task.id,
+        prompt: task.prompt,
+        title: task.title,
+        onRepoRunEvent,
+        onPlan,
+      })
       .then((result) => {
+        if (result.status === "awaiting-approval") {
+          deps.store.updateTask(task.id, {
+            workflow: {
+              status: "awaiting-approval",
+              checkpointThreadId: task.id,
+              message: "Workspace plan is waiting for approval.",
+              updatedAt: new Date().toISOString(),
+            },
+            ...(result.plan ? { plan: result.plan } : {}),
+          });
+          return;
+        }
+
         const failed = Object.values(result.repositories).some(
           (r) => r.status === "failed",
         );

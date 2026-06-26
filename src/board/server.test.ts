@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BoardStore } from "./BoardStore.js";
 import { routeApi } from "./router.js";
 import { startBoardServer, type BoardServer } from "./server.js";
+import type { BoardTerminalManager } from "./terminalSession.js";
 
 const noBody = () => Promise.resolve({});
 
@@ -107,6 +108,59 @@ describe("routeApi", () => {
     );
     expect(res?.status).toBe(400);
   });
+
+  it("resumes a paused task with an approval decision", async () => {
+    const task = store.createTask({ title: "Approve me", prompt: "do it" });
+    const resumed: Array<{ id: string; decision: string }> = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/resume`,
+      () => Promise.resolve({ decision: "approve" }),
+      undefined,
+      (t, decision) => resumed.push({ id: t.id, decision }),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(resumed).toEqual([{ id: task.id, decision: "approve" }]);
+  });
+
+  it("returns terminal status and resizes a running terminal", async () => {
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    const resized: Array<{ id: string; cols: number; rows: number }> = [];
+    const terminalManager = {
+      get: (id: string) =>
+        id === task.id ? { taskId: task.id, status: "running" } : undefined,
+      resize: (id: string, cols: number, rows: number) => {
+        resized.push({ id, cols, rows });
+        return true;
+      },
+    } as unknown as BoardTerminalManager;
+
+    const status = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/terminal`,
+      noBody,
+      undefined,
+      undefined,
+      terminalManager,
+    );
+    expect(status?.body).toMatchObject({ taskId: task.id, status: "running" });
+
+    const resize = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/terminal/resize`,
+      () => Promise.resolve({ cols: 80, rows: 24 }),
+      undefined,
+      undefined,
+      terminalManager,
+    );
+    expect(resize?.status).toBe(202);
+    expect(resized).toEqual([{ id: task.id, cols: 80, rows: 24 }]);
+  });
 });
 
 describe("startBoardServer", () => {
@@ -128,9 +182,22 @@ describe("startBoardServer", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body).toContain("Sandcastle Board");
+    expect(body).toContain("Managed agent console");
+    expect(body).toContain("--glow");
     expect(body).toContain("return html`");
     expect(body).not.toContain("html\\`");
     expect(body).not.toMatch(/\sstyle="/);
+  });
+
+  it("serves board controls for overview and task-level details", async () => {
+    const res = await fetch(server.url + "/");
+    const body = await res.text();
+    expect(body).toContain("Task overview");
+    expect(body).toContain("Task details");
+    expect(body).toContain("Task activity");
+    expect(body).toContain("resize-handle");
+    expect(body).toContain("Approve plan");
+    expect(body).toContain("Task failed before any repository run started.");
   });
 
   it("serves the runs API as JSON", async () => {

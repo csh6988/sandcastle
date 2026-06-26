@@ -73,11 +73,41 @@ export interface BoardUsageByModel {
 export interface BoardTaskPlan {
   readonly alignmentSummary?: string;
   readonly technicalPlan?: string;
+  readonly workspace?: {
+    readonly branchPrefix?: string;
+    readonly maxIterations?: number;
+    readonly repositories: ReadonlyArray<{
+      readonly name: string;
+      readonly cwd: string;
+      readonly kind?: string;
+      readonly description?: string;
+      readonly copyToWorktree?: readonly string[];
+      readonly branchStrategy?: unknown;
+    }>;
+  };
   readonly repositories: ReadonlyArray<{
     readonly name: string;
     readonly task: string;
     readonly reason?: string;
   }>;
+}
+
+/** Optional workflow state for board tasks driven by a workflow runtime. */
+export interface BoardTaskWorkflow {
+  readonly status:
+    | "planning"
+    | "awaiting-approval"
+    | "approved"
+    | "rejected"
+    | "running"
+    | "retrying"
+    | "succeeded"
+    | "failed";
+  readonly checkpointThreadId?: string;
+  readonly retryCount?: number;
+  readonly message?: string;
+  readonly error?: string;
+  readonly updatedAt: string;
 }
 
 /** A task created on the board, optionally fanned out into per-repo runs. */
@@ -92,6 +122,8 @@ export interface BoardTaskRecord {
   readonly runIds: string[];
   /** The workspace plan produced for this task, once planning has completed. */
   readonly plan?: BoardTaskPlan;
+  /** Workflow runtime status, present for opt-in workflow-backed tasks. */
+  readonly workflow?: BoardTaskWorkflow;
 }
 
 /** Input for creating a run, taken from a `run-started` event. */
@@ -151,6 +183,7 @@ export class BoardStore {
     this.tasksDir = join(baseDir, "tasks");
     mkdirSync(this.runsDir, { recursive: true });
     mkdirSync(this.tasksDir, { recursive: true });
+    this.failInterruptedRecords();
   }
 
   private runMetaPath(id: string): string {
@@ -170,6 +203,40 @@ export class BoardStore {
     this.recentSelfWrites.set(path, Date.now());
     writeFileSync(path, JSON.stringify(run, null, 2));
     this.publish({ kind: "run-updated", run });
+  }
+
+  private failInterruptedRecords(): void {
+    const now = new Date().toISOString();
+    const message = "Interrupted when the board server stopped or restarted.";
+    for (const run of this.listRuns()) {
+      if (run.status !== "running") continue;
+      const failed: BoardRunRecord = {
+        ...run,
+        status: "failed",
+        finishedAt: now,
+        error: message,
+      };
+      this.writeRun(failed);
+      const record: BoardRunEventRecord = {
+        seq: this.nextSeq(run.id),
+        event: {
+          type: "run-failed",
+          message,
+          timestamp: now,
+        },
+      };
+      appendFileSync(this.runEventsPath(run.id), JSON.stringify(record) + "\n");
+      this.publish({ kind: "run-event", runId: run.id, record });
+    }
+    for (const task of this.listTasks()) {
+      if (task.status !== "running") continue;
+      this.writeTask({
+        ...task,
+        status: "failed",
+        finishedAt: now,
+        error: message,
+      });
+    }
   }
 
   private publish(change: BoardChange): void {

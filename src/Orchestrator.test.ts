@@ -1419,6 +1419,14 @@ describe("Orchestrator run-event emitter", () => {
         },
       }),
       JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", content: "hello.txt\npackage.json\n" },
+          ],
+        },
+      }),
+      JSON.stringify({
         type: "result",
         result: "<promise>COMPLETE</promise>",
       }),
@@ -1463,6 +1471,15 @@ describe("Orchestrator run-event emitter", () => {
     expect(toolEvents[0]).toMatchObject({
       name: "Bash",
       formattedArgs: "ls",
+      iteration: 1,
+    });
+
+    const toolResultEvents = events.filter(
+      (e) => e.type === "agent-tool-result",
+    );
+    expect(toolResultEvents).toHaveLength(1);
+    expect(toolResultEvents[0]).toMatchObject({
+      content: "hello.txt\npackage.json\n",
       iteration: 1,
     });
 
@@ -2151,6 +2168,17 @@ describe("Orchestrator streaming", () => {
     );
 
     expect(capturedCommand).toContain(`--model '${DEFAULT_MODEL}'`);
+  });
+
+  it("lets Claude Code use its selected model when no model is configured", async () => {
+    const provider = claudeCode();
+    const command = provider.buildPrintCommand({
+      prompt: "do some work",
+      dangerouslySkipPermissions: false,
+    }).command;
+
+    expect(command).toContain("claude --print");
+    expect(command).not.toContain("--model");
   });
 
   it("uses the model from a custom provider", async () => {

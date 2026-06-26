@@ -1,9 +1,10 @@
 import { exec } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { resolveBoardPlanningConfig } from "./cli.js";
 
 const execAsync = promisify(exec);
 
@@ -163,6 +164,23 @@ describe("sandcastle CLI", () => {
     const { stdout } = await runCli("board --help", process.cwd());
     expect(stdout).toContain("--port");
     expect(stdout).toContain("--data-dir");
+    expect(stdout).toContain("--workflow");
+    expect(stdout).toContain("no-sandbox");
+  });
+
+  it("board uses the current repository as planner context when workspace config is missing", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-board-"));
+
+    const resolved = resolveBoardPlanningConfig(
+      join(hostDir, ".sandcastle", "workspace.json"),
+      hostDir,
+      false,
+    );
+
+    expect(resolved.configPath).toBe(`${hostDir}#planning-repository`);
+    expect(resolved.config.repositories).toEqual([
+      { name: basename(hostDir).toLowerCase(), cwd: "." },
+    ]);
   });
 
   it("workspace plan --help exposes PRD input options", async () => {

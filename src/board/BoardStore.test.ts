@@ -118,6 +118,32 @@ describe("BoardStore", () => {
     expect(updated.error).toBe("boom");
   });
 
+  it("marks running records as failed when a new store attaches after restart", () => {
+    const run = store.createRun({
+      name: "r1",
+      agent: "claude-code",
+      sandbox: "docker",
+      branch: "main",
+      maxIterations: 1,
+    });
+    const task = store.createTask({ title: "Add feature", prompt: "do it" });
+    store.updateTask(task.id, { status: "running", runIds: [run.id] });
+
+    const restarted = new BoardStore(dir);
+
+    expect(restarted.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: "Interrupted when the board server stopped or restarted.",
+    });
+    expect(restarted.getTask(task.id)).toMatchObject({
+      status: "failed",
+      error: "Interrupted when the board server stopped or restarted.",
+    });
+    expect(
+      restarted.getEvents(run.id).some((r) => r.event.type === "run-failed"),
+    ).toBe(true);
+  });
+
   it("aggregates token usage per model", () => {
     const run = store.createRun({
       name: "r1",

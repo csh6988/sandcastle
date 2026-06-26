@@ -90,6 +90,9 @@ describe("createTaskLauncher", () => {
       onPlan({
         alignmentSummary: "aligned interpretation",
         technicalPlan: "do it carefully",
+        workspace: {
+          repositories: [{ name: "web", cwd: "/repo/web", kind: "frontend" }],
+        },
         repositories: [
           { name: "web", task: "add page", reason: "ui change" },
           { name: "api", task: "add endpoint" },
@@ -112,6 +115,9 @@ describe("createTaskLauncher", () => {
     const updated = store.getTask(task.id)!;
     expect(updated.plan?.alignmentSummary).toBe("aligned interpretation");
     expect(updated.plan?.technicalPlan).toBe("do it carefully");
+    expect(updated.plan?.workspace).toEqual({
+      repositories: [{ name: "web", cwd: "/repo/web", kind: "frontend" }],
+    });
     expect(updated.plan?.repositories).toEqual([
       { name: "web", task: "add page", reason: "ui change" },
       { name: "api", task: "add endpoint" },

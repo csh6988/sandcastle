@@ -1,5 +1,6 @@
 import { NodeContext } from "@effect/platform-node";
 import { Effect, Layer } from "effect";
+import { resolve } from "node:path";
 import type { AgentProvider } from "./AgentProvider.js";
 import { ClackDisplay } from "./Display.js";
 import {
@@ -100,9 +101,16 @@ export interface RunWorkspaceTaskOptions<
   readonly plannerMaxIterations?: number;
   readonly logging?: LoggingOption;
   readonly name?: string;
+  readonly idleTimeoutSeconds?: number;
   readonly signal?: AbortSignal;
   readonly timeouts?: Timeouts;
   readonly dryRun?: boolean;
+  /**
+   * Let the planner return a task-scoped workspace snapshot that determines
+   * which repositories are executed. Used by the board PRD flow where the
+   * workspace is a planning output rather than a pre-existing config file.
+   */
+  readonly allowPlannerWorkspace?: boolean;
   /**
    * Optional callback invoked for each structured run event produced while
    * executing a repository's task, tagged with the repository name. Lets a
@@ -140,6 +148,7 @@ export interface ExecuteWorkspaceTaskPlanOptions<
   readonly maxIterations?: number;
   readonly logging?: LoggingOption;
   readonly name?: string;
+  readonly idleTimeoutSeconds?: number;
   readonly signal?: AbortSignal;
   readonly timeouts?: Timeouts;
   /** Optional per-repo run-event callback (see RunWorkspaceTaskOptions.onRepoRunEvent). */
@@ -202,6 +211,111 @@ const snapshotWorkspace = (
     : {}),
 });
 
+interface ParsedPlannerWorkspace {
+  readonly workspace: WorkspaceTaskWorkspace;
+  readonly repositories: WorkspaceTaskRepositoryOptions[];
+}
+
+const parsePlannerWorkspace = (
+  value: unknown,
+  baseDir: string,
+): ParsedPlannerWorkspace | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Planner workspace must be an object");
+  }
+
+  const input = value as {
+    repositories?: unknown;
+    branchPrefix?: unknown;
+    maxIterations?: unknown;
+  };
+  if (!Array.isArray(input.repositories) || input.repositories.length === 0) {
+    throw new Error("Planner workspace must include repositories");
+  }
+
+  const names = new Set<string>();
+  const repositories = input.repositories.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(
+        `Planner workspace repository at index ${index} must be an object`,
+      );
+    }
+    const repo = entry as {
+      name?: unknown;
+      cwd?: unknown;
+      kind?: unknown;
+      description?: unknown;
+      copyToWorktree?: unknown;
+      branchStrategy?: unknown;
+    };
+    if (typeof repo.name !== "string" || !repo.name.trim()) {
+      throw new Error(
+        `Planner workspace repository at index ${index} must include a name`,
+      );
+    }
+    if (names.has(repo.name)) {
+      throw new Error(
+        `Planner workspace has duplicate repository "${repo.name}"`,
+      );
+    }
+    names.add(repo.name);
+    if (typeof repo.cwd !== "string" || !repo.cwd.trim()) {
+      throw new Error(
+        `Planner workspace repository "${repo.name}" must include a cwd`,
+      );
+    }
+    if (
+      repo.copyToWorktree !== undefined &&
+      (!Array.isArray(repo.copyToWorktree) ||
+        repo.copyToWorktree.some((item: unknown) => typeof item !== "string"))
+    ) {
+      throw new Error(
+        `Planner workspace repository "${repo.name}" copyToWorktree must be an array of strings`,
+      );
+    }
+
+    return {
+      name: repo.name,
+      cwd: resolve(baseDir, repo.cwd),
+      ...(typeof repo.kind === "string" ? { kind: repo.kind } : {}),
+      ...(typeof repo.description === "string"
+        ? { description: repo.description }
+        : {}),
+      ...(Array.isArray(repo.copyToWorktree)
+        ? { copyToWorktree: repo.copyToWorktree as string[] }
+        : {}),
+      ...(typeof repo.branchStrategy === "object" &&
+      repo.branchStrategy !== null
+        ? {
+            branchStrategy:
+              repo.branchStrategy as WorkspaceTaskRepositoryOptions["branchStrategy"],
+          }
+        : {}),
+    } satisfies WorkspaceTaskRepositoryOptions;
+  });
+
+  return {
+    workspace: {
+      repositories: repositories.map((repo) => ({
+        name: repo.name,
+        cwd: repo.cwd,
+        ...(repo.kind ? { kind: repo.kind } : {}),
+        ...(repo.description ? { description: repo.description } : {}),
+        ...(repo.copyToWorktree ? { copyToWorktree: repo.copyToWorktree } : {}),
+        ...(repo.branchStrategy ? { branchStrategy: repo.branchStrategy } : {}),
+      })),
+      ...(typeof input.branchPrefix === "string" && input.branchPrefix.trim()
+        ? { branchPrefix: input.branchPrefix }
+        : {}),
+      ...(typeof input.maxIterations === "number"
+        ? { maxIterations: input.maxIterations }
+        : {}),
+    },
+    repositories,
+  };
+};
+
 const attachWorkspaceSnapshot = (
   plan: WorkspaceTaskPlan,
   options: Pick<
@@ -243,6 +357,7 @@ const resolveTaskPrompt = async (
 const buildPlannerPrompt = (
   taskPrompt: string,
   repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions>,
+  allowPlannerWorkspace = false,
 ): string => {
   const repoLines = repositories
     .map((repo) => {
@@ -256,11 +371,33 @@ const buildPlannerPrompt = (
     })
     .join("\n");
 
+  const workspaceInstructions = allowPlannerWorkspace
+    ? `
+Also determine the task workspace. Include a "workspace" object in the plan. It is a task-scoped workspace snapshot, equivalent to workspace.json, and must not assume a project-level .sandcastle/workspace.json already exists.
+
+The workspace shape is:
+
+"workspace": {
+  "repositories": [
+    {
+      "name": "repository-name",
+      "cwd": "absolute or relative path from the primary planning repository",
+      "kind": "optional repository kind",
+      "description": "optional repository description"
+    }
+  ],
+  "branchPrefix": "optional branch prefix",
+  "maxIterations": 1
+}
+`
+    : "";
+
   return `# Sandcastle workspace task planner
 
 You are planning a multi-repository coding task. Analyze the product requirements document or user request and candidate repositories, then produce product alignment notes, a technical plan, and repository-local implementation issues.
 
 Do not modify files. Do not commit. Return only a machine-readable plan inside <${WORKSPACE_PLAN_TAG}>. This is an automatic pipeline, so do not ask the user follow-up questions. When the PRD is ambiguous, make the safest explicit assumption and record it in alignment.assumptions. Only leave alignment.openQuestions for issues that truly block implementation.
+${workspaceInstructions}
 
 Product requirements document or user request:
 ${taskPrompt}
@@ -313,7 +450,16 @@ When complete, output <promise>COMPLETE</promise>.`;
 const extractWorkspaceTaskPlan = (
   stdout: string,
   repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions>,
-): WorkspaceTaskPlan => {
+  options: {
+    readonly allowPlannerWorkspace?: boolean;
+    readonly workspaceBaseDir?: string;
+  } = {},
+): {
+  readonly plan: WorkspaceTaskPlan;
+  readonly repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions>;
+  readonly workspaceBranchPrefix?: string;
+  readonly workspaceMaxIterations?: number;
+} => {
   const match = stdout.match(
     new RegExp(
       `<${WORKSPACE_PLAN_TAG}>\\s*([\\s\\S]*?)\\s*</${WORKSPACE_PLAN_TAG}>`,
@@ -342,7 +488,14 @@ const extractWorkspaceTaskPlan = (
     );
   }
 
-  const knownNames = new Set(repositories.map((repo) => repo.name));
+  const plannerWorkspace = options.allowPlannerWorkspace
+    ? parsePlannerWorkspace(
+        (parsed as { workspace?: unknown }).workspace,
+        options.workspaceBaseDir ?? repositories[0]?.cwd ?? process.cwd(),
+      )
+    : undefined;
+  const executionRepositories = plannerWorkspace?.repositories ?? repositories;
+  const knownNames = new Set(executionRepositories.map((repo) => repo.name));
   const alignment = parseAlignment(
     (parsed as { alignment?: unknown }).alignment,
   );
@@ -419,9 +572,15 @@ const extractWorkspaceTaskPlan = (
   }
 
   return {
-    ...(alignment ? { alignment } : {}),
-    ...(technicalPlan ? { technicalPlan } : {}),
-    repositories: planned,
+    plan: {
+      ...(alignment ? { alignment } : {}),
+      ...(technicalPlan ? { technicalPlan } : {}),
+      ...(plannerWorkspace ? { workspace: plannerWorkspace.workspace } : {}),
+      repositories: planned,
+    },
+    repositories: executionRepositories,
+    workspaceBranchPrefix: plannerWorkspace?.workspace.branchPrefix,
+    workspaceMaxIterations: plannerWorkspace?.workspace.maxIterations,
   };
 };
 
@@ -562,6 +721,7 @@ export async function executeWorkspaceTaskPlan(
           }),
           maxIterations: options.maxIterations ?? 1,
           logging: options.logging,
+          idleTimeoutSeconds: options.idleTimeoutSeconds,
           onRunEvent: options.onRepoRunEvent
             ? (event) => options.onRepoRunEvent!(repo.name, event)
             : undefined,
@@ -624,19 +784,37 @@ export async function runWorkspaceTask(
     primaryRepository: options.repositories[0]!.name,
     agent: options.plannerAgent ?? options.agent,
     sandbox: options.sandbox,
-    prompt: buildPlannerPrompt(taskPrompt, options.repositories),
+    prompt: buildPlannerPrompt(
+      taskPrompt,
+      options.repositories,
+      options.allowPlannerWorkspace,
+    ),
     maxIterations: options.plannerMaxIterations ?? 1,
     logging: options.logging,
     name: options.name ? `${options.name} planner` : "workspace planner",
+    idleTimeoutSeconds: options.idleTimeoutSeconds,
     signal: options.signal,
     timeouts: options.timeouts,
     onRunEvent: options.onPlannerRunEvent,
   });
 
-  const plan = attachWorkspaceSnapshot(
-    extractWorkspaceTaskPlan(planner.stdout, options.repositories),
-    options,
+  const extracted = extractWorkspaceTaskPlan(
+    planner.stdout,
+    options.repositories,
+    {
+      allowPlannerWorkspace: options.allowPlannerWorkspace,
+      workspaceBaseDir: options.repositories[0]!.cwd,
+    },
   );
+  const executionBranchPrefix =
+    options.branchPrefix ?? extracted.workspaceBranchPrefix;
+  const executionMaxIterations =
+    options.maxIterations ?? extracted.workspaceMaxIterations;
+  const plan = attachWorkspaceSnapshot(extracted.plan, {
+    repositories: extracted.repositories,
+    branchPrefix: executionBranchPrefix,
+    maxIterations: executionMaxIterations,
+  });
   options.onPlan?.(plan);
   if (options.dryRun) {
     return { plan, repositories: {}, plannerStdout: planner.stdout };
@@ -645,15 +823,16 @@ export async function runWorkspaceTask(
   return {
     plan,
     repositories: await executeWorkspaceTaskPlan({
-      repositories: options.repositories,
+      repositories: extracted.repositories,
       plan,
       taskPrompt,
       agent: options.agent,
       sandbox: options.sandbox,
-      branchPrefix: options.branchPrefix,
-      maxIterations: options.maxIterations,
+      branchPrefix: executionBranchPrefix,
+      maxIterations: executionMaxIterations,
       logging: options.logging,
       name: options.name,
+      idleTimeoutSeconds: options.idleTimeoutSeconds,
       signal: options.signal,
       timeouts: options.timeouts,
       onRepoRunEvent: options.onRepoRunEvent,

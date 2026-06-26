@@ -52,6 +52,18 @@ export type RunEvent =
       readonly timestamp: Date;
     }
   | {
+      readonly type: "agent-tool-result";
+      readonly content: string;
+      readonly iteration: number;
+      readonly timestamp: Date;
+    }
+  | {
+      readonly type: "agent-idle-warning";
+      readonly minutes: number;
+      readonly iteration: number;
+      readonly timestamp: Date;
+    }
+  | {
       readonly type: "usage";
       readonly usage: IterationUsage;
       /** Agent model the tokens are attributed to, when known. */

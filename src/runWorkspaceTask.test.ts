@@ -195,6 +195,39 @@ describe("runWorkspaceTask", () => {
     expect(executorCalls).toBe(0);
   });
 
+  it("executes repositories from the planner workspace snapshot", async () => {
+    const plannerRepo = await createRepo();
+    const web = await createRepo();
+    const executed: string[] = [];
+    const { provider } = createWorkspaceTaskProvider(
+      async ({ cwd, prompt }) => {
+        if (prompt.includes("workspace task planner")) {
+          return `<workspace_plan>{"workspace":{"repositories":[{"name":"web","cwd":${JSON.stringify(web)},"kind":"frontend"}]},"technicalPlan":"Use the web repository only.","repositories":[{"name":"web","task":"Add page","reason":"PRD only affects UI"}]}</workspace_plan><promise>COMPLETE</promise>`;
+        }
+        executed.push(cwd);
+        await writeFile(join(cwd, "page.txt"), "done");
+        await execAsync("git add page.txt && git commit -m web-task", { cwd });
+        return "<promise>COMPLETE</promise>";
+      },
+    );
+
+    const result = await runWorkspaceTask({
+      repositories: [{ name: "planner", cwd: plannerRepo }],
+      prompt: "Add a page",
+      agent: testAgent,
+      sandbox: provider,
+      allowPlannerWorkspace: true,
+      logging: { type: "stdout" },
+    });
+
+    expect(result.plan.workspace?.repositories).toEqual([
+      { name: "web", cwd: web, kind: "frontend" },
+    ]);
+    expect(Object.keys(result.repositories)).toEqual(["web"]);
+    expect(result.repositories.web!.status).toBe("success");
+    expect(executed).toHaveLength(1);
+  });
+
   it("executes an existing workspace plan without running the planner", async () => {
     const api = await createRepo();
     let plannerCalls = 0;

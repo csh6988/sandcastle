@@ -1,4 +1,5 @@
 import type { BoardStore, BoardTaskRecord } from "./BoardStore.js";
+import type { BoardTerminalManager } from "./terminalSession.js";
 
 /** A resolved JSON API response. */
 export interface ApiResponse {
@@ -8,6 +9,11 @@ export interface ApiResponse {
 
 /** Launches a board task into per-repo runs. Injected to keep the router decoupled from the orchestration core. */
 export type TaskLauncher = (task: BoardTaskRecord) => void;
+/** Resumes a paused board task workflow after a human decision. */
+export type TaskResumer = (
+  task: BoardTaskRecord,
+  decision: "approve" | "reject",
+) => void;
 
 const json = (status: number, body: unknown): ApiResponse => ({
   status,
@@ -27,6 +33,8 @@ export const routeApi = async (
   pathname: string,
   parseBody: () => Promise<unknown>,
   launchTask?: TaskLauncher,
+  resumeTask?: TaskResumer,
+  terminalManager?: BoardTerminalManager,
 ): Promise<ApiResponse | undefined> => {
   if (!pathname.startsWith("/api/")) return undefined;
 
@@ -57,6 +65,60 @@ export const routeApi = async (
     const id = decodeURIComponent(taskMatch[1]!);
     const task = store.getTask(id);
     return task ? json(200, task) : json(404, { error: "task not found" });
+  }
+
+  const taskResumeMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
+  if (method === "POST" && taskResumeMatch) {
+    const id = decodeURIComponent(taskResumeMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (!resumeTask) return json(409, { error: "task resume is not enabled" });
+    let payload: unknown;
+    try {
+      payload = await parseBody();
+    } catch {
+      return json(400, { error: "invalid JSON body" });
+    }
+    const decision = (payload as { decision?: unknown } | undefined)?.decision;
+    if (decision !== "approve" && decision !== "reject") {
+      return json(400, { error: "decision must be approve or reject" });
+    }
+    resumeTask(task, decision);
+    return json(202, { status: "resuming" });
+  }
+
+  const taskTerminalMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/terminal(\/resize)?$/,
+  );
+  if (taskTerminalMatch) {
+    const id = decodeURIComponent(taskTerminalMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (!terminalManager) {
+      return json(409, { error: "interactive terminal is not enabled" });
+    }
+    if (method === "GET" && !taskTerminalMatch[2]) {
+      return json(200, terminalManager.get(id) ?? { status: "not-started" });
+    }
+    if (method === "POST" && taskTerminalMatch[2] === "/resize") {
+      let payload: unknown;
+      try {
+        payload = await parseBody();
+      } catch {
+        return json(400, { error: "invalid JSON body" });
+      }
+      const { cols, rows } = (payload ?? {}) as {
+        cols?: unknown;
+        rows?: unknown;
+      };
+      if (typeof cols !== "number" || typeof rows !== "number") {
+        return json(400, { error: "cols and rows must be numbers" });
+      }
+      return terminalManager.resize(id, cols, rows)
+        ? json(202, { status: "resized" })
+        : json(409, { error: "terminal session is not running" });
+    }
+    return json(405, { error: "method not allowed" });
   }
 
   if (method === "POST" && pathname === "/api/tasks") {

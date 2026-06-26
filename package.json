@@ -1,6 +1,6 @@
 {
   "name": "@chenshaohui6988/sandcastle",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "CLI for orchestrating AI agents in isolated sandbox environments",
   "type": "module",
   "main": "./dist/index.js",
@@ -86,7 +86,9 @@
     "zod": "^4.4.3"
   },
   "dependencies": {
-    "@clack/prompts": "^1.1.0"
+    "@clack/prompts": "^1.1.0",
+    "@langchain/langgraph": "^1.4.6",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3"
   },
   "peerDependencies": {
     "@daytona/sdk": "^0.164.0",

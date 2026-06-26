@@ -35,6 +35,7 @@ export type ParsedStreamEvent =
   | { type: "text"; text: string }
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
+  | { type: "tool_result"; content: string }
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: IterationUsage };
 
@@ -68,6 +69,28 @@ const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   if (!line.startsWith("{")) return [];
   try {
     const obj = JSON.parse(line);
+    if (obj.type === "user" && Array.isArray(obj.message?.content)) {
+      return (obj.message.content as unknown[]).flatMap((block) => {
+        if (typeof block !== "object" || block === null) return [];
+        const toolResult = block as { type?: unknown; content?: unknown };
+        if (toolResult.type !== "tool_result") return [];
+        if (typeof toolResult.content === "string") {
+          return [{ type: "tool_result", content: toolResult.content }];
+        }
+        if (Array.isArray(toolResult.content)) {
+          const text = toolResult.content
+            .flatMap((item) => {
+              if (typeof item === "string") return [item];
+              if (typeof item !== "object" || item === null) return [];
+              const maybeText = item as { text?: unknown };
+              return typeof maybeText.text === "string" ? [maybeText.text] : [];
+            })
+            .join("");
+          return text ? [{ type: "tool_result", content: text }] : [];
+        }
+        return [];
+      });
+    }
     if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
       const events: ParsedStreamEvent[] = [];
       const texts: string[] = [];
@@ -1186,7 +1209,7 @@ export interface ClaudeCodeOptions {
 }
 
 export const claudeCode = (
-  model: string,
+  model?: string,
   options?: ClaudeCodeOptions,
 ): AgentProvider & { readonly sessionStorage: AgentSessionStorage } => ({
   name: "claude-code",
@@ -1217,8 +1240,9 @@ export const claudeCode = (
     // to write the continuation as a new session rather than mutating the
     // resumed one. See ADR 0018.
     const forkFlag = resumeSession && forkSession ? " --fork-session" : "";
+    const modelFlag = model ? ` --model ${shellEscape(model)}` : "";
     return {
-      command: `claude --print --verbose${permissionFlag} --output-format stream-json --model ${shellEscape(model)}${effortFlag}${resumeFlag}${forkFlag} -p -`,
+      command: `claude --print --verbose${permissionFlag} --output-format stream-json${modelFlag}${effortFlag}${resumeFlag}${forkFlag} -p -`,
       stdin: prompt,
     };
   },
@@ -1233,7 +1257,7 @@ export const claudeCode = (
     } else if (dangerouslySkipPermissions) {
       args.push("--dangerously-skip-permissions");
     }
-    args.push("--model", model);
+    if (model) args.push("--model", model);
     if (options?.effort) args.push("--effort", options.effort);
     if (prompt) args.push(prompt);
     return args;

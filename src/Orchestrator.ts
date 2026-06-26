@@ -30,6 +30,7 @@ export const invokeAgent = (
   completionSignals: readonly string[],
   onText: (text: string) => void,
   onToolCall: (name: string, formattedArgs: string) => void,
+  onToolResult: (content: string) => void,
   onRawLine: (line: string) => void,
   onIdleWarning: (minutes: number) => void,
   onCompletionTimeout: (timeoutMs: number) => void,
@@ -166,6 +167,8 @@ export const invokeAgent = (
               accumulatedOutput += parsed.result;
             } else if (parsed.type === "tool_call") {
               onToolCall(parsed.name, parsed.args);
+            } else if (parsed.type === "tool_result") {
+              onToolResult(parsed.content);
             } else if (parsed.type === "session_id") {
               sessionId = parsed.sessionId;
             } else if (parsed.type === "usage") {
@@ -477,6 +480,17 @@ export const orchestrate = (
                     }),
                   );
                 };
+                const onToolResult = (content: string) => {
+                  textBuffer.flush();
+                  Effect.runPromise(
+                    emitRun({
+                      type: "agent-tool-result",
+                      content,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                };
                 const onRawLine = (line: string) => {
                   Effect.runPromise(
                     streamEmitter.emit({
@@ -493,6 +507,14 @@ export const orchestrate = (
                       ? "Agent idle for 1 minute"
                       : `Agent idle for ${minutes} minutes`;
                   Effect.runPromise(display.status(label(msg), "warn"));
+                  Effect.runPromise(
+                    emitRun({
+                      type: "agent-idle-warning",
+                      minutes,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
                 };
                 const onCompletionTimeout = (timeoutMs: number) => {
                   Effect.runPromise(
@@ -518,6 +540,7 @@ export const orchestrate = (
                   completionSignals,
                   onText,
                   onToolCall,
+                  onToolResult,
                   onRawLine,
                   onIdleWarning,
                   onCompletionTimeout,
