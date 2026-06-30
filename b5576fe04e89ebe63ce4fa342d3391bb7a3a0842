@@ -1,0 +1,448 @@
+.gitignore
+  1c36effbb7f8d336 7-8
+src/board/launchTask.ts
+  a0c27acb0d3d4f61 7,17-18,77-79
+src/board/langGraphTaskRunner.test.ts
+  94f5afa19af0849b 625-673
+  ce436ddde7714e24 1093-1100,1105-1132
+  a0c27acb0d3d4f61 6-8,10,49,65,69,111-163,180-183,245,247,253-256,258,263,674-686,690
+  1d68d1d1ca28ca36 52-61,64,97-100,165-179,184-195,198
+  ee63a22aff9fd3e3 478-481
+  03df80d2ecf56d30 9,265-277,282-285,287-304,307-380,449-477,482-488,490-521,526-559,691-755,760-763,779-807,821,828,830-831,969-1014,1016-1092
+  c2cabb83a96dc476 687-689
+  1c36effbb7f8d336 560-624,759,764,766,812-816,832-968
+  08752ae39089ee33 1101-1104
+  1f808d6e2eb681e7 70-75,164,201,214-217,264,278-281,305-306,489,522-525
+  d99e0024bd8570cb 381-448,756-758,765,767-778,808-811,817-820,822-827,829
+src/board/router.ts
+  a0c27acb0d3d4f61 1-5,26-29,31,42-55,71,166-172,176-213,217-222,240
+  03df80d2ecf56d30 7,32-35,72-73,139-165
+  ce436ddde7714e24 23-25,30,223-239
+  94f5afa19af0849b 99-107
+  c95e2652bcccff16 173-175,214-216
+  1f808d6e2eb681e7 6,96,114-116,302
+.changeset/board-progress-recover.md
+  94f5afa19af0849b 1-5
+.changeset/fuzzy-task-terminal.md
+  b300a8cd5c49ab44 1-5
+src/board/BoardStore.ts
+  1f808d6e2eb681e7 121-124,139,166-206,234-384,415-422,425-567,571-586
+  a0c27acb0d3d4f61 104-120,125-134,137-138,140-142
+  d99e0024bd8570cb 408-409,414,424,1044,1057-1063
+  94f5afa19af0849b 14,568-570,633-636,837,901-924,960
+  b300a8cd5c49ab44 46,54-56,783-818,821,826,830,836
+  ce436ddde7714e24 385-389,423,669
+  1d68d1d1ca28ca36 97-100
+  1c36effbb7f8d336 390-407,410-413
+src/board/frontendHtml.ts
+  1f808d6e2eb681e7 149-154,197,199-210,460,515,521-523,550-553,620-621,623-624,626-634,639,653,655,657,659-660
+  a0c27acb0d3d4f61 195,401,422-423,427,432,435,458,542,549,567-569,571-574,576,579-580,636-637,658,664-666
+  1d68d1d1ca28ca36 486-489
+  94f5afa19af0849b 546-547,590-601,640,643-651
+  03df80d2ecf56d30 73-74,196,211-231,543-545,570,575,577-578,581-589,602-610,638,641-642,652,654,656,663
+  b300a8cd5c49ab44 117,119-120,233-358,376-380,533-534,681-682,687-688,711
+src/board/terminalSession.test.ts
+  03df80d2ecf56d30 9,153-172,209,225,229,263,305-318
+  1c36effbb7f8d336 264-301
+  c95e2652bcccff16 111,137-138,259
+  a0c27acb0d3d4f61 8,57,64,66-70,80,82-89,91,93,101,107-110,112-113,117,119-134,139-140,143-148,151,173-193,198-205,210-224,226-228,230-233,236-250,255-258,260-261
+src/cli.ts
+  1d68d1d1ca28ca36 2641-2642,2669,2671-2682,2684-2691,2698,2703
+  a0c27acb0d3d4f61 71-75,82-85,2402-2404,2410,2436-2440,2442-2446,2534-2536,2567-2568,2575-2582,2584,2586-2594,2598-2599,2605-2613,2617,2619-2620,2623,2627-2635,2640,2643-2645,2715
+  1c36effbb7f8d336 61,1847-1853,2542-2546,2549-2564,2569-2574,2670,2683,2699-2702,2711-2714,2723-2724
+  03df80d2ecf56d30 1837-1838,1857,1859-1860,2405-2409,2411-2428,2432-2435,2441,2447,2646-2647,2659-2660,2664,2716,2721-2722,2725
+  ce436ddde7714e24 1836,1839-1846,1854-1856,1858,2537-2541,2648-2658,2661-2662,2704-2710
+  ee63a22aff9fd3e3 2663
+  fc9a439baf7cb996 7,69,1464,1482-1488,1492-1494,1498-1500,1519-1528
+  1f808d6e2eb681e7 2665-2668
+  cdcd140125d35fe7 1448
+  d99e0024bd8570cb 2429-2431
+  48f0292673891cad 2547-2548,2717-2720
+README.md
+  1c36effbb7f8d336 1251-1253
+src/board/server.ts
+  1f808d6e2eb681e7 5,162-166
+  a0c27acb0d3d4f61 6-7,9-10,12-13,27-28,186,211-259
+  03df80d2ecf56d30 8,11,29-32,187-188
+.changeset/no-sandbox-session-capture.md
+  fc9a439baf7cb996 1-5
+src/runWorkspaceTask.test.ts
+  d99e0024bd8570cb 17,277-305
+src/board/terminalSession.ts
+  a0c27acb0d3d4f61 3-8,36,55-60,177-183,190,194-202,218,224-225,239-242,247,256,263-272,282-292,299-310,320-330,354-376
+  ee63a22aff9fd3e3 276-278
+  1c36effbb7f8d336 339-341,346-353
+  03df80d2ecf56d30 2,61-74,142-167,173,215,231-238,243-246,275
+  c95e2652bcccff16 54
+  48f0292673891cad 342-345
+.changeset/board-cancel-execution.md
+  94f5afa19af0849b 1-5
+src/board/launchTask.test.ts
+  94f5afa19af0849b 127-154,156-157
+  c95e2652bcccff16 220-223
+  1d68d1d1ca28ca36 197-219,224-234
+src/board/BoardStore.test.ts
+  a0c27acb0d3d4f61 663
+  08752ae39089ee33 456-459
+  1c36effbb7f8d336 504-583
+  1f808d6e2eb681e7 5-9,239,301-405,408-427
+  b300a8cd5c49ab44 85-88,116-117,137,202-204
+  94f5afa19af0849b 240-300,406-407
+  1d68d1d1ca28ca36 26-33,669
+  d99e0024bd8570cb 479-503,623-645
+  ce436ddde7714e24 429-455,460-478
+docs/adr/0023-langgraph-board-workflow-checkpoints.md
+  1f808d6e2eb681e7 28-36
+  a0c27acb0d3d4f61 3-7,11,16-18,20-27,49-51
+src/cli.test.ts
+  fc9a439baf7cb996 2-9,11,13,16,21-22,187-233
+  ce436ddde7714e24 18,253-278
+  1d68d1d1ca28ca36 182-183
+  1c36effbb7f8d336 281-290
+  cdcd140125d35fe7 15,17,19-20,251-252
+src/board/langGraphTaskRunner.ts
+  1d68d1d1ca28ca36 139,615,622-628,638-641,648-649,693,759-763
+  d99e0024bd8570cb 22,25,126,143-182,328,347-348,386,403-405,481-500,502,505-508,511-512,519-538,540-568,664-665,671,680-681,740-741,746-752,979-981,989-995,997-1008,1010-1033
+  a0c27acb0d3d4f61 16,18,30-35,60-63,76-79,258-266,274-297,313-314,427,459-465,471-475,477,501,503-504,569-578,580-584,616-621,629-634,642-647,650-656,691,695,723,803-832,834,855-857,861-866,873-882,884-915,934-937
+  48f0292673891cad 354-355,357
+  c95e2652bcccff16 466-469,478-480
+  94f5afa19af0849b 356,361-363,365,367-368,371-373,982-988,996,1009
+  1c36effbb7f8d336 98,183-252,329-346,349-353,358-360,364,366,369-370,374-375,412-420,513-518,539,776-783,840,883,925,958,1053
+  1f808d6e2eb681e7 17,429,435-455,457,579,660-661,666-670,672-679,682,692,710,724
+  03df80d2ecf56d30 14-15,68-69,86-91,267-273,298-312,315-323,377-384,387-399,411,434,659,683-685,951-957,959-978,1041-1052,1054-1067
+  ce436ddde7714e24 324-327,376,385,1034-1040
+src/board/server.test.ts
+  1c36effbb7f8d336 346
+  b300a8cd5c49ab44 511-513
+  a0c27acb0d3d4f61 5,203,205-211,213-223,231,237-241,246,253-272,515-516,527-529
+  94f5afa19af0849b 144-178
+  1d68d1d1ca28ca36 525
+  e81e413a46a62288 412-415
+  1f808d6e2eb681e7 105-118,120-125,127-143,508-509,521-522,530
+  03df80d2ecf56d30 274,313-345,347-411,416-473,517,519-520,523
+  ce436ddde7714e24 275-312
+CONTEXT.md
+  a0c27acb0d3d4f61 89,91-92,244-249,251
+  1f808d6e2eb681e7 90
+  c95e2652bcccff16 229-232,252-263
+  54f0b795321c96d5 250
+.changeset/phase-board-interaction.md
+  d99e0024bd8570cb 4
+  1c36effbb7f8d336 1
+  a0c27acb0d3d4f61 2-3
+src/board/taskProgress.ts
+  94f5afa19af0849b 1-177
+src/runWorkspaceTask.ts
+  1c36effbb7f8d336 500-517,536,556-559
+  d99e0024bd8570cb 187-203,458-459,604,721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "b5576fe04e89ebe63ce4fa342d3391bb7a3a0842",
+  "prompts": {
+    "03df80d2ecf56d30": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "0eaa52d8-fd18-48b5-8053-3838e2e97806",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 1089,
+      "total_deletions": 71,
+      "accepted_lines": 964,
+      "overriden_lines": 3,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/d9604941a6f227eb2d16d1b0be0ba9bfcac1ceb3b1577ff2f6731d49c95252bb"
+    },
+    "08752ae39089ee33": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f07fa-d490-74f0-a6c0-1d7c077d9e04",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 2,
+      "accepted_lines": 8,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/5106d321b7c4ce6686effb0cd58e347962a40347c9cc64af77f4035291e99652"
+    },
+    "1c36effbb7f8d336": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "a7d9b049-abde-47e7-bfd4-f0fec6cc2a0d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 658,
+      "total_deletions": 93,
+      "accepted_lines": 584,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2bd6a91bce3e26afeb9cacfb6bb6f3565daf8e68566cde9622abe02b9a013b27"
+    },
+    "1d68d1d1ca28ca36": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "06e92e26-a918-41b8-bcb8-d8f1bee5b25f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 203,
+      "total_deletions": 155,
+      "accepted_lines": 147,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/01cb44fab23f5acf5c52eafc91366cd26860f847633911a3bc955f4681f9e4b0"
+    },
+    "1f808d6e2eb681e7": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3553e494-3dd7-4f0a-9cdd-151a35b13ed4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 704,
+      "total_deletions": 131,
+      "accepted_lines": 682,
+      "overriden_lines": 2,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/15db82216f311f4c3e4ac9b29bfe6c4cc69fa3e6582303dc2ff9909ef85940aa"
+    },
+    "204d02e0f002d545": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eeefb-5f40-7a31-8406-d98085c36311",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2145,
+      "overriden_lines": 3,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/064e73eac6c0542d88a013b2f05b90c84854baa2282f0cea810551aba1d55971"
+    },
+    "3a8469d3df22cec4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef78f-5871-78f2-a6b1-39525c02b517",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 51,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0a410b5de4bb3b986e9647cf3ce1683d1c60e4fecebad2194ef6be9f02b96d3f"
+    },
+    "48f0292673891cad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1654-0312-7402-8e00-2ae09584e8cb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 4,
+      "accepted_lines": 13,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/847b7e2b287e5f0143f03b6a55c4f0015d77b45467bfcfad1329c89fa357f939"
+    },
+    "5216833164ddb92e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef7bf-8aeb-7e53-bb7c-ce87ebf7d938",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 102,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e148c192a8b77cd0f94ea89dcd6747c883f405d273f7b6b15fde6fed4d4c6e23"
+    },
+    "54f0b795321c96d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f029b-dab7-7050-ac46-9cbed5818165",
+        "model": "gpt-5.4"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 2,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "94f5afa19af0849b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6e683d93-9b94-4a4a-81e9-4b216e370936",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 460,
+      "total_deletions": 8,
+      "accepted_lines": 452,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/59d453cabbdf5a2f94e68b41ff83b687fd835f3103580dfbfb119bfe9ded98f2"
+    },
+    "a0c27acb0d3d4f61": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "457a2bc1-53a9-4a9e-b237-8bd245626ad8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 1016,
+      "total_deletions": 239,
+      "accepted_lines": 901,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2239789e81dfe27d4c21f38f31389dcde1c749e04fa29e790eaa13de3b811860"
+    },
+    "b300a8cd5c49ab44": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8ec633f8-02e3-4126-a5d9-d724de3597ec",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 208,
+      "total_deletions": 29,
+      "accepted_lines": 205,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/c0e17d44a85915cdaa50ada8405c37a6df1ef074db01dbe78258c1f0e98fac5a"
+    },
+    "b40456fb662af17b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eed1b-3275-74e0-b4e2-44fccbc2ed4e",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 24885,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2e9bb9c6f8f1075d898fbe435d6069c54bd67b990010387ba4df83f9e2f53b17"
+    },
+    "c2cabb83a96dc476": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f02b6-517e-7b32-b0ac-ccfc3af33f47",
+        "model": "gpt-5.4"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 3,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "c95e2652bcccff16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0287-b2fa-7170-85c5-81b04d11f036",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 13,
+      "accepted_lines": 39,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/34de4fedc0a5535a5250232e781128a36bfbb9284bdc5c461b6023b08a66dad3"
+    },
+    "cdcd140125d35fe7": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "1aef275d-20f6-467a-a3bc-1d894d1b2266",
+        "model": "gpt-5.5-medium"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 10,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    },
+    "ce436ddde7714e24": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "9454e3d8-571e-4436-9e8d-54618cb85e1b",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 238,
+      "total_deletions": 27,
+      "accepted_lines": 226,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/d24dbc4bb765d0f1e3b9e6e336e3c83b3759dc2f4c873f883a78a4104f090736"
+    },
+    "d99e0024bd8570cb": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ed63a1a6-bda3-473f-82fb-8cce9aaf1e78",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 417,
+      "total_deletions": 84,
+      "accepted_lines": 406,
+      "overriden_lines": 2,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ec361386c75b82018288ebf76cc42d6b4ff98d3d9dfcb771fadf1dd954aa811d"
+    },
+    "e81e413a46a62288": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f02cc-d23e-7400-ae32-98647b02bdf4",
+        "model": "gpt-5.4"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 1,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "ee63a22aff9fd3e3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f02f7-9243-79a2-a8a5-bff050a181d6",
+        "model": "gpt-5.4"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 3,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    },
+    "fc9a439baf7cb996": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "ba6125d5-16bc-4a29-ac01-508629edb895",
+        "model": "gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 93,
+      "total_deletions": 5,
+      "accepted_lines": 93,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e56e0ac3cc9b17ee7ebf68dd5c20899386b206d1e8826c98bb3081e50bc73f71"
+    }
+  }
+}
