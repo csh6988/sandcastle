@@ -2,8 +2,15 @@ import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
-import { BoardStore } from "./BoardStore.js";
-import { routeApi, type TaskLauncher, type TaskResumer } from "./router.js";
+import { BoardStore, boardTaskView } from "./BoardStore.js";
+import {
+  routeApi,
+  type TaskCanceler,
+  type TaskLauncher,
+  type TaskPhaseCompleter,
+  type TaskRecoverer,
+  type TaskResumer,
+} from "./router.js";
 import { BOARD_FRONTEND_HTML } from "./frontendHtml.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
 
@@ -17,6 +24,12 @@ export interface BoardServerOptions {
   readonly launchTask?: TaskLauncher;
   /** Optional resumer invoked when a paused task receives an approval decision. */
   readonly resumeTask?: TaskResumer;
+  /** Optional completer invoked when an interactive workflow phase continues. */
+  readonly completePhase?: TaskPhaseCompleter;
+  /** Optional recoverer invoked when a failed task can return to a workflow phase. */
+  readonly recoverTask?: TaskRecoverer;
+  /** Optional canceler invoked when a running workflow task should stop. */
+  readonly cancelTask?: TaskCanceler;
   /** Optional interactive terminal session manager for board tasks. */
   readonly terminalManager?: BoardTerminalManager;
 }
@@ -146,7 +159,11 @@ export const startBoardServer = (
         `event: snapshot\ndata: ${JSON.stringify(store.listRuns())}\n\n`,
       );
       const unsubscribe = store.subscribe((change) => {
-        res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`);
+        const payload =
+          change.kind === "task-updated"
+            ? { ...change, task: boardTaskView(change.task) }
+            : change;
+        res.write(`event: change\ndata: ${JSON.stringify(payload)}\n\n`);
       });
       const keepAlive = setInterval(() => {
         res.write(": keep-alive\n\n");
@@ -166,6 +183,9 @@ export const startBoardServer = (
       options.launchTask,
       options.resumeTask,
       options.terminalManager,
+      options.completePhase,
+      options.recoverTask,
+      options.cancelTask,
     ).then((apiResponse) => {
       if (apiResponse) {
         const payload = JSON.stringify(apiResponse.body);
@@ -188,6 +208,55 @@ export const startBoardServer = (
 
   server.on("upgrade", (req, socket) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    const phaseMatch = url.pathname.match(
+      /^\/api\/tasks\/([^/]+)\/phases\/([^/]+)\/terminal\/ws$/,
+    );
+    if (phaseMatch && options.terminalManager) {
+      const taskId = decodeURIComponent(phaseMatch[1]!);
+      const phase = decodeURIComponent(phaseMatch[2]!) as Parameters<
+        BoardTerminalManager["getPhase"]
+      >[1];
+      const key = req.headers["sec-websocket-key"];
+      if (
+        typeof key !== "string" ||
+        !options.terminalManager.getPhase(taskId, phase)
+      ) {
+        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const accept = createHash("sha1")
+        .update(key + WEBSOCKET_GUID)
+        .digest("base64");
+      socket.write(
+        [
+          "HTTP/1.1 101 Switching Protocols",
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          `Sec-WebSocket-Accept: ${accept}`,
+          "\r\n",
+        ].join("\r\n"),
+      );
+      const unsubscribe = options.terminalManager.subscribePhase(
+        taskId,
+        phase,
+        (data) => {
+          writeWebSocketText(socket, data);
+        },
+      );
+      let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+      socket.on("data", (chunk) => {
+        pending = readWebSocketFrames(
+          Buffer.concat([pending, chunk]),
+          (text) => {
+            options.terminalManager?.writePhase(taskId, phase, text);
+          },
+        );
+      });
+      socket.on("close", () => unsubscribe?.());
+      socket.on("error", () => unsubscribe?.());
+      return;
+    }
     const match = url.pathname.match(/^\/api\/tasks\/([^/]+)\/terminal\/ws$/);
     if (!match || !options.terminalManager) {
       socket.destroy();

@@ -1,4 +1,10 @@
-import type { BoardStore, BoardTaskRecord } from "./BoardStore.js";
+import type {
+  BoardStore,
+  BoardTaskRecord,
+  BoardTaskWorkflowPhase,
+} from "./BoardStore.js";
+import { boardTaskView } from "./BoardStore.js";
+import { recoverableFailedTaskPhase } from "./langGraphTaskRunner.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
 
 /** A resolved JSON API response. */
@@ -14,11 +20,38 @@ export type TaskResumer = (
   task: BoardTaskRecord,
   decision: "approve" | "reject",
 ) => void;
+export interface TaskPhaseCompletionOptions {
+  readonly workspacePlanText?: string;
+}
+/** Completes an interactive workflow phase and advances the workflow. */
+export type TaskPhaseCompleter = (
+  task: BoardTaskRecord,
+  phase: BoardTaskWorkflowPhase,
+  options?: TaskPhaseCompletionOptions,
+) => void;
+/** Recovers a failed task whose persisted failure is a workflow phase pause. */
+export type TaskRecoverer = (task: BoardTaskRecord) => void;
+/** Cancels a running workflow task. */
+export type TaskCanceler = (task: BoardTaskRecord) => void;
 
 const json = (status: number, body: unknown): ApiResponse => ({
   status,
   body,
 });
+
+const WORKFLOW_PHASES = new Set<string>([
+  "classifying",
+  "aligning-prd",
+  "technical-planning",
+  "creating-issues",
+  "awaiting-approval",
+  "running",
+]);
+
+const parseWorkflowPhase = (
+  value: string,
+): BoardTaskWorkflowPhase | undefined =>
+  WORKFLOW_PHASES.has(value) ? (value as BoardTaskWorkflowPhase) : undefined;
 
 /**
  * Route a board API request. Pure with respect to I/O beyond the store and the
@@ -35,6 +68,9 @@ export const routeApi = async (
   launchTask?: TaskLauncher,
   resumeTask?: TaskResumer,
   terminalManager?: BoardTerminalManager,
+  completePhase?: TaskPhaseCompleter,
+  recoverTask?: TaskRecoverer,
+  cancelTask?: TaskCanceler,
 ): Promise<ApiResponse | undefined> => {
   if (!pathname.startsWith("/api/")) return undefined;
 
@@ -57,14 +93,27 @@ export const routeApi = async (
   }
 
   if (method === "GET" && pathname === "/api/tasks") {
-    return json(200, store.listTasks());
+    return json(200, store.listTasks().map(boardTaskView));
+  }
+
+  const taskProgressMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/progress$/);
+  if (method === "GET" && taskProgressMatch) {
+    const id = decodeURIComponent(taskProgressMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    const markdown = store.readTaskProgress(id);
+    return markdown !== undefined
+      ? json(200, { markdown })
+      : json(404, { error: "task progress not found" });
   }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
   if (method === "GET" && taskMatch) {
     const id = decodeURIComponent(taskMatch[1]!);
     const task = store.getTask(id);
-    return task ? json(200, task) : json(404, { error: "task not found" });
+    return task
+      ? json(200, boardTaskView(task))
+      : json(404, { error: "task not found" });
   }
 
   const taskResumeMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
@@ -85,6 +134,110 @@ export const routeApi = async (
     }
     resumeTask(task, decision);
     return json(202, { status: "resuming" });
+  }
+
+  const taskRecoverMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/recover$/);
+  if (method === "POST" && taskRecoverMatch) {
+    const id = decodeURIComponent(taskRecoverMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    const phase = recoverableFailedTaskPhase(task);
+    if (!phase) return json(409, { error: "task failure is not recoverable" });
+    if (!recoverTask) {
+      return json(409, { error: "task recovery is not enabled" });
+    }
+    recoverTask(task);
+    return json(202, { status: "recovering", phase });
+  }
+
+  const taskCancelMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
+  if (method === "POST" && taskCancelMatch) {
+    const id = decodeURIComponent(taskCancelMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (task.status !== "running") {
+      return json(409, { error: "task is not running" });
+    }
+    if (!cancelTask) {
+      return json(409, { error: "task cancellation is not enabled" });
+    }
+    cancelTask(task);
+    return json(202, { status: "cancelling" });
+  }
+
+  const phaseTerminalMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/phases\/([^/]+)\/terminal(\/resize)?$/,
+  );
+  if (phaseTerminalMatch) {
+    const id = decodeURIComponent(phaseTerminalMatch[1]!);
+    const phase = parseWorkflowPhase(
+      decodeURIComponent(phaseTerminalMatch[2]!),
+    );
+    if (!phase) return json(404, { error: "phase not found" });
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (!terminalManager) {
+      return json(409, { error: "interactive terminal is not enabled" });
+    }
+    if (method === "GET" && !phaseTerminalMatch[3]) {
+      return json(
+        200,
+        terminalManager.getPhase(id, phase) ?? { status: "not-started" },
+      );
+    }
+    if (method === "POST" && phaseTerminalMatch[3] === "/resize") {
+      let payload: unknown;
+      try {
+        payload = await parseBody();
+      } catch {
+        return json(400, { error: "invalid JSON body" });
+      }
+      const { cols, rows } = (payload ?? {}) as {
+        cols?: unknown;
+        rows?: unknown;
+      };
+      if (typeof cols !== "number" || typeof rows !== "number") {
+        return json(400, { error: "cols and rows must be numbers" });
+      }
+      return terminalManager.resizePhase(id, phase, cols, rows)
+        ? json(202, { status: "resized" })
+        : json(409, { error: "terminal session is not running" });
+    }
+    return json(405, { error: "method not allowed" });
+  }
+
+  const phaseCompleteMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/phases\/([^/]+)\/complete$/,
+  );
+  if (method === "POST" && phaseCompleteMatch) {
+    const id = decodeURIComponent(phaseCompleteMatch[1]!);
+    const phase = parseWorkflowPhase(
+      decodeURIComponent(phaseCompleteMatch[2]!),
+    );
+    if (!phase) return json(404, { error: "phase not found" });
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (!completePhase) {
+      return json(409, { error: "phase completion is not enabled" });
+    }
+    let payload: unknown;
+    try {
+      payload = await parseBody();
+    } catch {
+      return json(400, { error: "invalid JSON body" });
+    }
+    const body = (payload ?? {}) as {
+      workspacePlan?: unknown;
+      workspacePlanText?: unknown;
+    };
+    const workspacePlanText =
+      typeof body.workspacePlanText === "string"
+        ? body.workspacePlanText
+        : body.workspacePlan !== undefined
+          ? `<workspace_plan>${JSON.stringify(body.workspacePlan)}</workspace_plan>`
+          : undefined;
+    completePhase(task, phase, { workspacePlanText });
+    return json(202, { status: "completing" });
   }
 
   const taskTerminalMatch = pathname.match(
@@ -146,7 +299,7 @@ export const routeApi = async (
         // Launch failures are reflected via task status updates, not here.
       }
     }
-    return json(201, task);
+    return json(201, boardTaskView(task));
   }
 
   return json(404, { error: "not found" });

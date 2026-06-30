@@ -4,6 +4,7 @@ import {
   createRunRecorder,
   type BoardTaskPlan,
   type BoardTaskRecord,
+  type BoardTaskWorkflowPhase,
 } from "./BoardStore.js";
 import type { TaskLauncher } from "./router.js";
 
@@ -13,7 +14,8 @@ export interface TaskRunResult {
   /** The workspace plan, when the runner produced one. */
   readonly plan?: BoardTaskPlan;
   /** Non-terminal result used by workflow-backed tasks that paused. */
-  readonly status?: "awaiting-approval";
+  readonly status?: "awaiting-approval" | "awaiting-phase-completion";
+  readonly phase?: BoardTaskWorkflowPhase;
 }
 
 /**
@@ -72,6 +74,9 @@ export const createTaskLauncher = (deps: {
         onPlan,
       })
       .then((result) => {
+        if (result.status === "awaiting-phase-completion") {
+          return;
+        }
         if (result.status === "awaiting-approval") {
           deps.store.updateTask(task.id, {
             workflow: {

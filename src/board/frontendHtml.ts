@@ -70,6 +70,8 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       button:hover { transform: translateY(-1px); box-shadow: 0 14px 34px rgba(33, 212, 253, .24); }
       button:disabled { cursor: default; opacity: .6; transform: none; }
       button.secondary { background: rgba(15, 23, 42, .76); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+      button.danger { background: linear-gradient(135deg, #e11d48, var(--failed)); color: white; border: 0; box-shadow: 0 10px 26px rgba(251, 113, 133, .18); }
+      button.danger:hover { box-shadow: 0 14px 34px rgba(251, 113, 133, .26); }
       .layout { display: grid; grid-template-columns: minmax(320px, 1fr) 8px minmax(360px, var(--detail-width, 500px)); gap: 0; height: calc(100vh - 71px); }
       .board { overflow: auto; padding: 22px; }
       .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -112,7 +114,10 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       .stream .tool { color: var(--accent); }
       .stream .row { margin-bottom: 4px; }
       .terminal-frame { background: #050814; border: 1px solid rgba(148, 163, 184, .16); border-radius: 13px; padding: 8px; min-height: 390px; overflow: hidden; box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }
+      .terminal-frame.readonly { min-height: 360px; }
       .terminal-frame .xterm { padding: 4px; }
+      .terminal-progress { color: var(--muted); font-size: 12px; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+      .terminal-progress strong { color: var(--text); }
       .empty { color: var(--muted); padding: 30px 0; text-align: center; }
       .notice { color: var(--muted); background: rgba(148, 163, 184, .08); border: 1px dashed var(--border); border-radius: 12px; padding: 11px; font-size: 12px; }
       .error-box { color: var(--failed); background: rgba(251, 113, 133, .08); border: 1px solid rgba(251, 113, 133, .25); border-radius: 12px; padding: 11px; margin-top: 10px; white-space: pre-wrap; }
@@ -141,6 +146,12 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       .repo-chip .rrepo { font-weight: 600; margin-bottom: 4px; }
       .repo-chip .rmeta { color: var(--muted); font-size: 11px; }
       .detail-list { display: grid; gap: 8px; }
+      .stage-line { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 0 0 10px; }
+      .timeline { display: grid; gap: 6px; margin-top: 10px; }
+      .timeline-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 10px; background: rgba(15, 23, 42, .44); color: var(--muted); font-size: 12px; }
+      .timeline-item.current { border-color: var(--border-strong); color: var(--text); background: rgba(138, 180, 255, .12); }
+      .timeline-item.complete { color: var(--succeeded); }
+      .timeline-item.failed { color: var(--failed); border-color: rgba(251, 113, 133, .25); background: rgba(251, 113, 133, .08); }
       .dot-status { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 6px; box-shadow: 0 0 14px currentColor; }
       .dot-status.running { background: var(--running); color: var(--running); }
       .dot-status.succeeded { background: var(--succeeded); color: var(--succeeded); }
@@ -181,9 +192,170 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       const api = (path, opts) => fetch(path, opts).then((r) => r.json());
       const fmtTokens = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
       const STATUSES = ["running", "succeeded", "failed"];
+      const INTERACTIVE_PHASES = ["classifying", "aligning-prd", "technical-planning", "creating-issues"];
+      const WORKFLOW_PHASES = [...INTERACTIVE_PHASES, "awaiting-approval", "running"];
+      const KNOWN_STAGE_LABELS = ["Validating workspace plan", "Fix workspace plan", "Cancel issue generation"];
       const countStatus = (items, status) => items.filter((i) => i.status === status).length;
+      const fallbackStage = (task) => task.stage || {
+        id: task.status,
+        label: task.status,
+        mode: task.status,
+        description: "No workflow stage has been reported yet.",
+        canComplete: false,
+        canCancel: false,
+        canApprove: false,
+        canReject: false,
+        canRecover: false,
+        timeline: [],
+      };
+      const interruptPhase = (error) => {
+        if (!error) return null;
+        let parsed = error;
+        if (typeof error === "string") {
+          try { parsed = JSON.parse(error); } catch { return null; }
+        }
+        if (!Array.isArray(parsed) || parsed.length === 0) return null;
+        const phase = parsed[0] && parsed[0].value && parsed[0].value.phase;
+        return typeof phase === "string" && WORKFLOW_PHASES.includes(phase) ? phase : null;
+      };
+      const latestInteractivePhaseSession = (workflow) => {
+        const sessions = Object.values((workflow && workflow.phaseSessions) || {});
+        const latest = sessions
+          .filter((session) => session && INTERACTIVE_PHASES.includes(session.phase))
+          .sort((a, b) => ((b.exitedAt || b.startedAt) || "").localeCompare((a.exitedAt || a.startedAt) || ""))[0];
+        return latest ? latest.phase : null;
+      };
+      const isPlannerTransientFailure = (task, workflow) => {
+        const message = ((task && task.error) || "") + "\\n" + ((workflow && workflow.error) || "");
+        return /Agent idle for \\d+ seconds/i.test(message) && (/runWorkspace repository failed/i.test(message) || /planner/i.test(message));
+      };
 
-      function Stream({ runId }) {
+      const eventTime = (event) => {
+        if (!event || !event.timestamp) return "";
+        const date = new Date(event.timestamp);
+        return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
+      };
+      const eventTokenTotal = (event) => {
+        const usage = event && event.usage;
+        if (!usage) return 0;
+        return usage.inputTokens + usage.cacheCreationInputTokens + usage.cacheReadInputTokens + usage.outputTokens;
+      };
+      const terminalPrefix = (event, label) => {
+        const time = eventTime(event);
+        return (time ? "[" + time + "] " : "") + label + " ";
+      };
+      const indentTerminalText = (prefix, value) => {
+        const text = String(value || "");
+        const lines = text.replace(/\\u0000/g, "").split(/\\r?\\n/);
+        return lines.map((line, index) => (index === 0 ? prefix : " ".repeat(prefix.length)) + line).join("\\r\\n");
+      };
+      const formatRunActivityRecord = (record) => {
+        const e = record.event;
+        if (e.type === "run-started") {
+          return [
+            terminalPrefix(e, "$") + "run started: " + e.name,
+            "  agent: " + e.agent + (e.model ? " · " + e.model : ""),
+            "  sandbox: " + e.sandbox + " · branch: " + e.branch,
+            "  max iterations: " + e.maxIterations,
+          ];
+        }
+        if (e.type === "iteration-started") return [terminalPrefix(e, "==>") + "iteration " + e.iteration + "/" + e.maxIterations];
+        if (e.type === "agent-text") return [indentTerminalText(terminalPrefix(e, "agent>"), e.message)];
+        if (e.type === "agent-tool-call") return [indentTerminalText(terminalPrefix(e, "tool>"), e.name + " " + e.formattedArgs)];
+        if (e.type === "agent-tool-result") return [indentTerminalText(terminalPrefix(e, "result>"), e.content)];
+        if (e.type === "agent-idle-warning") return [terminalPrefix(e, "warn>") + "Agent idle for " + e.minutes + " minute" + (e.minutes === 1 ? "" : "s")];
+        if (e.type === "usage") return [terminalPrefix(e, "usage>") + fmtTokens(eventTokenTotal(e)) + " tokens" + (e.model ? " · " + e.model : "") + " · iteration " + e.iteration];
+        if (e.type === "commit") return [terminalPrefix(e, "commit>") + e.sha.slice(0, 9) + " · iteration " + e.iteration];
+        if (e.type === "run-finished") return [terminalPrefix(e, "done>") + "finished after " + e.iterationsRun + " iteration" + (e.iterationsRun === 1 ? "" : "s") + (e.completionSignal ? " · " + e.completionSignal : "")];
+        if (e.type === "run-failed") return [indentTerminalText(terminalPrefix(e, "failed>"), e.message)];
+        return [terminalPrefix(e, "event>") + e.type];
+      };
+      const summarizeRunProgress = (records, run) => {
+        let currentIteration = run && (run.currentIteration || run.iterationsRun);
+        let maxIterations = run && run.maxIterations;
+        const useEventTotals = records.length > 0;
+        let commits = useEventTotals ? 0 : run ? run.commits || 0 : 0;
+        let totalTokens = useEventTotals ? 0 : run ? run.totalTokens || 0 : 0;
+        let lastType = run && run.lastEventType;
+        let status = run && run.status;
+        let failure = run && run.error;
+        for (const record of records) {
+          const e = record.event;
+          lastType = e.type;
+          if (e.type === "run-started") {
+            maxIterations = e.maxIterations;
+            status = status || "running";
+          } else if (e.type === "iteration-started") {
+            currentIteration = e.iteration;
+            maxIterations = e.maxIterations;
+          } else if (e.type === "usage") {
+            currentIteration = e.iteration;
+            totalTokens += eventTokenTotal(e);
+          } else if (e.iteration) {
+            currentIteration = e.iteration;
+          }
+          if (e.type === "commit") commits += 1;
+          if (e.type === "run-finished") {
+            status = "succeeded";
+            currentIteration = e.iterationsRun;
+          }
+          if (e.type === "run-failed") {
+            status = "failed";
+            failure = e.message;
+          }
+        }
+        const parts = [];
+        if (status) parts.push(status);
+        if (currentIteration && maxIterations) parts.push("iteration " + currentIteration + "/" + maxIterations);
+        else if (maxIterations) parts.push("max " + maxIterations + " iterations");
+        if (commits > 0) parts.push(commits + " commit" + (commits === 1 ? "" : "s"));
+        if (totalTokens > 0) parts.push(fmtTokens(totalTokens) + " tokens");
+        if (lastType) parts.push("last: " + lastType);
+        if (failure) parts.push("failed: " + String(failure).slice(0, 80));
+        return parts.length > 0 ? parts.join(" · ") : "No activity yet";
+      };
+      const runProgressText = (run) => summarizeRunProgress([], run);
+      const runSubtitle = (run) => (run.repo || run.name) + " · " + runProgressText(run);
+
+      function RunActivityTerminal({ records }) {
+        const elRef = React.useRef(null);
+        const termRef = React.useRef(null);
+        useEffect(() => {
+          const term = new Terminal({
+            cols: 100,
+            rows: 20,
+            cursorBlink: false,
+            convertEol: true,
+            disableStdin: true,
+            scrollback: 5000,
+            theme: { background: "#050814", foreground: "#eef4ff" },
+          });
+          termRef.current = term;
+          if (elRef.current) term.open(elRef.current);
+          return () => {
+            term.dispose();
+            termRef.current = null;
+          };
+        }, []);
+        useEffect(() => {
+          const term = termRef.current;
+          if (!term) return;
+          term.reset();
+          if (records.length === 0) {
+            term.writeln("No activity yet");
+          } else {
+            for (const record of records) {
+              for (const line of formatRunActivityRecord(record)) {
+                term.write(line + "\\r\\n");
+              }
+            }
+          }
+          term.scrollToBottom();
+        }, [records]);
+        return html\`<div class="terminal-frame readonly" ref=\${elRef}></div>\`;
+      }
+
+      function Stream({ runId, run }) {
         const [events, setEvents] = useState([]);
         useEffect(() => {
           let active = true;
@@ -201,20 +373,11 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           });
           return () => es.close();
         }, [runId]);
-        const visible = events.filter((r) =>
-          ["agent-text", "agent-tool-call", "agent-tool-result", "agent-idle-warning", "iteration-started", "commit"].includes(r.event.type)
-        );
-        if (visible.length === 0) return html\`<div class="empty">No activity yet</div>\`;
-        return html\`<div class="stream">\${visible.map((r) => {
-          const e = r.event;
-          if (e.type === "agent-text") return html\`<div class="row text" key=\${r.seq}>\${e.message}</div>\`;
-          if (e.type === "agent-tool-call") return html\`<div class="row tool" key=\${r.seq}>→ \${e.name} \${e.formattedArgs}</div>\`;
-          if (e.type === "agent-tool-result") return html\`<div class="row text" key=\${r.seq} style=\${{ color: "var(--muted)" }}>← \${e.content}</div>\`;
-          if (e.type === "agent-idle-warning") return html\`<div class="row" key=\${r.seq} style=\${{ color: "var(--warn)" }}>⚠ Agent idle for \${e.minutes} minute\${e.minutes === 1 ? "" : "s"}</div>\`;
-          if (e.type === "iteration-started") return html\`<div class="row" key=\${r.seq} style=\${{ color: "var(--muted)" }}>— iteration \${e.iteration}/\${e.maxIterations} —</div>\`;
-          if (e.type === "commit") return html\`<div class="row" key=\${r.seq} style=\${{ color: "var(--succeeded)" }}>✓ commit \${e.sha.slice(0,9)}</div>\`;
-          return null;
-        })}</div>\`;
+        const progress = summarizeRunProgress(events, run);
+        return html\`<div>
+          <div class="terminal-progress"><strong>readonly terminal</strong><span>\${progress}</span></div>
+          <\${RunActivityTerminal} records=\${events} />
+        </div>\`;
       }
 
       function UsagePanel({ runId, refreshKey }) {
@@ -235,7 +398,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         </table>\`;
       }
 
-      function TerminalPanel({ taskId }) {
+      function PhaseTerminalPanel({ taskId, phase }) {
         const elRef = React.useRef(null);
         const termRef = React.useRef(null);
         const [status, setStatus] = useState("connecting");
@@ -256,19 +419,20 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             elRef.current.addEventListener("click", () => term.focus());
           }
           const connect = async () => {
-            const info = await api("/api/tasks/" + taskId + "/terminal").catch(() => null);
+            const base = "/api/tasks/" + taskId + "/phases/" + phase + "/terminal";
+            const info = await api(base).catch(() => null);
             if (closed) return;
             if (!info || info.status === "not-started") {
               setStatus("not-started");
-              term.writeln("No interactive terminal session is attached to this task.");
+              term.writeln("Starting phase session...");
               return;
             }
             setStatus(info.status || "running");
             const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-            ws = new WebSocket(protocol + "//" + window.location.host + "/api/tasks/" + taskId + "/terminal/ws");
+            ws = new WebSocket(protocol + "//" + window.location.host + base + "/ws");
             ws.addEventListener("open", () => {
               setStatus("connected");
-              fetch("/api/tasks/" + taskId + "/terminal/resize", {
+              fetch(base + "/resize", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({ cols: term.cols, rows: term.rows }),
@@ -291,9 +455,9 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             if (ws) ws.close();
             term.dispose();
           };
-        }, [taskId]);
+        }, [taskId, phase]);
         return html\`<div>
-          <div class="sub">interactive terminal · \${status} · click the terminal, then type normally</div>
+          <div class="sub">interactive terminal · \${phase} · \${status} · click the terminal, then type normally</div>
           <div class="terminal-frame" ref=\${elRef}></div>
         </div>\`;
       }
@@ -319,6 +483,10 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
               <div class="rname">\${r.name}</div>
               <div class="body">\${r.task}</div>
               \${r.reason ? html\`<div class="rreason">\${r.reason}</div>\` : null}
+              \${r.issue ? html\`
+                <div class="label">Board issue</div>
+                <div class="rname">\${r.issue.title}</div>
+                <div class="body">\${r.issue.body}</div>\` : null}
             </div>\`)}\` : null}
         </div>\`;
       }
@@ -344,10 +512,15 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         return html\`<div>\${tasks.map((t) => {
           const taskRuns = runs.filter((r) => r.taskId === t.id);
           const isSelected = t.id === selectedTaskId;
+          const stage = fallbackStage(t);
           return html\`<div class="task-group \${isSelected ? "active" : ""}" key=\${t.id} onClick=\${() => onSelectTask(t.id)}>
             <div class="head">
               <span class="task-title">\${t.title}</span>
               <span class="badge \${t.status === "succeeded" ? "succeeded" : t.status === "failed" ? "failed" : "running"}">\${t.status}</span>
+            </div>
+            <div class="stage-line">
+              <span>\${stage.label}</span>
+              <span>· \${stage.mode}</span>
             </div>
             <div class="task-prompt">\${t.prompt}</div>
             <\${PlanView} plan=\${t.plan} />
@@ -357,7 +530,8 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
               : html\`<div class="repo-runs">\${taskRuns.map((r) => html\`
                   <div class="repo-chip \${r.id === selectedRunId ? "active" : ""}" key=\${r.id} onClick=\${(e) => { e.stopPropagation(); onSelectRun(r.id); }}>
                     <div class="rrepo"><span class="dot-status \${r.status}"></span>\${r.repo || r.name}</div>
-                    <div class="rmeta">\${r.branch}\${r.commits > 0 ? " · " + r.commits + " commit" + (r.commits === 1 ? "" : "s") : ""}</div>
+                    <div class="rmeta">\${r.branch}</div>
+                    <div class="rmeta">\${runProgressText(r)}</div>
                   </div>\`)}</div>\`}
           </div>\`;
         })}</div>\`;
@@ -365,7 +539,18 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
 
       function TaskDetail({ task, taskRuns, onSelectRun }) {
         const [decisionBusy, setDecisionBusy] = useState(null);
+        const [phaseBusy, setPhaseBusy] = useState(false);
+        const [phaseNotice, setPhaseNotice] = useState(null);
+        const [recoverBusy, setRecoverBusy] = useState(false);
+        const [cancelBusy, setCancelBusy] = useState(false);
+        const [progressBusy, setProgressBusy] = useState(false);
+        const [progressMarkdown, setProgressMarkdown] = useState(null);
         const activityRun = taskRuns.find((r) => r.status === "running") || taskRuns[0] || null;
+        const workflow = task.workflow || null;
+        const stage = fallbackStage(task);
+        const currentPhase = stage.terminalPhase || null;
+        const showPhaseTerminal = Boolean(stage.terminalPhase);
+        const recoverablePhase = stage.recoverPhase || null;
         const decide = async (decision) => {
           setDecisionBusy(decision);
           const res = await fetch("/api/tasks/" + task.id + "/resume", {
@@ -379,6 +564,50 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             alert(e.error || "Failed to resume task");
           }
         };
+        const completePhase = async () => {
+          if (!currentPhase) return;
+          setPhaseBusy(true);
+          setPhaseNotice("Sending completion signal…");
+          const res = await fetch("/api/tasks/" + task.id + "/phases/" + currentPhase + "/complete", { method: "POST" });
+          setPhaseBusy(false);
+          if (!res.ok) {
+            const e = await res.json();
+            setPhaseNotice(e.error || "Failed to complete phase");
+            alert(e.error || "Failed to complete phase");
+          } else {
+            setPhaseNotice("Completion signal sent. Waiting for workflow update…");
+          }
+        };
+        const recoverTask = async () => {
+          setRecoverBusy(true);
+          const res = await fetch("/api/tasks/" + task.id + "/recover", { method: "POST" });
+          setRecoverBusy(false);
+          if (!res.ok) {
+            const e = await res.json();
+            alert(e.error || "Failed to recover task");
+          }
+        };
+        const viewProgress = async () => {
+          setProgressBusy(true);
+          const res = await fetch("/api/tasks/" + task.id + "/progress");
+          setProgressBusy(false);
+          if (!res.ok) {
+            const e = await res.json();
+            alert(e.error || "Failed to load progress");
+            return;
+          }
+          const body = await res.json();
+          setProgressMarkdown(body.markdown || "");
+        };
+        const cancelTask = async () => {
+          setCancelBusy(true);
+          const res = await fetch("/api/tasks/" + task.id + "/cancel", { method: "POST" });
+          setCancelBusy(false);
+          if (!res.ok) {
+            const e = await res.json();
+            alert(e.error || "Failed to cancel task");
+          }
+        };
         return html\`<div>
           <h3>Task details</h3>
           <div class="sub">\${task.title}</div>
@@ -388,21 +617,53 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             \${task.finishedAt ? html\`<span style=\${{ color: "var(--muted)", marginLeft: "8px" }}>finished \${new Date(task.finishedAt).toLocaleString()}</span>\` : null}
             \${task.error ? html\`<div class="error-box">\${task.error}</div>\` : null}
           </div>
-          \${task.workflow ? html\`<div class="section">
-            <div class="title">Workflow</div>
-            <div class="notice">
-              \${task.workflow.status}\${task.workflow.message ? " · " + task.workflow.message : ""}\${task.workflow.retryCount ? " · retry " + task.workflow.retryCount : ""}
-            </div>
-            \${task.workflow.status === "awaiting-approval" ? html\`
-              <div class="actions">
-                <button class="secondary" disabled=\${decisionBusy !== null} onClick=\${() => decide("reject")}>\${decisionBusy === "reject" ? "Rejecting…" : "Reject plan"}</button>
-                <button disabled=\${decisionBusy !== null} onClick=\${() => decide("approve")}>\${decisionBusy === "approve" ? "Approving…" : "Approve plan"}</button>
-              </div>\` : null}
-          </div>\` : null}
           <div class="section">
-            <div class="title">Interactive terminal</div>
-            <\${TerminalPanel} taskId=\${task.id} />
+            <div class="title">Current stage</div>
+            <div class="notice">
+              <strong>\${stage.label}</strong> · \${stage.mode}<br />
+              \${stage.description}\${workflow && workflow.message ? " · " + workflow.message : ""}\${workflow && workflow.retryCount ? " · retry " + workflow.retryCount : ""}
+            </div>
+            \${stage.timeline && stage.timeline.length > 0 ? html\`
+              <div class="title" style=\${{ marginTop: "12px" }}>Workflow timeline</div>
+              <div class="timeline">
+                \${stage.timeline.map((item) => html\`<div class="timeline-item \${item.status}" key=\${item.id}>
+                  <span>\${item.label}</span>
+                  <span>\${item.status}</span>
+                </div>\`)}
+              </div>\` : null}
+            \${stage.canComplete && currentPhase ? html\`
+              <div class="actions">
+                <button disabled=\${phaseBusy} onClick=\${completePhase}>\${phaseBusy ? "Continuing…" : "Complete phase / Continue"}</button>
+              </div>\` : null}
+            \${phaseNotice ? html\`<div class="notice">\${phaseNotice}</div>\` : null}
+            \${stage.canRecover && recoverablePhase ? html\`
+              <div class="notice">Recover will continue from the Board progress document, not from a model session.</div>
+              <div class="actions">
+                <button disabled=\${recoverBusy} onClick=\${recoverTask}>\${recoverBusy ? "Recovering…" : "Recover / Continue from failed phase"}</button>
+              </div>\` : null}
+            \${task.plan ? html\`
+              <div class="actions">
+                <button class="secondary" disabled=\${progressBusy} onClick=\${viewProgress}>\${progressBusy ? "Loading progress…" : "View progress"}</button>
+              </div>\` : null}
+            \${progressMarkdown !== null ? html\`
+              <div class="section">
+                <div class="title">Board progress document</div>
+                <div class="stream"><div class="text">\${progressMarkdown || "No progress document content."}</div></div>
+              </div>\` : null}
+            \${stage.canCancel ? html\`
+              <div class="actions">
+                <button class="danger" disabled=\${cancelBusy} onClick=\${cancelTask}>\${cancelBusy ? "Cancelling…" : (stage.cancelLabel || "Cancel phase")}</button>
+              </div>\` : null}
+            \${stage.canApprove || stage.canReject ? html\`
+              <div class="actions">
+                \${stage.canReject ? html\`<button class="secondary" disabled=\${decisionBusy !== null} onClick=\${() => decide("reject")}>\${decisionBusy === "reject" ? "Rejecting…" : "Reject plan"}</button>\` : null}
+                \${stage.canApprove ? html\`<button disabled=\${decisionBusy !== null} onClick=\${() => decide("approve")}>\${decisionBusy === "approve" ? "Approving…" : "Approve plan"}</button>\` : null}
+              </div>\` : null}
           </div>
+          \${showPhaseTerminal ? html\`<div class="section">
+            <div class="title">Phase terminal</div>
+            <\${PhaseTerminalPanel} taskId=\${task.id} phase=\${currentPhase} />
+          </div>\` : null}
           <div class="section">
             <div class="title">Prompt</div>
             <div class="stream"><div class="text">\${task.prompt}</div></div>
@@ -417,13 +678,14 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
               ? html\`<div class="notice">\${task.status === "failed" ? "Task failed before any repository run started." : "Waiting for runs…"}</div>\`
               : html\`<div class="detail-list">\${taskRuns.map((r) => html\`<div class="repo-chip" key=\${r.id} onClick=\${() => onSelectRun(r.id)}>
                   <div class="rrepo"><span class="dot-status \${r.status}"></span>\${r.repo || r.name}</div>
-                  <div class="rmeta">\${r.status} · \${r.branch}</div>
+                  <div class="rmeta">\${r.branch}</div>
+                  <div class="rmeta">\${runProgressText(r)}</div>
                 </div>\`)}</div>\`}
           </div>
           \${activityRun ? html\`<div class="section">
             <div class="title">Task activity</div>
-            <div class="sub">\${activityRun.repo || activityRun.name} · \${activityRun.status}</div>
-            <\${Stream} runId=\${activityRun.id} />
+            <div class="sub">\${runSubtitle(activityRun)}</div>
+            <\${Stream} runId=\${activityRun.id} run=\${activityRun} />
           </div>\` : null}
         </div>\`;
       }
@@ -446,7 +708,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           </div>
           <div class="section">
             <div class="title">Live activity</div>
-            <\${Stream} runId=\${run.id} />
+            <\${Stream} runId=\${run.id} run=\${run} />
           </div>
         </div>\`;
       }

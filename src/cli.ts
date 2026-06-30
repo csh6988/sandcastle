@@ -4,6 +4,7 @@ import { Effect, Option } from "effect";
 import * as clack from "@clack/prompts";
 import { execSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -57,6 +58,7 @@ import { noSandbox } from "./sandboxes/no-sandbox.js";
 import { run } from "./run.js";
 import {
   executeWorkspaceTaskPlan,
+  parseWorkspaceTaskPlan,
   runWorkspaceTask,
   type WorkspaceTaskPlan,
   type WorkspaceTaskRepositoryOptions,
@@ -64,15 +66,23 @@ import {
 } from "./runWorkspaceTask.js";
 import { docker } from "./sandboxes/docker.js";
 import { podman } from "./sandboxes/podman.js";
+import { encodeProjectPath } from "./SessionStore.js";
 import { VERSION } from "./version.js";
-import { BoardStore, type BoardTaskRecord } from "./board/BoardStore.js";
+import {
+  BoardStore,
+  type BoardTaskRecord,
+  type BoardTaskWorkflowPhase,
+} from "./board/BoardStore.js";
 import { startBoardServer } from "./board/server.js";
 import { createTaskLauncher } from "./board/launchTask.js";
 import {
   createLangGraphTaskWorkflow,
   workspacePlanToBoardPlan,
 } from "./board/langGraphTaskRunner.js";
-import { BoardTerminalManager } from "./board/terminalSession.js";
+import {
+  BoardTerminalManager,
+  PHASE_COMPLETION_SIGNAL,
+} from "./board/terminalSession.js";
 
 // --- Shared options ---
 
@@ -1435,7 +1445,7 @@ const normalizeWorkspaceRepositories = (
 // registry so there is a single place to bump them. (The internal `x6/`/`x5/`
 // routing slugs are not used here — external users get public model slugs.)
 const DEFAULT_WORKSPACE_CODEX_MODEL = getAgent("codex")!.defaultModel;
-const DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS = 90;
+export const DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS = 600;
 
 const buildWorkspaceCliAgent = (
   agentName: "codex" | "claude",
@@ -1451,7 +1461,7 @@ const buildWorkspaceCliAgent = (
         },
       );
 
-const buildWorkspaceSandboxProvider = (
+export const buildWorkspaceSandboxProvider = (
   sandbox: Option.Option<"docker" | "podman" | "no-sandbox">,
   env: Record<string, string>,
 ): SandboxProvider => {
@@ -1469,11 +1479,24 @@ const buildWorkspaceSandboxProvider = (
         const pathMap = new Map(
           options.mounts.map((mount) => [mount.sandboxPath, mount.hostPath]),
         );
+        const encodedPathMap = new Map(
+          options.mounts.map((mount) => [
+            encodeProjectPath(mount.sandboxPath),
+            encodeProjectPath(mount.hostPath),
+          ]),
+        );
+        const hostHome = process.env.HOME;
         const translate = (value: string | undefined): string | undefined => {
           if (value === undefined) return undefined;
           let translated = value;
+          for (const [sandboxPath, hostPath] of encodedPathMap) {
+            translated = translated.split(sandboxPath).join(hostPath);
+          }
           for (const [sandboxPath, hostPath] of pathMap) {
             translated = translated.split(sandboxPath).join(hostPath);
+          }
+          if (hostHome) {
+            translated = translated.split("/home/agent").join(hostHome);
           }
           return translated;
         };
@@ -1493,8 +1516,16 @@ const buildWorkspaceSandboxProvider = (
                 cwd: translate(execOptions.cwd),
               },
             ),
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
+          copyFileIn: async (hostPath, sandboxPath) => {
+            const targetPath = translate(sandboxPath) ?? sandboxPath;
+            mkdirSync(dirname(targetPath), { recursive: true });
+            copyFileSync(hostPath, targetPath);
+          },
+          copyFileOut: async (sandboxPath, hostPath) => {
+            const sourcePath = translate(sandboxPath) ?? sandboxPath;
+            mkdirSync(dirname(hostPath), { recursive: true });
+            copyFileSync(sourcePath, hostPath);
+          },
           close: () => host.close(),
         };
       },
@@ -1800,6 +1831,31 @@ ${
     : "- None recorded."
 }
 `;
+};
+
+export const parseInteractiveWorkspacePlan = (
+  transcript: string,
+): WorkspaceTaskPlan | undefined => {
+  let plan: WorkspaceTaskPlan | undefined;
+  for (const match of transcript.matchAll(
+    /<workspace_plan>\s*([\s\S]*?)\s*<\/workspace_plan>/g,
+  )) {
+    if (!match[1]) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(match[1]);
+    } catch {
+      continue;
+    }
+    try {
+      plan = parseWorkspaceTaskPlan(parsed, [], {
+        allowPlannerWorkspace: true,
+      }).plan;
+    } catch {
+      continue;
+    }
+  }
+  return plan;
 };
 
 const readWorkspacePlan = (planPath: string): WorkspaceTaskPlan => {
@@ -2343,22 +2399,58 @@ const boardDataDirOption = Options.text("data-dir").pipe(
   Options.optional,
 );
 
-const boardWorkflowOption = Options.choice("workflow", [
-  "legacy",
-  "langgraph",
-]).pipe(
-  Options.withDescription(
-    "Workflow engine for board tasks (legacy or langgraph; default: legacy)",
-  ),
-  Options.optional,
-);
+const buildBoardPhasePrompt = (
+  task: BoardTaskRecord,
+  phase: BoardTaskWorkflowPhase,
+): string => {
+  const issueGenerationInstructions =
+    phase === "creating-issues"
+      ? `
+For this creating-issues phase, produce the final Board issues interactively. Before printing the phase completion marker, include one machine-readable workspace plan block in this exact shape:
+
+<workspace_plan>
+{
+  "alignment": { "summary": "short summary" },
+  "technicalPlan": "technical approach and sequencing",
+  "repositories": [
+    {
+      "name": "repository-name",
+      "task": "specific implementation task",
+      "reason": "why this repository is affected",
+      "issue": {
+        "title": "short issue title",
+        "body": "Status: ready-for-agent\\n\\n## What to build\\n\\n...\\n\\n## Acceptance criteria\\n\\n- [ ] ...\\n\\n## Verification\\n\\n- [ ] ..."
+      }
+    }
+  ]
+}
+</workspace_plan>
+
+The Board will import this block directly. The repositories array must contain each repository name at most once. If multiple issues or tasks belong to the same repository, combine them into a single repository entry and put the combined work in that entry's task, issue body, and checklist instead of repeating the repository name.
+
+Do not print the completion marker until the workspace_plan block and issue content are final.`
+      : "";
+
+  return `You are helping with the current Sandcastle Board workflow phase.
+
+Task: ${task.title}
+Phase: ${phase}
+
+Original task prompt / PRD:
+${task.prompt}
+${issueGenerationInstructions}
+
+Work interactively with the user for this phase. When this phase is complete, print this exact marker on its own line:
+${PHASE_COMPLETION_SIGNAL}
+
+The Board will detect that marker and advance to the next phase. The user can still click "Complete phase / Continue" as a fallback. Do not start multi-repository execution from this terminal.`;
+};
 
 const boardCommand = Command.make(
   "board",
   {
     port: boardPortOption,
     dataDir: boardDataDirOption,
-    workflow: boardWorkflowOption,
     config: workspaceConfigOption,
     agent: workspaceAgentOption,
     model: workspaceModelOption,
@@ -2370,7 +2462,6 @@ const boardCommand = Command.make(
   ({
     port,
     dataDir,
-    workflow,
     config,
     agent,
     model,
@@ -2414,19 +2505,6 @@ const boardCommand = Command.make(
       const resolvedMaxIterations =
         maxIterations._tag === "Some" ? maxIterations.value : undefined;
 
-      const resolvePlannerRepositories = () => {
-        const plannerContext = resolveBoardPlanningConfig(
-          configPath,
-          cwd,
-          config._tag === "Some",
-        );
-        return normalizeWorkspaceRepositories(
-          plannerContext.configPath,
-          plannerContext.config,
-          cwd,
-        );
-      };
-
       const resolveExecutionRepositories = (plan: WorkspaceTaskPlan) => {
         const workspaceConfig =
           plan.workspace !== undefined
@@ -2453,124 +2531,163 @@ const boardCommand = Command.make(
         );
       };
 
-      const legacyTaskRunner = async ({
-        prompt,
-        title,
-        onRepoRunEvent,
-        onPlan,
-      }: Parameters<typeof createTaskLauncher>[0]["run"] extends (
-        args: infer A,
-      ) => unknown
-        ? A
-        : never) => {
-        const result = await runWorkspaceTask({
-          repositories: resolvePlannerRepositories(),
-          prompt,
-          agent: executionAgent,
-          plannerAgent,
-          sandbox: sandboxProvider,
-          branchPrefix: resolvedBranchPrefix,
-          maxIterations: resolvedMaxIterations,
-          allowPlannerWorkspace: true,
-          name: title,
-          idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-          onRepoRunEvent,
-          // Surface the planner phase as its own per-task run.
-          onPlannerRunEvent: (event) => onRepoRunEvent("(planner)", event),
-          // Show the plan as soon as it is ready, before execution finishes.
-          onPlan: (plan) => onPlan(workspacePlanToBoardPlan(plan)),
-        });
-        return { repositories: result.repositories };
-      };
-
-      const workflowEngine =
-        workflow._tag === "Some" ? workflow.value : "legacy";
-      const langGraphWorkflow =
-        workflowEngine === "langgraph"
-          ? createLangGraphTaskWorkflow({
-              store,
-              checkpointPath: resolve(resolvedDataDir, "workflows.sqlite"),
-              plan: async ({ prompt, title, onPlannerRunEvent }) => {
-                const result = await runWorkspaceTask({
-                  repositories: resolvePlannerRepositories(),
-                  prompt,
-                  agent: executionAgent,
-                  plannerAgent,
-                  sandbox: sandboxProvider,
-                  branchPrefix: resolvedBranchPrefix,
-                  maxIterations: resolvedMaxIterations,
-                  allowPlannerWorkspace: true,
-                  name: title,
-                  idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-                  dryRun: true,
-                  onPlannerRunEvent,
-                });
-                return {
-                  plan: result.plan,
-                  plannerStdout: result.plannerStdout,
-                };
-              },
-              execute: async ({ prompt, title, plan, onRepoRunEvent }) =>
-                executeWorkspaceTaskPlan({
-                  repositories: resolveExecutionRepositories(plan),
-                  plan,
-                  taskPrompt: prompt,
-                  agent: executionAgent,
-                  sandbox: sandboxProvider,
-                  branchPrefix:
-                    resolvedBranchPrefix ?? plan.workspace?.branchPrefix,
-                  maxIterations:
-                    resolvedMaxIterations ?? plan.workspace?.maxIterations,
-                  name: title,
-                  idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-                  onRepoRunEvent,
-                }),
-            })
-          : undefined;
-
-      const terminalManager = new BoardTerminalManager(store);
-      const launchTask = (task: BoardTaskRecord) => {
-        try {
-          if (!executionAgent.buildInteractiveArgs) {
-            store.updateTask(task.id, {
+      let langGraphWorkflow:
+        | ReturnType<typeof createLangGraphTaskWorkflow>
+        | undefined;
+      const phasePlanOverrides = new Map<string, string>();
+      const phasePlanOverrideKey = (
+        taskId: string,
+        phase: BoardTaskWorkflowPhase,
+      ) => `${taskId}:${phase}`;
+      const reportWorkflowPromise = (
+        taskId: string,
+        promise: Promise<unknown>,
+      ): void => {
+        void promise.catch((error) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const task = store.getTask(taskId);
+          const updatedAt = new Date().toISOString();
+          store.updateTask(taskId, {
+            status: "failed",
+            finishedAt: updatedAt,
+            error: message,
+            workflow: {
+              ...(task?.workflow ?? {
+                status: "failed",
+                updatedAt,
+              }),
               status: "failed",
-              finishedAt: new Date().toISOString(),
-              error: `Agent provider "${executionAgent.name}" does not support interactive sessions.`,
+              error: message,
+              updatedAt,
+            },
+          });
+        });
+      };
+      const terminalManager = new BoardTerminalManager(store, undefined, {
+        onPhaseCompleteSignal: ({ taskId, phase }) => {
+          if (langGraphWorkflow) {
+            reportWorkflowPromise(
+              taskId,
+              langGraphWorkflow.completePhase(taskId, phase),
+            );
+          }
+        },
+      });
+      const ensurePhaseSession = (
+        taskId: string,
+        phase: BoardTaskWorkflowPhase,
+      ) => {
+        const task = store.getTask(taskId);
+        if (!task) return;
+        try {
+          if (!plannerAgent.buildInteractiveArgs) {
+            store.updateTask(task.id, {
+              workflow: {
+                ...(task.workflow ?? {
+                  status: phase,
+                  currentPhase: phase,
+                  updatedAt: new Date().toISOString(),
+                }),
+                error: `Agent provider "${plannerAgent.name}" does not support interactive sessions.`,
+                updatedAt: new Date().toISOString(),
+              },
             });
             return;
           }
-          const args = executionAgent.buildInteractiveArgs({
-            prompt: task.prompt,
+          const args = plannerAgent.buildInteractiveArgs({
+            prompt: buildBoardPhasePrompt(task, phase),
             dangerouslySkipPermissions: true,
           });
           const [command, ...rest] = args;
           if (!command) {
             store.updateTask(task.id, {
-              status: "failed",
-              finishedAt: new Date().toISOString(),
-              error: `Agent provider "${executionAgent.name}" did not produce an interactive command.`,
+              workflow: {
+                ...(task.workflow ?? {
+                  status: phase,
+                  currentPhase: phase,
+                  updatedAt: new Date().toISOString(),
+                }),
+                error: `Agent provider "${plannerAgent.name}" did not produce an interactive command.`,
+                updatedAt: new Date().toISOString(),
+              },
             });
             return;
           }
-          const resolvedCommand =
-            command.includes("/") || command !== "claude"
-              ? command
-              : execSync("command -v claude", { encoding: "utf8" }).trim();
-          terminalManager.start({
+          terminalManager.startPhase({
             task,
-            command: resolvedCommand,
+            phase,
+            command,
             args: rest,
             cwd,
-            env: agentEnv,
+            env: { ...agentEnv, ...plannerAgent.env },
           });
         } catch (error) {
           store.updateTask(task.id, {
-            status: "failed",
-            finishedAt: new Date().toISOString(),
-            error: error instanceof Error ? error.message : String(error),
+            workflow: {
+              ...(task.workflow ?? {
+                status: phase,
+                currentPhase: phase,
+                updatedAt: new Date().toISOString(),
+              }),
+              error: error instanceof Error ? error.message : String(error),
+              updatedAt: new Date().toISOString(),
+            },
           });
         }
       };
+
+      langGraphWorkflow = createLangGraphTaskWorkflow({
+        store,
+        checkpointPath: resolve(resolvedDataDir, "workflows.sqlite"),
+        onPhaseStarted: ({ taskId, phase }) => {
+          ensurePhaseSession(taskId, phase);
+        },
+        planFromPhase: async ({ taskId, phase }) => {
+          if (phase !== "creating-issues") return undefined;
+          const overrideKey = phasePlanOverrideKey(taskId, phase);
+          const overrideText = phasePlanOverrides.get(overrideKey);
+          const overridePlan =
+            overrideText !== undefined
+              ? parseInteractiveWorkspacePlan(overrideText)
+              : undefined;
+          if (overridePlan) {
+            phasePlanOverrides.delete(overrideKey);
+            return { plan: overridePlan, plannerStdout: "interactive phase" };
+          }
+          const terminalPlan = parseInteractiveWorkspacePlan(
+            terminalManager.getPhaseOutput(taskId, phase),
+          );
+          return terminalPlan
+            ? { plan: terminalPlan, plannerStdout: "interactive phase" }
+            : undefined;
+        },
+        plan: async () => {
+          throw new Error(
+            "Board background planner fallback is disabled. Fix the <workspace_plan> block in the creating-issues phase terminal, then complete the phase again.",
+          );
+        },
+        execute: async ({ prompt, title, plan, onRepoRunEvent, signal }) =>
+          executeWorkspaceTaskPlan({
+            repositories: resolveExecutionRepositories(plan),
+            plan,
+            taskPrompt: prompt,
+            agent: executionAgent,
+            sandbox: sandboxProvider,
+            branchPrefix: resolvedBranchPrefix ?? plan.workspace?.branchPrefix,
+            maxIterations:
+              resolvedMaxIterations ?? plan.workspace?.maxIterations,
+            name: title,
+            idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+            onRepoRunEvent,
+            signal,
+          }),
+      });
+
+      const launchTask = createTaskLauncher({
+        store,
+        run: langGraphWorkflow.run,
+      });
 
       const server = yield* Effect.promise(() =>
         startBoardServer({
@@ -2578,11 +2695,34 @@ const boardCommand = Command.make(
           port: port._tag === "Some" ? port.value : 4318,
           launchTask,
           terminalManager,
-          resumeTask: langGraphWorkflow
-            ? (task, decision) => {
-                void langGraphWorkflow.resume(task.id, decision);
-              }
-            : undefined,
+          resumeTask: (task, decision) => {
+            reportWorkflowPromise(
+              task.id,
+              langGraphWorkflow.resume(task.id, decision),
+            );
+          },
+          completePhase: (task, phase, options) => {
+            if (options?.workspacePlanText) {
+              phasePlanOverrides.set(
+                phasePlanOverrideKey(task.id, phase),
+                options.workspacePlanText,
+              );
+            }
+            reportWorkflowPromise(
+              task.id,
+              langGraphWorkflow.completePhase(task.id, phase),
+            );
+          },
+          recoverTask: (task) => {
+            reportWorkflowPromise(
+              task.id,
+              langGraphWorkflow.recoverPhase(task.id),
+            );
+          },
+          cancelTask: (task) => {
+            terminalManager.killTask(task.id);
+            reportWorkflowPromise(task.id, langGraphWorkflow.cancel(task.id));
+          },
         }),
       );
 

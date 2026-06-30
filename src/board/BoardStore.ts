@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { RunEvent } from "../RunEvent.js";
+import { renderTaskProgress } from "./taskProgress.js";
 
 /**
  * Lifecycle status of a board run, derived from the run-event stream.
@@ -42,6 +43,7 @@ export interface BoardRunRecord {
   readonly sandbox: string;
   readonly branch: string;
   readonly maxIterations: number;
+  readonly currentIteration?: number;
   readonly status: BoardRunStatus;
   readonly createdAt: string;
   readonly finishedAt?: string;
@@ -49,6 +51,9 @@ export interface BoardRunRecord {
   readonly iterationsRun?: number;
   readonly error?: string;
   readonly commits: number;
+  readonly totalTokens?: number;
+  readonly lastEventType?: RunEvent["type"];
+  readonly lastEventAt?: string;
   /** Optional link to a board task (set for workspace task runs). */
   readonly taskId?: string;
   /** Repository name this run targets (set for workspace task runs). */
@@ -89,20 +94,52 @@ export interface BoardTaskPlan {
     readonly name: string;
     readonly task: string;
     readonly reason?: string;
+    readonly issue?: {
+      readonly title: string;
+      readonly body: string;
+    };
   }>;
+}
+
+export type BoardTaskWorkflowPhase =
+  | "classifying"
+  | "aligning-prd"
+  | "technical-planning"
+  | "creating-issues"
+  | "awaiting-approval"
+  | "running";
+
+export type BoardTaskWorkflowStatus =
+  | BoardTaskWorkflowPhase
+  | "planning"
+  | "approved"
+  | "rejected"
+  | "retrying"
+  | "succeeded"
+  | "failed";
+
+export type BoardTaskWorkflowSubstatus =
+  | "validating-workspace-plan"
+  | "fixing-workspace-plan";
+
+export interface BoardPhaseSessionSummary {
+  readonly taskId: string;
+  readonly phase: BoardTaskWorkflowPhase;
+  readonly pid: number;
+  readonly status: "running" | "exited";
+  readonly startedAt: string;
+  readonly exitedAt?: string;
+  readonly exitCode?: number;
 }
 
 /** Optional workflow state for board tasks driven by a workflow runtime. */
 export interface BoardTaskWorkflow {
-  readonly status:
-    | "planning"
-    | "awaiting-approval"
-    | "approved"
-    | "rejected"
-    | "running"
-    | "retrying"
-    | "succeeded"
-    | "failed";
+  readonly status: BoardTaskWorkflowStatus;
+  readonly currentPhase?: BoardTaskWorkflowPhase;
+  readonly substatus?: BoardTaskWorkflowSubstatus;
+  readonly phaseSessions?: Partial<
+    Record<BoardTaskWorkflowPhase, BoardPhaseSessionSummary>
+  >;
   readonly checkpointThreadId?: string;
   readonly retryCount?: number;
   readonly message?: string;
@@ -124,6 +161,47 @@ export interface BoardTaskRecord {
   readonly plan?: BoardTaskPlan;
   /** Workflow runtime status, present for opt-in workflow-backed tasks. */
   readonly workflow?: BoardTaskWorkflow;
+}
+
+export type BoardTaskStageMode =
+  | "pending"
+  | "interactive"
+  | "background"
+  | "approval"
+  | "afk"
+  | "complete"
+  | "failed";
+
+export type BoardTaskStageTimelineStatus =
+  | "pending"
+  | "complete"
+  | "current"
+  | "failed";
+
+export interface BoardTaskStageTimelineItem {
+  readonly id: string;
+  readonly label: string;
+  readonly status: BoardTaskStageTimelineStatus;
+}
+
+export interface BoardTaskStage {
+  readonly id: string;
+  readonly label: string;
+  readonly mode: BoardTaskStageMode;
+  readonly description: string;
+  readonly terminalPhase?: BoardTaskWorkflowPhase;
+  readonly canComplete: boolean;
+  readonly canCancel: boolean;
+  readonly cancelLabel?: string;
+  readonly canApprove: boolean;
+  readonly canReject: boolean;
+  readonly canRecover: boolean;
+  readonly recoverPhase?: BoardTaskWorkflowPhase;
+  readonly timeline: BoardTaskStageTimelineItem[];
+}
+
+export interface BoardTaskView extends BoardTaskRecord {
+  readonly stage: BoardTaskStage;
 }
 
 /** Input for creating a run, taken from a `run-started` event. */
@@ -152,6 +230,360 @@ type ChangeListener = (change: BoardChange) => void;
 
 const serializeEvent = (event: RunEvent): SerializedRunEvent =>
   JSON.parse(JSON.stringify(event)) as SerializedRunEvent;
+
+const INTERACTIVE_WORKFLOW_PHASES = new Set<BoardTaskWorkflowPhase>([
+  "classifying",
+  "aligning-prd",
+  "technical-planning",
+  "creating-issues",
+]);
+
+const WORKFLOW_PHASES = new Set<string>([
+  "classifying",
+  "aligning-prd",
+  "technical-planning",
+  "creating-issues",
+  "awaiting-approval",
+  "running",
+]);
+
+const PHASE_LABELS: Record<BoardTaskWorkflowPhase, string> = {
+  classifying: "Classifying task",
+  "aligning-prd": "Aligning PRD",
+  "technical-planning": "Technical planning",
+  "creating-issues": "Creating issues",
+  "awaiting-approval": "Awaiting approval",
+  running: "Running AFK execution",
+};
+
+const PHASE_DESCRIPTIONS: Record<BoardTaskWorkflowPhase, string> = {
+  classifying: "Classify the task and decide how the board should treat it.",
+  "aligning-prd": "Align the PRD, goals, non-goals, and workspace boundaries.",
+  "technical-planning":
+    "Prepare the technical approach before issues are finalized.",
+  "creating-issues":
+    "Create the final Board issues and emit the workspace_plan block.",
+  "awaiting-approval": "Review and approve the generated workspace plan.",
+  running: "Execute the approved workspace plan as AFK repository runs.",
+};
+
+const BASE_TIMELINE: ReadonlyArray<{
+  readonly id: string;
+  readonly label: string;
+}> = [
+  { id: "classifying", label: "Classify" },
+  { id: "aligning-prd", label: "Align PRD" },
+  { id: "technical-planning", label: "Technical plan" },
+  { id: "creating-issues", label: "Create issues" },
+  { id: "validating-workspace-plan", label: "Validate plan" },
+  { id: "awaiting-approval", label: "Approve" },
+  { id: "running", label: "Execute" },
+];
+
+const timelineFor = (
+  currentId: string,
+  failure = false,
+): BoardTaskStageTimelineItem[] => {
+  const currentIndex = BASE_TIMELINE.findIndex((item) => item.id === currentId);
+  return BASE_TIMELINE.map((item, index) => {
+    let status: BoardTaskStageTimelineStatus = "pending";
+    if (currentIndex === -1) {
+      status = failure ? "failed" : "pending";
+    } else if (index < currentIndex) {
+      status = "complete";
+    } else if (index === currentIndex) {
+      status = failure ? "failed" : "current";
+    }
+    return { ...item, status };
+  });
+};
+
+const boardTaskStage = (stage: {
+  readonly id: string;
+  readonly label: string;
+  readonly mode: BoardTaskStageMode;
+  readonly description: string;
+  readonly currentTimelineId?: string;
+  readonly terminalPhase?: BoardTaskWorkflowPhase;
+  readonly canComplete?: boolean;
+  readonly canCancel?: boolean;
+  readonly cancelLabel?: string;
+  readonly canApprove?: boolean;
+  readonly canReject?: boolean;
+  readonly canRecover?: boolean;
+  readonly recoverPhase?: BoardTaskWorkflowPhase;
+  readonly failureTimeline?: boolean;
+}): BoardTaskStage => ({
+  id: stage.id,
+  label: stage.label,
+  mode: stage.mode,
+  description: stage.description,
+  ...(stage.terminalPhase ? { terminalPhase: stage.terminalPhase } : {}),
+  canComplete: stage.canComplete ?? false,
+  canCancel: stage.canCancel ?? false,
+  ...(stage.cancelLabel ? { cancelLabel: stage.cancelLabel } : {}),
+  canApprove: stage.canApprove ?? false,
+  canReject: stage.canReject ?? false,
+  canRecover: stage.canRecover ?? false,
+  ...(stage.recoverPhase ? { recoverPhase: stage.recoverPhase } : {}),
+  timeline: timelineFor(
+    stage.currentTimelineId ?? stage.id,
+    stage.failureTimeline ?? false,
+  ),
+});
+
+const boardTaskInterruptPhase = (
+  error: unknown,
+): BoardTaskWorkflowPhase | undefined => {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : undefined;
+  let parsed: unknown = error;
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = error;
+    }
+  }
+  const interrupts = Array.isArray(parsed) ? parsed : undefined;
+  if (!interrupts || interrupts.length === 0) return undefined;
+  const phase = (interrupts[0] as { value?: { phase?: unknown } } | undefined)
+    ?.value?.phase;
+  return typeof phase === "string" && WORKFLOW_PHASES.has(phase)
+    ? (phase as BoardTaskWorkflowPhase)
+    : undefined;
+};
+
+const latestInteractivePhaseSession = (
+  task: BoardTaskRecord,
+): BoardTaskWorkflowPhase | undefined => {
+  const sessions = Object.values(task.workflow?.phaseSessions ?? {});
+  const latest = sessions
+    .filter(
+      (session) =>
+        session !== undefined && INTERACTIVE_WORKFLOW_PHASES.has(session.phase),
+    )
+    .sort((a, b) =>
+      (b.exitedAt ?? b.startedAt).localeCompare(a.exitedAt ?? a.startedAt),
+    )[0];
+  return latest?.phase;
+};
+
+const isPlannerTransientFailure = (task: BoardTaskRecord): boolean => {
+  const message = `${task.error ?? ""}\n${task.workflow?.error ?? ""}`;
+  return (
+    /Agent idle for \d+ seconds/i.test(message) &&
+    (/runWorkspace repository failed/i.test(message) ||
+      /planner/i.test(message))
+  );
+};
+
+const isAwaitingApprovalWithPlan = (task: BoardTaskRecord): boolean =>
+  task.plan !== undefined &&
+  (task.workflow?.status === "awaiting-approval" ||
+    task.workflow?.currentPhase === "awaiting-approval");
+
+const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
+  const message = [
+    task.error,
+    task.workflow?.error,
+    task.workflow?.message,
+    task.workflow?.status,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  return (
+    /Executing approved workspace plan/i.test(message) ||
+    /Retrying failed repository execution/i.test(message) ||
+    /One or more repository executions failed/i.test(message) ||
+    /Interrupted when the board server stopped or restarted/i.test(message) ||
+    /Task cancelled/i.test(message)
+  );
+};
+
+const isFailedExecutionWithPlan = (task: BoardTaskRecord): boolean =>
+  task.plan !== undefined &&
+  (task.workflow?.currentPhase === "running" ||
+    task.workflow?.status === "running" ||
+    task.workflow?.status === "retrying" ||
+    isExecutionRecoveryMessage(task));
+
+export const recoverableBoardTaskPhase = (
+  task: BoardTaskRecord,
+): BoardTaskWorkflowPhase | undefined => {
+  if (task.status !== "failed") return undefined;
+  const interruptPhase =
+    boardTaskInterruptPhase(task.error) ??
+    boardTaskInterruptPhase(task.workflow?.error);
+  if (interruptPhase) return interruptPhase;
+  if (isAwaitingApprovalWithPlan(task)) return "awaiting-approval";
+  if (isFailedExecutionWithPlan(task)) return "running";
+  if (task.plan) return undefined;
+  const currentPhase = task.workflow?.currentPhase;
+  if (currentPhase && INTERACTIVE_WORKFLOW_PHASES.has(currentPhase)) {
+    return currentPhase;
+  }
+  if (task.workflow?.status === "failed") {
+    const latestPhase = latestInteractivePhaseSession(task);
+    if (latestPhase) return latestPhase;
+  }
+  if (isPlannerTransientFailure(task)) return "creating-issues";
+  return undefined;
+};
+
+export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
+  if (task.status === "succeeded") {
+    return boardTaskStage({
+      id: "succeeded",
+      label: "Succeeded",
+      mode: "complete",
+      description: "The board task completed successfully.",
+      currentTimelineId: "running",
+    });
+  }
+
+  if (task.status === "failed") {
+    const recoverPhase = recoverableBoardTaskPhase(task);
+    if (recoverPhase) {
+      return boardTaskStage({
+        id: "failed-recoverable",
+        label: "Recover workflow phase",
+        mode: "failed",
+        description: `The task failed while ${PHASE_LABELS[recoverPhase].toLowerCase()} was recoverable.`,
+        currentTimelineId: recoverPhase,
+        canRecover: true,
+        recoverPhase,
+        failureTimeline: true,
+      });
+    }
+    return boardTaskStage({
+      id: "failed",
+      label: "Failed",
+      mode: "failed",
+      description:
+        "The board task failed and cannot be recovered automatically.",
+      currentTimelineId: task.workflow?.currentPhase ?? "running",
+      failureTimeline: true,
+    });
+  }
+
+  const workflow = task.workflow;
+  if (!workflow) {
+    return boardTaskStage({
+      id: task.status === "pending" ? "pending" : "starting",
+      label: task.status === "pending" ? "Pending" : "Starting workflow",
+      mode: task.status === "pending" ? "pending" : "background",
+      description:
+        task.status === "pending"
+          ? "The task has not started yet."
+          : "The board is starting the task workflow.",
+      currentTimelineId: "classifying",
+    });
+  }
+
+  if (
+    workflow.currentPhase === "creating-issues" &&
+    workflow.substatus === "validating-workspace-plan"
+  ) {
+    return boardTaskStage({
+      id: "validating-workspace-plan",
+      label: "Validating workspace plan",
+      mode: "background",
+      description:
+        "Importing and validating the workspace_plan block from the phase transcript.",
+      canCancel: task.status === "running",
+      cancelLabel: "Cancel issue generation",
+    });
+  }
+
+  if (
+    workflow.currentPhase === "creating-issues" &&
+    workflow.substatus === "fixing-workspace-plan"
+  ) {
+    return boardTaskStage({
+      id: "fix-workspace-plan",
+      label: "Fix workspace plan",
+      mode: "interactive",
+      description:
+        "Fix the workspace_plan block in the creating-issues terminal, then complete the phase again.",
+      currentTimelineId: "creating-issues",
+      terminalPhase: "creating-issues",
+      canComplete: true,
+      canCancel: task.status === "running",
+      cancelLabel: "Cancel issue generation",
+    });
+  }
+
+  const phase = workflow.currentPhase ?? workflow.status;
+  if (
+    typeof phase === "string" &&
+    WORKFLOW_PHASES.has(phase) &&
+    INTERACTIVE_WORKFLOW_PHASES.has(phase as BoardTaskWorkflowPhase)
+  ) {
+    const currentPhase = phase as BoardTaskWorkflowPhase;
+    return boardTaskStage({
+      id: currentPhase,
+      label: PHASE_LABELS[currentPhase],
+      mode: "interactive",
+      description: PHASE_DESCRIPTIONS[currentPhase],
+      terminalPhase: currentPhase,
+      canComplete: true,
+      canCancel: task.status === "running",
+      cancelLabel: "Cancel phase",
+    });
+  }
+
+  if (workflow.status === "awaiting-approval") {
+    return boardTaskStage({
+      id: "awaiting-approval",
+      label: "Awaiting approval",
+      mode: "approval",
+      description: "Review the generated workspace plan before AFK execution.",
+      canApprove: true,
+      canReject: true,
+    });
+  }
+
+  if (
+    workflow.currentPhase === "running" ||
+    workflow.status === "approved" ||
+    workflow.status === "running" ||
+    workflow.status === "retrying"
+  ) {
+    return boardTaskStage({
+      id: "running",
+      label:
+        workflow.status === "retrying"
+          ? "Retrying AFK execution"
+          : "Running AFK execution",
+      mode: "afk",
+      description:
+        workflow.status === "retrying"
+          ? "Retrying failed repository execution for the approved plan."
+          : "Executing the approved workspace plan in repository runs.",
+      canCancel: task.status === "running",
+      cancelLabel:
+        workflow.status === "retrying" ? "Cancel retry" : "Cancel execution",
+    });
+  }
+
+  return boardTaskStage({
+    id: "workflow-progress",
+    label: "Workflow in progress",
+    mode: "background",
+    description: workflow.message ?? "The board workflow is making progress.",
+    currentTimelineId: workflow.currentPhase ?? "classifying",
+  });
+};
+
+export const boardTaskView = (task: BoardTaskRecord): BoardTaskView => ({
+  ...task,
+  stage: getBoardTaskStage(task),
+});
 
 /**
  * File-backed persistence for the workflow board.
@@ -198,6 +630,10 @@ export class BoardStore {
     return join(this.tasksDir, `${id}.json`);
   }
 
+  taskProgressPath(id: string): string {
+    return join(this.tasksDir, id, "progress.md");
+  }
+
   private writeRun(run: BoardRunRecord): void {
     const path = this.runMetaPath(run.id);
     this.recentSelfWrites.set(path, Date.now());
@@ -230,6 +666,7 @@ export class BoardStore {
     }
     for (const task of this.listTasks()) {
       if (task.status !== "running") continue;
+      if (isAwaitingApprovalWithPlan(task)) continue;
       this.writeTask({
         ...task,
         status: "failed",
@@ -343,26 +780,61 @@ export class BoardStore {
 
     const run = this.getRun(runId);
     if (run) {
-      let next: BoardRunRecord | undefined;
-      if (event.type === "commit") {
-        next = { ...run, commits: run.commits + 1 };
+      let next: BoardRunRecord = {
+        ...run,
+        lastEventType: event.type,
+        lastEventAt: event.timestamp.toISOString(),
+      };
+      if (event.type === "iteration-started") {
+        next = {
+          ...next,
+          currentIteration: event.iteration,
+        };
+      } else if (event.type === "usage") {
+        const usage = event.usage;
+        next = {
+          ...next,
+          currentIteration: event.iteration,
+          totalTokens:
+            (run.totalTokens ?? 0) +
+            usage.inputTokens +
+            usage.cacheCreationInputTokens +
+            usage.cacheReadInputTokens +
+            usage.outputTokens,
+        };
+      } else if (event.type === "agent-text") {
+        next = { ...next, currentIteration: event.iteration };
+      } else if (event.type === "agent-tool-call") {
+        next = { ...next, currentIteration: event.iteration };
+      } else if (event.type === "agent-tool-result") {
+        next = { ...next, currentIteration: event.iteration };
+      } else if (event.type === "agent-idle-warning") {
+        next = { ...next, currentIteration: event.iteration };
+      } else if (event.type === "commit") {
+        next = {
+          ...next,
+          commits: run.commits + 1,
+          currentIteration: event.iteration,
+        };
       } else if (event.type === "run-finished") {
         next = {
-          ...run,
+          ...next,
           status: "succeeded",
           finishedAt: new Date().toISOString(),
           completionSignal: event.completionSignal,
           iterationsRun: event.iterationsRun,
+          currentIteration: event.iterationsRun,
         };
       } else if (event.type === "run-failed") {
         next = {
-          ...run,
+          ...next,
           status: "failed",
           finishedAt: new Date().toISOString(),
           error: event.message,
         };
       }
-      if (next) this.writeRun(next);
+      this.writeRun(next);
+      if (next.taskId) this.refreshTaskProgress(next.taskId);
     }
     return record;
   }
@@ -426,6 +898,30 @@ export class BoardStore {
     this.publish({ kind: "task-updated", task });
   }
 
+  readTaskProgress(id: string): string | undefined {
+    const path = this.taskProgressPath(id);
+    if (!existsSync(path)) return undefined;
+    return readFileSync(path, "utf8");
+  }
+
+  writeTaskProgress(id: string, markdown: string): void {
+    const progressDir = join(this.tasksDir, id);
+    mkdirSync(progressDir, { recursive: true });
+    writeFileSync(this.taskProgressPath(id), markdown);
+  }
+
+  refreshTaskProgress(id: string): string | undefined {
+    const task = this.getTask(id);
+    if (!task?.plan) return undefined;
+    const runs = this.listRuns()
+      .filter((run) => run.taskId === id && run.repo !== "(planner)")
+      .map((run) => ({ run, events: this.getEvents(run.id) }));
+    const markdown = renderTaskProgress(task, runs);
+    if (!markdown) return undefined;
+    this.writeTaskProgress(id, markdown);
+    return markdown;
+  }
+
   listTasks(): BoardTaskRecord[] {
     if (!existsSync(this.tasksDir)) return [];
     return readdirSync(this.tasksDir)
@@ -461,6 +957,7 @@ export class BoardStore {
     if (!task) return undefined;
     const next: BoardTaskRecord = { ...task, ...patch };
     this.writeTask(next);
+    if (next.plan) this.refreshTaskProgress(next.id);
     return next;
   }
 
@@ -544,6 +1041,7 @@ export const createRunRecorder = (
   link?: { taskId?: string; repo?: string },
 ): ((event: RunEvent) => void) => {
   let runId: string | undefined;
+  let closed = false;
   return (event: RunEvent) => {
     if (event.type === "run-started") {
       runId = store.createRun({
@@ -556,7 +1054,13 @@ export const createRunRecorder = (
         taskId: link?.taskId,
         repo: link?.repo,
       }).id;
+      closed = false;
     }
-    if (runId) store.recordEvent(runId, event);
+    if (!runId || closed) return;
+    store.recordEvent(runId, event);
+    if (event.type === "run-failed" || event.type === "run-finished") {
+      closed = true;
+      runId = undefined;
+    }
   };
 };

@@ -1,5 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { BoardStore, BoardTaskRecord } from "./BoardStore.js";
+import { StringDecoder } from "node:string_decoder";
+import type {
+  BoardPhaseSessionSummary,
+  BoardStore,
+  BoardTaskRecord,
+  BoardTaskWorkflowPhase,
+} from "./BoardStore.js";
 
 export interface TerminalProcess {
   readonly pid: number;
@@ -27,6 +33,7 @@ export interface TerminalSpawner {
 
 export interface BoardTerminalSessionRecord {
   readonly taskId: string;
+  readonly phase: BoardTaskWorkflowPhase;
   readonly pid: number;
   readonly status: "running" | "exited";
   readonly startedAt: string;
@@ -43,6 +50,27 @@ export interface StartTerminalSessionOptions {
   readonly cols?: number;
   readonly rows?: number;
 }
+
+export interface StartPhaseTerminalSessionOptions extends StartTerminalSessionOptions {
+  readonly phase: BoardTaskWorkflowPhase;
+}
+
+export const PHASE_COMPLETION_SIGNAL =
+  "<sandcastle-phase>complete</sandcastle-phase>";
+
+export const createTerminalUtf8Decoder = (callback: (data: string) => void) => {
+  const decoder = new StringDecoder("utf8");
+  return {
+    write(chunk: Buffer): void {
+      const decoded = decoder.write(chunk);
+      if (decoded) callback(decoded);
+    },
+    end(): void {
+      const decoded = decoder.end();
+      if (decoded) callback(decoded);
+    },
+  };
+};
 
 export const ptyBridgeSpawner: TerminalSpawner = {
   spawn(command, args, options) {
@@ -111,33 +139,46 @@ finally:
 
 const wrapChildProcess = (
   child: ChildProcessWithoutNullStreams,
-): TerminalProcess => ({
-  pid: child.pid ?? 0,
-  write: (data) => child.stdin.write(data),
-  resize: () => {
-    // The `script` wrapper owns the PTY size. Resizing is best-effort no-op.
-  },
-  kill: () => child.kill(),
-  onData: (callback) => {
-    child.stdout.on("data", (chunk: Buffer) =>
-      callback(chunk.toString("utf8")),
-    );
-    child.stderr.on("data", (chunk: Buffer) =>
-      callback(chunk.toString("utf8")),
-    );
-  },
-  onExit: (callback) => {
-    child.on("exit", (exitCode, signal) =>
-      callback({ exitCode: exitCode ?? 0, signal: signal ? 1 : undefined }),
-    );
-  },
-});
+): TerminalProcess => {
+  const decoders = new Set<ReturnType<typeof createTerminalUtf8Decoder>>();
+  return {
+    pid: child.pid ?? 0,
+    write: (data) => child.stdin.write(data),
+    resize: () => {
+      // The `script` wrapper owns the PTY size. Resizing is best-effort no-op.
+    },
+    kill: () => child.kill(),
+    onData: (callback) => {
+      const stdoutDecoder = createTerminalUtf8Decoder(callback);
+      const stderrDecoder = createTerminalUtf8Decoder(callback);
+      decoders.add(stdoutDecoder);
+      decoders.add(stderrDecoder);
+      child.stdout.on("data", (chunk: Buffer) => stdoutDecoder.write(chunk));
+      child.stderr.on("data", (chunk: Buffer) => stderrDecoder.write(chunk));
+    },
+    onExit: (callback) => {
+      child.on("exit", (exitCode, signal) => {
+        for (const decoder of decoders) decoder.end();
+        decoders.clear();
+        callback({ exitCode: exitCode ?? 0, signal: signal ? 1 : undefined });
+      });
+    },
+  };
+};
 
 interface RunningTerminalSession {
   readonly process: TerminalProcess;
   readonly subscribers: Set<(data: string) => void>;
   readonly output: string[];
+  completionScanOffset: number;
   record: BoardTerminalSessionRecord;
+}
+
+export interface BoardTerminalManagerOptions {
+  readonly onPhaseCompleteSignal?: (args: {
+    readonly taskId: string;
+    readonly phase: BoardTaskWorkflowPhase;
+  }) => void;
 }
 
 export class BoardTerminalManager {
@@ -146,10 +187,19 @@ export class BoardTerminalManager {
   constructor(
     private readonly store: BoardStore,
     private readonly spawner: TerminalSpawner = ptyBridgeSpawner,
+    private readonly options: BoardTerminalManagerOptions = {},
   ) {}
 
   start(options: StartTerminalSessionOptions): BoardTerminalSessionRecord {
-    const existing = this.sessions.get(options.task.id);
+    const phase = options.task.workflow?.currentPhase ?? "running";
+    return this.startPhase({ ...options, phase });
+  }
+
+  startPhase(
+    options: StartPhaseTerminalSessionOptions,
+  ): BoardTerminalSessionRecord {
+    const key = this.sessionKey(options.task.id, options.phase);
+    const existing = this.sessions.get(key);
     if (existing?.record.status === "running") return existing.record;
 
     const terminal = this.spawner.spawn(options.command, options.args, {
@@ -162,27 +212,39 @@ export class BoardTerminalManager {
       process: terminal,
       subscribers: new Set(),
       output: [],
+      completionScanOffset: 0,
       record: {
         taskId: options.task.id,
+        phase: options.phase,
         pid: terminal.pid,
         status: "running",
         startedAt: new Date().toISOString(),
       },
     };
-    this.sessions.set(options.task.id, session);
-    this.store.updateTask(options.task.id, {
-      status: "running",
-      workflow: {
-        status: "running",
-        message: "Interactive terminal session is running.",
-        updatedAt: new Date().toISOString(),
-      },
-    });
+    this.sessions.set(key, session);
+    this.recordPhaseSession(session.record);
 
     terminal.onData((data) => {
       session.output.push(data);
       if (session.output.length > 500) session.output.shift();
       for (const subscriber of session.subscribers) subscriber(data);
+      const output = session.output.join("");
+      let completionIndex = output.indexOf(
+        PHASE_COMPLETION_SIGNAL,
+        session.completionScanOffset,
+      );
+      while (completionIndex !== -1) {
+        session.completionScanOffset =
+          completionIndex + PHASE_COMPLETION_SIGNAL.length;
+        this.options.onPhaseCompleteSignal?.({
+          taskId: session.record.taskId,
+          phase: session.record.phase,
+        });
+        completionIndex = output.indexOf(
+          PHASE_COMPLETION_SIGNAL,
+          session.completionScanOffset,
+        );
+      }
     });
     terminal.onExit((event) => {
       session.record = {
@@ -191,38 +253,61 @@ export class BoardTerminalManager {
         exitedAt: new Date().toISOString(),
         exitCode: event.exitCode,
       };
-      this.store.updateTask(options.task.id, {
-        status: event.exitCode === 0 ? "succeeded" : "failed",
-        finishedAt: new Date().toISOString(),
-        ...(event.exitCode === 0
-          ? {}
-          : {
-              error: `Interactive terminal exited with code ${event.exitCode}.`,
-            }),
-        workflow: {
-          status: event.exitCode === 0 ? "succeeded" : "failed",
-          message: `Interactive terminal exited with code ${event.exitCode}.`,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      this.recordPhaseSession(session.record);
     });
 
     return session.record;
   }
 
   get(taskId: string): BoardTerminalSessionRecord | undefined {
-    return this.sessions.get(taskId)?.record;
+    const task = this.store.getTask(taskId);
+    const phase = task?.workflow?.currentPhase ?? "running";
+    return this.getPhase(taskId, phase);
+  }
+
+  getPhase(
+    taskId: string,
+    phase: BoardTaskWorkflowPhase,
+  ): BoardTerminalSessionRecord | undefined {
+    return this.sessions.get(this.sessionKey(taskId, phase))?.record;
+  }
+
+  getPhaseOutput(taskId: string, phase: BoardTaskWorkflowPhase): string {
+    return (
+      this.sessions.get(this.sessionKey(taskId, phase))?.output.join("") ?? ""
+    );
   }
 
   write(taskId: string, data: string): boolean {
-    const session = this.sessions.get(taskId);
+    const task = this.store.getTask(taskId);
+    const phase = task?.workflow?.currentPhase ?? "running";
+    return this.writePhase(taskId, phase, data);
+  }
+
+  writePhase(
+    taskId: string,
+    phase: BoardTaskWorkflowPhase,
+    data: string,
+  ): boolean {
+    const session = this.sessions.get(this.sessionKey(taskId, phase));
     if (!session || session.record.status !== "running") return false;
     session.process.write(data);
     return true;
   }
 
   resize(taskId: string, cols: number, rows: number): boolean {
-    const session = this.sessions.get(taskId);
+    const task = this.store.getTask(taskId);
+    const phase = task?.workflow?.currentPhase ?? "running";
+    return this.resizePhase(taskId, phase, cols, rows);
+  }
+
+  resizePhase(
+    taskId: string,
+    phase: BoardTaskWorkflowPhase,
+    cols: number,
+    rows: number,
+  ): boolean {
+    const session = this.sessions.get(this.sessionKey(taskId, phase));
     if (!session || session.record.status !== "running") return false;
     session.process.resize(cols, rows);
     return true;
@@ -232,13 +317,63 @@ export class BoardTerminalManager {
     taskId: string,
     callback: (data: string) => void,
   ): (() => void) | undefined {
-    const session = this.sessions.get(taskId);
+    const task = this.store.getTask(taskId);
+    const phase = task?.workflow?.currentPhase ?? "running";
+    return this.subscribePhase(taskId, phase, callback);
+  }
+
+  subscribePhase(
+    taskId: string,
+    phase: BoardTaskWorkflowPhase,
+    callback: (data: string) => void,
+  ): (() => void) | undefined {
+    const session = this.sessions.get(this.sessionKey(taskId, phase));
     if (!session) return undefined;
     for (const chunk of session.output) callback(chunk);
     session.subscribers.add(callback);
     return () => {
       session.subscribers.delete(callback);
     };
+  }
+
+  killTask(taskId: string): boolean {
+    let killed = false;
+    for (const session of this.sessions.values()) {
+      if (
+        session.record.taskId !== taskId ||
+        session.record.status !== "running"
+      ) {
+        continue;
+      }
+      session.process.kill();
+      killed = true;
+    }
+    return killed;
+  }
+
+  private sessionKey(taskId: string, phase: BoardTaskWorkflowPhase): string {
+    return `${taskId}:${phase}`;
+  }
+
+  private recordPhaseSession(record: BoardTerminalSessionRecord): void {
+    const task = this.store.getTask(record.taskId);
+    if (!task) return;
+    const summary: BoardPhaseSessionSummary = { ...record };
+    this.store.updateTask(record.taskId, {
+      workflow: {
+        status: task.workflow?.status ?? record.phase,
+        currentPhase: task.workflow?.currentPhase ?? record.phase,
+        checkpointThreadId: task.workflow?.checkpointThreadId,
+        retryCount: task.workflow?.retryCount,
+        message: task.workflow?.message,
+        error: task.workflow?.error,
+        phaseSessions: {
+          ...(task.workflow?.phaseSessions ?? {}),
+          [record.phase]: summary,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+    });
   }
 
   close(): void {

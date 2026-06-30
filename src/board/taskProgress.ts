@@ -1,0 +1,177 @@
+import type {
+  BoardRunEventRecord,
+  BoardRunRecord,
+  BoardTaskPlan,
+  BoardTaskRecord,
+} from "./BoardStore.js";
+
+export interface TaskProgressRun {
+  readonly run: BoardRunRecord;
+  readonly events: readonly BoardRunEventRecord[];
+}
+
+const MAX_DIGEST_ITEMS = 8;
+const MAX_INLINE_CHARS = 220;
+
+const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
+
+const truncate = (value: string, max = MAX_INLINE_CHARS): string => {
+  const normalized = oneLine(value);
+  return normalized.length > max
+    ? `${normalized.slice(0, Math.max(0, max - 1))}…`
+    : normalized;
+};
+
+const bulletList = (items: readonly string[], empty: string): string =>
+  (items.length > 0 ? items : [empty]).map((item) => `- ${item}`).join("\n");
+
+const repoStatus = (run: BoardRunRecord | undefined): string => {
+  if (!run) return "pending";
+  if (run.status === "running") return "in_progress";
+  if (run.status === "succeeded") return "succeeded";
+  return "needs_recovery";
+};
+
+const approvedWorkLines = (repo: BoardTaskPlan["repositories"][number]) => {
+  const lines = [`Task: ${repo.task}`];
+  if (repo.reason) lines.push(`Reason: ${repo.reason}`);
+  if (repo.issue) {
+    lines.push(`Issue: ${repo.issue.title}`);
+    lines.push(repo.issue.body);
+  }
+  return lines;
+};
+
+const eventTimestamp = (record: BoardRunEventRecord): string =>
+  "timestamp" in record.event && typeof record.event.timestamp === "string"
+    ? record.event.timestamp
+    : "unknown-time";
+
+const digestLine = (record: BoardRunEventRecord): string | undefined => {
+  const event = record.event;
+  const prefix = `[${eventTimestamp(record)}]`;
+  switch (event.type) {
+    case "agent-text":
+      return `${prefix} agent text: ${truncate(event.message)}`;
+    case "agent-tool-call":
+      return `${prefix} tool call: ${event.name} ${truncate(event.formattedArgs)}`;
+    case "agent-tool-result":
+      return `${prefix} tool result: ${truncate(event.content)}`;
+    case "agent-idle-warning":
+      return `${prefix} idle warning: agent idle for ${event.minutes} minute${event.minutes === 1 ? "" : "s"}`;
+    case "commit":
+      return `${prefix} commit: ${event.sha}`;
+    case "run-failed":
+      return `${prefix} run failed: ${truncate(event.message)}`;
+    case "run-finished":
+      return `${prefix} run finished after ${event.iterationsRun} iteration${event.iterationsRun === 1 ? "" : "s"}`;
+    default:
+      return undefined;
+  }
+};
+
+const completedEvidence = (
+  run: BoardRunRecord | undefined,
+  events: readonly BoardRunEventRecord[],
+): string[] => {
+  if (!run) return [];
+  const evidence = events
+    .map((record) => {
+      const event = record.event;
+      if (event.type === "commit") return `Commit ${event.sha}`;
+      if (event.type === "run-finished") {
+        return `Run ${run.id} finished successfully after ${event.iterationsRun} iteration${event.iterationsRun === 1 ? "" : "s"}.`;
+      }
+      return undefined;
+    })
+    .filter((item): item is string => item !== undefined);
+  if (run.status === "succeeded" && evidence.length === 0) {
+    evidence.push(`Run ${run.id} succeeded.`);
+  }
+  return evidence;
+};
+
+const currentNextStep = (
+  run: BoardRunRecord | undefined,
+  events: readonly BoardRunEventRecord[],
+): string[] => {
+  if (!run) return ["Start this repository's approved work."];
+  if (run.status === "succeeded") {
+    return ["No action required unless later verification finds a regression."];
+  }
+  if (run.status === "failed") {
+    return [
+      "Inspect the existing branch/worktree and continue from the last activity digest.",
+      run.error ? `Address the last failure: ${truncate(run.error)}` : "",
+    ].filter(Boolean);
+  }
+  const latestDigest = [...events].reverse().map(digestLine).find(Boolean);
+  return [
+    latestDigest
+      ? `Continue after latest activity: ${latestDigest}`
+      : "Continue the in-progress repository task.",
+  ];
+};
+
+const latestRunForRepo = (
+  repoName: string,
+  runs: readonly TaskProgressRun[],
+): { readonly latest?: TaskProgressRun; readonly attempt: number } => {
+  const repoRuns = runs
+    .filter(({ run }) => run.repo === repoName)
+    .sort((a, b) => b.run.createdAt.localeCompare(a.run.createdAt));
+  return repoRuns[0]
+    ? { latest: repoRuns[0], attempt: repoRuns.length }
+    : { attempt: 0 };
+};
+
+export const renderTaskProgress = (
+  task: BoardTaskRecord,
+  runs: readonly TaskProgressRun[],
+  now: Date = new Date(),
+): string | undefined => {
+  if (!task.plan) return undefined;
+  const sections = task.plan.repositories.map((repo) => {
+    const { latest, attempt } = latestRunForRepo(repo.name, runs);
+    const run = latest?.run;
+    const events = latest?.events ?? [];
+    const digest = events
+      .map(digestLine)
+      .filter((line): line is string => line !== undefined);
+    const lastDigest = digest.slice(-MAX_DIGEST_ITEMS);
+    return `## Repository: ${repo.name}
+Status: ${repoStatus(run)}
+Run ID: ${run?.id ?? "not-started"}
+Branch: ${run?.branch ?? "not-started"}
+Attempt: ${attempt}
+
+### Approved Work
+${approvedWorkLines(repo).join("\n")}
+
+### Completed Evidence
+${bulletList(completedEvidence(run, events), "No completed evidence recorded yet.")}
+
+### Current/Next Step
+${bulletList(currentNextStep(run, events), "Continue the approved repository task.")}
+
+### Last Activity Digest
+${bulletList(lastDigest, "No run activity recorded yet.")}`;
+  });
+
+  return `# Board Execution Progress
+
+Task: ${task.title}
+Task ID: ${task.id}
+Phase: ${task.workflow?.currentPhase ?? task.workflow?.status ?? task.status}
+Updated: ${now.toISOString()}
+
+## Recovery Instructions
+- Continue from this document, not from model session state.
+- Inspect existing branch/worktree/diff before editing.
+- Do not re-plan or regenerate Board issues.
+- Do not redo repositories marked succeeded unless verification proves they regressed.
+- Continue repositories marked in_progress, needs_recovery, or pending.
+
+${sections.join("\n\n")}
+`;
+};

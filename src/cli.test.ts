@@ -1,10 +1,25 @@
 import { exec } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { Option } from "effect";
 import { describe, expect, it } from "vitest";
-import { resolveBoardPlanningConfig } from "./cli.js";
+import {
+  buildWorkspaceSandboxProvider,
+  DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+  parseInteractiveWorkspacePlan,
+  resolveBoardPlanningConfig,
+} from "./cli.js";
+import type { BindMountSandboxProvider } from "./SandboxProvider.js";
+import { encodeProjectPath } from "./SessionStore.js";
 
 const execAsync = promisify(exec);
 
@@ -164,8 +179,58 @@ describe("sandcastle CLI", () => {
     const { stdout } = await runCli("board --help", process.cwd());
     expect(stdout).toContain("--port");
     expect(stdout).toContain("--data-dir");
-    expect(stdout).toContain("--workflow");
+    expect(stdout).not.toContain("--workflow");
+    expect(stdout).not.toContain("legacy");
     expect(stdout).toContain("no-sandbox");
+  });
+
+  it("workspace no-sandbox copies Claude session files from host storage", async () => {
+    const originalHome = process.env.HOME;
+    const homeDir = await mkdtemp(join(tmpdir(), "cli-nosandbox-home-"));
+    const hostRepo = await mkdtemp(join(tmpdir(), "cli-nosandbox-repo-"));
+    const sessionId = "session-123";
+    process.env.HOME = homeDir;
+    try {
+      const provider = buildWorkspaceSandboxProvider(
+        Option.some("no-sandbox"),
+        {},
+      ) as BindMountSandboxProvider;
+      const handle = await provider.create({
+        worktreePath: hostRepo,
+        hostRepoPath: hostRepo,
+        mounts: [{ hostPath: hostRepo, sandboxPath: "/home/agent/workspace" }],
+        env: {},
+      });
+      const hostSessionPath = join(
+        homeDir,
+        ".claude",
+        "projects",
+        encodeProjectPath(hostRepo),
+        `${sessionId}.jsonl`,
+      );
+      await mkdir(dirname(hostSessionPath), { recursive: true });
+      await writeFile(hostSessionPath, "session from host\n");
+
+      const copiedPath = join(
+        await mkdtemp(join(tmpdir(), "cli-nosandbox-copy-")),
+        "session.jsonl",
+      );
+      await handle.copyFileOut(
+        `/home/agent/.claude/projects/${encodeProjectPath("/home/agent/workspace")}/${sessionId}.jsonl`,
+        copiedPath,
+      );
+
+      expect(await readFile(copiedPath, "utf8")).toBe("session from host\n");
+      await handle.close();
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      await rm(homeDir, { recursive: true, force: true });
+      await rm(hostRepo, { recursive: true, force: true });
+    }
   });
 
   it("board uses the current repository as planner context when workspace config is missing", async () => {
@@ -181,6 +246,46 @@ describe("sandcastle CLI", () => {
     expect(resolved.config.repositories).toEqual([
       { name: basename(hostDir).toLowerCase(), cwd: "." },
     ]);
+  });
+
+  it("board planner runs use a 10 minute idle timeout by default", () => {
+    expect(DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS).toBe(600);
+  });
+
+  it("imports the last valid interactive workspace plan when earlier transcript blocks are invalid", () => {
+    const plan = parseInteractiveWorkspacePlan(`
+      Earlier prompt text included a broken example:
+      <workspace_plan>
+      {"repositories":
+      </workspace_plan>
+
+      Final answer:
+      <workspace_plan>
+      {"technicalPlan":"Ship the issues.","repositories":[{"name":"web","task":"Do it","issue":{"title":"Do it","body":"Status: ready-for-agent"}}]}
+      </workspace_plan>
+      <sandcastle-phase>complete</sandcastle-phase>
+    `);
+
+    expect(plan).toMatchObject({
+      technicalPlan: "Ship the issues.",
+      repositories: [
+        {
+          name: "web",
+          task: "Do it",
+          issue: { title: "Do it" },
+        },
+      ],
+    });
+  });
+
+  it("ignores interactive workspace plans with invalid repository entries", () => {
+    const plan = parseInteractiveWorkspacePlan(`
+      <workspace_plan>
+      {"repositories":[{"name":"web","issue":{"title":"","body":"missing task"}}]}
+      </workspace_plan>
+    `);
+
+    expect(plan).toBeUndefined();
   });
 
   it("workspace plan --help exposes PRD input options", async () => {

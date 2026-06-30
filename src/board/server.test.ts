@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BoardStore } from "./BoardStore.js";
+import { BoardStore, type BoardTaskWorkflowPhase } from "./BoardStore.js";
 import { routeApi } from "./router.js";
 import { startBoardServer, type BoardServer } from "./server.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
@@ -102,6 +102,80 @@ describe("routeApi", () => {
     expect(launched).toEqual([created.id]);
   });
 
+  it("returns tasks with a stable display stage", async () => {
+    const task = store.createTask({ title: "Stage me", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        substatus: "fixing-workspace-plan",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const list = await routeApi(store, "GET", "/api/tasks", noBody);
+    expect(
+      (list?.body as Array<{ stage: { label: string } }>)[0],
+    ).toMatchObject({
+      stage: {
+        label: "Fix workspace plan",
+        mode: "interactive",
+        terminalPhase: "creating-issues",
+      },
+    });
+
+    const single = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}`,
+      noBody,
+    );
+    expect(single?.body).toMatchObject({
+      id: task.id,
+      stage: {
+        label: "Fix workspace plan",
+        canComplete: true,
+        canCancel: true,
+      },
+    });
+  });
+
+  it("returns a board task progress document", async () => {
+    const task = store.createTask({ title: "Progress", prompt: "do it" });
+    store.updateTask(task.id, {
+      plan: {
+        repositories: [{ name: "web", task: "add page" }],
+      },
+    });
+
+    const res = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/progress`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(200);
+    expect((res?.body as { markdown: string }).markdown).toContain(
+      "# Board Execution Progress",
+    );
+  });
+
+  it("404s missing board task progress", async () => {
+    const task = store.createTask({ title: "No progress", prompt: "do it" });
+
+    const res = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/progress`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(404);
+    expect(res?.body).toEqual({ error: "task progress not found" });
+  });
+
   it("rejects task creation with missing fields", async () => {
     const res = await routeApi(store, "POST", "/api/tasks", () =>
       Promise.resolve({ title: "" }),
@@ -126,14 +200,27 @@ describe("routeApi", () => {
     expect(resumed).toEqual([{ id: task.id, decision: "approve" }]);
   });
 
-  it("returns terminal status and resizes a running terminal", async () => {
+  it("returns phase terminal status and resizes a running phase terminal", async () => {
     const task = store.createTask({ title: "Interactive", prompt: "do it" });
-    const resized: Array<{ id: string; cols: number; rows: number }> = [];
+    const phase: BoardTaskWorkflowPhase = "classifying";
+    const resized: Array<{
+      id: string;
+      phase: BoardTaskWorkflowPhase;
+      cols: number;
+      rows: number;
+    }> = [];
     const terminalManager = {
-      get: (id: string) =>
-        id === task.id ? { taskId: task.id, status: "running" } : undefined,
-      resize: (id: string, cols: number, rows: number) => {
-        resized.push({ id, cols, rows });
+      getPhase: (id: string, requestedPhase: BoardTaskWorkflowPhase) =>
+        id === task.id && requestedPhase === phase
+          ? { taskId: task.id, phase, status: "running" }
+          : undefined,
+      resizePhase: (
+        id: string,
+        requestedPhase: BoardTaskWorkflowPhase,
+        cols: number,
+        rows: number,
+      ) => {
+        resized.push({ id, phase: requestedPhase, cols, rows });
         return true;
       },
     } as unknown as BoardTerminalManager;
@@ -141,25 +228,249 @@ describe("routeApi", () => {
     const status = await routeApi(
       store,
       "GET",
-      `/api/tasks/${task.id}/terminal`,
+      `/api/tasks/${task.id}/phases/${phase}/terminal`,
       noBody,
       undefined,
       undefined,
       terminalManager,
     );
-    expect(status?.body).toMatchObject({ taskId: task.id, status: "running" });
+    expect(status?.body).toMatchObject({
+      taskId: task.id,
+      phase,
+      status: "running",
+    });
 
     const resize = await routeApi(
       store,
       "POST",
-      `/api/tasks/${task.id}/terminal/resize`,
+      `/api/tasks/${task.id}/phases/${phase}/terminal/resize`,
       () => Promise.resolve({ cols: 80, rows: 24 }),
       undefined,
       undefined,
       terminalManager,
     );
     expect(resize?.status).toBe(202);
-    expect(resized).toEqual([{ id: task.id, cols: 80, rows: 24 }]);
+    expect(resized).toEqual([{ id: task.id, phase, cols: 80, rows: 24 }]);
+  });
+
+  it("completes a workflow phase through the phase API", async () => {
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    const completed: Array<{ id: string; phase: BoardTaskWorkflowPhase }> = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/phases/classifying/complete`,
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      (t, phase) => completed.push({ id: t.id, phase }),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(completed).toEqual([{ id: task.id, phase: "classifying" }]);
+  });
+
+  it("passes an inline workspace plan through the phase completion API", async () => {
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    const completed: Array<{
+      id: string;
+      phase: BoardTaskWorkflowPhase;
+      workspacePlanText?: string;
+    }> = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/phases/creating-issues/complete`,
+      () =>
+        Promise.resolve({
+          workspacePlan: { repositories: [{ name: "web", task: "Do it" }] },
+        }),
+      undefined,
+      undefined,
+      undefined,
+      (t, phase, options) =>
+        completed.push({
+          id: t.id,
+          phase,
+          workspacePlanText: options?.workspacePlanText,
+        }),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(completed).toEqual([
+      {
+        id: task.id,
+        phase: "creating-issues",
+        workspacePlanText:
+          '<workspace_plan>{"repositories":[{"name":"web","task":"Do it"}]}</workspace_plan>',
+      },
+    ]);
+  });
+
+  it("recovers a failed task when its error is a persisted phase interrupt", async () => {
+    const task = store.createTask({ title: "Recover", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "failed",
+      error: JSON.stringify([
+        {
+          id: "interrupt-id",
+          value: { taskId: task.id, title: task.title, phase: "aligning-prd" },
+        },
+      ]),
+    });
+    const recovered: string[] = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/recover`,
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (t) => recovered.push(t.id),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(res?.body).toEqual({
+      status: "recovering",
+      phase: "aligning-prd",
+    });
+    expect(recovered).toEqual([task.id]);
+  });
+
+  it("does not recover a failed task without a recoverable workflow phase", async () => {
+    const task = store.createTask({ title: "Failed", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "failed",
+      error: "One or more repository executions failed.",
+      workflow: {
+        status: "failed",
+        currentPhase: "running",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/recover`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(409);
+    expect(res?.body).toEqual({ error: "task failure is not recoverable" });
+  });
+
+  it("recovers a failed transient workflow error from the latest interactive phase session", async () => {
+    const task = store.createTask({ title: "Retry planner", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "failed",
+      error:
+        "runWorkspace repository failed on branch sandcastle/planner: Agent idle for 90 seconds",
+      workflow: {
+        status: "failed",
+        phaseSessions: {
+          "creating-issues": {
+            taskId: task.id,
+            phase: "creating-issues",
+            pid: 123,
+            status: "exited",
+            startedAt: "2026-06-26T06:50:00.000Z",
+          },
+        },
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+    const recovered: string[] = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/recover`,
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (t) => recovered.push(t.id),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(res?.body).toEqual({
+      status: "recovering",
+      phase: "creating-issues",
+    });
+    expect(recovered).toEqual([task.id]);
+  });
+
+  it("recovers old planner idle failures without phase metadata as creating-issues", async () => {
+    const task = store.createTask({
+      title: "Old planner timeout",
+      prompt: "do it",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      error:
+        "runWorkspace repository failed on branch sandcastle/planner: Agent idle for 90 seconds — no output received.",
+      workflow: {
+        status: "failed",
+        checkpointThreadId: task.id,
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/recover`,
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {},
+    );
+
+    expect(res?.status).toBe(202);
+    expect(res?.body).toEqual({
+      status: "recovering",
+      phase: "creating-issues",
+    });
+  });
+
+  it("cancels a running workflow task through the task API", async () => {
+    const task = store.createTask({ title: "Cancel me", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "planning",
+        currentPhase: "creating-issues",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+    const cancelled: string[] = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/cancel`,
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (t) => cancelled.push(t.id),
+    );
+
+    expect(res?.status).toBe(202);
+    expect(res?.body).toEqual({ status: "cancelling" });
+    expect(cancelled).toEqual([task.id]);
   });
 });
 
@@ -194,10 +505,29 @@ describe("startBoardServer", () => {
     const body = await res.text();
     expect(body).toContain("Task overview");
     expect(body).toContain("Task details");
+    expect(body).toContain("Current stage");
+    expect(body).toContain("Workflow timeline");
     expect(body).toContain("Task activity");
+    expect(body).toContain("readonly terminal");
+    expect(body).toContain("currentIteration");
+    expect(body).toContain("last: ");
     expect(body).toContain("resize-handle");
+    expect(body).toContain("Phase terminal");
+    expect(body).toContain("Complete phase");
+    expect(body).toContain(
+      "Completion signal sent. Waiting for workflow update…",
+    );
+    expect(body).toContain("Cancel issue generation");
+    expect(body).toContain("Validating workspace plan");
+    expect(body).toContain("Fix workspace plan");
+    expect(body).toContain("Recover / Continue from failed phase");
     expect(body).toContain("Approve plan");
+    expect(body).toContain("Board issue");
     expect(body).toContain("Task failed before any repository run started.");
+    expect(body).not.toContain(
+      "No interactive terminal session is attached to this task.",
+    );
+    expect(body).not.toContain('"phase " + currentPhase');
   });
 
   it("serves the runs API as JSON", async () => {

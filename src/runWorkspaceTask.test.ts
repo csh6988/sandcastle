@@ -14,6 +14,7 @@ import {
   type BindMountCreateOptions,
   type BindMountSandboxHandle,
 } from "./SandboxProvider.js";
+import type { RunEvent } from "./RunEvent.js";
 
 const execAsync = promisify(exec);
 
@@ -271,6 +272,37 @@ describe("runWorkspaceTask", () => {
     expect(result.api!.status).toBe("success");
     expect(result.api!.branch).toBe("codex/existing-plan/api");
     expect(result.api!.commits).toHaveLength(1);
+  });
+
+  it("rejects duplicate plan repositories before starting repository runs", async () => {
+    const api = await createRepo();
+    const runEvents: RunEvent[] = [];
+    const { provider, createCalls } = createWorkspaceTaskProvider(async () => {
+      throw new Error("executor should not start");
+    });
+
+    await expect(
+      executeWorkspaceTaskPlan({
+        repositories: [{ name: "api", cwd: api, kind: "backend" }],
+        plan: {
+          technicalPlan: "Invalid duplicate plan.",
+          repositories: [
+            { name: "api", task: "Add first API behavior" },
+            { name: "api", task: "Add second API behavior" },
+          ],
+        },
+        agent: testAgent,
+        sandbox: provider,
+        branchPrefix: "codex/duplicate-plan",
+        logging: { type: "stdout" },
+        onRepoRunEvent: (_repo, event) => runEvents.push(event),
+      }),
+    ).rejects.toThrow(
+      'Workspace plan contains duplicate repository "api". Combine same-repository issues into one repository entry or use distinct repository names.',
+    );
+
+    expect(createCalls).toEqual([]);
+    expect(runEvents).toEqual([]);
   });
 
   it("rejects planner output that references an unknown repository", async () => {

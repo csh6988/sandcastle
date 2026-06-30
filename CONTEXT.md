@@ -86,6 +86,10 @@ _Avoid_: "agent runner", "agent caller"
 A single invocation of the **agent** inside the **sandbox**, producing at most one commit against one **task**.
 _Avoid_: "run" (ambiguous with the JS `run()` function), "cycle", "loop"
 
+**AFK run**:
+An automatic **agent** execution that is allowed to continue while the user is not actively watching or interacting with the computer. In the **workflow board**, AFK runs are reserved for approved execution after the generated workspace plan has been approved.
+_Avoid_: "background run" (too broad), "autonomous run" (less specific about user attention)
+
 **Task**:
 A work item from the **issue tracker** that the **agent** selects and works on during an **iteration**.
 _Avoid_: "job", "work item", "ticket"
@@ -222,6 +226,10 @@ _Avoid_: "agent stream event" (narrower), "log event", "lifecycle event" (too ge
 
 ### Workflow board
 
+**Control plane**:
+The productized local coordination layer built on top of Sandcastle's orchestration core. It records **board tasks**, **board runs**, plans, review state, feedback, and artifacts so humans can inspect and steer agent work from a local surface.
+_Avoid_: "dashboard" (too generic), "desktop app" (one possible shell), "Rudder clone"
+
 **Workflow board**:
 A local web view of runs, started with `sandcastle board`. Consumes the **run event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
 _Avoid_: "dashboard" (too generic), "UI", "console"
@@ -233,3 +241,23 @@ _Avoid_: "job", "session" (overloaded), conflating with the JS **iteration**
 **Board task**:
 A unit of work created on the **workflow board** (title + prompt/PRD) that is fanned out into per-repository **board runs** via `runWorkspaceTask`. The board acts as a **task** source that writes back into the orchestration core. See ADR 0022.
 _Avoid_: "ticket", "issue" (reserved for the **issue tracker**), "job"
+
+**Board phase**:
+A named step in a LangGraph-backed **board task** workflow, such as `classifying`, `aligning-prd`, `technical-planning`, `creating-issues`, `awaiting-approval`, or `running`. All phases before Board issues are generated are interactive: `classifying`, `aligning-prd`, `technical-planning`, and `creating-issues` expose a **phase session** so the user can collaborate with the **agent** before any issue-generation handoff or approved **AFK run**.
+_Avoid_: "step" (ambiguous with **iteration**), "stage" (use only in UI copy when necessary)
+
+**Phase session**:
+An interactive terminal session attached to a specific **board task** and **board phase**. A phase session lets the user collaborate with the **agent** during that phase, and can advance the workflow by emitting the structured phase completion signal. Its process exit does not determine the **board task** result; the LangGraph workflow does.
+_Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **run event** backed execution)
+
+**Artifact**:
+A durable output from a **board run** or **board task** that a human can inspect, such as a file path, generated document, screenshot, preview URL, pull request link, or plan artifact. Artifacts are evidence of work, distinct from raw agent transcript text.
+_Avoid_: "output" (too broad), "result" (ambiguous with `RunResult`)
+
+**Review**:
+A human decision on a **board task** or **artifact** that marks the work as accepted, rejected, or needing changes before the next execution step.
+_Avoid_: "approval" when quality judgment is meant; approval is the existing workflow gate before execution
+
+**Feedback**:
+A durable note attached to a **board task**, **board run**, **review**, or **artifact** describing what should influence future work. Feedback is input for later context, skills, or workflows; it is not automatically promoted into them.
+_Avoid_: "memory" (too broad), "lesson" (promotion outcome, not the raw note)

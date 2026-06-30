@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BoardStore, createRunRecorder } from "./BoardStore.js";
+import {
+  BoardStore,
+  createRunRecorder,
+  getBoardTaskStage,
+} from "./BoardStore.js";
 import type { RunEvent } from "../RunEvent.js";
 
 const startedEvent = (
@@ -18,6 +22,14 @@ const startedEvent = (
   timestamp: new Date(),
   ...overrides,
 });
+
+const waitFor = async (predicate: () => boolean, timeoutMs = 1500) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
 
 describe("BoardStore", () => {
   let dir: string;
@@ -70,6 +82,10 @@ describe("BoardStore", () => {
     expect(events[1]!.event.type).toBe("agent-text");
     // Timestamp serialized to an ISO string.
     expect(typeof events[1]!.event.timestamp).toBe("string");
+    expect(store.getRun(run.id)).toMatchObject({
+      currentIteration: 1,
+      lastEventType: "agent-text",
+    });
   });
 
   it("folds run-finished into a succeeded status and commit count", () => {
@@ -97,6 +113,8 @@ describe("BoardStore", () => {
     expect(updated.commits).toBe(1);
     expect(updated.completionSignal).toBe("<promise>COMPLETE</promise>");
     expect(updated.iterationsRun).toBe(1);
+    expect(updated.currentIteration).toBe(1);
+    expect(updated.lastEventType).toBe("run-finished");
     expect(updated.finishedAt).toBeTruthy();
   });
 
@@ -116,6 +134,7 @@ describe("BoardStore", () => {
     const updated = store.getRun(run.id)!;
     expect(updated.status).toBe("failed");
     expect(updated.error).toBe("boom");
+    expect(updated.lastEventType).toBe("run-failed");
   });
 
   it("marks running records as failed when a new store attaches after restart", () => {
@@ -180,6 +199,11 @@ describe("BoardStore", () => {
       outputTokens: 10,
       totalTokens: 270,
     });
+    expect(store.getRun(run.id)).toMatchObject({
+      currentIteration: 2,
+      lastEventType: "usage",
+      totalTokens: 270,
+    });
   });
 
   it("notifies subscribers of run and event changes", () => {
@@ -211,6 +235,351 @@ describe("BoardStore", () => {
     });
     expect(updated?.status).toBe("running");
     expect(store.listTasks().map((t) => t.id)).toContain(task.id);
+  });
+
+  it("initializes a board progress document when a task receives a plan", () => {
+    const task = store.createTask({ title: "Add feature", prompt: "do it" });
+
+    store.updateTask(task.id, {
+      plan: {
+        repositories: [
+          {
+            name: "web",
+            task: "Add the page",
+            reason: "User-facing UI",
+            issue: {
+              title: "Add page",
+              body: "Implement the planned page.",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(store.taskProgressPath(task.id)).toBe(
+      join(dir, "tasks", task.id, "progress.md"),
+    );
+    expect(store.readTaskProgress(task.id)).toContain(
+      "# Board Execution Progress",
+    );
+    expect(store.readTaskProgress(task.id)).toContain("## Repository: web");
+    expect(store.readTaskProgress(task.id)).toContain("Status: pending");
+    expect(store.readTaskProgress(task.id)).toContain("Task: Add the page");
+  });
+
+  it("updates task progress from linked repository run events", () => {
+    const task = store.createTask({ title: "Fix UI", prompt: "do it" });
+    store.updateTask(task.id, {
+      plan: {
+        repositories: [{ name: "web", task: "Fix the UI" }],
+      },
+    });
+    const recorder = createRunRecorder(store, { taskId: task.id, repo: "web" });
+
+    recorder(startedEvent({ name: "task web", branch: "sandcastle/web" }));
+    recorder({
+      type: "agent-text",
+      message: "I changed the component and will run tests next.",
+      iteration: 1,
+      timestamp: new Date(),
+    });
+    recorder({
+      type: "run-failed",
+      message: "lint failed",
+      timestamp: new Date(),
+    });
+
+    const progress = store.readTaskProgress(task.id)!;
+    expect(progress).toContain("Status: needs_recovery");
+    expect(progress).toContain("Branch: sandcastle/web");
+    expect(progress).toContain(
+      "agent text: I changed the component and will run tests next.",
+    );
+    expect(progress).toContain("Address the last failure: lint failed");
+  });
+
+  it("maps interactive workflow phases to stable display stages", () => {
+    const task = store.createTask({ title: "Plan", prompt: "do it" });
+    const updated = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(updated)).toMatchObject({
+      id: "creating-issues",
+      label: "Creating issues",
+      mode: "interactive",
+      terminalPhase: "creating-issues",
+      canComplete: true,
+      canCancel: true,
+      cancelLabel: "Cancel phase",
+    });
+    expect(
+      getBoardTaskStage(updated).timeline.find(
+        (item) => item.id === "creating-issues",
+      ),
+    ).toMatchObject({ status: "current" });
+  });
+
+  it("maps workspace plan validation and fix states without exposing planner internals", () => {
+    const task = store.createTask({ title: "Import plan", prompt: "do it" });
+    const validating = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "planning",
+        currentPhase: "creating-issues",
+        substatus: "validating-workspace-plan",
+        message: "Importing the workspace plan from the phase transcript.",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(validating)).toMatchObject({
+      id: "validating-workspace-plan",
+      label: "Validating workspace plan",
+      mode: "background",
+      canComplete: false,
+      canCancel: true,
+      cancelLabel: "Cancel issue generation",
+    });
+
+    const fixing = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        substatus: "fixing-workspace-plan",
+        message:
+          "Board could not import a workspace plan from this phase. Fix the <workspace_plan> block, then complete the phase again.",
+        updatedAt: "2026-06-26T07:01:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(fixing)).toMatchObject({
+      id: "fix-workspace-plan",
+      label: "Fix workspace plan",
+      mode: "interactive",
+      terminalPhase: "creating-issues",
+      canComplete: true,
+      canCancel: true,
+      cancelLabel: "Cancel issue generation",
+    });
+  });
+
+  it("maps approval, AFK execution, and recoverable failures to task stages", () => {
+    const task = store.createTask({ title: "Execute", prompt: "do it" });
+    const awaitingApproval = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(awaitingApproval)).toMatchObject({
+      id: "awaiting-approval",
+      label: "Awaiting approval",
+      mode: "approval",
+      canApprove: true,
+      canReject: true,
+    });
+
+    const running = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "running",
+        currentPhase: "running",
+        updatedAt: "2026-06-26T07:01:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(running)).toMatchObject({
+      id: "running",
+      label: "Running AFK execution",
+      mode: "afk",
+      canComplete: false,
+      canCancel: true,
+      cancelLabel: "Cancel execution",
+    });
+
+    const failed = store.updateTask(task.id, {
+      status: "failed",
+      error:
+        "runWorkspace repository failed on branch sandcastle/planner: Agent idle for 90 seconds",
+      workflow: {
+        status: "failed",
+        currentPhase: "creating-issues",
+        updatedAt: "2026-06-26T07:02:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(failed)).toMatchObject({
+      id: "failed-recoverable",
+      label: "Recover workflow phase",
+      mode: "failed",
+      canRecover: true,
+      recoverPhase: "creating-issues",
+    });
+  });
+
+  it("keeps tasks waiting for approval running across store restarts", () => {
+    const task = store.createTask({ title: "Approve", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "running",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const restarted = new BoardStore(dir).getTask(task.id)!;
+
+    expect(restarted.status).toBe("running");
+    expect(restarted.error).toBeUndefined();
+    expect(getBoardTaskStage(restarted)).toMatchObject({
+      id: "awaiting-approval",
+      canApprove: true,
+      canReject: true,
+    });
+  });
+
+  it("marks interrupted approval tasks as recoverable to approval", () => {
+    const task = store.createTask({
+      title: "Recover approval",
+      prompt: "do it",
+    });
+    const failedApproval = store.updateTask(task.id, {
+      status: "failed",
+      error: "Interrupted when the board server stopped or restarted.",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(failedApproval)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "awaiting-approval",
+    });
+  });
+
+  it("marks failed approved execution tasks as recoverable to execution", () => {
+    const task = store.createTask({
+      title: "Retry execution",
+      prompt: "do it",
+    });
+    const failedExecution = store.updateTask(task.id, {
+      status: "failed",
+      error: "One or more repository executions failed.",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "failed",
+        currentPhase: "running",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(failedExecution)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "running",
+    });
+  });
+
+  it("keeps interrupted running execution tasks recoverable after store close", () => {
+    const task = store.createTask({
+      title: "Interrupted execution",
+      prompt: "do it",
+    });
+    store.updateTask(task.id, {
+      status: "running",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "running",
+        currentPhase: "running",
+        message: "Executing approved workspace plan.",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const restarted = new BoardStore(dir);
+
+    expect(getBoardTaskStage(restarted.getTask(task.id)!)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "running",
+    });
+    restarted.close();
+  });
+
+  it("recovers older interrupted execution tasks from their execution message", () => {
+    const task = store.createTask({
+      title: "Interrupted execution",
+      prompt: "do it",
+    });
+    const interrupted = store.updateTask(task.id, {
+      status: "failed",
+      error: "Interrupted when the board server stopped or restarted.",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "failed",
+        message: "Executing approved workspace plan.",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(interrupted)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "running",
+    });
+  });
+
+  it("marks cancelled tasks with an approved plan as recoverable execution", () => {
+    const task = store.createTask({
+      title: "Cancelled execution",
+      prompt: "do it",
+    });
+    const cancelled = store.updateTask(task.id, {
+      status: "failed",
+      error: "Task cancelled.",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "failed",
+        currentPhase: "creating-issues",
+        message:
+          'Workspace plan contains duplicate repository "web". Combine same-repository issues into one repository entry or use distinct repository names.',
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(cancelled)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "running",
+    });
   });
 });
 
@@ -251,6 +620,29 @@ describe("createRunRecorder", () => {
     expect(store.getEvents(run.id).length).toBe(3);
   });
 
+  it("ignores non-start events after a run has failed", () => {
+    const record = createRunRecorder(store, { taskId: "t1", repo: "web" });
+    record(startedEvent());
+    record({
+      type: "run-failed",
+      message: "cannot lock ref",
+      timestamp: new Date(),
+    });
+    record({
+      type: "agent-text",
+      message: "late output",
+      iteration: 1,
+      timestamp: new Date(),
+    });
+
+    const run = store.listRuns()[0]!;
+    expect(store.getRun(run.id)?.status).toBe("failed");
+    expect(store.getEvents(run.id).map((event) => event.event.type)).toEqual([
+      "run-started",
+      "run-failed",
+    ]);
+  });
+
   it("ignores events emitted before run-started", () => {
     const record = createRunRecorder(store);
     record({
@@ -268,12 +660,13 @@ describe("createRunRecorder", () => {
     store.subscribe((c) => {
       if (c.kind === "task-updated") changes.push(c.task.id);
     });
+    await new Promise((resolve) => setTimeout(resolve, 25));
 
     // A separate store instance (another process) writes to the same dir.
     const external = new BoardStore(dir);
     const task = external.createTask({ title: "external", prompt: "do it" });
 
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(() => changes.includes(task.id));
     expect(changes).toContain(task.id);
     store.close();
   });

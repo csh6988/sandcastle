@@ -184,6 +184,23 @@ const defaultBranchFor = (
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+export const duplicateWorkspacePlanRepositoryMessage = (
+  repoName: string,
+): string =>
+  `Workspace plan contains duplicate repository "${repoName}". Combine same-repository issues into one repository entry or use distinct repository names.`;
+
+export const assertUniqueWorkspaceTaskPlanRepositories = (
+  plan: Pick<WorkspaceTaskPlan, "repositories">,
+): void => {
+  const names = new Set<string>();
+  for (const repo of plan.repositories) {
+    if (names.has(repo.name)) {
+      throw new Error(duplicateWorkspacePlanRepositoryMessage(repo.name));
+    }
+    names.add(repo.name);
+  }
+};
+
 const preservedWorktreePath = (error: unknown): string | undefined => {
   if (typeof error !== "object" || error === null) return undefined;
   const value = (error as { preservedWorktreePath?: unknown })
@@ -438,6 +455,8 @@ Return this exact shape:
 Rules:
 - Include only repositories that need code changes.
 - Use repository names exactly as listed.
+- Each repository name may appear at most once in the repositories array.
+- If multiple issues belong to the same repository, combine them into one repository entry with one task, issue body, and checklist covering all work for that repository.
 - Keep each task and issue scoped to one repository.
 - Perform product alignment first using explicit assumptions instead of stopping for interactive clarification.
 - The technical plan should explain the cross-repository design before splitting work.
@@ -478,6 +497,24 @@ const extractWorkspaceTaskPlan = (
     );
   }
 
+  return parseWorkspaceTaskPlan(parsed, repositories, options);
+};
+
+export interface ParsedWorkspaceTaskPlan {
+  readonly plan: WorkspaceTaskPlan;
+  readonly repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions>;
+  readonly workspaceBranchPrefix?: string;
+  readonly workspaceMaxIterations?: number;
+}
+
+export const parseWorkspaceTaskPlan = (
+  parsed: unknown,
+  repositories: ReadonlyArray<WorkspaceTaskRepositoryOptions> = [],
+  options: {
+    readonly allowPlannerWorkspace?: boolean;
+    readonly workspaceBaseDir?: string;
+  } = {},
+): ParsedWorkspaceTaskPlan => {
   if (
     typeof parsed !== "object" ||
     parsed === null ||
@@ -496,6 +533,7 @@ const extractWorkspaceTaskPlan = (
     : undefined;
   const executionRepositories = plannerWorkspace?.repositories ?? repositories;
   const knownNames = new Set(executionRepositories.map((repo) => repo.name));
+  const shouldValidateKnownNames = knownNames.size > 0;
   const alignment = parseAlignment(
     (parsed as { alignment?: unknown }).alignment,
   );
@@ -515,7 +553,10 @@ const extractWorkspaceTaskPlan = (
         reason?: unknown;
         issue?: unknown;
       };
-      if (typeof repo.name !== "string" || !knownNames.has(repo.name)) {
+      if (typeof repo.name !== "string" || repo.name.trim() === "") {
+        throw new Error("Planner repository entries must include a name");
+      }
+      if (shouldValidateKnownNames && !knownNames.has(repo.name)) {
         throw new Error(`Planner referenced unknown repository "${repo.name}"`);
       }
       if (typeof repo.task !== "string" || repo.task.trim() === "") {
@@ -560,16 +601,7 @@ const extractWorkspaceTaskPlan = (
       };
     },
   );
-
-  const duplicate = planned.find(
-    (entry, index) =>
-      planned.findIndex((candidate) => candidate.name === entry.name) !== index,
-  );
-  if (duplicate) {
-    throw new Error(
-      `Planner returned duplicate repository "${duplicate.name}"`,
-    );
-  }
+  assertUniqueWorkspaceTaskPlanRepositories({ repositories: planned });
 
   return {
     plan: {
@@ -686,6 +718,7 @@ When complete, output <promise>COMPLETE</promise>.`;
 export async function executeWorkspaceTaskPlan(
   options: ExecuteWorkspaceTaskPlanOptions,
 ): Promise<Record<string, WorkspaceTaskRepositoryResult>> {
+  assertUniqueWorkspaceTaskPlanRepositories(options.plan);
   const repoByName = new Map(
     options.repositories.map((repo) => [repo.name, repo]),
   );

@@ -124,6 +124,37 @@ describe("createTaskLauncher", () => {
     ]);
   });
 
+  it("updates the board progress document from repository lifecycle events", async () => {
+    const run: TaskRunner = async ({ onRepoRunEvent, onPlan }) => {
+      onPlan({ repositories: [{ name: "web", task: "add page" }] });
+      onRepoRunEvent("web", started("task web", "web"));
+      onRepoRunEvent("web", {
+        type: "agent-tool-call",
+        name: "ReadFile",
+        formattedArgs: "src/page.ts",
+        iteration: 1,
+        timestamp: new Date(),
+      });
+      onRepoRunEvent("web", {
+        type: "run-failed",
+        message: "verification failed",
+        timestamp: new Date(),
+      });
+      return { repositories: { web: { status: "failed" } } };
+    };
+
+    const launch = createTaskLauncher({ store, run });
+    const task = store.createTask({ title: "Progress", prompt: "do it" });
+    launch(task);
+    await flush();
+
+    const progress = store.readTaskProgress(task.id)!;
+    expect(progress).toContain("## Repository: web");
+    expect(progress).toContain("Status: needs_recovery");
+    expect(progress).toContain("tool call: ReadFile src/page.ts");
+    expect(progress).toContain("Address the last failure: verification failed");
+  });
+
   it("records the planner phase as its own run when reported", async () => {
     const run: TaskRunner = async ({ onRepoRunEvent, onPlan }) => {
       onRepoRunEvent("(planner)", started("task planner", "planner"));
@@ -162,5 +193,43 @@ describe("createTaskLauncher", () => {
     const updated = store.getTask(task.id)!;
     expect(updated.status).toBe("failed");
     expect(updated.error).toBe("planner failed");
+  });
+
+  it("keeps the task running when the workflow pauses for plan approval", async () => {
+    const run: TaskRunner = async ({ onPlan }) => {
+      onPlan({
+        technicalPlan: "Review this before execution.",
+        repositories: [
+          {
+            name: "web",
+            task: "Implement the UI",
+            issue: {
+              title: "Implement the UI",
+              body: "Use the approved technical plan.",
+            },
+          },
+        ],
+      });
+      return {
+        repositories: {},
+        status: "awaiting-approval",
+      };
+    };
+
+    const launch = createTaskLauncher({ store, run });
+    const task = store.createTask({
+      title: "Needs approval",
+      prompt: "Plan it",
+    });
+    launch(task);
+    await flush();
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("running");
+    expect(updated.workflow?.status).toBe("awaiting-approval");
+    expect(updated.plan?.repositories[0]?.issue).toEqual({
+      title: "Implement the UI",
+      body: "Use the approved technical plan.",
+    });
   });
 });

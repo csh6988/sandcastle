@@ -69,6 +69,46 @@ await run({
 });
 ```
 
+## Quick Smoke Test
+
+Before you hand Sandcastle a real task, run a minimal read-only check to confirm the whole pipeline is wired up: the sandbox starts, the agent authenticates, a command runs inside it, and the iteration loop exits cleanly. It is the fastest way to separate a setup problem from a task problem.
+
+Drop this into `.sandcastle/main.ts` (or any scratch file) and run it with `npx tsx`:
+
+```typescript
+import { run, claudeCode } from "@chenshaohui6988/sandcastle";
+import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+
+const result = await run({
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: docker(), // or podman(), noSandbox()
+  prompt:
+    "Run `echo sandcastle-ok` and report what it printed. " +
+    "Do not modify any files. " +
+    "Output <promise>COMPLETE</promise> when done.",
+});
+
+console.log(result.completionSignal); // "<promise>COMPLETE</promise>"
+console.log(result.commits.length); // 0 — the smoke test changes nothing
+```
+
+```bash
+npx tsx .sandcastle/main.ts
+```
+
+A healthy run typically finishes within a minute and:
+
+- prints the completion signal (`<promise>COMPLETE</promise>`) — the agent started, authenticated, and the loop exited on the signal instead of timing out
+- reports `0` commits — the read-only prompt left your working tree untouched
+
+If it hangs or throws instead, you have isolated the failure to setup rather than your task. Common causes:
+
+- **Auth** — `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) missing or invalid in `.sandcastle/.env`
+- **Sandbox** — Docker/Podman is not running, or the image is not built yet (`sandcastle docker build-image`)
+- **Network** — the agent CLI cannot reach its model provider from inside the sandbox
+
+Best practice: keep this check around and re-run it after editing your Dockerfile, rotating tokens, or upgrading Sandcastle. A green smoke test confirms the plumbing before you debug a real run.
+
 ## Agent Skill Routing
 
 Sandcastle scaffolds `.sandcastle/SKILL_ROUTER.md` as a companion workflow guide. Before an agent starts project work, it should read the router, choose the matching skill flow, and make sure the target repository's `AGENTS.md` or `CLAUDE.md` accurately describes the project-specific rules.
@@ -1208,7 +1248,9 @@ sandcastle workspace run --prd-file ./prd.md
 
 ### `sandcastle board`
 
-Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, and tasks to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, surfaces the planner phase as its own `(planner)` run, and renders the workspace plan (alignment summary, technical plan, per-repository tasks); and a **by-status** kanban. Selecting a run shows its live agent activity (text + tool calls) and per-model token counts. Creating a task on the board fans it out into per-repository runs via `runWorkspaceTask` using your `.sandcastle/workspace.json`. The server also watches its data directory, so runs written by other processes appear without a manual refresh.
+Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, workflow checkpoints, and tasks to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
+
+Creating a task starts an interactive LangGraph phase flow: classify the task, align the PRD, draft the technical plan, generate repository issues, approve the imported workspace plan, then execute the approved repository tasks. Each interactive phase opens a board terminal and advances when the agent prints the phase completion marker or when you click **Complete phase / Continue**. The `creating-issues` phase must emit a valid `<workspace_plan>` block before approval. After approval, Sandcastle runs one executor per planned repository using the approved plan and the resolved workspace config.
 
 ```bash
 sandcastle board                 # http://127.0.0.1:4318
