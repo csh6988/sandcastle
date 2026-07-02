@@ -8,6 +8,7 @@ export interface BoardTaskBranchMergeRepositoryOption {
   readonly sourceBranch?: string;
   readonly currentBranch?: string;
   readonly targetBranches: readonly string[];
+  readonly mergedTargetBranches: readonly string[];
   readonly dirty: boolean;
   readonly canMerge: boolean;
   readonly reason?: string;
@@ -17,7 +18,7 @@ export interface BoardTaskBranchMergeOptions {
   readonly repositories: readonly BoardTaskBranchMergeRepositoryOption[];
 }
 
-export interface BoardTaskBranchMergeResult {
+export interface BoardTaskBranchMergedResult {
   readonly status: "merged";
   readonly repository: string;
   readonly cwd: string;
@@ -27,6 +28,20 @@ export interface BoardTaskBranchMergeResult {
   readonly after: string;
   readonly fastForward: boolean;
 }
+
+export interface BoardTaskBranchMergeConflictResult {
+  readonly status: "conflict";
+  readonly repository: string;
+  readonly cwd: string;
+  readonly sourceBranch: string;
+  readonly targetBranch: string;
+  readonly before: string;
+  readonly message: string;
+}
+
+export type BoardTaskBranchMergeResult =
+  | BoardTaskBranchMergedResult
+  | BoardTaskBranchMergeConflictResult;
 
 const git = (cwd: string, args: readonly string[]): string =>
   execFileSync("git", [...args], {
@@ -114,6 +129,14 @@ const branchExists = (cwd: string, branch: string): boolean =>
   gitOrUndefined(cwd, ["rev-parse", "--verify", `refs/heads/${branch}`]) !==
   undefined;
 
+const branchContains = (
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+): boolean =>
+  gitOrUndefined(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]) ===
+  "";
+
 const mergeInProgress = (cwd: string): boolean =>
   gitOrUndefined(cwd, ["rev-parse", "--verify", "MERGE_HEAD"]) !== undefined;
 
@@ -127,25 +150,39 @@ export const listBoardTaskBranchMergeOptions = (args: {
     const sourceBranch = sourceBranchFor(repo.name, args.runs);
     const branches = localBranches(cwd);
     const targetBranches = branches.filter((branch) => branch !== sourceBranch);
+    const mergedTargetBranches = sourceBranch
+      ? targetBranches.filter((branch) =>
+          branchContains(cwd, sourceBranch, branch),
+        )
+      : [];
     const activeBranch = currentBranch(cwd);
     const dirty = isDirty(cwd);
     const missingSource =
       sourceBranch === undefined || !branchExists(cwd, sourceBranch);
+    const hasUnmergedTarget =
+      targetBranches.length > mergedTargetBranches.length;
     const reason = missingSource
       ? "No local source branch was recorded for this repository."
       : targetBranches.length === 0
         ? "No local target branch is available for this source branch."
-        : dirty
-          ? "The repository working tree is not clean."
-          : undefined;
+        : !hasUnmergedTarget
+          ? "The source branch is already merged into every target branch."
+          : dirty
+            ? "The repository working tree is not clean."
+            : undefined;
     return {
       name: repo.name,
       cwd,
       ...(sourceBranch ? { sourceBranch } : {}),
       ...(activeBranch ? { currentBranch: activeBranch } : {}),
       targetBranches,
+      mergedTargetBranches,
       dirty,
-      canMerge: !missingSource && targetBranches.length > 0 && !dirty,
+      canMerge:
+        !missingSource &&
+        targetBranches.length > 0 &&
+        hasUnmergedTarget &&
+        !dirty,
       ...(reason ? { reason } : {}),
     };
   });
@@ -191,12 +228,19 @@ export const mergeBoardTaskBranch = (args: {
   try {
     git(cwd, ["merge", "--no-edit", sourceBranch]);
   } catch (error) {
+    const message = `Failed to merge "${sourceBranch}" into "${args.targetBranch}": ${errorOutput(error)}`;
     if (mergeInProgress(cwd)) {
       gitOrUndefined(cwd, ["merge", "--abort"]);
     }
-    throw new Error(
-      `Failed to merge "${sourceBranch}" into "${args.targetBranch}": ${errorOutput(error)}`,
-    );
+    return {
+      status: "conflict",
+      repository: repo.name,
+      cwd,
+      sourceBranch,
+      targetBranch: args.targetBranch,
+      before,
+      message,
+    };
   }
   const after = headSha(cwd);
 

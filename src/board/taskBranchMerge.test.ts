@@ -129,6 +129,58 @@ describe("task branch merge", () => {
     );
   });
 
+  it("marks a target branch as already merged once it contains the task source branch", () => {
+    mergeBoardTaskBranch({
+      task: taskFor(dir, "feature"),
+      runs: [
+        {
+          id: "run-1",
+          name: "web",
+          agent: "claude-code",
+          sandbox: "no-sandbox",
+          branch: "feature",
+          maxIterations: 1,
+          status: "succeeded",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          commits: 1,
+          taskId: "task-1",
+          repo: "web",
+        },
+      ],
+      repository: "web",
+      targetBranch: "main",
+      defaultRepoDir: dir,
+    });
+
+    const options = listBoardTaskBranchMergeOptions({
+      task: taskFor(dir, "feature"),
+      runs: [
+        {
+          id: "run-1",
+          name: "web",
+          agent: "claude-code",
+          sandbox: "no-sandbox",
+          branch: "feature",
+          maxIterations: 1,
+          status: "succeeded",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          commits: 1,
+          taskId: "task-1",
+          repo: "web",
+        },
+      ],
+      defaultRepoDir: dir,
+    });
+
+    expect(options.repositories[0]).toMatchObject({
+      name: "web",
+      sourceBranch: "feature",
+      mergedTargetBranches: ["main"],
+      canMerge: false,
+      reason: "The source branch is already merged into every target branch.",
+    });
+  });
+
   it("refuses to merge when the target repository has uncommitted changes", () => {
     writeFileSync(join(dir, "dirty.txt"), "dirty\n");
 
@@ -183,35 +235,41 @@ describe("task branch merge", () => {
     ).toThrow("Source and target branches must be different");
   });
 
-  it("aborts a conflicted merge started by the board action", () => {
+  it("returns a conflict result for a conflicted merge started by the board action", () => {
     git(dir, ["checkout", "feature"]);
     commitFile(dir, "base.txt", "feature base\n");
     git(dir, ["checkout", "main"]);
     commitFile(dir, "base.txt", "main base\n");
 
-    expect(() =>
-      mergeBoardTaskBranch({
-        task: taskFor(dir, "feature"),
-        runs: [
-          {
-            id: "run-1",
-            name: "web",
-            agent: "claude-code",
-            sandbox: "no-sandbox",
-            branch: "feature",
-            maxIterations: 1,
-            status: "succeeded",
-            createdAt: "2026-07-01T00:00:00.000Z",
-            commits: 1,
-            taskId: "task-1",
-            repo: "web",
-          },
-        ],
-        repository: "web",
-        targetBranch: "main",
-        defaultRepoDir: dir,
-      }),
-    ).toThrow('Failed to merge "feature" into "main"');
+    const result = mergeBoardTaskBranch({
+      task: taskFor(dir, "feature"),
+      runs: [
+        {
+          id: "run-1",
+          name: "web",
+          agent: "claude-code",
+          sandbox: "no-sandbox",
+          branch: "feature",
+          maxIterations: 1,
+          status: "succeeded",
+          createdAt: "2026-07-01T00:00:00.000Z",
+          commits: 1,
+          taskId: "task-1",
+          repo: "web",
+        },
+      ],
+      repository: "web",
+      targetBranch: "main",
+      defaultRepoDir: dir,
+    });
+
+    expect(result).toMatchObject({
+      status: "conflict",
+      repository: "web",
+      sourceBranch: "feature",
+      targetBranch: "main",
+      message: expect.stringContaining('Failed to merge "feature" into "main"'),
+    });
     expect(git(dir, ["branch", "--show-current"])).toBe("main");
     expect(git(dir, ["status", "--porcelain"])).toBe("");
     expect(() => git(dir, ["rev-parse", "--verify", "MERGE_HEAD"])).toThrow();

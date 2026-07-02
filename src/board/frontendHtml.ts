@@ -564,6 +564,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         const [mergeTargetBranch, setMergeTargetBranch] = useState("");
         const [mergeBusy, setMergeBusy] = useState(false);
         const [mergeNotice, setMergeNotice] = useState(null);
+        const [mergeConflict, setMergeConflict] = useState(null);
         const activityRun = taskRuns.find((r) => r.status === "running") || taskRuns[0] || null;
         const workflow = task.workflow || null;
       const stage = fallbackStage(task);
@@ -689,11 +690,44 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           setMergeRepository(name);
           setMergeTargetBranch(defaultMergeTargetBranch(next));
           setMergeNotice(null);
+          setMergeConflict(null);
+        };
+        const selectedMergeTargetMerged = Boolean(
+          selectedMergeOption &&
+            mergeTargetBranch &&
+            (selectedMergeOption.mergedTargetBranches || []).includes(mergeTargetBranch),
+        );
+        const selectedMergeTargetConflicted = Boolean(
+          mergeConflict &&
+            selectedMergeOption &&
+            mergeConflict.repository === selectedMergeOption.name &&
+            mergeConflict.targetBranch === mergeTargetBranch,
+        );
+        const mergeButtonLabel = mergeBusy
+          ? "Merging…"
+          : selectedMergeTargetMerged
+            ? "Merged"
+            : selectedMergeTargetConflicted
+              ? "Resolve conflicts"
+              : "Merge branch";
+        const mergeButtonDisabled =
+          mergeBusy ||
+          !selectedMergeOption ||
+          !mergeTargetBranch ||
+          selectedMergeTargetMerged ||
+          !selectedMergeOption.canMerge;
+        const resolveMergeConflict = () => {
+          setMergeNotice("Resolve the merge conflict with Codex or Claude Code, then retry the branch merge.");
         };
         const mergeBranch = async () => {
           if (!selectedMergeOption || !mergeTargetBranch) return;
+          if (selectedMergeTargetConflicted) {
+            resolveMergeConflict();
+            return;
+          }
           setMergeBusy(true);
           setMergeNotice(null);
+          setMergeConflict(null);
           const res = await fetch("/api/tasks/" + task.id + "/branch-merge", {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -703,6 +737,11 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           const body = await res.json();
           if (!res.ok) {
             setMergeNotice(body.error || "Failed to merge branch");
+            return;
+          }
+          if (body.status === "conflict") {
+            setMergeConflict(body);
+            setMergeNotice((body.message || "Branch merge has conflicts.") + " Resolve with Codex or Claude Code before retrying.");
             return;
           }
           setMergeNotice("Merged " + body.sourceBranch + " into " + body.targetBranch + ".");
@@ -770,12 +809,13 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
                   <select class="inline-select" value=\${mergeRepository} onChange=\${(event) => changeMergeRepository(event.target.value)}>
                     \${mergeRepositories.map((repo) => html\`<option key=\${repo.name} value=\${repo.name}>\${repo.name}</option>\`)}
                   </select>
-                  <select class="inline-select" value=\${mergeTargetBranch} onChange=\${(event) => { setMergeTargetBranch(event.target.value); setMergeNotice(null); }}>
+                  <select class="inline-select" value=\${mergeTargetBranch} onChange=\${(event) => { setMergeTargetBranch(event.target.value); setMergeNotice(null); setMergeConflict(null); }}>
                     \${(selectedMergeOption ? selectedMergeOption.targetBranches : []).map((branch) => html\`<option key=\${branch} value=\${branch}>\${branch}</option>\`)}
                   </select>
-                  <button disabled=\${mergeBusy || !selectedMergeOption || !selectedMergeOption.canMerge || !mergeTargetBranch} onClick=\${mergeBranch}>\${mergeBusy ? "Merging…" : "Merge branch"}</button>
+                  <button disabled=\${mergeButtonDisabled && !selectedMergeTargetConflicted} onClick=\${mergeBranch}>\${mergeButtonLabel}</button>
                 </div>
-                \${mergeNotice ? html\`<div class=\${mergeNotice.startsWith("Merged ") ? "notice" : "error-box"}>\${mergeNotice}</div>\` : null}
+                \${selectedMergeTargetMerged && !mergeNotice ? html\`<div class="notice">Merged \${selectedMergeOption.sourceBranch} into \${mergeTargetBranch}.</div>\` : null}
+                \${mergeNotice ? html\`<div class=\${mergeNotice.startsWith("Merged ") || mergeNotice.startsWith("Resolve ") ? "notice" : "error-box"}>\${mergeNotice}</div>\` : null}
               </div>\` : null}
             \${stage.canCancel ? html\`
               <div class="actions">

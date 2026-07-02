@@ -316,6 +316,90 @@ describe("routeApi", () => {
       expect(
         git(repoDir, ["merge-base", "--is-ancestor", "feature", "main"]),
       ).toBe("");
+
+      const refreshedOptions = await routeApi(
+        store,
+        "GET",
+        `/api/tasks/${task.id}/branch-merge`,
+        noBody,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        repoDir,
+      );
+      expect(refreshedOptions?.status).toBe(200);
+      expect(refreshedOptions?.body).toMatchObject({
+        repositories: [
+          expect.objectContaining({
+            name: "web",
+            mergedTargetBranches: ["main"],
+            canMerge: false,
+          }),
+        ],
+      });
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a structured conflict result when branch merge conflicts", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "board-router-conflict-repo-"));
+    try {
+      git(repoDir, ["init", "-b", "main"]);
+      git(repoDir, ["config", "user.email", "test@example.com"]);
+      git(repoDir, ["config", "user.name", "Test User"]);
+      commitFile(repoDir, "base.txt", "base\n");
+      git(repoDir, ["checkout", "-b", "feature"]);
+      commitFile(repoDir, "base.txt", "feature\n");
+      git(repoDir, ["checkout", "main"]);
+      commitFile(repoDir, "base.txt", "main\n");
+
+      const task = store.createTask({ title: "Merge", prompt: "do it" });
+      store.updateTask(task.id, {
+        status: "succeeded",
+        plan: {
+          workspace: { repositories: [{ name: "web", cwd: repoDir }] },
+          repositories: [{ name: "web", task: "ship it" }],
+        },
+      });
+      store.createRun({
+        name: "web",
+        agent: "claude-code",
+        sandbox: "no-sandbox",
+        branch: "feature",
+        maxIterations: 1,
+        taskId: task.id,
+        repo: "web",
+      });
+
+      const res = await routeApi(
+        store,
+        "POST",
+        `/api/tasks/${task.id}/branch-merge`,
+        () => Promise.resolve({ repository: "web", targetBranch: "main" }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        repoDir,
+      );
+
+      expect(res?.status).toBe(200);
+      expect(res?.body).toMatchObject({
+        status: "conflict",
+        repository: "web",
+        sourceBranch: "feature",
+        targetBranch: "main",
+        message: expect.stringContaining(
+          'Failed to merge "feature" into "main"',
+        ),
+      });
+      expect(git(repoDir, ["status", "--porcelain"])).toBe("");
     } finally {
       rmSync(repoDir, { recursive: true, force: true });
     }
@@ -745,6 +829,9 @@ describe("startBoardServer", () => {
     expect(body).toContain("Board verification report");
     expect(body).toContain("Branch merge");
     expect(body).toContain("Merge branch");
+    expect(body).toContain("Merged");
+    expect(body).toContain("Resolve conflicts");
+    expect(body).toContain("mergedTargetBranches");
     expect(body).toContain('/api/tasks/" + task.id + "/branch-merge');
     expect(body).toContain("Task artifacts");
     expect(body).toContain('/api/tasks/" + task.id + "/artifacts');
