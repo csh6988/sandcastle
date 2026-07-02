@@ -405,6 +405,58 @@ describe("routeApi", () => {
     }
   });
 
+  it("starts an agent-backed branch merge conflict resolver", async () => {
+    const task = store.createTask({ title: "Merge", prompt: "do it" });
+    const calls: Array<{
+      readonly taskId: string;
+      readonly repository: string;
+      readonly targetBranch: string;
+    }> = [];
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/branch-merge/resolve`,
+      () => Promise.resolve({ repository: "web", targetBranch: "main" }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      dir,
+      (resolvedTask, args) => {
+        calls.push({
+          taskId: resolvedTask.id,
+          repository: args.repository,
+          targetBranch: args.targetBranch,
+        });
+      },
+    );
+
+    expect(res?.status).toBe(202);
+    expect(res?.body).toEqual({ status: "started" });
+    expect(calls).toEqual([
+      { taskId: task.id, repository: "web", targetBranch: "main" },
+    ]);
+  });
+
+  it("rejects branch merge conflict resolution when no resolver is configured", async () => {
+    const task = store.createTask({ title: "Merge", prompt: "do it" });
+
+    const res = await routeApi(
+      store,
+      "POST",
+      `/api/tasks/${task.id}/branch-merge/resolve`,
+      () => Promise.resolve({ repository: "web", targetBranch: "main" }),
+    );
+
+    expect(res?.status).toBe(409);
+    expect(res?.body).toEqual({
+      error: "branch merge conflict resolution is not enabled",
+    });
+  });
+
   it("rejects branch merge when the repository is dirty", async () => {
     const repoDir = mkdtempSync(join(tmpdir(), "board-router-dirty-repo-"));
     try {
@@ -831,8 +883,10 @@ describe("startBoardServer", () => {
     expect(body).toContain("Merge branch");
     expect(body).toContain("Merged");
     expect(body).toContain("Resolve conflicts");
+    expect(body).toContain("Resolver started");
     expect(body).toContain("mergedTargetBranches");
     expect(body).toContain('/api/tasks/" + task.id + "/branch-merge');
+    expect(body).toContain('/api/tasks/" + task.id + "/branch-merge/resolve');
     expect(body).toContain("Task artifacts");
     expect(body).toContain('/api/tasks/" + task.id + "/artifacts');
     expect(body).toContain("artifact-list");

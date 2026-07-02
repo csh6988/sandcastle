@@ -43,6 +43,13 @@ export type BoardTaskBranchMergeResult =
   | BoardTaskBranchMergedResult
   | BoardTaskBranchMergeConflictResult;
 
+export interface BoardTaskBranchMergeContext {
+  readonly repository: string;
+  readonly cwd: string;
+  readonly sourceBranch: string;
+  readonly targetBranch: string;
+}
+
 const git = (cwd: string, args: readonly string[]): string =>
   execFileSync("git", [...args], {
     cwd,
@@ -140,6 +147,47 @@ const branchContains = (
 const mergeInProgress = (cwd: string): boolean =>
   gitOrUndefined(cwd, ["rev-parse", "--verify", "MERGE_HEAD"]) !== undefined;
 
+export const getBoardTaskBranchMergeContext = (args: {
+  readonly task: BoardTaskRecord;
+  readonly runs: readonly BoardRunRecord[];
+  readonly repository: string;
+  readonly targetBranch: string;
+  readonly defaultRepoDir: string;
+}): BoardTaskBranchMergeContext => {
+  const repo = args.task.plan?.repositories.find(
+    (item) => item.name === args.repository,
+  );
+  if (!repo) {
+    throw new Error(
+      `Repository "${args.repository}" is not part of this task.`,
+    );
+  }
+  const cwd = repositoryCwd(args.task, repo.name, args.defaultRepoDir);
+  const sourceBranch = sourceBranchFor(repo.name, args.runs);
+  if (!sourceBranch || !branchExists(cwd, sourceBranch)) {
+    throw new Error(
+      `No local source branch was recorded for repository "${repo.name}".`,
+    );
+  }
+  if (!branchExists(cwd, args.targetBranch)) {
+    throw new Error(`Target branch "${args.targetBranch}" does not exist.`);
+  }
+  if (sourceBranch === args.targetBranch) {
+    throw new Error("Source and target branches must be different.");
+  }
+  if (isDirty(cwd)) {
+    throw new Error(
+      `Repository "${repo.name}" working tree is not clean; commit or stash local changes before resolving merge conflicts.`,
+    );
+  }
+  return {
+    repository: repo.name,
+    cwd,
+    sourceBranch,
+    targetBranch: args.targetBranch,
+  };
+};
+
 export const listBoardTaskBranchMergeOptions = (args: {
   readonly task: BoardTaskRecord;
   readonly runs: readonly BoardRunRecord[];
@@ -196,48 +244,24 @@ export const mergeBoardTaskBranch = (args: {
   readonly targetBranch: string;
   readonly defaultRepoDir: string;
 }): BoardTaskBranchMergeResult => {
-  const repo = args.task.plan?.repositories.find(
-    (item) => item.name === args.repository,
-  );
-  if (!repo) {
-    throw new Error(
-      `Repository "${args.repository}" is not part of this task.`,
-    );
-  }
-  const cwd = repositoryCwd(args.task, repo.name, args.defaultRepoDir);
-  const sourceBranch = sourceBranchFor(repo.name, args.runs);
-  if (!sourceBranch || !branchExists(cwd, sourceBranch)) {
-    throw new Error(
-      `No local source branch was recorded for repository "${repo.name}".`,
-    );
-  }
-  if (!branchExists(cwd, args.targetBranch)) {
-    throw new Error(`Target branch "${args.targetBranch}" does not exist.`);
-  }
-  if (sourceBranch === args.targetBranch) {
-    throw new Error("Source and target branches must be different.");
-  }
-  if (isDirty(cwd)) {
-    throw new Error(
-      `Repository "${repo.name}" working tree is not clean; commit or stash local changes before merging.`,
-    );
-  }
+  const context = getBoardTaskBranchMergeContext(args);
+  const { cwd, repository: repoName, sourceBranch, targetBranch } = context;
 
-  git(cwd, ["checkout", args.targetBranch]);
+  git(cwd, ["checkout", targetBranch]);
   const before = headSha(cwd);
   try {
     git(cwd, ["merge", "--no-edit", sourceBranch]);
   } catch (error) {
-    const message = `Failed to merge "${sourceBranch}" into "${args.targetBranch}": ${errorOutput(error)}`;
+    const message = `Failed to merge "${sourceBranch}" into "${targetBranch}": ${errorOutput(error)}`;
     if (mergeInProgress(cwd)) {
       gitOrUndefined(cwd, ["merge", "--abort"]);
     }
     return {
       status: "conflict",
-      repository: repo.name,
+      repository: repoName,
       cwd,
       sourceBranch,
-      targetBranch: args.targetBranch,
+      targetBranch,
       before,
       message,
     };
@@ -246,10 +270,10 @@ export const mergeBoardTaskBranch = (args: {
 
   return {
     status: "merged",
-    repository: repo.name,
+    repository: repoName,
     cwd,
     sourceBranch,
-    targetBranch: args.targetBranch,
+    targetBranch,
     before,
     after,
     fastForward:

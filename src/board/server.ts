@@ -7,6 +7,7 @@ import {
   routeApi,
   type TaskCanceler,
   type TaskLauncher,
+  type TaskBranchMergeConflictResolver,
   type TaskPhaseCompleter,
   type TaskRecoverer,
   type TaskResumer,
@@ -30,6 +31,8 @@ export interface BoardServerOptions {
   readonly recoverTask?: TaskRecoverer;
   /** Optional canceler invoked when a running workflow task should stop. */
   readonly cancelTask?: TaskCanceler;
+  /** Optional resolver invoked when a Board branch merge needs agent help. */
+  readonly resolveBranchMergeConflict?: TaskBranchMergeConflictResolver;
   /** Optional interactive terminal session manager for board tasks. */
   readonly terminalManager?: BoardTerminalManager;
   /** Host repository directory used for Board git actions. Defaults to process.cwd(). */
@@ -189,6 +192,7 @@ export const startBoardServer = (
       options.recoverTask,
       options.cancelTask,
       options.repoDir ?? process.cwd(),
+      options.resolveBranchMergeConflict,
     ).then((apiResponse) => {
       if (apiResponse) {
         const payload = JSON.stringify(apiResponse.body);

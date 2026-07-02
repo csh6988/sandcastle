@@ -2,7 +2,7 @@ import { Command, Options } from "@effect/cli";
 import { FileSystem } from "@effect/platform";
 import { Effect, Option } from "effect";
 import * as clack from "@clack/prompts";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -78,6 +78,7 @@ import {
 import { startBoardServer } from "./board/server.js";
 import { createTaskLauncher } from "./board/launchTask.js";
 import { createLangGraphTaskWorkflow } from "./board/langGraphTaskRunner.js";
+import { getBoardTaskBranchMergeContext } from "./board/taskBranchMerge.js";
 import { createImportedWorkspacePlanTask } from "./board/workspacePlanImport.js";
 import { createPrdFileBoardTask } from "./board/prdTask.js";
 import {
@@ -2809,6 +2810,129 @@ const boardCommand = Command.make(
         store,
         run: langGraphWorkflow.run,
       });
+      const resolveBranchMergeConflict = (
+        task: BoardTaskRecord,
+        args: { readonly repository: string; readonly targetBranch: string },
+      ): void => {
+        const runs = store.listRuns().filter((run) => run.taskId === task.id);
+        const context = getBoardTaskBranchMergeContext({
+          task,
+          runs,
+          repository: args.repository,
+          targetBranch: args.targetBranch,
+          defaultRepoDir: cwd,
+        });
+        const startedAt = new Date().toISOString();
+        store.updateTask(task.id, {
+          workflow: {
+            ...(task.workflow ?? { status: "running", updatedAt: startedAt }),
+            message: `Resolving merge conflict from ${context.sourceBranch} into ${context.targetBranch}.`,
+            updatedAt: startedAt,
+          },
+        });
+        execFileSync("git", ["checkout", context.targetBranch], {
+          cwd: context.cwd,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+
+        let recorder: ((event: RunEvent) => void) | undefined;
+        const promise = executeWorkspaceTaskPlan({
+          repositories: [
+            {
+              name: context.repository,
+              cwd: context.cwd,
+              branchStrategy: { type: "merge-to-head" },
+            },
+          ],
+          plan: {
+            workspace: {
+              repositories: [
+                {
+                  name: context.repository,
+                  cwd: context.cwd,
+                  branchStrategy: { type: "merge-to-head" },
+                },
+              ],
+            },
+            repositories: [
+              {
+                name: context.repository,
+                task: `Resolve the git merge conflict when merging ${context.sourceBranch} into ${context.targetBranch}.`,
+                reason:
+                  "The Board branch merge action detected a conflict and needs an agent-assisted resolution.",
+                issue: {
+                  title: "Resolve Board branch merge conflict",
+                  body: `Status: ready-for-agent
+
+## What to build
+
+Resolve the git merge conflict between source branch \`${context.sourceBranch}\` and target branch \`${context.targetBranch}\`.
+
+## Acceptance criteria
+
+- Run \`git merge ${context.sourceBranch}\` from the checked-out target branch worktree.
+- Resolve all conflicts without unrelated changes.
+- Commit the conflict resolution.
+- Leave the repository with a clean working tree.
+
+## Verification
+
+- \`git status --short\` is empty.
+- \`git merge-base --is-ancestor ${context.sourceBranch} HEAD\` succeeds.`,
+                },
+              },
+            ],
+          },
+          taskPrompt: `Resolve the Board branch merge conflict for task "${task.title}". Merge source branch ${context.sourceBranch} into target branch ${context.targetBranch}, resolve conflicts, commit the resolution, and report completion.`,
+          agent: executionAgent,
+          sandbox: sandboxProvider,
+          branchPrefix:
+            resolvedBranchPrefix ??
+            `${boardExecutionBranchPrefix(task.id)}/merge-conflict`,
+          maxIterations: resolvedMaxIterations,
+          name: `${task.title} resolve merge`,
+          idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+          onRepoRunEvent: (repo, event) => {
+            recorder ??= createRunRecorder(store, {
+              taskId: task.id,
+              repo,
+            });
+            recorder(event);
+          },
+        }).then((results) => {
+          const result = results[context.repository];
+          const updatedAt = new Date().toISOString();
+          store.updateTask(task.id, {
+            workflow: {
+              ...(store.getTask(task.id)?.workflow ?? {
+                status: "succeeded",
+                updatedAt,
+              }),
+              message:
+                result?.status === "success"
+                  ? `Merge conflict resolver completed for ${context.repository}.`
+                  : `Merge conflict resolver failed for ${context.repository}.`,
+              ...(result?.error ? { error: result.error } : {}),
+              updatedAt,
+            },
+          });
+        });
+        void promise.catch((error) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const updatedAt = new Date().toISOString();
+          store.updateTask(task.id, {
+            workflow: {
+              ...(store.getTask(task.id)?.workflow ?? {
+                status: "failed",
+                updatedAt,
+              }),
+              error: message,
+              updatedAt,
+            },
+          });
+        });
+      };
 
       const startupTask = createBoardStartupTask({
         store,
@@ -2871,6 +2995,7 @@ const boardCommand = Command.make(
             terminalManager.killTask(task.id);
             reportWorkflowPromise(task.id, langGraphWorkflow.cancel(task.id));
           },
+          resolveBranchMergeConflict,
         }),
       );
 

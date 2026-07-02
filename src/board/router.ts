@@ -37,6 +37,14 @@ export type TaskPhaseCompleter = (
 export type TaskRecoverer = (task: BoardTaskRecord) => void;
 /** Cancels a running workflow task. */
 export type TaskCanceler = (task: BoardTaskRecord) => void;
+/** Starts an agent run that resolves a conflicted Board branch merge. */
+export type TaskBranchMergeConflictResolver = (
+  task: BoardTaskRecord,
+  args: {
+    readonly repository: string;
+    readonly targetBranch: string;
+  },
+) => void;
 
 const json = (status: number, body: unknown): ApiResponse => ({
   status,
@@ -77,6 +85,7 @@ export const routeApi = async (
   recoverTask?: TaskRecoverer,
   cancelTask?: TaskCanceler,
   defaultRepoDir: string = process.cwd(),
+  resolveBranchMergeConflict?: TaskBranchMergeConflictResolver,
 ): Promise<ApiResponse | undefined> => {
   if (!pathname.startsWith("/api/")) return undefined;
 
@@ -197,6 +206,48 @@ export const routeApi = async (
       }
     }
     return json(405, { error: "method not allowed" });
+  }
+
+  const taskBranchMergeResolveMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/branch-merge\/resolve$/,
+  );
+  if (taskBranchMergeResolveMatch) {
+    const id = decodeURIComponent(taskBranchMergeResolveMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (method !== "POST") return json(405, { error: "method not allowed" });
+    if (!resolveBranchMergeConflict) {
+      return json(409, {
+        error: "branch merge conflict resolution is not enabled",
+      });
+    }
+    let payload: unknown;
+    try {
+      payload = await parseBody();
+    } catch {
+      return json(400, { error: "invalid JSON body" });
+    }
+    const { repository, targetBranch } = (payload ?? {}) as {
+      repository?: unknown;
+      targetBranch?: unknown;
+    };
+    if (typeof repository !== "string" || repository.trim().length === 0) {
+      return json(400, { error: "repository is required" });
+    }
+    if (typeof targetBranch !== "string" || targetBranch.trim().length === 0) {
+      return json(400, { error: "targetBranch is required" });
+    }
+    try {
+      resolveBranchMergeConflict(task, {
+        repository: repository.trim(),
+        targetBranch: targetBranch.trim(),
+      });
+    } catch (error) {
+      return json(409, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return json(202, { status: "started" });
   }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
