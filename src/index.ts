@@ -54,7 +54,11 @@ export type {
 } from "./createWorktree.js";
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
-export type { RunEvent } from "./RunEvent.js";
+export type {
+  RunEvent,
+  RunFailureKind,
+  RunFailureRecovery,
+} from "./RunEvent.js";
 export {
   transferClaudeSession,
   transferCodexSession,

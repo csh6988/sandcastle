@@ -49,6 +49,7 @@ import type {
 } from "./Output.js";
 import { StructuredOutputError } from "./Output.js";
 import { extractStructuredOutput } from "./extractStructuredOutput.js";
+import { buildRunFailureRecovery } from "./RunFailureEvidence.js";
 
 /**
  * Build the token-efficient feedback prompt sent to the agent when retrying
@@ -800,11 +801,18 @@ export async function run(
   // In file-logging mode, write errors to the log before they propagate.
   // In stdout mode (ClackDisplay), errors are already shown by withFriendlyErrors
   // in main.ts, so we skip to avoid duplicate terminal output.
+  // Capture the underlying tagged error as it flows through the Effect failure
+  // channel. `Effect.runPromise` rejects with a FiberFailure wrapper that hides
+  // the tagged error's `_tag` and evidence fields (preservedWorktreePath,
+  // etc.), so we read them here where the real error is available. This does
+  // not alter the error channel — the original rejection is still thrown.
+  let taggedFailure: unknown;
   const withErrorLog =
     resolvedLogging.type === "file"
       ? baseEffect.pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
+              taggedFailure = error;
               const d = yield* Display;
               yield* d.status(
                 formatErrorMessage(error as SandboxError),
@@ -813,7 +821,13 @@ export async function run(
             }),
           ),
         )
-      : baseEffect;
+      : baseEffect.pipe(
+          Effect.tapError((error) =>
+            Effect.sync(() => {
+              taggedFailure = error;
+            }),
+          ),
+        );
 
   emitRunEvent({
     type: "run-started",
@@ -832,9 +846,24 @@ export async function run(
       withErrorLog.pipe(Effect.provide(runLayer)),
     );
   } catch (error: unknown) {
+    // Enrich the failure event with structured, best-effort recovery evidence.
+    // This is observability metadata only — the original error is still thrown
+    // below, and the abort-signal reason is still surfaced verbatim.
+    // Prefer the unwrapped tagged error (captured in tapError) so we can read
+    // its `_tag` and evidence fields; fall back to the FiberFailure wrapper.
+    const evidenceError = taggedFailure ?? error;
+    const structuredCommits =
+      evidenceError instanceof StructuredOutputError
+        ? evidenceError.commits.map((c) => c.sha)
+        : undefined;
     emitRunEvent({
       type: "run-failed",
       message: error instanceof Error ? error.message : String(error),
+      recovery: buildRunFailureRecovery(evidenceError, {
+        runLogPath:
+          resolvedLogging.type === "file" ? resolvedLogging.path : undefined,
+        commits: structuredCommits,
+      }),
       timestamp: new Date(),
     });
     // If the signal was aborted, surface its reason verbatim (no wrapping)

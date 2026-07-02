@@ -2,6 +2,55 @@ import { Context, Effect, Layer } from "effect";
 import type { IterationUsage } from "./AgentProvider.js";
 
 /**
+ * A stable, coarse classification of why a run failed, so consumers can route
+ * infrastructure failures differently from agent or task failures without
+ * pattern-matching on error messages.
+ *
+ * - `infrastructure` — the sandbox/host environment failed (e.g. a missing
+ *   container image, Docker/Podman errors, copy/sync/worktree/hook timeouts).
+ *   The task itself was never fairly attempted.
+ * - `agent` — the agent process itself failed (non-zero exit, idle timeout).
+ * - `task` — the run reached the agent's output but it did not satisfy the
+ *   task contract (e.g. structured-output extraction/validation failed).
+ * - `unknown` — the failure could not be classified.
+ *
+ * This is a plain string union with no Effect types so it can be exported from
+ * `src/index.ts` and consumed by non-Effect hosts. See ADR 0021.
+ */
+export type RunFailureKind = "infrastructure" | "agent" | "task" | "unknown";
+
+/**
+ * Structured, best-effort recovery evidence attached to a {@link RunEvent} of
+ * type `run-failed`. Every field is optional and plain-serializable so the
+ * event survives a JSON round-trip through a store and stays compatible with
+ * minimal legacy `run-failed` events that omit it entirely.
+ *
+ * This is observability/recovery metadata, not a new error-handling mechanism:
+ * the original error is still thrown. It surfaces evidence Sandcastle already
+ * knows (preserved worktree, run log, session, commits, completion state) at
+ * the same public seam used by `run()` and the workspace runners so a caller or
+ * the workflow board can decide how to recover.
+ */
+export interface RunFailureRecovery {
+  /** Coarse, stable classification of the failure. */
+  readonly failureKind: RunFailureKind;
+  /** Best-effort human label for where the run failed (e.g. "agent", "sandbox-create"). */
+  readonly failurePhase?: string;
+  /** Host path to a worktree preserved after failure, when one was kept. */
+  readonly preservedWorktreePath?: string;
+  /** Host path to the run log, when the run logged to a file. */
+  readonly runLogPath?: string;
+  /** Agent session id of the last iteration, when captured. */
+  readonly sessionId?: string;
+  /** Host path to the captured session file, when captured. */
+  readonly sessionFilePath?: string;
+  /** Whether the completion signal was seen before the failure, when known. */
+  readonly completionSignalSeen?: boolean;
+  /** Commit SHAs recorded before the failure, when any. */
+  readonly commits?: readonly string[];
+}
+
+/**
  * A single event in a run's structured lifecycle stream, surfaced to callers of
  * `run()` (and the workspace runners) via the `onRunEvent` callback.
  *
@@ -87,6 +136,12 @@ export type RunEvent =
   | {
       readonly type: "run-failed";
       readonly message: string;
+      /**
+       * Optional structured recovery evidence. Absent on minimal/legacy
+       * `run-failed` events; present when the emit site could gather it. The
+       * `message` field is unchanged and remains the primary failure text.
+       */
+      readonly recovery?: RunFailureRecovery;
       readonly timestamp: Date;
     };
 

@@ -224,6 +224,14 @@ _Avoid_: "log event" (the log file contains more than just agent output), "displ
 A single item in a run's structured lifecycle stream surfaced to the caller of `run()` via the `onRunEvent` callback, working in **both** display modes. A superset of the **agent stream event**: covers run lifecycle (`run-started`/`run-finished`/`run-failed`), `iteration-started`, `agent-text`, `agent-tool-call`, token `usage` (with the **agent**'s model), and `commit`. A plain (Effect-free) discriminated union so it can be consumed by non-Effect hosts such as the **workflow board**. See ADR 0021.
 _Avoid_: "agent stream event" (narrower), "log event", "lifecycle event" (too generic)
 
+**Run failure evidence**:
+Optional structured, plain (Effect-free) recovery metadata carried on a `run-failed` **run event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional; a minimal/legacy `run-failed` event without it still renders. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports. See ADR 0021.
+_Avoid_: "error details" (too generic), "failure report" (reserved for the Board verification report), "diagnostics" (overloaded with prompt diagnostics)
+
+**Run failure kind**:
+The stable, coarse classification of why a run failed, carried on **run failure evidence**: `infrastructure` (the sandbox/host environment failed), `agent` (the agent process failed), `task` (the agent ran but did not satisfy the task contract, e.g. structured-output validation), or `unknown`. Lets a library consumer route infrastructure failures differently from agent or task failures without pattern-matching error text.
+_Avoid_: "error type" (ambiguous with the tagged `SandboxError` classes), "failure category", "severity"
+
 ### Workflow board
 
 **Control plane**:

@@ -61,6 +61,7 @@ import {
   type SandboxHooks,
 } from "./SandboxLifecycle.js";
 import type { SandboxError } from "./errors.js";
+import { buildRunFailureRecovery } from "./RunFailureEvidence.js";
 import { TextDeltaBuffer } from "./TextDeltaBuffer.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 
@@ -808,9 +809,25 @@ export async function runWorkspace(
     };
   } catch (error) {
     caught = error;
+    // Best-effort per-workspace recovery evidence. The workspace shares one
+    // sandbox across mounted repos, so surface the primary repo's preserved
+    // worktree and the aggregate commits gathered before the failure; the run
+    // log path is shared. Emit-site evidence is additive — the error is still
+    // rethrown below.
+    const primaryRepo =
+      prepared.find((repo) => repo.name === options.primaryRepository) ??
+      prepared[0];
+    const workspaceCommits = prepared.flatMap((repo) =>
+      repo.commits.map((commit) => commit.sha),
+    );
     emitRunEvent({
       type: "run-failed",
       message: error instanceof Error ? error.message : String(error),
+      recovery: buildRunFailureRecovery(error, {
+        runLogPath: displayConfig.logFilePath,
+        preservedWorktreePath: primaryRepo?.worktreePath,
+        commits: workspaceCommits,
+      }),
       timestamp: new Date(),
     });
   } finally {

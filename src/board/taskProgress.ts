@@ -101,6 +101,64 @@ const completedEvidence = (
   return evidence;
 };
 
+const failureKindLabel: Record<string, string> = {
+  infrastructure: "infrastructure failure (environment, not the task)",
+  agent: "agent failure",
+  task: "task failure",
+  unknown: "unclassified failure",
+};
+
+/**
+ * Board-specific recovery wording projected from the generic
+ * `RunFailureRecovery` evidence carried on the latest `run-failed` event. Falls
+ * back to nothing when the event is a minimal/legacy one without `recovery`, so
+ * historical events still render safely.
+ */
+const recoveryEvidenceLines = (
+  events: readonly BoardRunEventRecord[],
+): string[] => {
+  const failed = [...events]
+    .reverse()
+    .map((record) => record.event)
+    .find((event) => event.type === "run-failed");
+  if (!failed || failed.type !== "run-failed") return [];
+  const recovery = failed.recovery;
+  if (!recovery) return [];
+
+  const lines: string[] = [];
+  const label = failureKindLabel[recovery.failureKind];
+  if (label) lines.push(`Failure kind: ${label}.`);
+  if (recovery.failurePhase) {
+    lines.push(`Failure phase: ${recovery.failurePhase}.`);
+  }
+  if (recovery.preservedWorktreePath) {
+    lines.push(
+      `Preserved worktree to inspect or continue: ${recovery.preservedWorktreePath}`,
+    );
+  }
+  if (recovery.runLogPath) {
+    lines.push(`Run log for full context: ${recovery.runLogPath}`);
+  }
+  if (recovery.sessionId) {
+    lines.push(
+      `Agent session id${recovery.sessionFilePath ? ` (${recovery.sessionFilePath})` : ""}: ${recovery.sessionId}`,
+    );
+  }
+  if (recovery.commits && recovery.commits.length > 0) {
+    lines.push(
+      `Commits recorded before failure: ${recovery.commits.join(", ")}`,
+    );
+  }
+  if (recovery.completionSignalSeen !== undefined) {
+    lines.push(
+      recovery.completionSignalSeen
+        ? "The agent claimed completion before the failure — verify delivered work before recovering."
+        : "The agent did not claim completion before the failure.",
+    );
+  }
+  return lines;
+};
+
 const currentNextStep = (
   run: BoardRunRecord | undefined,
   events: readonly BoardRunEventRecord[],
@@ -113,6 +171,7 @@ const currentNextStep = (
     return [
       "Inspect the existing branch/worktree and continue from the last activity digest.",
       run.error ? `Address the last failure: ${truncate(run.error)}` : "",
+      ...recoveryEvidenceLines(events),
     ].filter(Boolean);
   }
   const latestDigest = [...events].reverse().map(digestLine).find(Boolean);

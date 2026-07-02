@@ -56,4 +56,7 @@ consumer needs: `run-started` / `run-finished` / `run-failed`, `iteration-starte
 The board (persistence + HTTP/SSE server) consumes `onRunEvent` to record and
 stream runs without parsing logs or importing Effect. Future run-level signals
 (e.g. structured-output extraction, retries) can be added as new `RunEvent`
-variants without touching the logging layers.
+variants without touching the logging layers. ADR 0025 takes this additive path:
+it enriches the existing `run-failed` variant with an optional structured
+`recovery` object (**run failure evidence**) rather than adding a parallel
+observer API.
