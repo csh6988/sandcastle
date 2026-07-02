@@ -1619,6 +1619,19 @@ describe("run() onRunEvent", () => {
     const failed = events.find((e) => e.type === "run-failed");
     expect(failed).toBeDefined();
     expect(events.map((e) => e.type)).toContain("run-started");
+
+    // The failure carries structured recovery evidence with a stable kind and
+    // a best-effort failure phase. A sandbox exec error is infrastructure.
+    expect(failed).toMatchObject({ type: "run-failed" });
+    if (failed?.type === "run-failed") {
+      expect(failed.message).toMatch(/agent boom/i);
+      expect(failed.recovery).toBeDefined();
+      expect(["infrastructure", "agent", "task", "unknown"]).toContain(
+        failed.recovery?.failureKind,
+      );
+      expect(failed.recovery?.failureKind).toBe("infrastructure");
+      expect(failed.recovery?.failurePhase).toBeTypeOf("string");
+    }
   });
 
   it("a throwing observer does not abort the run", async () => {

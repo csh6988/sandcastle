@@ -137,6 +137,50 @@ describe("BoardStore", () => {
     expect(updated.lastEventType).toBe("run-failed");
   });
 
+  it("preserves structured recovery evidence on run-failed through serialization", () => {
+    const run = store.createRun({
+      name: "r1",
+      agent: "claude-code",
+      sandbox: "docker",
+      branch: "main",
+      maxIterations: 1,
+    });
+    store.recordEvent(run.id, {
+      type: "run-failed",
+      message: "agent exited with code 1",
+      recovery: {
+        failureKind: "agent",
+        failurePhase: "agent",
+        preservedWorktreePath: "/host/worktrees/repo",
+        runLogPath: "/host/logs/repo.log",
+        sessionId: "sess-1",
+        completionSignalSeen: false,
+        commits: ["abc123"],
+      },
+      timestamp: new Date(),
+    });
+
+    // Read back from a fresh store instance to prove it survives the on-disk
+    // JSON round-trip (only `timestamp` is remapped; new fields flow through).
+    const reopened = new BoardStore(dir);
+    const failed = reopened
+      .getEvents(run.id)
+      .map((r) => r.event)
+      .find((e) => e.type === "run-failed");
+    expect(failed).toBeDefined();
+    if (failed?.type === "run-failed") {
+      expect(failed.recovery).toEqual({
+        failureKind: "agent",
+        failurePhase: "agent",
+        preservedWorktreePath: "/host/worktrees/repo",
+        runLogPath: "/host/logs/repo.log",
+        sessionId: "sess-1",
+        completionSignalSeen: false,
+        commits: ["abc123"],
+      });
+    }
+  });
+
   it("marks running records as failed when a new store attaches after restart", () => {
     const run = store.createRun({
       name: "r1",

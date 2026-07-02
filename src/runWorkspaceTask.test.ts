@@ -321,4 +321,42 @@ describe("runWorkspaceTask", () => {
       }),
     ).rejects.toThrow('Planner referenced unknown repository "missing"');
   });
+
+  it("forwards richer per-repository failure evidence through onRepoRunEvent", async () => {
+    const api = await createRepo();
+    const runEvents: Array<{ repo: string; event: RunEvent }> = [];
+    const { provider } = createWorkspaceTaskProvider(async ({ prompt }) => {
+      if (prompt.includes("workspace task planner")) {
+        return `<workspace_plan>{"repositories":[{"name":"api","task":"Add API"}]}</workspace_plan><promise>COMPLETE</promise>`;
+      }
+      // The executor agent fails mid-run.
+      throw new Error("executor boom");
+    });
+
+    // runWorkspaceTask captures per-repo failures into the result rather than
+    // rejecting; the run-failed event still flows through onRepoRunEvent.
+    const result = await runWorkspaceTask({
+      repositories: [{ name: "api", cwd: api, kind: "backend" }],
+      prompt: "Add API",
+      agent: testAgent,
+      sandbox: provider,
+      branchPrefix: "codex/task",
+      logging: { type: "stdout" },
+      onRepoRunEvent: (repo, event) => runEvents.push({ repo, event }),
+    });
+
+    expect(result.repositories.api!.status).toBe("failed");
+
+    const failed = runEvents.find(({ event }) => event.type === "run-failed");
+    expect(failed).toBeDefined();
+    // The failure event is tagged with the repository name...
+    expect(failed!.repo).toBe("api");
+    // ...and carries structured recovery evidence with a stable failure kind.
+    if (failed!.event.type === "run-failed") {
+      expect(failed!.event.recovery).toBeDefined();
+      expect(["infrastructure", "agent", "task", "unknown"]).toContain(
+        failed!.event.recovery?.failureKind,
+      );
+    }
+  });
 });
