@@ -4,6 +4,7 @@ import type {
   BoardTaskPlan,
   BoardTaskRecord,
 } from "./BoardStore.js";
+import type { LocalIssueStatus } from "./localIssueMarkdown.js";
 
 export interface TaskProgressRun {
   readonly run: BoardRunRecord;
@@ -30,6 +31,15 @@ const repoStatus = (run: BoardRunRecord | undefined): string => {
   if (run.status === "running") return "in_progress";
   if (run.status === "succeeded") return "succeeded";
   return "needs_recovery";
+};
+
+export const issueStatusForRun = (
+  run: BoardRunRecord | undefined,
+): LocalIssueStatus => {
+  if (!run) return "ready-for-agent";
+  if (run.status === "running") return "in-progress";
+  if (run.status === "succeeded") return "succeeded";
+  return "needs-recovery";
 };
 
 const approvedWorkLines = (repo: BoardTaskPlan["repositories"][number]) => {
@@ -140,6 +150,7 @@ export const renderTaskProgress = (
       .filter((line): line is string => line !== undefined);
     const lastDigest = digest.slice(-MAX_DIGEST_ITEMS);
     return `## Repository: ${repo.name}
+Issue status: ${issueStatusForRun(run)}
 Status: ${repoStatus(run)}
 Run ID: ${run?.id ?? "not-started"}
 Branch: ${run?.branch ?? "not-started"}

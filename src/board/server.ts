@@ -32,6 +32,8 @@ export interface BoardServerOptions {
   readonly cancelTask?: TaskCanceler;
   /** Optional interactive terminal session manager for board tasks. */
   readonly terminalManager?: BoardTerminalManager;
+  /** Host repository directory used for Board git actions. Defaults to process.cwd(). */
+  readonly repoDir?: string;
 }
 
 export interface BoardServer {
@@ -186,6 +188,7 @@ export const startBoardServer = (
       options.completePhase,
       options.recoverTask,
       options.cancelTask,
+      options.repoDir ?? process.cwd(),
     ).then((apiResponse) => {
       if (apiResponse) {
         const payload = JSON.stringify(apiResponse.body);

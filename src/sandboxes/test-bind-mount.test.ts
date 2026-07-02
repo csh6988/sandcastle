@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { canonicalTestPath } from "../testPath.js";
 import { testBindMount } from "./test-bind-mount.js";
 
 describe("testBindMount()", () => {
@@ -38,7 +39,9 @@ describe("testBindMount()", () => {
     });
     try {
       const result = await handle.exec("pwd");
-      expect(result.stdout.trim()).toBe(handle.worktreePath);
+      expect(result.stdout.trim()).toBe(
+        await canonicalTestPath(handle.worktreePath),
+      );
     } finally {
       await handle.close();
     }

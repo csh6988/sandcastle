@@ -24,6 +24,7 @@ import {
 import { encodeProjectPath } from "./SessionStore.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { makeLocalSandbox } from "./testSandbox.js";
+import { canonicalTestPath } from "./testPath.js";
 
 /** Dummy sandbox provider used to satisfy the required `sandbox` field in test mode. */
 const testSandbox = createBindMountSandboxProvider({
@@ -844,7 +845,9 @@ describe("createSandbox", () => {
     try {
       const result = await sandbox.exec("pwd");
       // In test mode, sandboxRepoDir === worktreePath.
-      expect(result.stdout.trim()).toBe(sandbox.worktreePath);
+      expect(result.stdout.trim()).toBe(
+        await canonicalTestPath(sandbox.worktreePath),
+      );
     } finally {
       await sandbox.close();
       await rm(hostDir, { recursive: true, force: true });
@@ -890,7 +893,7 @@ describe("createSandbox", () => {
 
     try {
       const result = await sandbox.exec("pwd", { cwd: hostDir });
-      expect(result.stdout.trim()).toBe(hostDir);
+      expect(result.stdout.trim()).toBe(await canonicalTestPath(hostDir));
     } finally {
       await sandbox.close();
       await rm(hostDir, { recursive: true, force: true });

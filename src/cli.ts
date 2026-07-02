@@ -55,6 +55,7 @@ import type {
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
 import { noSandbox } from "./sandboxes/no-sandbox.js";
+import type { RunEvent } from "./RunEvent.js";
 import { run } from "./run.js";
 import {
   executeWorkspaceTaskPlan,
@@ -70,19 +71,35 @@ import { encodeProjectPath } from "./SessionStore.js";
 import { VERSION } from "./version.js";
 import {
   BoardStore,
+  createRunRecorder,
   type BoardTaskRecord,
   type BoardTaskWorkflowPhase,
 } from "./board/BoardStore.js";
 import { startBoardServer } from "./board/server.js";
 import { createTaskLauncher } from "./board/launchTask.js";
+import { createLangGraphTaskWorkflow } from "./board/langGraphTaskRunner.js";
+import { createImportedWorkspacePlanTask } from "./board/workspacePlanImport.js";
+import { createPrdFileBoardTask } from "./board/prdTask.js";
 import {
-  createLangGraphTaskWorkflow,
-  workspacePlanToBoardPlan,
-} from "./board/langGraphTaskRunner.js";
+  isPrdVisualAssetFile,
+  isUnsupportedPrdDocumentFile,
+  unsupportedPrdDocumentMessage,
+} from "./board/prdAssets.js";
+import { preparePrdAssetsForExecution } from "./board/prdExecutionAssets.js";
 import {
   BoardTerminalManager,
   PHASE_COMPLETION_SIGNAL,
 } from "./board/terminalSession.js";
+import {
+  sanitizePlanningArtifactSegment,
+  writeWorkspacePlanningArtifacts,
+  type WorkspacePlanningArtifacts,
+} from "./board/planningArtifacts.js";
+import { exportApprovedBoardPlan } from "./board/approvedPlanExport.js";
+import {
+  BOARD_EVALUATOR_REPO,
+  runBoardEvaluatorAgent,
+} from "./board/taskEvaluator.js";
 
 // --- Shared options ---
 
@@ -1535,11 +1552,7 @@ export const buildWorkspaceSandboxProvider = (
 };
 
 const sanitizeArtifactSegment = (value: string): string => {
-  const sanitized = value
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return sanitized || "workspace-task";
+  return sanitizePlanningArtifactSegment(value);
 };
 
 export const resolveBoardPlanningConfig = (
@@ -1680,75 +1693,82 @@ const configuredPrdFile = (config: WorkspaceCliConfig): string | undefined =>
     ? config.prdFile
     : undefined;
 
-const issueBodyFor = (
-  repo: WorkspaceTaskPlan["repositories"][number],
-): string => {
-  if (repo.issue) {
-    return `# ${repo.issue.title}
-
-${repo.issue.body}
-`;
+export const resolveBoardStartupPrdFile = (params: {
+  readonly cwd: string;
+  readonly configPath: string;
+  readonly explicitConfig: boolean;
+  readonly planFile: Option.Option<string>;
+  readonly prdFile: Option.Option<string>;
+}): string | undefined => {
+  if (params.planFile._tag === "Some" && params.prdFile._tag === "Some") {
+    throw new InitError({
+      message:
+        "Pass only one board startup input source: --plan-file, --prd-file",
+    });
+  }
+  if (params.planFile._tag === "Some") return undefined;
+  if (params.prdFile._tag === "Some") {
+    return resolve(params.cwd, params.prdFile.value);
   }
 
-  return `# ${repo.name}: ${repo.task}
+  const workspaceConfig = resolveBoardPlanningConfig(
+    params.configPath,
+    params.cwd,
+    params.explicitConfig,
+  ).config;
+  const configPrdFile = configuredPrdFile(workspaceConfig);
+  return configPrdFile ? resolve(params.cwd, configPrdFile) : undefined;
+};
 
-Status: ready-for-agent
+export const createBoardStartupTask = (params: {
+  readonly store: BoardStore;
+  readonly cwd: string;
+  readonly configPath: string;
+  readonly explicitConfig: boolean;
+  readonly planFile: Option.Option<string>;
+  readonly prdFile: Option.Option<string>;
+  readonly planningOnly: boolean;
+  readonly launchTask: (task: BoardTaskRecord) => void;
+}): BoardTaskRecord | undefined => {
+  const startupPrdFile = resolveBoardStartupPrdFile({
+    cwd: params.cwd,
+    configPath: params.configPath,
+    explicitConfig: params.explicitConfig,
+    planFile: params.planFile,
+    prdFile: params.prdFile,
+  });
 
-## What to build
+  if (params.planFile._tag === "Some") {
+    const resolvedPlanFile = resolve(params.cwd, params.planFile.value);
+    return createImportedWorkspacePlanTask(params.store, {
+      plan: readWorkspacePlan(resolvedPlanFile),
+      planFile: resolvedPlanFile,
+      planningOnly: params.planningOnly,
+    });
+  }
 
-${repo.task}
+  if (startupPrdFile) {
+    if (isUnsupportedPrdDocumentFile(startupPrdFile)) {
+      throw new InitError({ message: unsupportedPrdDocumentMessage });
+    }
+    const task = createPrdFileBoardTask(params.store, {
+      prdFile: startupPrdFile,
+      prd: isPrdVisualAssetFile(startupPrdFile)
+        ? ""
+        : readFileSync(startupPrdFile, "utf8"),
+      planningOnly: params.planningOnly,
+    });
+    params.launchTask(task);
+    return task;
+  }
 
-## Acceptance criteria
-
-- [ ] Implement the repository-local task.
-- [ ] Keep changes scoped to ${repo.name}.
-- [ ] Run focused verification when feasible.
-
-## Notes
-
-${repo.reason ?? "No planner reason was provided."}
-`;
+  return undefined;
 };
 
 const writeWorkspaceArtifacts = (
   dir: string,
   plan: WorkspaceTaskPlan,
-): {
-  readonly planJsonPath: string;
-  readonly alignmentPath: string;
-  readonly technicalPlanPath: string;
-  readonly issuePaths: string[];
-} => {
-  const issuesDir = resolve(dir, "issues");
-  mkdirSync(issuesDir, { recursive: true });
-
-  const planJsonPath = resolve(dir, "workspace-plan.json");
-  writeFileSync(planJsonPath, `${JSON.stringify(plan, null, 2)}\n`);
-
-  const alignmentPath = resolve(dir, "alignment.md");
-  writeFileSync(alignmentPath, workspaceAlignmentMarkdown(plan));
-
-  const technicalPlanPath = resolve(dir, "technical-plan.md");
-  writeFileSync(
-    technicalPlanPath,
-    `# Workspace Technical Plan
-
-${plan.technicalPlan ?? "The planner did not provide a separate technical plan."}
-
-## Repository Issues
-
-${plan.repositories.map((repo) => `- ${repo.name}: ${repo.task}`).join("\n")}
-`,
-  );
-
-  const issuePaths = plan.repositories.map((repo) => {
-    const path = resolve(issuesDir, `${sanitizeArtifactSegment(repo.name)}.md`);
-    writeFileSync(path, issueBodyFor(repo));
-    return path;
-  });
-
-  return { planJsonPath, alignmentPath, technicalPlanPath, issuePaths };
-};
+): WorkspacePlanningArtifacts => writeWorkspacePlanningArtifacts(dir, plan);
 
 /**
  * Run the planner (dry run) and write the resulting plan artifacts to disk.
@@ -1787,52 +1807,6 @@ const planWorkspaceToArtifacts = async (opts: {
   return { plan: result.plan, artifacts };
 };
 
-const workspaceAlignmentMarkdown = (plan: WorkspaceTaskPlan): string => {
-  const alignment = plan.alignment;
-  return `# Workspace PRD Alignment
-
-## Summary
-
-${alignment?.summary ?? "The planner did not provide a separate alignment summary."}
-
-## Assumptions
-
-${
-  alignment?.assumptions?.length
-    ? alignment.assumptions.map((item) => `- ${item}`).join("\n")
-    : "- None recorded."
-}
-
-## Open Questions
-
-${
-  alignment?.openQuestions?.length
-    ? alignment.openQuestions.map((item) => `- ${item}`).join("\n")
-    : "- None blocking."
-}
-
-## Domain Terms
-
-${
-  alignment?.domainTerms?.length
-    ? alignment.domainTerms
-        .map((item) => `- ${item.term}: ${item.meaning}`)
-        .join("\n")
-    : "- None recorded."
-}
-
-## ADR Candidates
-
-${
-  alignment?.adrCandidates?.length
-    ? alignment.adrCandidates
-        .map((item) => `- ${item.title}: ${item.reason}`)
-        .join("\n")
-    : "- None recorded."
-}
-`;
-};
-
 export const parseInteractiveWorkspacePlan = (
   transcript: string,
 ): WorkspaceTaskPlan | undefined => {
@@ -1856,6 +1830,25 @@ export const parseInteractiveWorkspacePlan = (
     }
   }
   return plan;
+};
+
+export const readInteractiveWorkspacePlanFile = (
+  planPath: string,
+): WorkspaceTaskPlan | undefined => {
+  if (!existsSync(planPath)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(planPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+  try {
+    return parseWorkspaceTaskPlan(parsed, [], {
+      allowPlannerWorkspace: true,
+    }).plan;
+  } catch {
+    return undefined;
+  }
 };
 
 const readWorkspacePlan = (planPath: string): WorkspaceTaskPlan => {
@@ -2399,10 +2392,44 @@ const boardDataDirOption = Options.text("data-dir").pipe(
   Options.optional,
 );
 
-const buildBoardPhasePrompt = (
+const boardPlanningOnlyOption = Options.boolean("planning-only").pipe(
+  Options.withDescription(
+    "Export approved Board planning artifacts without starting AFK execution",
+  ),
+);
+
+const sanitizeBoardBranchSegment = (value: string): string => {
+  const sanitized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/\/+/g, "/");
+  return sanitized || "task";
+};
+
+export const boardExecutionBranchPrefix = (taskId: string): string =>
+  `codex/board/${sanitizeBoardBranchSegment(taskId).slice(0, 8)}`;
+
+const boardEvaluatorBranch = (taskId: string): string =>
+  `${boardExecutionBranchPrefix(taskId)}/evaluator`;
+
+export const buildBoardPhasePrompt = (
   task: BoardTaskRecord,
   phase: BoardTaskWorkflowPhase,
+  options: {
+    readonly workspacePlanFile?: string;
+  } = {},
 ): string => {
+  const planningBoundaryInstructions =
+    phase === "classifying" ||
+    phase === "aligning-prd" ||
+    phase === "technical-planning" ||
+    phase === "creating-issues"
+      ? `
+Board role: Planner. Stay inside the Planner responsibility boundary.
+This is a planning-only Board phase. You may read CLAUDE.md and AGENTS.md, plus project docs, only to understand required skills/workflows, repository rules, verification expectations, and issue formatting requirements. Do not implement the task. Do not edit source files. Do not run long-lived agents. Do not commit changes. Preserve required skill/workflow instructions inside generated plans and issues so the later execution phase can follow them. If repository docs conflict with this planning-only boundary, this Board phase instruction wins.
+`
+      : "";
   const issueGenerationInstructions =
     phase === "creating-issues"
       ? `
@@ -2428,6 +2455,10 @@ For this creating-issues phase, produce the final Board issues interactively. Be
 
 The Board will import this block directly. The repositories array must contain each repository name at most once. If multiple issues or tasks belong to the same repository, combine them into a single repository entry and put the combined work in that entry's task, issue body, and checklist instead of repeating the repository name.
 
+If the original task prompt includes PRD visual assets, include relevant PRD visual assets in each affected repository issue body. For frontend or UI work, add an explicit checklist item: "Inspect PRD visual assets before implementation." Preserve the asset paths so the execution agent can inspect the images.
+
+If a workspace plan file path is provided below, also write the exact JSON object to that file before printing the completion marker. Write only the JSON object to the file, without XML tags, markdown fences, ANSI styling, or commentary. Create the parent directory if needed. Workspace plan file: ${options.workspacePlanFile ?? "(not provided)"}
+
 Do not print the completion marker until the workspace_plan block and issue content are final.`
       : "";
 
@@ -2438,6 +2469,7 @@ Phase: ${phase}
 
 Original task prompt / PRD:
 ${task.prompt}
+${planningBoundaryInstructions}
 ${issueGenerationInstructions}
 
 Work interactively with the user for this phase. When this phase is complete, print this exact marker on its own line:
@@ -2452,6 +2484,10 @@ const boardCommand = Command.make(
     port: boardPortOption,
     dataDir: boardDataDirOption,
     config: workspaceConfigOption,
+    artifactsDir: workspaceArtifactsDirOption,
+    planFile: workspacePlanFileOption,
+    prdFile: workspacePrdFileOption,
+    planningOnly: boardPlanningOnlyOption,
     agent: workspaceAgentOption,
     model: workspaceModelOption,
     plannerModel: workspacePlannerModelOption,
@@ -2463,6 +2499,10 @@ const boardCommand = Command.make(
     port,
     dataDir,
     config,
+    artifactsDir,
+    planFile,
+    prdFile,
+    planningOnly,
     agent,
     model,
     plannerModel,
@@ -2499,11 +2539,24 @@ const boardCommand = Command.make(
         plannerModel._tag === "Some" ? plannerModel : model,
         agentEnv,
       );
+      const evaluatorAgent = plannerAgent;
       const sandboxProvider = buildWorkspaceSandboxProvider(sandbox, agentEnv);
       const resolvedBranchPrefix =
         branchPrefix._tag === "Some" ? branchPrefix.value : undefined;
       const resolvedMaxIterations =
         maxIterations._tag === "Some" ? maxIterations.value : undefined;
+      const artifactsDirForTask = (taskId: string): string => {
+        if (artifactsDir._tag === "Some") {
+          return resolve(cwd, artifactsDir.value);
+        }
+        const task = store.getTask(taskId);
+        return defaultWorkspaceArtifactsDir(
+          cwd,
+          task?.source?.type === "prd-file"
+            ? Option.some(task.source.prdFile)
+            : Option.none(),
+        );
+      };
 
       const resolveExecutionRepositories = (plan: WorkspaceTaskPlan) => {
         const workspaceConfig =
@@ -2539,6 +2592,8 @@ const boardCommand = Command.make(
         taskId: string,
         phase: BoardTaskWorkflowPhase,
       ) => `${taskId}:${phase}`;
+      const phaseWorkspacePlanFile = (taskId: string): string =>
+        join(resolvedDataDir, "tasks", `${taskId}.workspace-plan.json`);
       const reportWorkflowPromise = (
         taskId: string,
         promise: Promise<unknown>,
@@ -2596,7 +2651,12 @@ const boardCommand = Command.make(
             return;
           }
           const args = plannerAgent.buildInteractiveArgs({
-            prompt: buildBoardPhasePrompt(task, phase),
+            prompt: buildBoardPhasePrompt(task, phase, {
+              workspacePlanFile:
+                phase === "creating-issues"
+                  ? phaseWorkspacePlanFile(task.id)
+                  : undefined,
+            }),
             dangerouslySkipPermissions: true,
           });
           const [command, ...rest] = args;
@@ -2639,9 +2699,21 @@ const boardCommand = Command.make(
 
       langGraphWorkflow = createLangGraphTaskWorkflow({
         store,
-        checkpointPath: resolve(resolvedDataDir, "workflows.sqlite"),
+        planningOnly,
+        exportApprovedPlan: async ({ taskId, plan }) => {
+          exportApprovedBoardPlan({
+            store,
+            cwd,
+            taskId,
+            artifactsDir: artifactsDirForTask(taskId),
+            plan,
+          });
+        },
         onPhaseStarted: ({ taskId, phase }) => {
           ensurePhaseSession(taskId, phase);
+        },
+        requestPhaseRepair: ({ taskId, phase, message }) => {
+          terminalManager.writePhase(taskId, phase, `\n${message.trim()}\n`);
         },
         planFromPhase: async ({ taskId, phase }) => {
           if (phase !== "creating-issues") return undefined;
@@ -2655,6 +2727,15 @@ const boardCommand = Command.make(
             phasePlanOverrides.delete(overrideKey);
             return { plan: overridePlan, plannerStdout: "interactive phase" };
           }
+          const filePlan = readInteractiveWorkspacePlanFile(
+            phaseWorkspacePlanFile(taskId),
+          );
+          if (filePlan) {
+            return {
+              plan: filePlan,
+              plannerStdout: "interactive phase file",
+            };
+          }
           const terminalPlan = parseInteractiveWorkspacePlan(
             terminalManager.getPhaseOutput(taskId, phase),
           );
@@ -2667,27 +2748,94 @@ const boardCommand = Command.make(
             "Board background planner fallback is disabled. Fix the <workspace_plan> block in the creating-issues phase terminal, then complete the phase again.",
           );
         },
-        execute: async ({ prompt, title, plan, onRepoRunEvent, signal }) =>
-          executeWorkspaceTaskPlan({
-            repositories: resolveExecutionRepositories(plan),
+        execute: async ({
+          taskId,
+          prompt,
+          title,
+          plan,
+          onRepoRunEvent,
+          signal,
+        }) => {
+          const task = store.getTask(taskId);
+          const executionAssets = task
+            ? preparePrdAssetsForExecution({
+                task,
+                repositories: resolveExecutionRepositories(plan),
+              })
+            : {
+                repositories: resolveExecutionRepositories(plan),
+                promptSection: "",
+              };
+          return executeWorkspaceTaskPlan({
+            repositories: executionAssets.repositories,
             plan,
-            taskPrompt: prompt,
+            taskPrompt: `${prompt}${executionAssets.promptSection}`,
             agent: executionAgent,
             sandbox: sandboxProvider,
-            branchPrefix: resolvedBranchPrefix ?? plan.workspace?.branchPrefix,
+            branchPrefix:
+              resolvedBranchPrefix ??
+              plan.workspace?.branchPrefix ??
+              boardExecutionBranchPrefix(taskId),
             maxIterations:
               resolvedMaxIterations ?? plan.workspace?.maxIterations,
             name: title,
             idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
             onRepoRunEvent,
             signal,
-          }),
+          });
+        },
+        evaluate: async (input) => {
+          let recorder: ((event: RunEvent) => void) | undefined;
+          return runBoardEvaluatorAgent({
+            cwd,
+            agent: evaluatorAgent,
+            sandbox: sandboxProvider,
+            branch: boardEvaluatorBranch(input.task.id),
+            input,
+            signal: input.signal,
+            idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
+            onRunEvent: (event) => {
+              recorder ??= createRunRecorder(store, {
+                taskId: input.task.id,
+                repo: BOARD_EVALUATOR_REPO,
+              });
+              recorder(event);
+            },
+          });
+        },
       });
 
       const launchTask = createTaskLauncher({
         store,
         run: langGraphWorkflow.run,
       });
+
+      const startupTask = createBoardStartupTask({
+        store,
+        cwd,
+        configPath,
+        explicitConfig: config._tag === "Some",
+        planFile,
+        prdFile,
+        planningOnly,
+        launchTask,
+      });
+
+      if (startupTask?.source?.type === "workspace-plan") {
+        yield* d.status(
+          planningOnly
+            ? `Imported workspace plan into Board task ${startupTask.id}. Open the board and approve it to export planning artifacts.`
+            : `Imported workspace plan into Board task ${startupTask.id}. Open the board and approve it to execute.`,
+          "success",
+        );
+      } else if (startupTask?.source?.type === "prd-file") {
+        yield* d.status(
+          planningOnly
+            ? `Created Board task ${startupTask.id} from PRD ${startupTask.source.prdFile}. Open the board to guide planning and approve artifact export.`
+            : `Created Board task ${startupTask.id} from PRD ${startupTask.source.prdFile}. Open the board to guide planning.`,
+          "success",
+        );
+      }
 
       const server = yield* Effect.promise(() =>
         startBoardServer({
@@ -2758,7 +2906,37 @@ export const sandcastle = rootCommand.pipe(
   ]),
 );
 
-export const cli = Command.run(sandcastle, {
+export const normalizeBoardPlanningOnlyHelpArgs = (
+  argv: readonly string[],
+): string[] => {
+  const prefix = argv.slice(0, 2);
+  const args = argv.slice(2);
+  if (args[0] !== "board") return [...argv];
+
+  const planningOnlyIndex = args.findIndex((arg) =>
+    arg.startsWith("--planning-only"),
+  );
+  const helpIndex = args.findIndex((arg) => arg === "--help" || arg === "-h");
+  if (
+    planningOnlyIndex === -1 ||
+    helpIndex === -1 ||
+    helpIndex < planningOnlyIndex
+  ) {
+    return [...argv];
+  }
+
+  return [
+    ...prefix,
+    "board",
+    args[helpIndex]!,
+    ...args.slice(1).filter((_, index) => index !== helpIndex - 1),
+  ];
+};
+
+const runCli = Command.run(sandcastle, {
   name: "sandcastle",
   version: VERSION,
 });
+
+export const cli = (argv: readonly string[]) =>
+  runCli(normalizeBoardPlanningOnlyHelpArgs(argv));

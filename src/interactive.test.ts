@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { interactive, type InteractiveOptions } from "./interactive.js";
+import { isTestPathInside } from "./testPath.js";
 import {
   createBindMountSandboxProvider,
   type BindMountSandboxHandle,
@@ -751,7 +752,7 @@ describe("interactive()", () => {
     expect(result.exitCode).toBe(0);
     // The worktree should be under the other repo's .sandcastle/worktrees/ dir
     expect(worktreeCwd).toBeDefined();
-    expect(worktreeCwd!.startsWith(otherRepo)).toBe(true);
+    expect(await isTestPathInside(worktreeCwd!, otherRepo)).toBe(true);
   });
 
   it("without cwd behaves identically to process.cwd()", async () => {
@@ -772,7 +773,7 @@ describe("interactive()", () => {
     expect(result.exitCode).toBe(0);
     // The worktree should be under process.cwd() (which is hostDir)
     expect(worktreeCwd).toBeDefined();
-    expect(worktreeCwd!.startsWith(hostDir)).toBe(true);
+    expect(await isTestPathInside(worktreeCwd!, hostDir)).toBe(true);
   });
 
   it("copies files to worktree with copyToWorktree", async () => {

@@ -16,6 +16,7 @@ import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { substitutePromptArgs } from "./PromptArgumentSubstitution.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import { makeLocalSandbox } from "./testSandbox.js";
+import { canonicalTestPath } from "./testPath.js";
 import { PromptError, PromptExpansionTimeoutError } from "./errors.js";
 
 describe("PromptPreprocessor", () => {
@@ -89,7 +90,7 @@ describe("PromptPreprocessor", () => {
     const { sandboxDir, sandbox, displayLayer } = await setup();
     const prompt = "Dir: !`pwd`";
     const result = await run(prompt, sandbox, displayLayer, sandboxDir);
-    expect(result).toBe(`Dir: ${sandboxDir}`);
+    expect(result).toBe(`Dir: ${await canonicalTestPath(sandboxDir)}`);
   });
 
   it("runs multiple shell expressions in parallel", async () => {

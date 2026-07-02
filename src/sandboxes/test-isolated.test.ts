@@ -8,6 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { canonicalTestPath } from "../testPath.js";
 import { testIsolated } from "./test-isolated.js";
 
 describe("testIsolated()", () => {
@@ -34,7 +35,9 @@ describe("testIsolated()", () => {
     const handle = await provider.create({ env: {} });
     try {
       const result = await handle.exec("pwd");
-      expect(result.stdout.trim()).toBe(handle.worktreePath);
+      expect(result.stdout.trim()).toBe(
+        await canonicalTestPath(handle.worktreePath),
+      );
     } finally {
       await handle.close();
     }
@@ -45,7 +48,7 @@ describe("testIsolated()", () => {
     const handle = await provider.create({ env: {} });
     try {
       const result = await handle.exec("pwd", { cwd: "/tmp" });
-      expect(result.stdout.trim()).toBe("/tmp");
+      expect(result.stdout.trim()).toBe(await canonicalTestPath("/tmp"));
     } finally {
       await handle.close();
     }

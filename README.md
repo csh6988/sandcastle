@@ -8,13 +8,13 @@
 
 ## What Is Sandcastle?
 
-A TypeScript library for orchestrating AI coding agents in isolated sandboxes:
+A local workflow board for planning, approving, running, and verifying AI coding agent work in isolated sandboxes:
 
-1. You invoke agents with a single `sandcastle.run()`.
-2. Sandcastle handles sandboxing the agent with a configurable branch strategy.
-3. The commits made on the branches get merged back.
+1. You start with a task or PRD in `sandcastle board`.
+2. Sandcastle turns it into alignment notes, a technical plan, and repository issues for review.
+3. After approval, Sandcastle runs sandboxed agents, tracks their progress, records artifacts, and verifies the delivery.
 
-Sandcastle is provider-agnostic — it ships with built-in providers for Docker, Podman, and Vercel, and you can create your own. Great for parallelizing multiple AFK agents, creating review pipelines, or even just orchestrating your own agents.
+Sandcastle is also a TypeScript orchestration library for custom automation. It is provider-agnostic — it ships with built-in providers for Docker, Podman, and Vercel, and you can create your own. Use the Board for the default human-in-the-loop workflow, and drop to `run()`, `runWorkspaceTask()`, or `runWorkspace()` when you need a custom script or integration.
 
 ## Prerequisites
 
@@ -29,9 +29,9 @@ Sandcastle is provider-agnostic — it ships with built-in providers for Docker,
 
 By the end of this path, you should know three things:
 
-- how to scaffold a Sandcastle runner for a repository
-- how the runner chooses the right agent skill flow before coding
-- when to use single-repo `run()`, PRD-driven `runWorkspaceTask()`, or lower-level `runWorkspace()`
+- how to scaffold Sandcastle config for a repository
+- how to start a Board task from a PRD or from the browser
+- when to stay in `sandcastle board` and when to use lower-level programmatic APIs
 
 1. Install the package:
 
@@ -51,55 +51,41 @@ npx @chenshaohui6988/sandcastle init
 cp .sandcastle/.env.example .sandcastle/.env
 ```
 
-4. Run the `.sandcastle/main.ts` (or `main.mts`) file with `npx tsx`
+4. Start the workflow board:
 
 ```bash
-npx tsx .sandcastle/main.ts
+npx @chenshaohui6988/sandcastle board
 ```
 
-```typescript
-// 3. Run the agent via the JS API
-import { run, claudeCode } from "@chenshaohui6988/sandcastle";
-import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+Open `http://127.0.0.1:4318`, create a task, review the generated plan, then approve execution when the repository issues look right. To start directly from a PRD file, run:
 
-await run({
-  agent: claudeCode("claude-opus-4-8"),
-  sandbox: docker(), // or podman(), vercel(), or your own provider
-  promptFile: ".sandcastle/prompt.md",
-});
+```bash
+npx @chenshaohui6988/sandcastle board --prd-file ./prd.md
 ```
+
+Use `--planning-only` when you want the Board to produce `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md` without starting AFK execution after approval.
 
 ## Quick Smoke Test
 
-Before you hand Sandcastle a real task, run a minimal read-only check to confirm the whole pipeline is wired up: the sandbox starts, the agent authenticates, a command runs inside it, and the iteration loop exits cleanly. It is the fastest way to separate a setup problem from a task problem.
+Before you hand Sandcastle a real task, start the Board and run a planning-only task. This confirms the server starts, the agent authenticates, the planner can produce a workspace plan, and approval exports artifacts without touching code.
 
-Drop this into `.sandcastle/main.ts` (or any scratch file) and run it with `npx tsx`:
+Put this tiny PRD in `./smoke-prd.md`:
 
-```typescript
-import { run, claudeCode } from "@chenshaohui6988/sandcastle";
-import { docker } from "@chenshaohui6988/sandcastle/sandboxes/docker";
+```markdown
+# Smoke Test
 
-const result = await run({
-  agent: claudeCode("claude-opus-4-8"),
-  sandbox: docker(), // or podman(), noSandbox()
-  prompt:
-    "Run `echo sandcastle-ok` and report what it printed. " +
-    "Do not modify any files. " +
-    "Output <promise>COMPLETE</promise> when done.",
-});
-
-console.log(result.completionSignal); // "<promise>COMPLETE</promise>"
-console.log(result.commits.length); // 0 — the smoke test changes nothing
+Read this repository's AGENTS.md, CLAUDE.md if present, and .sandcastle/SKILL_ROUTER.md.
+Create a plan for explaining which workflow should be used for a small bug fix.
+Do not ask for code changes.
 ```
+
+Then launch the Board in planning-only mode:
 
 ```bash
-npx tsx .sandcastle/main.ts
+npx @chenshaohui6988/sandcastle board --prd-file ./smoke-prd.md --planning-only
 ```
 
-A healthy run typically finishes within a minute and:
-
-- prints the completion signal (`<promise>COMPLETE</promise>`) — the agent started, authenticated, and the loop exited on the signal instead of timing out
-- reports `0` commits — the read-only prompt left your working tree untouched
+Open `http://127.0.0.1:4318`, let the interactive planning phases finish, review the generated plan, then click **Export artifacts**. A healthy smoke test writes planning artifacts under `.scratch/smoke-prd/` and does not start repository execution.
 
 If it hangs or throws instead, you have isolated the failure to setup rather than your task. Common causes:
 
@@ -107,7 +93,7 @@ If it hangs or throws instead, you have isolated the failure to setup rather tha
 - **Sandbox** — Docker/Podman is not running, or the image is not built yet (`sandcastle docker build-image`)
 - **Network** — the agent CLI cannot reach its model provider from inside the sandbox
 
-Best practice: keep this check around and re-run it after editing your Dockerfile, rotating tokens, or upgrading Sandcastle. A green smoke test confirms the plumbing before you debug a real run.
+Best practice: re-run this check after editing your Dockerfile, rotating tokens, or upgrading Sandcastle. A green Board smoke test confirms the planning and approval path before you debug a real run.
 
 ## Agent Skill Routing
 
@@ -131,63 +117,63 @@ See [`sandcastle init`](#sandcastle-init) for the full business flow diagram and
 
 Sandcastle is easiest to learn as a sequence, not as an API catalog.
 
-### 1. Start With The Smallest Runner
+### 1. Start With The Workflow Board
 
-Use `sandcastle init` first. It creates the local runner files under `.sandcastle/` and gives the agent a prompt file to read. Do not start by writing a custom orchestration script unless you already know which lifecycle you need.
+Use `sandcastle init` first, then start `sandcastle board`. Init creates the local config under `.sandcastle/`; the Board gives you the default human-in-the-loop path for planning, approval, execution, artifact review, and verification. Do not start by writing a custom orchestration script unless you already know which lifecycle you need.
 
 After init, inspect these files:
 
-| File                          | What to learn from it                                                    |
-| ----------------------------- | ------------------------------------------------------------------------ |
-| `.sandcastle/main.ts`         | Which agent, sandbox provider, branch strategy, and prompt file will run |
-| `.sandcastle/prompt.md`       | What the agent is asked to do each iteration                             |
-| `.sandcastle/SKILL_ROUTER.md` | Which skill flow should be selected before project work starts           |
-| `.sandcastle/workspace.json`  | Which repositories are candidates for multi-repository planning          |
-| `.sandcastle/.env.example`    | Which host-side credentials the selected agent and issue tracker need    |
+| File                          | What to learn from it                                                 |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `.sandcastle/main.ts`         | A lower-level runner example for custom programmatic workflows        |
+| `.sandcastle/prompt.md`       | What the agent is asked to do each iteration                          |
+| `.sandcastle/SKILL_ROUTER.md` | Which skill flow should be selected before project work starts        |
+| `.sandcastle/workspace.json`  | Which repositories the Board can plan and execute against             |
+| `.sandcastle/.env.example`    | Which host-side credentials the selected agent and issue tracker need |
 
 ### 2. Pick The Right Execution Shape
 
 Choose the smallest API that matches the work:
 
-| Situation                                      | Use this                 | Why                                                             |
-| ---------------------------------------------- | ------------------------ | --------------------------------------------------------------- |
-| One prompt, one repository                     | `run()`                  | Starts an agent once or for a bounded number of iterations      |
-| Several agent passes on the same branch        | `createSandbox()`        | Reuses one sandbox for implement-then-review or repair loops    |
-| You need a managed branch before running agent | `createWorktree()`       | Gives you direct control over worktree lifecycle                |
-| One request may touch several repositories     | `runWorkspaceTask()`     | Plans alignment, technical work, repo issues, and execution     |
-| One agent must see several repos at once       | `runWorkspace()`         | Lower-level multi-repo sandbox primitive                        |
-| A local markdown issue should be implemented   | `sandcastle local-issue` | Runs a scoped host-side issue flow without per-repo scaffolding |
+| Situation                                                      | Use this                                               | Why                                                            |
+| -------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------- |
+| You have a PRD or product request and want approval gates      | `sandcastle board --prd-file ./prd.md`                 | Plans, lets you review, executes after approval, then verifies |
+| You already reviewed a generated `workspace-plan.json`         | `sandcastle board --plan-file <path>`                  | Imports the plan into Board approval and verification          |
+| You want planning artifacts but not AFK execution              | `sandcastle board --prd-file ./prd.md --planning-only` | Uses the Board planning flow and stops after export            |
+| You need a non-Board planning artifact pipeline                | `sandcastle workspace plan` / `execute`                | Runs the same plan/execute flow from the CLI                   |
+| One prompt, one repository inside a custom script              | `run()`                                                | Starts an agent once or for a bounded number of iterations     |
+| Several agent passes on the same branch inside a custom script | `createSandbox()`                                      | Reuses one sandbox for implement-then-review or repair loops   |
+| You need a managed branch before running agent                 | `createWorktree()`                                     | Gives you direct control over worktree lifecycle               |
+| One agent must see several repos at once                       | `runWorkspace()`                                       | Lower-level multi-repo sandbox primitive                       |
 
 ### 3. Do A First Practice Run
 
-For a safe first pass, use a read-only prompt:
+For a safe first pass, put this in `./practice-prd.md` and run a planning-only Board task:
 
 ```markdown
-# Task
+# Practice PRD
 
 Read this repository's AGENTS.md, CLAUDE.md, and .sandcastle/SKILL_ROUTER.md.
-Explain which skill flow should be used for a small bug fix.
-
-# Done
-
-Output <promise>COMPLETE</promise> when finished.
+Create a plan for explaining which skill flow should be used for a small bug fix.
+Do not ask for implementation or code changes.
 ```
 
 Run it with:
 
 ```bash
-npx tsx .sandcastle/main.ts
+npx @chenshaohui6988/sandcastle board --prd-file ./practice-prd.md --planning-only
 ```
 
-You should see the agent explain the selected flow without changing code. A good first result names the likely flow, says whether `AGENTS.md` or `CLAUDE.md` needs an update, and stops before implementation. After that, replace the prompt with a real issue or use the workspace commands for PRD-driven work.
+You should see the Board move through the planning phases, produce a workspace plan, and offer **Export artifacts** instead of AFK execution. A good first result names the likely flow, says whether `AGENTS.md` or `CLAUDE.md` needs an update, and stops before implementation. After that, replace the PRD with a real task and approve execution only after reviewing the generated repository issues.
 
 ### 4. Avoid Common Mistakes
 
 - Do not copy every available skill into the active agent. Load the skill flow selected by `.sandcastle/SKILL_ROUTER.md`.
 - Do not put project facts in the router. Put build commands, repo boundaries, terminology, and verification rules in `AGENTS.md` or `CLAUDE.md`.
-- Do not start with `runWorkspaceTask()` for a one-repo bug fix. Use `run()` until the task actually needs multi-repo planning.
+- Do not bypass the Board for PRD-first work unless you are building a custom automation. The Board is the default place for plan review, execution approval, artifacts, and verification.
+- Do not start with `runWorkspaceTask()` for product work that needs human approval. Use the Board unless you specifically need the programmatic API.
 - Do not let chat history be the only source of instructions. If future agents need the rule, write it into project guidance.
-- Do not skip the read-only practice run when teaching a new team or a new repository. It confirms the agent can find the router and explain the workflow before it writes code.
+- Do not skip the planning-only practice run when teaching a new team or a new repository. It confirms the agent can find the router and explain the workflow before it writes code.
 
 ### Check Your Understanding
 
@@ -195,11 +181,11 @@ Before you let an agent write code, you should be able to answer:
 
 - Which file tells the agent how to choose a skill flow?
 - Which file holds project-specific rules?
-- Which API creates reusable sandboxes?
-- Which command turns a PRD into repository-specific issues?
+- Which Board command starts from a PRD?
+- Which Board option exports planning artifacts without AFK execution?
 - Where will generated workspace planning artifacts be written?
 
-If any answer is unclear, read [`sandcastle init`](#sandcastle-init), [`runWorkspaceTask()`](#runworkspacetask--plan-and-execute-across-repositories), and [`sandcastle workspace plan`](#sandcastle-workspace-plan) before running implementation.
+If any answer is unclear, read [`sandcastle init`](#sandcastle-init), [`sandcastle board`](#sandcastle-board), and [`sandcastle workspace plan`](#sandcastle-workspace-plan) before running implementation.
 
 ## Sandbox Providers
 
@@ -241,7 +227,7 @@ You can also [create your own provider](#custom-sandbox-providers) using `create
 
 ## API
 
-Sandcastle exports programmatic APIs for use in scripts, CI pipelines, or custom tooling. Use `run()` for one repository, `runWorkspaceTask()` when one product request may affect multiple repositories, and `runWorkspace()` when you need the lower-level multi-repository sandbox primitive directly. The examples below use `docker()`, but any compatible `SandboxProvider` works in its place.
+The workflow board is the default entry point for human-reviewed Sandcastle work. Sandcastle also exports programmatic APIs for scripts, CI pipelines, and custom tooling that need to own the control plane themselves. Use `run()` for one repository, `runWorkspaceTask()` when one product request may affect multiple repositories, and `runWorkspace()` when you need the lower-level multi-repository sandbox primitive directly. The examples below use `docker()`, but any compatible `SandboxProvider` works in its place.
 
 ```typescript
 import { run, claudeCode } from "@chenshaohui6988/sandcastle";
@@ -353,12 +339,17 @@ You can run the same flow from the CLI with a JSON config instead of writing a T
 ```
 
 ```bash
+sandcastle board --prd-file ./prd.md
+# Or import an already reviewed plan into Board approval and verification
+sandcastle board --plan-file .scratch/<prd-name>/workspace-plan.json
+# Or use the Board only to approve and export planning artifacts
+sandcastle board --prd-file ./prd.md --planning-only
+# Lower-level CLI alternative without the Board:
 sandcastle workspace plan --prd-file ./prd.md
-# Review .scratch/<prd-name>/alignment.md, technical-plan.md, and issues/*.md
 sandcastle workspace execute --plan-file .scratch/<prd-name>/workspace-plan.json
 ```
 
-For PRD-first workflows, `workspace plan --prd-file ./prd.md` writes `.scratch/<prd-name>/workspace-plan.json`, `.scratch/<prd-name>/alignment.md`, `.scratch/<prd-name>/technical-plan.md`, and `.scratch/<prd-name>/issues/<repo>.md`. The plan JSON snapshots the workspace chosen for that PRD, so later execution uses the repositories recorded in the plan instead of whatever `.sandcastle/workspace.json` contains at that time. Review those artifacts, then run `workspace execute --plan-file .scratch/<prd-name>/workspace-plan.json` to execute the approved repository issues in parallel.
+For PRD-first workflows, prefer `board --prd-file ./prd.md`: it runs the interactive planning phases, waits for approval, executes approved repository issues, and verifies the result. If you need a file-first review flow, `workspace plan --prd-file ./prd.md` writes `.scratch/<prd-name>/workspace-plan.json`, `.scratch/<prd-name>/alignment.md`, `.scratch/<prd-name>/technical-plan.md`, and `.scratch/<prd-name>/issues/<repo>.md`. The plan JSON snapshots the workspace chosen for that PRD, so later execution uses the repositories recorded in the plan instead of whatever `.sandcastle/workspace.json` contains at that time. Review those artifacts, then run `board --plan-file .scratch/<prd-name>/workspace-plan.json` to approve and verify the same plan from the workflow board, or use the lower-level `workspace execute --plan-file .scratch/<prd-name>/workspace-plan.json` when you intentionally do not want the Board. Add `--planning-only` to `board --prd-file` when you want Board approval to export the same `.scratch` planning artifacts and stop before AFK execution.
 
 `workspace run --prd-file ./prd.md` is the fully automatic pipeline: PRD alignment, technical plan, repository issue generation, and execution in one command. When the current repo has exactly one ready local issue under `.scratch/`, `workspace run` can still use that issue as the prompt file automatically. Pass one of `--prd`, `--prd-file`, `--prompt`, or `--prompt-file` to override it.
 
@@ -1112,7 +1103,7 @@ Creates the following files:
 
 For multi-repository workflows, edit `workspace.json` and add each repository to the `repositories` array. For single-repository workflows, the generated `cwd: "."` entry is enough. This file is the default candidate workspace; each `workspace plan` or PRD-driven `workspace run` writes the selected workspace into that task's `workspace-plan.json`.
 
-If you pass `sandcastle init --prd-file <path>`, init also records a top-level `prdFile` field in `workspace.json`. When you then run `workspace plan` or `workspace run` without an explicit input flag, they default to that PRD instead of looking for a ready local issue under `.scratch/`. Precedence is: explicit `--prompt`/`--prompt-file`/`--prd`/`--prd-file` > the configured `prdFile` > the only ready `.scratch/` issue. With `--plan true` (and a docker/podman image built during init), init runs the planner once at the end to write the plan artifacts immediately — equivalent to running `sandcastle workspace plan --prd-file <path>` yourself.
+If you pass `sandcastle init --prd-file <path>`, init also records a top-level `prdFile` field in `workspace.json`. When you then run `workspace plan` or `workspace run` without an explicit input flag, they default to that PRD instead of looking for a ready local issue under `.scratch/`. `sandcastle board` also creates and starts a Board task from that configured PRD unless `--plan-file` or `--prd-file` is passed. Precedence for workspace planning is: explicit `--prompt`/`--prompt-file`/`--prd`/`--prd-file` > the configured `prdFile` > the only ready `.scratch/` issue. With `--plan true` (and a docker/podman image built during init), init runs the planner once at the end to write the plan artifacts immediately — equivalent to running `sandcastle workspace plan --prd-file <path>` yourself.
 
 `SKILL_ROUTER.md` is intentionally a router, not a bundled skill installer. Keep it next to your Sandcastle runner so humans and agents can first choose the right flow (`grill-with-docs`, `to-prd`, `to-issues`, `implement`, `triage`, `review`, and related flows), then ensure the target repo's `AGENTS.md` or `CLAUDE.md` reflects that workflow before coding. For Codex, keep the selected skills active in the Codex skill profile. For Claude Code, copy or sync the matching `SKILL.md` directories into `.claude/skills/` so Claude Code can discover them with its native progressive-loading mechanism.
 
@@ -1167,6 +1158,8 @@ Errors if `.sandcastle/` already exists to prevent overwriting customizations.
 Runs an agent against a local markdown issue in the target repository without scaffolding a per-repo `.sandcastle/` runner and without Docker. Invoke it from the target repo using this Sandcastle checkout's CLI.
 
 When `--issue` is omitted, Sandcastle searches `.scratch/**/issues/*.md` for the only issue containing `status: ready-for-agent`. It creates a host worktree with `noSandbox()` and branch strategy `branch`; for `.scratch/<topic>/issues/*.md`, the default branch is `sandcastle/<topic>`.
+
+Local issue markdown uses a `status:` line as the durable issue state. Workspace planning writes generated issues as `ready-for-agent`. Board tasks write their generated per-repository issue markdown under `.sandcastle/board/tasks/<taskId>/issues/<repo>.md` and update the same `status:` line as execution proceeds (`in-progress`, `succeeded`, `needs-recovery`, `verification-failed`, or `infra-warning`).
 
 The command expects a local QA1 Apollo config cache at `config-cache/` by default. The path is passed to the agent as local context only; config values are not printed by Sandcastle.
 
@@ -1248,26 +1241,43 @@ sandcastle workspace run --prd-file ./prd.md
 
 ### `sandcastle board`
 
-Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, workflow checkpoints, and tasks to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
+Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, task workflow state, tasks, progress documents, and verification reports to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
 
-Creating a task starts an interactive LangGraph phase flow: classify the task, align the PRD, draft the technical plan, generate repository issues, approve the imported workspace plan, then execute the approved repository tasks. Each interactive phase opens a board terminal and advances when the agent prints the phase completion marker or when you click **Complete phase / Continue**. The `creating-issues` phase must emit a valid `<workspace_plan>` block before approval. After approval, Sandcastle runs one executor per planned repository using the approved plan and the resolved workspace config.
+Creating a task starts an interactive Board phase flow with strict roles: Planner phases classify the task, align the PRD, draft the technical plan, and generate repository issues; the Generator executes only the approved workspace plan; the Evaluator verifies the delivery against recorded evidence. Each interactive phase opens a board terminal and advances when the agent prints the phase completion marker or when you click **Complete phase / Continue**. The `creating-issues` phase must emit a valid `<workspace_plan>` block before approval. After approval, Sandcastle runs one executor per planned repository using the approved plan and the resolved workspace config, then enters `verifying` before marking the task succeeded. In planning-only mode, the approval stage and button use export-oriented copy because approval writes artifacts instead of starting AFK execution.
+
+The Board also keeps task artifacts next to each task record: `.sandcastle/board/tasks/<taskId>/progress.md`, `.sandcastle/board/tasks/<taskId>/verification.md`, `.sandcastle/board/tasks/<taskId>/issues/<repo>.md`, and `.sandcastle/board/tasks/<taskId>/artifacts.json` when planning-only export writes artifacts outside the Board data directory. Issue markdown is initialized from the approved Board issue body, then only its `status:` line is rewritten as repository runs start, fail, recover, or pass verification. Task artifacts are exposed through `GET /api/tasks/:id/artifacts` and rendered in the task detail panel.
+
+The verification phase writes `.sandcastle/board/tasks/<taskId>/verification.md` and exposes it through `GET /api/tasks/:id/verification`. The report summarizes per-repository execution results, linked run evidence, local issue status, errors, infrastructure/capture warnings, whether the agent claimed `<promise>COMPLETE</promise>`, and whether commits were recorded. Verification failures recover into approved execution with the progress document, verification report, and updated issue markdown in the next prompt; infrastructure capture warnings do not automatically turn otherwise completed committed work into a delivery failure.
 
 ```bash
 sandcastle board                 # http://127.0.0.1:4318
 sandcastle board --port 5000
+sandcastle board --prd-file ./prd.md
+sandcastle board --plan-file .scratch/my-feature/workspace-plan.json
+sandcastle board --prd-file ./prd.md --planning-only
 ```
 
-| Option             | Required | Default                      | Description                                    |
-| ------------------ | -------- | ---------------------------- | ---------------------------------------------- |
-| `--port`           | No       | `4318`                       | Port for the board server                      |
-| `--data-dir`       | No       | `.sandcastle/board`          | Directory for board run/event/task data        |
-| `--config`         | No       | `.sandcastle/workspace.json` | Workspace config used to fan out tasks         |
-| `--agent`          | No       | `claude`                     | Agent for task execution (`claude` or `codex`) |
-| `--model`          | No       | provider default             | Model passed to the execution agent            |
-| `--planner-model`  | No       | `--model`                    | Model passed to the planner agent              |
-| `--sandbox`        | No       | `docker`                     | Sandbox provider (`docker` or `podman`)        |
-| `--branch-prefix`  | No       | —                            | Branch prefix for per-repository task runs     |
-| `--max-iterations` | No       | —                            | Max iterations per repository run              |
+| Option             | Required | Default                      | Description                                                                   |
+| ------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------- |
+| `--port`           | No       | `4318`                       | Port for the board server                                                     |
+| `--data-dir`       | No       | `.sandcastle/board`          | Directory for board run/event/task data                                       |
+| `--config`         | No       | `.sandcastle/workspace.json` | Workspace config used to fan out tasks                                        |
+| `--artifacts-dir`  | No       | `.scratch/<prd-name>`        | Output directory for planning-only artifact export                            |
+| `--plan-file`      | No       | —                            | Import an existing `workspace-plan.json` as a Board task waiting for approval |
+| `--prd-file`       | No       | Config `prdFile`             | Create and start a Board task from a PRD file                                 |
+| `--planning-only`  | No       | `false`                      | Export approved planning artifacts instead of starting AFK execution          |
+| `--agent`          | No       | `claude`                     | Agent for task execution (`claude` or `codex`)                                |
+| `--model`          | No       | provider default             | Model passed to the execution agent                                           |
+| `--planner-model`  | No       | `--model`                    | Model passed to the planner agent                                             |
+| `--sandbox`        | No       | `docker`                     | Sandbox provider (`docker` or `podman`)                                       |
+| `--branch-prefix`  | No       | —                            | Branch prefix for per-repository task runs                                    |
+| `--max-iterations` | No       | —                            | Max iterations per repository run                                             |
+
+`sandcastle board --plan-file <path>` is the Board equivalent of `workspace execute --plan-file`: it imports the reviewed `workspace-plan.json` as a running task in the approval stage. When you approve it in the Board, Sandcastle executes the imported plan, records per-repository runs, writes progress and issue status artifacts, and runs the verification phase before marking the task complete. Plans with an embedded `workspace` snapshot execute against that snapshot; older plans still fall back to `--config` / `.sandcastle/workspace.json`.
+
+`sandcastle board --prd-file <path>` creates and starts an interactive Board task from the PRD content. If neither `--plan-file` nor `--prd-file` is passed and `.sandcastle/workspace.json` contains `prdFile`, the Board uses that configured PRD as its startup task source. `--plan-file` and `--prd-file` are mutually exclusive.
+
+`sandcastle board --prd-file <path> --planning-only` keeps the interactive Board planning phases and approval gate, then writes `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md` to the same artifact shape as `workspace plan` without starting repository runs. The Board records those exported paths in the task artifact manifest so they stay visible in the task detail panel after approval. While awaiting approval, the task detail panel says it will export planning artifacts and the primary action is **Export artifacts**. Pass `--artifacts-dir <dir>` to choose the output directory; otherwise PRD-backed tasks default to `.scratch/<prd-name>` and imported plans default to `.scratch/workspace-task`.
 
 Programmatically, `run()` accepts an `onRunEvent` callback that emits the same structured `RunEvent` stream (run lifecycle, iterations, agent text/tool calls, token usage with the model, and commits) in **both** logging modes — use it to forward runs to your own observability system. `runWorkspace()` accepts the same `onRunEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRunEvent`, the planner phase via `onPlannerRunEvent`, and the extracted plan via `onPlan`. See ADR 0021.
 

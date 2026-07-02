@@ -86,9 +86,7 @@
     "zod": "^4.4.3"
   },
   "dependencies": {
-    "@clack/prompts": "^1.1.0",
-    "@langchain/langgraph": "^1.4.6",
-    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3"
+    "@clack/prompts": "^1.1.0"
   },
   "peerDependencies": {
     "@daytona/sdk": "^0.164.0",

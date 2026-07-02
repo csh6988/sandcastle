@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:child_process", async () => {
   const actual =
@@ -23,8 +23,14 @@ import type { BindMountSandboxHandle } from "../SandboxProvider.js";
 
 const mockExecFile = vi.mocked(execFile);
 const mockExecFileSync = vi.mocked(execFileSync);
+const actualPlatform = process.platform;
+
+beforeEach(() => {
+  Object.defineProperty(process, "platform", { value: "linux" });
+});
 
 afterEach(() => {
+  Object.defineProperty(process, "platform", { value: actualPlatform });
   mockExecFile.mockReset();
 });
 

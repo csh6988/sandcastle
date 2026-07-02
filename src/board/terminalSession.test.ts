@@ -170,6 +170,28 @@ describe("BoardTerminalManager", () => {
     );
   });
 
+  it("keeps a completed workspace plan available through noisy PTY output", () => {
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    manager.startPhase({
+      task,
+      phase: "creating-issues",
+      command: "claude",
+      args: ["issues"],
+      cwd: dir,
+    });
+
+    terminals[0]!.emitData(
+      '<workspace_plan>{"repositories":[{"name":"web","task":"Do it"}]}</workspace_plan>',
+    );
+    for (let i = 0; i < 700; i++) {
+      terminals[0]!.emitData("\x1b[?6n");
+    }
+
+    expect(manager.getPhaseOutput(task.id, "creating-issues")).toContain(
+      '<workspace_plan>{"repositories":[{"name":"web","task":"Do it"}]}</workspace_plan>',
+    );
+  });
+
   it("records phase terminal exits without folding them into the task status", () => {
     const task = store.createTask({ title: "Interactive", prompt: "do it" });
     store.updateTask(task.id, {
@@ -206,7 +228,7 @@ describe("BoardTerminalManager", () => {
     });
   });
 
-  it("notifies for each new phase completion signal in the terminal output", () => {
+  it("notifies once for a phase completion signal in the terminal output", () => {
     const completed: Array<{ taskId: string; phase: string }> = [];
     manager = new BoardTerminalManager(store, spawner, {
       onPhaseCompleteSignal: ({ taskId, phase }) =>
@@ -227,8 +249,75 @@ describe("BoardTerminalManager", () => {
 
     expect(completed).toEqual([
       { taskId: task.id, phase: "technical-planning" },
-      { taskId: task.id, phase: "technical-planning" },
     ]);
+  });
+
+  it("notifies again when creating-issues returns to fixing the workspace plan", () => {
+    const completed: Array<{ taskId: string; phase: string }> = [];
+    manager = new BoardTerminalManager(store, spawner, {
+      onPhaseCompleteSignal: ({ taskId, phase }) =>
+        completed.push({ taskId, phase }),
+    });
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    manager.startPhase({
+      task,
+      phase: "creating-issues",
+      command: "claude",
+      args: ["issues"],
+      cwd: dir,
+    });
+
+    terminals[0]!.emitData(PHASE_COMPLETION_SIGNAL);
+    store.updateTask(task.id, {
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        substatus: "fixing-workspace-plan",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    terminals[0]!.emitData(`repaired ${PHASE_COMPLETION_SIGNAL}`);
+
+    expect(completed).toEqual([
+      { taskId: task.id, phase: "creating-issues" },
+      { taskId: task.id, phase: "creating-issues" },
+    ]);
+  });
+
+  it("ignores completion signals from stale phase terminals", () => {
+    const completed: Array<{ taskId: string; phase: string }> = [];
+    manager = new BoardTerminalManager(store, spawner, {
+      onPhaseCompleteSignal: ({ taskId, phase }) =>
+        completed.push({ taskId, phase }),
+    });
+    const task = store.createTask({ title: "Interactive", prompt: "do it" });
+    store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "creating-issues",
+        currentPhase: "creating-issues",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    manager.startPhase({
+      task,
+      phase: "aligning-prd",
+      command: "claude",
+      args: ["align"],
+      cwd: dir,
+    });
+
+    terminals[0]!.emitData(PHASE_COMPLETION_SIGNAL);
+
+    expect(completed).toEqual([]);
   });
 
   it("kills running terminals when the manager closes", () => {

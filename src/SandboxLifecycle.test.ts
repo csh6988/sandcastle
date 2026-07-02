@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { type DisplayEntry, SilentDisplay } from "./Display.js";
 import { type SandboxService } from "./SandboxFactory.js";
 import { makeLocalSandbox } from "./testSandbox.js";
+import { canonicalTestPath } from "./testPath.js";
 import { ExecError, SyncError } from "./errors.js";
 import { withSandboxLifecycle, runHostHooks } from "./SandboxLifecycle.js";
 
@@ -1483,7 +1484,7 @@ describe("runHostHooks", () => {
     await Effect.runPromise(runHostHooks([{ command: "pwd > cwd.txt" }], dir));
 
     const content = await readFile(join(dir, "cwd.txt"), "utf-8");
-    expect(content.trim()).toBe(dir);
+    expect(content.trim()).toBe(await canonicalTestPath(dir));
   });
 
   it("aborts a running hook when signal fires", async () => {

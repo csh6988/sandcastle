@@ -239,15 +239,55 @@ A single `run()` invocation as recorded on the **workflow board** -- its metadat
 _Avoid_: "job", "session" (overloaded), conflating with the JS **iteration**
 
 **Board task**:
-A unit of work created on the **workflow board** (title + prompt/PRD) that is fanned out into per-repository **board runs** via `runWorkspaceTask`. The board acts as a **task** source that writes back into the orchestration core. See ADR 0022.
+A unit of work created on the **workflow board** (title + prompt/PRD), created from a PRD file, or imported from an existing `workspace-plan.json` that is fanned out into per-repository **board runs** via `runWorkspaceTask`. The board acts as a **task** source that writes back into the orchestration core. See ADR 0022.
 _Avoid_: "ticket", "issue" (reserved for the **issue tracker**), "job"
 
+**Board task source**:
+The origin of a **board task** as recorded by the **workflow board**. Current sources are manual board entry, PRD file input, and imported `workspace-plan.json` input. The source explains where the task came from; it is not the same as an **issue tracker**.
+_Avoid_: "issue source" (conflicts with **issue tracker**), "task source" (already too close to **Task** from an **issue tracker**)
+
+**Board role**:
+One of the strict responsibilities in a **board task** workflow: Planner turns requirements into reviewed plans and Board issues, Generator executes only the approved plan, and Evaluator verifies delivery against recorded evidence. A **board phase** may expose the current **Board role**, but the role is the responsibility boundary rather than the UI step name.
+_Avoid_: "agent role" (too broad), "worker" (ambiguous), conflating with **board phase**
+
+**Evaluator run**:
+The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **run events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
+_Avoid_: "static verification", "post-run summary", treating a successful **completion signal** as proof of delivery
+
+**Board verification report**:
+The task-scoped delivery report written during **verifying**. It contains the **Evaluator run** output plus structured deterministic evidence and the final verification status (`passed`, `needs-verification`, `needs-recovery`, `infra-warning`, or `failed`).
+_Avoid_: "test report" (too narrow), "run summary" (too broad)
+
+**PRD visual asset**:
+An image file discovered from a PRD-backed **board task** -- either a Markdown image reference or a direct image PRD file -- that is copied into task-scoped storage and made available to planning and execution agents as part of the product requirements.
+_Avoid_: "attachment" (too generic), "screenshot" (too narrow), "image prompt" (implies model-specific transport)
+
+**Planning artifact**:
+A file produced from an approved or exported workspace plan that lets a human inspect the plan outside the live **workflow board**. The current artifact set is `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and repository issue markdown under `issues/*.md`.
+_Avoid_: "document" (too generic), "report" (reserved for verification-style summaries)
+
+**Local issue status**:
+The status line recorded for a repository-local markdown issue, originally `status: ready-for-agent` under `.scratch/**/issues/*.md`. The **workflow board** writes generated Board issues as task-scoped markdown artifacts under `.sandcastle/board/tasks/<taskId>/issues/<repo>.md` and updates the same status line as execution and verification advance: `ready-for-agent`, `in-progress`, `succeeded`, `needs-recovery`, `verification-failed`, or `infra-warning`.
+_Avoid_: "task status" (ambiguous with **board task** status), "run status" (reserved for **board run** lifecycle)
+
 **Board phase**:
-A named step in a LangGraph-backed **board task** workflow, such as `classifying`, `aligning-prd`, `technical-planning`, `creating-issues`, `awaiting-approval`, or `running`. All phases before Board issues are generated are interactive: `classifying`, `aligning-prd`, `technical-planning`, and `creating-issues` expose a **phase session** so the user can collaborate with the **agent** before any issue-generation handoff or approved **AFK run**.
+A named step in a file-backed **board task** workflow, such as `classifying`, `aligning-prd`, `technical-planning`, `creating-issues`, `awaiting-approval`, `running`, or `verifying`. All phases before Board issues are generated are interactive Planner phases: `classifying`, `aligning-prd`, `technical-planning`, and `creating-issues` expose a **phase session** so the user can collaborate with the **agent** before any issue-generation handoff or approved **AFK run**. The `running` phase is the Generator role, and the `verifying` phase is the Evaluator role that runs after approved repository execution and before a **board task** can succeed.
 _Avoid_: "step" (ambiguous with **iteration**), "stage" (use only in UI copy when necessary)
 
+**Board planning-only mode**:
+A **workflow board** mode where approving the generated workspace plan exports the same planning artifacts as `workspace plan` (`workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md`) and then completes the **board task** without starting an approved **AFK run**.
+_Avoid_: "dry run" (already used by workspace execution), "plan import" (that starts from an existing plan), "no-op execution"
+
+**Verification report**:
+A deterministic **board task** artifact written after approved **AFK run** execution, usually at `.sandcastle/board/tasks/<taskId>/verification.md`. It summarizes planned repositories, execution results, run evidence, completion-signal and commit evidence, delivery errors, infrastructure/capture failures, and the suggested next action. It separates "the **agent** produced work" from "the **board task** delivery was verified".
+_Avoid_: "test report" (too narrow), "execution result" (the report verifies execution results rather than replacing them)
+
+**Board branch merge**:
+A **workflow board** action that merges a **board task** repository's recorded **source branch** into a human-selected **target branch** on the **host**. The action requires a clean target repository working tree and does not auto-stash or overwrite uncommitted changes.
+_Avoid_: "auto-merge" (implies no human target selection), "deploy" (too broad)
+
 **Phase session**:
-An interactive terminal session attached to a specific **board task** and **board phase**. A phase session lets the user collaborate with the **agent** during that phase, and can advance the workflow by emitting the structured phase completion signal. Its process exit does not determine the **board task** result; the LangGraph workflow does.
+An interactive terminal session attached to a specific **board task** and **board phase**. A phase session lets the user collaborate with the **agent** during that phase, and can advance the workflow by emitting the structured phase completion signal. Its process exit does not determine the **board task** result; the file-backed board task workflow does.
 _Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **run event** backed execution)
 
 **Artifact**:

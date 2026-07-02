@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +9,19 @@ import { startBoardServer, type BoardServer } from "./server.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
 
 const noBody = () => Promise.resolve({});
+
+const git = (cwd: string, args: readonly string[]): string =>
+  execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+
+const commitFile = (cwd: string, file: string, content: string): void => {
+  writeFileSync(join(cwd, file), content);
+  git(cwd, ["add", file]);
+  git(cwd, ["commit", "-m", `commit ${file}`]);
+};
 
 describe("routeApi", () => {
   let dir: string;
@@ -160,6 +174,220 @@ describe("routeApi", () => {
     expect((res?.body as { markdown: string }).markdown).toContain(
       "# Board Execution Progress",
     );
+  });
+
+  it("returns a board task verification report", async () => {
+    const task = store.createTask({ title: "Verification", prompt: "do it" });
+    store.writeTaskVerification(
+      task.id,
+      "# Board Verification Report\n\nStatus: infra-warning\n",
+    );
+
+    const res = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/verification`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(200);
+    expect((res?.body as { markdown: string }).markdown).toContain(
+      "Status: infra-warning",
+    );
+  });
+
+  it("returns board task artifacts", async () => {
+    const task = store.createTask({ title: "Artifacts", prompt: "do it" });
+    store.writeTaskArtifactManifest(task.id, [
+      {
+        kind: "workspace-plan",
+        absolutePath: join(dir, "exports", "workspace-plan.json"),
+        displayPath: ".scratch/artifacts/workspace-plan.json",
+        createdAt: "2026-06-30T12:00:00.000Z",
+      },
+      {
+        kind: "technical-plan",
+        absolutePath: join(dir, "exports", "technical-plan.md"),
+        displayPath: ".scratch/artifacts/technical-plan.md",
+        createdAt: "2026-06-30T12:00:00.000Z",
+      },
+    ]);
+
+    const res = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/artifacts`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(200);
+    expect(res?.body).toEqual({
+      artifacts: [
+        {
+          kind: "workspace-plan",
+          absolutePath: join(dir, "exports", "workspace-plan.json"),
+          displayPath: ".scratch/artifacts/workspace-plan.json",
+          createdAt: "2026-06-30T12:00:00.000Z",
+        },
+        {
+          kind: "technical-plan",
+          absolutePath: join(dir, "exports", "technical-plan.md"),
+          displayPath: ".scratch/artifacts/technical-plan.md",
+          createdAt: "2026-06-30T12:00:00.000Z",
+        },
+      ],
+    });
+  });
+
+  it("lists and merges a task branch through the branch merge API", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "board-router-merge-repo-"));
+    try {
+      git(repoDir, ["init", "-b", "main"]);
+      git(repoDir, ["config", "user.email", "test@example.com"]);
+      git(repoDir, ["config", "user.name", "Test User"]);
+      commitFile(repoDir, "base.txt", "base\n");
+      git(repoDir, ["checkout", "-b", "feature"]);
+      commitFile(repoDir, "feature.txt", "feature\n");
+      git(repoDir, ["checkout", "main"]);
+
+      const task = store.createTask({ title: "Merge", prompt: "do it" });
+      store.updateTask(task.id, {
+        status: "succeeded",
+        plan: {
+          workspace: { repositories: [{ name: "web", cwd: repoDir }] },
+          repositories: [{ name: "web", task: "ship it" }],
+        },
+      });
+      store.createRun({
+        name: "web",
+        agent: "claude-code",
+        sandbox: "no-sandbox",
+        branch: "feature",
+        maxIterations: 1,
+        taskId: task.id,
+        repo: "web",
+      });
+
+      const options = await routeApi(
+        store,
+        "GET",
+        `/api/tasks/${task.id}/branch-merge`,
+        noBody,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        repoDir,
+      );
+      expect(options?.status).toBe(200);
+      expect(options?.body).toMatchObject({
+        repositories: [
+          expect.objectContaining({
+            name: "web",
+            sourceBranch: "feature",
+            currentBranch: "main",
+            targetBranches: expect.arrayContaining(["main"]),
+          }),
+        ],
+      });
+
+      const merged = await routeApi(
+        store,
+        "POST",
+        `/api/tasks/${task.id}/branch-merge`,
+        () => Promise.resolve({ repository: "web", targetBranch: "main" }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        repoDir,
+      );
+      expect(merged?.status).toBe(200);
+      expect(merged?.body).toMatchObject({
+        status: "merged",
+        repository: "web",
+        sourceBranch: "feature",
+        targetBranch: "main",
+      });
+      expect(
+        git(repoDir, ["merge-base", "--is-ancestor", "feature", "main"]),
+      ).toBe("");
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects branch merge when the repository is dirty", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "board-router-dirty-repo-"));
+    try {
+      git(repoDir, ["init", "-b", "main"]);
+      git(repoDir, ["config", "user.email", "test@example.com"]);
+      git(repoDir, ["config", "user.name", "Test User"]);
+      commitFile(repoDir, "base.txt", "base\n");
+      git(repoDir, ["checkout", "-b", "feature"]);
+      commitFile(repoDir, "feature.txt", "feature\n");
+      git(repoDir, ["checkout", "main"]);
+      writeFileSync(join(repoDir, "dirty.txt"), "dirty\n");
+
+      const task = store.createTask({ title: "Merge", prompt: "do it" });
+      store.updateTask(task.id, {
+        status: "succeeded",
+        plan: {
+          workspace: { repositories: [{ name: "web", cwd: repoDir }] },
+          repositories: [{ name: "web", task: "ship it" }],
+        },
+      });
+      store.createRun({
+        name: "web",
+        agent: "claude-code",
+        sandbox: "no-sandbox",
+        branch: "feature",
+        maxIterations: 1,
+        taskId: task.id,
+        repo: "web",
+      });
+
+      const res = await routeApi(
+        store,
+        "POST",
+        `/api/tasks/${task.id}/branch-merge`,
+        () => Promise.resolve({ repository: "web", targetBranch: "main" }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        repoDir,
+      );
+      expect(res?.status).toBe(409);
+      expect(res?.body).toMatchObject({
+        error: expect.stringContaining("working tree is not clean"),
+      });
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("404s missing board task verification report", async () => {
+    const task = store.createTask({
+      title: "No verification",
+      prompt: "do it",
+    });
+
+    const res = await routeApi(
+      store,
+      "GET",
+      `/api/tasks/${task.id}/verification`,
+      noBody,
+    );
+
+    expect(res?.status).toBe(404);
+    expect(res?.body).toEqual({ error: "task verification not found" });
   });
 
   it("404s missing board task progress", async () => {
@@ -504,10 +732,23 @@ describe("startBoardServer", () => {
     const res = await fetch(server.url + "/");
     const body = await res.text();
     expect(body).toContain("Task overview");
+    expect(body).toContain('<div class="label">Active</div>');
+    expect(body).toContain("repository runs");
+    expect(body).toContain("tasks completed");
+    expect(body).toContain("tasks failed");
     expect(body).toContain("Task details");
     expect(body).toContain("Current stage");
     expect(body).toContain("Workflow timeline");
     expect(body).toContain("Task activity");
+    expect(body).toContain("Verification");
+    expect(body).toContain("View verification");
+    expect(body).toContain("Board verification report");
+    expect(body).toContain("Branch merge");
+    expect(body).toContain("Merge branch");
+    expect(body).toContain('/api/tasks/" + task.id + "/branch-merge');
+    expect(body).toContain("Task artifacts");
+    expect(body).toContain('/api/tasks/" + task.id + "/artifacts');
+    expect(body).toContain("artifact-list");
     expect(body).toContain("readonly terminal");
     expect(body).toContain("currentIteration");
     expect(body).toContain("last: ");
@@ -522,12 +763,22 @@ describe("startBoardServer", () => {
     expect(body).toContain("Fix workspace plan");
     expect(body).toContain("Recover / Continue from failed phase");
     expect(body).toContain("Approve plan");
+    expect(body).toContain("stage.approveLabel");
+    expect(body).toContain("stage.approvingLabel");
     expect(body).toContain("Board issue");
     expect(body).toContain("Task failed before any repository run started.");
     expect(body).not.toContain(
       "No interactive terminal session is attached to this task.",
     );
     expect(body).not.toContain('"phase " + currentPhase');
+  });
+
+  it("guards the verification report button until a report exists", async () => {
+    const res = await fetch(server.url + "/");
+    const body = await res.text();
+
+    expect(body).toContain("hasVerificationReport");
+    expect(body).toContain("hasVerificationReport ? html`<button class=${");
   });
 
   it("serves the runs API as JSON", async () => {

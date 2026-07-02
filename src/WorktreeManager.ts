@@ -116,7 +116,16 @@ export interface WorktreeEntry {
  * the two without normalizing fails on Windows, so all path comparisons in
  * this module run both sides through this first.
  */
-const normalizePath = (p: string): string => p.replace(/\\/g, "/");
+const normalizeMacOsPrivateAlias = (p: string): string => {
+  if (p === "/private/tmp") return "/tmp";
+  if (p.startsWith("/private/tmp/")) return `/tmp/${p.slice(13)}`;
+  if (p === "/private/var") return "/var";
+  if (p.startsWith("/private/var/")) return `/var/${p.slice(13)}`;
+  return p;
+};
+
+const normalizePath = (p: string): string =>
+  normalizeMacOsPrivateAlias(p.replace(/\\/g, "/"));
 
 /**
  * Finds an existing worktree that collides with `branch` or `worktreePath`.
@@ -141,8 +150,14 @@ export const findCollidingWorktree = (
 export const isManagedWorktreePath = (
   worktreePath: string,
   worktreesDir: string,
-): boolean =>
-  normalizePath(worktreePath).startsWith(normalizePath(worktreesDir));
+): boolean => {
+  const normalizedWorktreePath = normalizePath(worktreePath);
+  const normalizedWorktreesDir = normalizePath(worktreesDir);
+  return (
+    normalizedWorktreePath === normalizedWorktreesDir ||
+    normalizedWorktreePath.startsWith(`${normalizedWorktreesDir}/`)
+  );
+};
 
 /**
  * Whether a directory entry under `.sandcastle/worktrees/` is orphaned — not
@@ -347,7 +362,11 @@ export const create = (
           }
           // git reports forward slashes even on Windows; return a
           // platform-native path so downstream join/fs calls stay consistent.
-          return { path: normalize(collision.path), branch };
+          const returnPath =
+            normalizePath(collision.path) === normalizePath(worktreePath)
+              ? worktreePath
+              : normalize(collision.path);
+          return { path: returnPath, branch };
         }
         // Branch is checked out in the main working tree or external worktree
         yield* Effect.fail(

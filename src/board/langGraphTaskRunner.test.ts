@@ -1,13 +1,15 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BoardStore } from "./BoardStore.js";
+import { BoardStore, boardTaskView } from "./BoardStore.js";
 import {
   createLangGraphTaskWorkflow,
   langGraphInterruptPhase,
+  workspacePlanToBoardPlan,
   type LangGraphPlanResult,
 } from "./langGraphTaskRunner.js";
+import { exportApprovedBoardPlan } from "./approvedPlanExport.js";
 import type { RunEvent } from "../RunEvent.js";
 import type { BoardTaskPlan } from "./BoardStore.js";
 import type { WorkspaceTaskPlan } from "../runWorkspaceTask.js";
@@ -32,6 +34,20 @@ const finished = (): RunEvent => ({
 const failed = (message: string): RunEvent => ({
   type: "run-failed",
   message,
+  timestamp: new Date(),
+});
+
+const agentText = (message: string): RunEvent => ({
+  type: "agent-text",
+  message,
+  iteration: 1,
+  timestamp: new Date(),
+});
+
+const commit = (sha: string): RunEvent => ({
+  type: "commit",
+  sha,
+  iteration: 1,
   timestamp: new Date(),
 });
 
@@ -65,7 +81,6 @@ describe("createLangGraphTaskWorkflow", () => {
     const startedPhases: string[] = [];
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       onPhaseStarted: ({ phase }) => startedPhases.push(phase),
       planFromPhase: async () => {
         calls.push("import-plan");
@@ -200,6 +215,341 @@ describe("createLangGraphTaskWorkflow", () => {
     expect(resumed?.repositories.web?.status).toBe("success");
     expect(calls).toEqual(["import-plan", "execute"]);
     expect(store.getTask(task.id)?.status).toBe("succeeded");
+    expect(store.getTask(task.id)?.workflow).toMatchObject({
+      status: "succeeded",
+      currentPhase: "verifying",
+      verificationStatus: "passed",
+    });
+    expect(store.readTaskVerification(task.id)).toContain(
+      "# Board Verification Report",
+    );
+    expect(store.readTaskVerification(task.id)).toContain("Status: passed");
+  });
+
+  it("persists workflow progress in BoardStore without a SQLite checkpoint database", async () => {
+    const checkpointPath = join(dir, "workflows.sqlite");
+    const roles: string[] = [];
+    let task: ReturnType<BoardStore["createTask"]>;
+    const plan: WorkspaceTaskPlan = {
+      repositories: [{ name: "api", task: "ship endpoint" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async ({ onRepoRunEvent }) => {
+        roles.push(store.getTask(task.id)?.workflow?.role ?? "missing");
+        onRepoRunEvent("api", started("api", "api"));
+        onRepoRunEvent("api", agentText("<promise>COMPLETE</promise>"));
+        onRepoRunEvent("api", commit("abc123"));
+        onRepoRunEvent("api", finished());
+        return {
+          api: {
+            task: "ship endpoint",
+            status: "success",
+            branch: "sandcastle/api",
+            commits: [{ sha: "abc123" }],
+            stdout: "<promise>COMPLETE</promise>",
+          },
+        };
+      },
+    });
+    task = store.createTask({ title: "Ship endpoint", prompt: "Do it" });
+
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+
+    expect(store.getTask(task.id)?.workflow).toMatchObject({
+      status: "classifying",
+      currentPhase: "classifying",
+      role: "planner",
+    });
+
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(result?.repositories.api?.status).toBe("success");
+    expect(roles).toEqual(["generator"]);
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        role: "evaluator",
+        verificationStatus: "passed",
+      },
+    });
+    expect(existsSync(checkpointPath)).toBe(false);
+  });
+
+  it("enters verifying after execution and records completion plus commit evidence", async () => {
+    const plan: WorkspaceTaskPlan = {
+      repositories: [{ name: "api", task: "ship endpoint" }],
+    };
+    const workflowStatuses: string[] = [];
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async ({ onRepoRunEvent }) => {
+        onRepoRunEvent("api", started("api", "api"));
+        onRepoRunEvent(
+          "api",
+          agentText("Implemented it.\n<promise>COMPLETE</promise>"),
+        );
+        onRepoRunEvent("api", commit("abc123"));
+        onRepoRunEvent("api", finished());
+        return {
+          api: {
+            task: "ship endpoint",
+            status: "success",
+            branch: "sandcastle/api",
+            commits: [{ sha: "abc123" }],
+            stdout: "Implemented it.\n<promise>COMPLETE</promise>",
+          },
+        };
+      },
+    });
+    const task = store.createTask({ title: "Ship endpoint", prompt: "Do it" });
+    const unsubscribe = store.subscribe((change) => {
+      if (change.kind === "task-updated" && change.task.workflow?.status) {
+        workflowStatuses.push(change.task.workflow.status);
+      }
+    });
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    await workflow.resume(task.id, "approve");
+    unsubscribe();
+
+    expect(workflowStatuses).toContain("verifying");
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        verificationStatus: "passed",
+      },
+    });
+    const report = store.readTaskVerification(task.id)!;
+    expect(report).toContain("Status: passed");
+    expect(report).toContain("Repository: api");
+    expect(report).toContain("Issue status: succeeded");
+    expect(report).toContain("Agent claimed completion: yes");
+    expect(report).toContain("Commit exists: yes");
+    expect(report).toContain("abc123");
+    expect(store.readTaskIssue(task.id, "api")).toContain("status: succeeded");
+  });
+
+  it("reports infrastructure capture failures as warnings when completion and commits exist", async () => {
+    const plan: WorkspaceTaskPlan = {
+      repositories: [{ name: "api", task: "capture finished work" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      maxRepoRetries: 0,
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async ({ onRepoRunEvent }) => {
+        onRepoRunEvent("api", started("api", "api"));
+        onRepoRunEvent("api", agentText("<promise>COMPLETE</promise>"));
+        onRepoRunEvent("api", commit("def456"));
+        onRepoRunEvent("api", failed("Session capture failed: missing jsonl"));
+        return {
+          api: {
+            task: "capture finished work",
+            status: "failed",
+            branch: "sandcastle/api",
+            commits: [{ sha: "def456" }],
+            stdout: "<promise>COMPLETE</promise>",
+            error: "Session capture failed: missing jsonl",
+          },
+        };
+      },
+    });
+    const task = store.createTask({
+      title: "Capture finished work",
+      prompt: "Do it",
+    });
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(result?.repositories.api?.status).toBe("failed");
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        verificationStatus: "infra-warning",
+      },
+    });
+    const report = store.readTaskVerification(task.id)!;
+    expect(report).toContain("Status: infra-warning");
+    expect(report).toContain("Issue status: infra-warning");
+    expect(report).toContain("Infrastructure failures");
+    expect(report).toContain("Session capture failed");
+    expect(report).toContain("Agent claimed completion: yes");
+    expect(report).toContain("Commit exists: yes");
+    expect(store.readTaskIssue(task.id, "api")).toContain(
+      "status: infra-warning",
+    );
+  });
+
+  it("syncs delivery verification failures back to issue markdown", async () => {
+    const plan: WorkspaceTaskPlan = {
+      repositories: [{ name: "api", task: "fix failing delivery" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      maxRepoRetries: 0,
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async ({ onRepoRunEvent }) => {
+        onRepoRunEvent("api", started("api", "api"));
+        onRepoRunEvent("api", failed("tests failed"));
+        return {
+          api: {
+            task: "fix failing delivery",
+            status: "failed",
+            branch: "sandcastle/api",
+            commits: [],
+            error: "tests failed",
+          },
+        };
+      },
+    });
+    const task = store.createTask({
+      title: "Fix delivery",
+      prompt: "Do it",
+    });
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    await workflow.resume(task.id, "approve");
+
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "failed",
+      workflow: {
+        status: "failed",
+        verificationStatus: "failed",
+      },
+    });
+    expect(store.getTask(task.id)?.workflow).not.toHaveProperty("message");
+    expect(store.readTaskVerification(task.id)).toContain(
+      "Issue status: verification-failed",
+    );
+    expect(store.readTaskIssue(task.id, "api")).toContain(
+      "status: verification-failed",
+    );
+  });
+
+  it("fails verification recoverably when execution results are missing", async () => {
+    const plan: WorkspaceTaskPlan = {
+      repositories: [
+        { name: "api", task: "ship api" },
+        { name: "web", task: "ship web" },
+      ],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async ({ onRepoRunEvent }) => {
+        onRepoRunEvent("api", started("api", "api"));
+        onRepoRunEvent("api", finished());
+        return {
+          api: {
+            task: "ship api",
+            status: "success",
+            branch: "sandcastle/api",
+            commits: [],
+          },
+        };
+      },
+    });
+    const task = store.createTask({ title: "Ship both", prompt: "Do it" });
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    await workflow.resume(task.id, "approve");
+
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "failed",
+      error:
+        "Verification needs recovery: repository execution results were missing.",
+      workflow: {
+        status: "failed",
+        currentPhase: "verifying",
+        verificationStatus: "needs-recovery",
+      },
+    });
+    expect(store.readTaskVerification(task.id)).toContain(
+      "Missing execution result",
+    );
+    expect(store.readTaskVerification(task.id)).toContain(
+      "Issue status: needs-recovery",
+    );
+    expect(store.readTaskIssue(task.id, "api")).toContain("status: succeeded");
+    expect(store.readTaskIssue(task.id, "web")).toContain(
+      "status: needs-recovery",
+    );
   });
 
   it("retries failed repository execution once before aggregating the task result", async () => {
@@ -209,7 +559,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let attempts = 0;
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       maxRepoRetries: 1,
       planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
       plan: async () => {
@@ -274,7 +623,6 @@ describe("createLangGraphTaskWorkflow", () => {
     });
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       planFromPhase: async () => planStarted,
       plan: async () => {
         throw new Error("background planner should not start");
@@ -317,7 +665,6 @@ describe("createLangGraphTaskWorkflow", () => {
     const calls: string[] = [];
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       planFromPhase: async () => ({
         plan: {
           technicalPlan: "Use the interactive issue plan.",
@@ -391,7 +738,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let executeCalls = 0;
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       planFromPhase: async () => phasePlan,
       plan: async () => {
         throw new Error("background planner should not start");
@@ -449,9 +795,16 @@ describe("createLangGraphTaskWorkflow", () => {
   it("stays interactive when the creating-issues phase does not emit an importable plan", async () => {
     let phasePlan: LangGraphPlanResult | undefined;
     const calls: string[] = [];
+    const repairs: Array<{
+      taskId: string;
+      phase: string;
+      message: string;
+    }> = [];
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
+      requestPhaseRepair: async (request) => {
+        repairs.push(request);
+      },
       planFromPhase: async () => phasePlan,
       plan: async () => {
         calls.push("background-plan");
@@ -483,6 +836,16 @@ describe("createLangGraphTaskWorkflow", () => {
     expect(firstAttempt?.status).toBe("awaiting-phase-completion");
     expect(firstAttempt?.phase).toBe("creating-issues");
     expect(calls).toEqual([]);
+    expect(repairs).toEqual([
+      {
+        taskId: task.id,
+        phase: "creating-issues",
+        message: expect.stringContaining("<workspace_plan>") as string,
+      },
+    ]);
+    expect(repairs[0]?.message).toContain(
+      "<sandcastle-phase>complete</sandcastle-phase>",
+    );
     expect(store.getTask(task.id)?.workflow).toMatchObject({
       status: "creating-issues",
       currentPhase: "creating-issues",
@@ -505,6 +868,47 @@ describe("createLangGraphTaskWorkflow", () => {
     expect(store.getTask(task.id)?.workflow?.status).toBe("awaiting-approval");
   });
 
+  it("stops auto-requesting workspace plan repairs after the configured attempts", async () => {
+    const repairs: Array<{ taskId: string; phase: string; message: string }> =
+      [];
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      maxWorkspacePlanRepairAttempts: 1,
+      requestPhaseRepair: async (request) => {
+        repairs.push(request);
+      },
+      planFromPhase: async () => undefined,
+      plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
+      execute: async () => ({}),
+    });
+    const task = store.createTask({
+      title: "Repair once",
+      prompt: "do it",
+    });
+    store.updateTask(task.id, { status: "running" });
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+
+    await workflow.completePhase(task.id, "creating-issues");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    expect(repairs).toHaveLength(1);
+    expect(store.getTask(task.id)?.workflow).toMatchObject({
+      status: "creating-issues",
+      currentPhase: "creating-issues",
+      substatus: "fixing-workspace-plan",
+      workspacePlanRepairAttempts: 1,
+    });
+  });
+
   it("cancels issue generation before the planner result moves to approval", async () => {
     let resolvePlan!: (value: {
       plan: WorkspaceTaskPlan;
@@ -518,7 +922,6 @@ describe("createLangGraphTaskWorkflow", () => {
     });
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       planFromPhase: async () => planStarted,
       plan: async () => {
         throw new Error("background planner should not start");
@@ -572,7 +975,6 @@ describe("createLangGraphTaskWorkflow", () => {
     });
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
       plan: async () => {
         throw new Error("background planner should not start");
@@ -629,7 +1031,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let recoveredPrompt = "";
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => {
         throw new Error("background planner should not start");
       },
@@ -661,6 +1062,10 @@ describe("createLangGraphTaskWorkflow", () => {
         updatedAt: "2026-06-26T07:00:00.000Z",
       },
     });
+    store.writeTaskVerification(
+      task.id,
+      "# Board Verification Report\n\nStatus: needs-recovery\n\nRepository web needs test fixes.\n",
+    );
 
     await workflow.recoverPhase(task.id);
 
@@ -668,6 +1073,9 @@ describe("createLangGraphTaskWorkflow", () => {
     expect(recoveredPrompt).toContain("# Board Execution Progress");
     expect(recoveredPrompt).toContain("## Repository: web");
     expect(recoveredPrompt).toContain("Status: pending");
+    expect(recoveredPrompt).toContain("Board verification report:");
+    expect(recoveredPrompt).toContain("Status: needs-recovery");
+    expect(recoveredPrompt).toContain("Repository web needs test fixes.");
     expect(recoveredPrompt).toContain("Original task prompt:\nFinish it");
   });
 
@@ -693,7 +1101,6 @@ describe("createLangGraphTaskWorkflow", () => {
     const startedPhases: string[] = [];
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       onPhaseStarted: ({ phase }) => startedPhases.push(phase),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async () => ({}),
@@ -759,7 +1166,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let recoveredPrompt = "";
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async ({ prompt, plan, onRepoRunEvent }) => {
         executeCalls++;
@@ -823,10 +1229,357 @@ describe("createLangGraphTaskWorkflow", () => {
       finishedAt: expect.any(String),
       workflow: {
         status: "succeeded",
-        currentPhase: "running",
+        currentPhase: "verifying",
       },
     });
     expect(store.getTask(task.id)?.error).toBeUndefined();
+  });
+
+  it("executes an imported workspace plan after approval without a phase checkpoint", async () => {
+    let executeCalls = 0;
+    let approvedPlan: WorkspaceTaskPlan | undefined;
+    let approvedPrompt = "";
+    const plan: WorkspaceTaskPlan = {
+      alignment: { summary: "Existing plan was already reviewed." },
+      technicalPlan: "Implement the imported plan.",
+      workspace: {
+        branchPrefix: "sandcastle/imported",
+        repositories: [{ name: "web", cwd: "/repos/web" }],
+      },
+      repositories: [{ name: "web", task: "Ship the imported UI task" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      plan: async () => {
+        throw new Error("imported plan should not re-plan");
+      },
+      execute: async ({ prompt, plan, onRepoRunEvent }) => {
+        executeCalls++;
+        approvedPrompt = prompt;
+        approvedPlan = plan;
+        onRepoRunEvent("web", started("web", "web"));
+        onRepoRunEvent("web", finished());
+        return {
+          web: {
+            task: "Ship the imported UI task",
+            status: "success",
+            branch: "sandcastle/imported/web",
+            commits: [],
+          },
+        };
+      },
+    });
+    const task = store.createTask({
+      title: "Imported workspace plan",
+      prompt: "Execute approved workspace plan from /tmp/workspace-plan.json.",
+    });
+    store.updateTask(task.id, {
+      status: "running",
+      source: {
+        type: "workspace-plan",
+        planFile: "/tmp/workspace-plan.json",
+      },
+      plan: workspacePlanToBoardPlan(plan),
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(executeCalls).toBe(1);
+    expect(result?.repositories.web?.status).toBe("success");
+    expect(approvedPrompt).toBe(task.prompt);
+    expect(approvedPlan).toMatchObject({
+      technicalPlan: "Implement the imported plan.",
+      workspace: {
+        branchPrefix: "sandcastle/imported",
+        repositories: [{ name: "web", cwd: "/repos/web" }],
+      },
+      repositories: [{ name: "web", task: "Ship the imported UI task" }],
+    });
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        verificationStatus: "passed",
+      },
+    });
+  });
+
+  it("exports an approved workspace plan without starting AFK execution in planning-only mode", async () => {
+    let executeCalls = 0;
+    const exportedPlans: WorkspaceTaskPlan[] = [];
+    const plan: WorkspaceTaskPlan = {
+      alignment: { summary: "Plan before execution." },
+      technicalPlan: "Prepare deterministic artifacts.",
+      repositories: [
+        {
+          name: "web",
+          task: "Implement the reviewed UI task.",
+          issue: {
+            title: "Implement UI task",
+            body: "status: ready-for-agent\n\nShip it.",
+          },
+        },
+      ],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planningOnly: true,
+      exportApprovedPlan: async ({ plan }) => {
+        exportedPlans.push(plan);
+      },
+      planFromPhase: async () => ({ plan, plannerStdout: "ok" }),
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      execute: async () => {
+        executeCalls++;
+        return {};
+      },
+    });
+    const task = store.createTask({
+      title: "Plan UI task",
+      prompt: "Plan it first",
+    });
+
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+    expect(boardTaskView(store.getTask(task.id)!)).toMatchObject({
+      workflow: {
+        approvedPlanAction: "export-artifacts",
+      },
+      stage: {
+        label: "Awaiting export approval",
+        approveLabel: "Export artifacts",
+      },
+    });
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(executeCalls).toBe(0);
+    expect(exportedPlans).toEqual([plan]);
+    expect(result?.repositories).toEqual({});
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "awaiting-approval",
+        message: "Approved workspace plan artifacts were exported.",
+      },
+    });
+    expect(store.getTask(task.id)?.finishedAt).toEqual(expect.any(String));
+  });
+
+  it("writes workspace planning artifacts after approving a generated planning-only plan", async () => {
+    let executeCalls = 0;
+    const exportDir = join(dir, "exports", "reviewed-plan");
+    const plan: WorkspaceTaskPlan = {
+      alignment: {
+        summary: "Ship a reviewed two-repository plan.",
+        assumptions: ["The imported plan has already been reviewed."],
+        openQuestions: ["Confirm the release branch before execution."],
+        domainTerms: [
+          {
+            term: "workflow board",
+            meaning: "The local approval surface for the imported plan.",
+          },
+        ],
+        adrCandidates: [
+          {
+            title: "Keep approval explicit",
+            reason: "Humans approve artifacts before agent execution.",
+          },
+        ],
+      },
+      technicalPlan: "1. Update API.\n2. Update web.",
+      workspace: {
+        branchPrefix: "codex/reviewed-plan",
+        maxIterations: 2,
+        repositories: [
+          { name: "api", cwd: "/repos/api", kind: "backend" },
+          { name: "web/app", cwd: "/repos/web", kind: "frontend" },
+        ],
+      },
+      repositories: [
+        {
+          name: "api",
+          task: "Add the API contract.",
+          reason: "The API owns the persisted contract.",
+          issue: {
+            title: "Add API contract",
+            body: "status: ready-for-agent\n\nAdd the API contract.",
+          },
+        },
+        {
+          name: "web/app",
+          task: "Render the reviewed settings flow.",
+        },
+      ],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planningOnly: true,
+      exportApprovedPlan: async ({ taskId, plan }) => {
+        exportApprovedBoardPlan({
+          store,
+          cwd: dir,
+          taskId,
+          artifactsDir: exportDir,
+          plan,
+          createdAt: "2026-06-30T00:00:00.000Z",
+        });
+      },
+      plan: async () => {
+        throw new Error("background planner should not start");
+      },
+      planFromPhase: async () => {
+        return { plan, plannerStdout: "ok" };
+      },
+      execute: async () => {
+        executeCalls++;
+        return {};
+      },
+    });
+    const task = store.createTask({
+      title: "Generated workspace plan",
+      prompt: "Plan and export the reviewed workspace task.",
+    });
+
+    await workflow.run({
+      taskId: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      onPlan: () => {},
+      onRepoRunEvent: () => {},
+    });
+    await workflow.completePhase(task.id, "classifying");
+    await workflow.completePhase(task.id, "aligning-prd");
+    await workflow.completePhase(task.id, "technical-planning");
+    await workflow.completePhase(task.id, "creating-issues");
+
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(executeCalls).toBe(0);
+    expect(result?.repositories).toEqual({});
+    expect(readFileSync(join(exportDir, "workspace-plan.json"), "utf8")).toBe(
+      `${JSON.stringify(plan, null, 2)}\n`,
+    );
+    expect(readFileSync(join(exportDir, "alignment.md"), "utf8")).toContain(
+      "Ship a reviewed two-repository plan.",
+    );
+    expect(
+      readFileSync(join(exportDir, "technical-plan.md"), "utf8"),
+    ).toContain("1. Update API.\n2. Update web.");
+    expect(readFileSync(join(exportDir, "issues", "api.md"), "utf8"))
+      .toBe(`# Add API contract
+
+status: ready-for-agent
+
+Add the API contract.
+`);
+    expect(
+      readFileSync(join(exportDir, "issues", "web-app.md"), "utf8"),
+    ).toContain("# web/app: Render the reviewed settings flow.");
+    expect(existsSync(join(exportDir, "issues", "web/app.md"))).toBe(false);
+    expect(
+      store.listTaskArtifacts(task.id).map((artifact) => artifact.kind),
+    ).toEqual([
+      "workspace-plan",
+      "alignment",
+      "technical-plan",
+      "issue",
+      "issue",
+      "progress",
+      "issue",
+      "issue",
+    ]);
+    expect(
+      store.listTaskArtifacts(task.id).map((artifact) => artifact.displayPath),
+    ).toEqual([
+      "exports/reviewed-plan/workspace-plan.json",
+      "exports/reviewed-plan/alignment.md",
+      "exports/reviewed-plan/technical-plan.md",
+      "exports/reviewed-plan/issues/api.md",
+      "exports/reviewed-plan/issues/web-app.md",
+      `tasks/${task.id}/progress.md`,
+      `tasks/${task.id}/issues/api.md`,
+      `tasks/${task.id}/issues/web-app.md`,
+    ]);
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "awaiting-approval",
+        message: "Approved workspace plan artifacts were exported.",
+      },
+    });
+  });
+
+  it("exports an imported workspace plan without starting AFK execution in planning-only mode", async () => {
+    let executeCalls = 0;
+    const exportedPlans: WorkspaceTaskPlan[] = [];
+    const plan: WorkspaceTaskPlan = {
+      alignment: { summary: "Imported and reviewed." },
+      technicalPlan: "Export the imported artifacts.",
+      repositories: [{ name: "api", task: "Ship imported API task" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      planningOnly: true,
+      exportApprovedPlan: async ({ plan }) => {
+        exportedPlans.push(plan);
+      },
+      plan: async () => {
+        throw new Error("imported plan should not re-plan");
+      },
+      execute: async () => {
+        executeCalls++;
+        return {};
+      },
+    });
+    const task = store.createTask({
+      title: "Imported workspace plan",
+      prompt: "Execute approved workspace plan from /tmp/workspace-plan.json.",
+    });
+    store.updateTask(task.id, {
+      status: "running",
+      source: {
+        type: "workspace-plan",
+        planFile: "/tmp/workspace-plan.json",
+      },
+      plan: workspacePlanToBoardPlan(plan),
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    });
+
+    const result = await workflow.resume(task.id, "approve");
+
+    expect(executeCalls).toBe(0);
+    expect(exportedPlans).toEqual([plan]);
+    expect(result?.repositories).toEqual({});
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "awaiting-approval",
+      },
+    });
   });
 
   it("merges duplicate repository entries when recovering approved execution", async () => {
@@ -834,7 +1587,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let recoveredPlan: WorkspaceTaskPlan | undefined;
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async ({ plan, onRepoRunEvent }) => {
         executeCalls++;
@@ -884,7 +1636,7 @@ describe("createLangGraphTaskWorkflow", () => {
       status: "succeeded",
       workflow: {
         status: "succeeded",
-        currentPhase: "running",
+        currentPhase: "verifying",
       },
     });
     expect(store.getTask(task.id)?.plan?.repositories).toHaveLength(1);
@@ -895,7 +1647,6 @@ describe("createLangGraphTaskWorkflow", () => {
     let executeCalls = 0;
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async ({ onRepoRunEvent }) => {
         executeCalls++;
@@ -934,9 +1685,97 @@ describe("createLangGraphTaskWorkflow", () => {
       status: "succeeded",
       workflow: {
         status: "succeeded",
-        currentPhase: "running",
+        currentPhase: "verifying",
       },
     });
+  });
+
+  it("recovers from a failed evaluator verification artifact", async () => {
+    let executeCalls = 0;
+    let evaluateCalls = 0;
+    const plan: WorkspaceTaskPlan = {
+      repositories: [{ name: "web", task: "execute it" }],
+    };
+    const workflow = createLangGraphTaskWorkflow({
+      store,
+      plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
+      execute: async ({ onRepoRunEvent }) => {
+        executeCalls++;
+        onRepoRunEvent("web", started("web", "web"));
+        onRepoRunEvent("web", agentText("<promise>COMPLETE</promise>"));
+        onRepoRunEvent("web", finished());
+        return {
+          web: {
+            task: "execute it",
+            status: "success",
+            branch: "sandcastle/web",
+            commits: [],
+            stdout: "<promise>COMPLETE</promise>",
+          },
+        };
+      },
+      evaluate: async () => {
+        evaluateCalls++;
+        if (evaluateCalls === 1) {
+          throw new Error("Evaluator could not parse recorded evidence.");
+        }
+        return {
+          status: "passed",
+          markdown: "Evaluator verified the recovered run evidence.",
+        };
+      },
+    });
+    const task = store.createTask({
+      title: "Recover evaluator",
+      prompt: "do it",
+    });
+    store.updateTask(task.id, {
+      status: "running",
+      plan: workspacePlanToBoardPlan(plan),
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        updatedAt: "2026-07-01T00:00:00.000Z",
+      },
+    });
+
+    const failedResult = await workflow.resume(task.id, "approve");
+
+    expect(failedResult?.repositories.web?.status).toBe("success");
+    expect(executeCalls).toBe(1);
+    expect(evaluateCalls).toBe(1);
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "failed",
+      workflow: {
+        status: "failed",
+        currentPhase: "verifying",
+        verificationStatus: "failed",
+      },
+    });
+    expect(store.readTaskVerification(task.id)).toContain(
+      "Evaluator agent failed",
+    );
+    expect(boardTaskView(store.getTask(task.id)!).stage).toMatchObject({
+      id: "failed-recoverable",
+      recoverPhase: "running",
+    });
+
+    const recoveredResult = await workflow.recoverPhase(task.id);
+
+    expect(recoveredResult?.repositories.web?.status).toBe("success");
+    expect(executeCalls).toBe(2);
+    expect(evaluateCalls).toBe(2);
+    expect(store.getTask(task.id)).toMatchObject({
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        verificationStatus: "passed",
+      },
+    });
+    expect(store.readTaskVerification(task.id)).toContain(
+      "Evaluator verified the recovered run evidence.",
+    );
   });
 
   it("treats older interrupted execution task records as recoverable execution", () => {
@@ -957,7 +1796,6 @@ describe("createLangGraphTaskWorkflow", () => {
     return expect(
       createLangGraphTaskWorkflow({
         store,
-        checkpointPath: join(dir, "workflows.sqlite"),
         plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
         execute: async () => ({}),
       }).recoverPhase(task.id),
@@ -970,7 +1808,6 @@ describe("createLangGraphTaskWorkflow", () => {
     const startedPhases: string[] = [];
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       onPhaseStarted: ({ phase }) => startedPhases.push(phase),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async () => ({}),
@@ -1006,7 +1843,6 @@ describe("createLangGraphTaskWorkflow", () => {
   it("recovers older transient workflow failures from the latest phase session when currentPhase was lost", async () => {
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async () => ({}),
     });
@@ -1062,7 +1898,6 @@ describe("createLangGraphTaskWorkflow", () => {
   it("recovers old planner idle failures without phase metadata to creating-issues", async () => {
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async () => ({}),
     });
@@ -1094,7 +1929,6 @@ describe("createLangGraphTaskWorkflow", () => {
   it("recovers interrupted approval tasks back to awaiting approval", async () => {
     const workflow = createLangGraphTaskWorkflow({
       store,
-      checkpointPath: join(dir, "workflows.sqlite"),
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
       execute: async () => ({}),
     });

@@ -1,51 +1,76 @@
-# LangGraph board workflow checkpoints
+# File-backed board workflow state
 
-The workflow board now uses a LangGraph-backed **board task** workflow by
-default. This mode keeps the existing board UI, file-backed **BoardStore**, and
-**run event** persistence, but uses a LangGraph state graph to pause at
-interactive **board phases**, wait for approval, resume from a checkpoint,
-execute repositories, and retry failed repository execution once.
+The workflow board uses the existing file-backed `BoardStore` as the durable
+state for **board task** workflow progress. The Board keeps the same task UI,
+phase flow, approval gate, run-event persistence, progress documents, and
+verification reports, but workflow resume now comes from task JSON, plan
+artifacts, progress documents, verification reports, and run-event files under
+`.sandcastle/board/` instead of a SQLite checkpoint database.
 
 ## Decisions
 
-- **LangGraph is the task workflow, not the board store.** ADR 0022 keeps
-  `BoardStore` dependency-free and file-backed. That remains true: task and run
-  metadata stay in JSON / NDJSON under `.sandcastle/board/`. LangGraph stores
-  only workflow checkpoints.
-- **SQLite is scoped to workflow checkpoints.** The SQLite file defaults to
-  `.sandcastle/board/workflows.sqlite`. The native dependency cost is accepted
-  for this runtime because durable interrupt/resume is part of the board task
-  workflow.
-- **The existing `TaskRunner` seam remains the integration point.** The
-  LangGraph runner implements the same board task contract used by the launcher.
-  The HTTP server and frontend continue to observe changes through the same
-  store and SSE stream.
+- **BoardStore is the workflow checkpoint.** Task and run metadata stay in JSON
+  / NDJSON under `.sandcastle/board/`. The task record stores the current phase,
+  current **Board role**, approval action, retry count, verification status,
+  phase sessions, and messages needed to resume or recover the workflow.
+- **No SQLite checkpoint database.** The board no longer writes
+  `.sandcastle/board/workflows.sqlite` and no longer depends on LangGraph,
+  `@langchain/langgraph-checkpoint-sqlite`, or `better-sqlite3`. This keeps the
+  default install free of a native SQLite dependency and makes the docs match
+  the implementation.
+- **Board roles are strict responsibility boundaries.** Planner phases may read
+  repository docs and produce planning artifacts, but must not implement or
+  commit. The Generator runs only approved repository issues and recovery stays
+  inside the approved plan. The Evaluator writes the verification report and
+  must verify acceptance criteria from recorded evidence rather than trusting a
+  successful run or completion signal alone.
 - **Interactive phases are workflow-scoped.** `classifying`, `aligning-prd`,
   `technical-planning`, and `creating-issues` each expose a **phase session**
   keyed by board task id and phase. Emitting the structured phase completion
-  signal, or using the board's Continue button as a fallback, resumes the graph;
-  the terminal process lifecycle does not mark the task succeeded or failed.
-  Issue generation stays interactive through final Board issue creation. After
-  `creating-issues` completes, the board visibly imports and validates the
-  `<workspace_plan>` block from the phase transcript; import failures return to
-  the same interactive phase as a workspace-plan fix state rather than starting
-  a background planner run.
-- **User-facing stages are distinct from checkpoint status.** The board derives
-  task-card labels, detail timeline rows, and available controls from a stable
-  display stage model. `workflow.status` and `currentPhase` remain internal
-  checkpoint/progress fields and are not concatenated directly in the UI.
-- **Human approval is task-scoped.** The graph uses the board task id as the
-  LangGraph `thread_id`, so a task can be resumed by approving or rejecting the
-  plan through the board API.
-- **Retries are conservative.** The POC retries failed repository execution once
-  and then records the aggregate task result. More advanced retry policies can
-  be added after the side effects of duplicate worktrees, branches, and commits
-  are better understood.
+  signal, or using the board's Continue button as a fallback, advances the
+  stored task workflow state; the terminal process lifecycle does not mark the
+  task succeeded or failed.
+- **Issue generation stays interactive.** After `creating-issues` completes,
+  the board imports and validates the `<workspace_plan>` block from the phase
+  transcript. Import failures return to the same interactive phase as a
+  workspace-plan fix state rather than starting a background planner run.
+- **Existing workspace plans can enter at approval.** `sandcastle board
+--plan-file <workspace-plan.json>` imports a reviewed plan as a **board task**
+  already waiting for approval, providing the workflow-board equivalent of
+  `workspace execute --plan-file`.
+- **Recovery stays model-agnostic.** Failed approved executions recover from the
+  stored plan plus the Board progress document and verification report. Recovery
+  prompts instruct the Generator not to re-plan, regenerate Board issues, or
+  redo repositories already marked succeeded unless verification proves they
+  regressed.
+- **Delivery verification is a separate Evaluator phase.** Approved repository
+  execution transitions from `running` to `verifying` before a **board task**
+  can succeed. The Board first renders deterministic structured evidence, then
+  runs an **Evaluator run** when repository agent activity was recorded. The
+  **Board verification report** contains Evaluator output plus the deterministic
+  evidence, approved repositories, local issue status, repository execution
+  results, linked **run event** evidence, completion-signal and commit evidence,
+  errors, infrastructure/capture failures, and suggested next action.
+- **Deterministic verification remains the fallback evidence.** If no
+  repository agent activity was recorded, the Evaluator is skipped and the
+  verification report states that no delivery was reviewed. If the Evaluator
+  fails, the deterministic report is still written into `verification.md` so
+  recovery can continue from stored progress and verification artifacts.
+- **Infrastructure/capture failures are not delivery failures by default.**
+  Conservative error-message classification handles known Sandcastle-side
+  capture failures such as session capture, `copyFileOut`, and transcript
+  capture problems. If a failed repository result also has both agent completion
+  evidence and commit evidence, verification records `infra-warning` instead of
+  treating the delivery as failed.
 
 ## Consequences
 
-The LangGraph workflow adds `@langchain/langgraph` and
-`@langchain/langgraph-checkpoint-sqlite` to the runtime dependency set. The
-SQLite checkpoint package depends on `better-sqlite3`. A future packaging pass
-can move the workflow runner behind a separately installed optional integration
-if this native dependency is too costly for default installs.
+The board workflow no longer has a separate database artifact to back up,
+inspect, or migrate. Durable recovery depends on keeping
+`.sandcastle/board/tasks/<taskId>.json`, task-scoped artifacts, run records, and
+run event streams together.
+
+The legacy `createLangGraphTaskWorkflow` name remains as an internal API
+compatibility point while the workflow implementation shifts to BoardStore
+state. Future cleanup can rename that seam once downstream CLI, router, and test
+call sites no longer depend on the old name.

@@ -13,13 +13,19 @@ import { promisify } from "node:util";
 import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  boardExecutionBranchPrefix,
   buildWorkspaceSandboxProvider,
+  buildBoardPhasePrompt,
+  createBoardStartupTask,
   DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
   parseInteractiveWorkspacePlan,
+  readInteractiveWorkspacePlanFile,
+  resolveBoardStartupPrdFile,
   resolveBoardPlanningConfig,
 } from "./cli.js";
 import type { BindMountSandboxProvider } from "./SandboxProvider.js";
 import { encodeProjectPath } from "./SessionStore.js";
+import { BoardStore } from "./board/BoardStore.js";
 
 const execAsync = promisify(exec);
 
@@ -179,6 +185,8 @@ describe("sandcastle CLI", () => {
     const { stdout } = await runCli("board --help", process.cwd());
     expect(stdout).toContain("--port");
     expect(stdout).toContain("--data-dir");
+    expect(stdout).toContain("--plan-file");
+    expect(stdout).toContain("--prd-file");
     expect(stdout).not.toContain("--workflow");
     expect(stdout).not.toContain("legacy");
     expect(stdout).toContain("no-sandbox");
@@ -252,6 +260,77 @@ describe("sandcastle CLI", () => {
     expect(DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS).toBe(600);
   });
 
+  it("board uses an explicit PRD file as the startup task source", () => {
+    const hostDir = "/tmp/project";
+
+    expect(
+      resolveBoardStartupPrdFile({
+        cwd: hostDir,
+        configPath: join(hostDir, ".sandcastle", "workspace.json"),
+        explicitConfig: false,
+        planFile: Option.none(),
+        prdFile: Option.some("docs/prd.md"),
+      }),
+    ).toBe(join(hostDir, "docs", "prd.md"));
+  });
+
+  it("board falls back to the configured prdFile when no startup source is passed", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-board-prd-"));
+    await mkdir(join(hostDir, ".sandcastle"), { recursive: true });
+    await writeFile(
+      join(hostDir, ".sandcastle", "workspace.json"),
+      JSON.stringify({
+        repositories: [{ name: "app", cwd: "." }],
+        prdFile: "docs/prd.md",
+      }),
+    );
+
+    expect(
+      resolveBoardStartupPrdFile({
+        cwd: hostDir,
+        configPath: join(hostDir, ".sandcastle", "workspace.json"),
+        explicitConfig: false,
+        planFile: Option.none(),
+        prdFile: Option.none(),
+      }),
+    ).toBe(join(hostDir, "docs", "prd.md"));
+  });
+
+  it("board does not read configured prdFile when importing a workspace plan", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-board-plan-"));
+
+    expect(
+      resolveBoardStartupPrdFile({
+        cwd: hostDir,
+        configPath: join(hostDir, ".sandcastle", "workspace.json"),
+        explicitConfig: false,
+        planFile: Option.some("workspace-plan.json"),
+        prdFile: Option.none(),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("board rejects unsupported binary PRD document containers with a clear message", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-board-pdf-prd-"));
+    const store = new BoardStore(join(hostDir, ".sandcastle", "board"));
+    await writeFile(join(hostDir, "prd.pdf"), "not text");
+
+    expect(() =>
+      createBoardStartupTask({
+        store,
+        cwd: hostDir,
+        configPath: join(hostDir, ".sandcastle", "workspace.json"),
+        explicitConfig: false,
+        planFile: Option.none(),
+        prdFile: Option.some("prd.pdf"),
+        planningOnly: false,
+        launchTask: () => {},
+      }),
+    ).toThrow(
+      "PDF and Word PRD image extraction is not supported yet. Export images and reference them from a Markdown PRD, or pass an image file directly.",
+    );
+  });
+
   it("imports the last valid interactive workspace plan when earlier transcript blocks are invalid", () => {
     const plan = parseInteractiveWorkspacePlan(`
       Earlier prompt text included a broken example:
@@ -286,6 +365,110 @@ describe("sandcastle CLI", () => {
     `);
 
     expect(plan).toBeUndefined();
+  });
+
+  it("reads an interactive workspace plan from a task-scoped file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "board-plan-file-"));
+    const planPath = join(dir, "workspace-plan.json");
+    await writeFile(
+      planPath,
+      JSON.stringify({
+        technicalPlan: "Ship from the file.",
+        repositories: [
+          {
+            name: "web",
+            task: "Do it",
+            issue: { title: "Do it", body: "Status: ready-for-agent" },
+          },
+        ],
+      }),
+    );
+
+    try {
+      expect(readInteractiveWorkspacePlanFile(planPath)).toMatchObject({
+        technicalPlan: "Ship from the file.",
+        repositories: [{ name: "web", task: "Do it" }],
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("board planning phase prompts limit project rules and skills to planning", () => {
+    const task = {
+      id: "task-1",
+      title: "Create scoped work",
+      prompt: "Split this PRD into implementation issues.",
+      status: "running" as const,
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runIds: [],
+    };
+
+    for (const phase of [
+      "classifying",
+      "aligning-prd",
+      "technical-planning",
+      "creating-issues",
+    ] as const) {
+      const prompt = buildBoardPhasePrompt(task, phase);
+
+      expect(prompt).toContain("Board role: Planner");
+      expect(prompt).toContain("read CLAUDE.md and AGENTS.md");
+      expect(prompt).toContain("required skills/workflows");
+      expect(prompt).toContain("Do not implement the task.");
+      expect(prompt).toContain("Do not edit source files.");
+      expect(prompt).toContain("Do not commit changes.");
+      expect(prompt).toContain(
+        "Preserve required skill/workflow instructions inside generated plans and issues",
+      );
+    }
+
+    expect(buildBoardPhasePrompt(task, "running")).not.toContain(
+      "Do not implement the task.",
+    );
+  });
+
+  it("tells the creating-issues phase to preserve PRD visual assets in generated issues", () => {
+    const task = {
+      id: "task-1",
+      title: "Create UI",
+      prompt:
+        "# Product Requirements Document\n\nBuild UI\n\n## PRD visual assets\n\n- mock.png\n  - Task asset path: /tmp/mock.png",
+      status: "running" as const,
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runIds: [],
+    };
+
+    const prompt = buildBoardPhasePrompt(task, "creating-issues");
+
+    expect(prompt).toContain("PRD visual assets");
+    expect(prompt).toContain("include relevant PRD visual assets");
+    expect(prompt).toContain("Inspect PRD visual assets before implementation");
+  });
+
+  it("tells the creating-issues phase to write a clean workspace plan file", () => {
+    const task = {
+      id: "task-1",
+      title: "Create UI",
+      prompt: "Build UI",
+      status: "running" as const,
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runIds: [],
+    };
+
+    const prompt = buildBoardPhasePrompt(task, "creating-issues", {
+      workspacePlanFile: "/tmp/task-1.workspace-plan.json",
+    });
+
+    expect(prompt).toContain("/tmp/task-1.workspace-plan.json");
+    expect(prompt).toContain("write the exact JSON object");
+    expect(prompt).toContain("without XML tags");
+  });
+
+  it("uses a task-scoped default branch prefix for board execution", () => {
+    expect(
+      boardExecutionBranchPrefix("db16dc79-8a42-447d-bd49-0fcfaec2707a"),
+    ).toBe("codex/board/db16dc79");
   });
 
   it("workspace plan --help exposes PRD input options", async () => {
@@ -333,6 +516,68 @@ describe("sandcastle CLI", () => {
     expect(stdout).toContain("--prd");
     expect(stdout).toContain("--prd-file");
     expect(stdout).toContain("--artifacts-dir");
+  });
+
+  it("board --help exposes planning-only artifact export options", async () => {
+    const { stdout } = await runCli("board --help", process.cwd());
+    expect(stdout).toContain("--planning-only");
+    expect(stdout).toContain("--artifacts-dir");
+  });
+
+  it("board --planning-only --help exposes planning-only artifact export options", async () => {
+    const { stdout } = await runCli(
+      "board --planning-only --help",
+      process.cwd(),
+    );
+    expect(stdout).toContain("--planning-only");
+    expect(stdout).toContain("--artifacts-dir");
+    expect(stdout).toContain("Export approved Board planning artifacts");
+  });
+
+  it("board planning-only startup imports a plan without launching agents or a server", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "cli-board-startup-"));
+    const dataDir = join(hostDir, ".sandcastle", "board");
+    const planFile = join(
+      hostDir,
+      ".scratch",
+      "feature",
+      "workspace-plan.json",
+    );
+    await mkdir(dirname(planFile), { recursive: true });
+    await writeFile(
+      planFile,
+      JSON.stringify({
+        alignment: { summary: "Review before export." },
+        technicalPlan: "Export artifacts only.",
+        repositories: [{ name: "app", task: "Ship the app task." }],
+      }),
+    );
+
+    const store = new BoardStore(dataDir);
+    let launchCalls = 0;
+
+    const task = createBoardStartupTask({
+      store,
+      cwd: hostDir,
+      configPath: join(hostDir, ".sandcastle", "workspace.json"),
+      explicitConfig: false,
+      planFile: Option.some(planFile),
+      prdFile: Option.none(),
+      planningOnly: true,
+      launchTask: () => {
+        launchCalls++;
+      },
+    });
+
+    expect(launchCalls).toBe(0);
+    expect(task).toMatchObject({
+      source: { type: "workspace-plan", planFile },
+      workflow: {
+        status: "awaiting-approval",
+        approvedPlanAction: "export-artifacts",
+      },
+    });
+    expect(store.listRuns()).toEqual([]);
   });
 
   it("workspace run uses the only ready local issue as the default prompt file", async () => {

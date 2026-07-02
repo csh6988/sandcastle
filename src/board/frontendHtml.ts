@@ -70,6 +70,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       button:hover { transform: translateY(-1px); box-shadow: 0 14px 34px rgba(33, 212, 253, .24); }
       button:disabled { cursor: default; opacity: .6; transform: none; }
       button.secondary { background: rgba(15, 23, 42, .76); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+      button.secondary.on { background: rgba(138, 180, 255, .16); border-color: var(--accent); }
       button.danger { background: linear-gradient(135deg, #e11d48, var(--failed)); color: white; border: 0; box-shadow: 0 10px 26px rgba(251, 113, 133, .18); }
       button.danger:hover { box-shadow: 0 14px 34px rgba(251, 113, 133, .26); }
       .layout { display: grid; grid-template-columns: minmax(320px, 1fr) 8px minmax(360px, var(--detail-width, 500px)); gap: 0; height: calc(100vh - 71px); }
@@ -145,6 +146,11 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       .repo-chip.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(138, 180, 255, .3), 0 0 26px var(--glow); }
       .repo-chip .rrepo { font-weight: 600; margin-bottom: 4px; }
       .repo-chip .rmeta { color: var(--muted); font-size: 11px; }
+      .artifact-list { display: grid; gap: 7px; }
+      .artifact-row { background: rgba(30, 41, 64, .5); border: 1px solid var(--border); border-radius: 11px; padding: 8px 10px; min-width: 0; }
+      .artifact-row .kind { color: var(--accent); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 2px; }
+      .artifact-row .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+      .artifact-row .time { color: var(--muted); font-size: 11px; margin-top: 2px; }
       .detail-list { display: grid; gap: 8px; }
       .stage-line { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 0 0 10px; }
       .timeline { display: grid; gap: 6px; margin-top: 10px; }
@@ -163,6 +169,10 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       .modal input, .modal textarea {
         width: 100%; background: rgba(15, 23, 42, .9); border: 1px solid var(--border); color: var(--text);
         border-radius: 12px; padding: 9px 10px; font: inherit; outline: none;
+      }
+      .inline-select {
+        background: rgba(15, 23, 42, .9); border: 1px solid var(--border); color: var(--text);
+        border-radius: 999px; padding: 8px 12px; font: inherit; min-width: 150px;
       }
       .modal input:focus, .modal textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(138, 180, 255, .14); }
       .modal textarea { min-height: 120px; resize: vertical; }
@@ -193,7 +203,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       const fmtTokens = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
       const STATUSES = ["running", "succeeded", "failed"];
       const INTERACTIVE_PHASES = ["classifying", "aligning-prd", "technical-planning", "creating-issues"];
-      const WORKFLOW_PHASES = [...INTERACTIVE_PHASES, "awaiting-approval", "running"];
+      const WORKFLOW_PHASES = [...INTERACTIVE_PHASES, "awaiting-approval", "running", "verifying"];
       const KNOWN_STAGE_LABELS = ["Validating workspace plan", "Fix workspace plan", "Cancel issue generation"];
       const countStatus = (items, status) => items.filter((i) => i.status === status).length;
       const fallbackStage = (task) => task.stage || {
@@ -497,10 +507,10 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           <div class="section">
             <div class="title">Task overview</div>
             <div class="overview">
-              <div class="metric"><div class="label">Tasks</div><div class="value">\${tasks.length}</div><div class="hint">\${activeTasks} active</div></div>
-              <div class="metric"><div class="label">Runs</div><div class="value">\${runs.length}</div><div class="hint">\${countStatus(runs, "running")} running</div></div>
-              <div class="metric"><div class="label">Succeeded</div><div class="value">\${countStatus(tasks, "succeeded")}</div><div class="hint">\${countStatus(runs, "succeeded")} runs</div></div>
-              <div class="metric"><div class="label">Failed</div><div class="value">\${countStatus(tasks, "failed")}</div><div class="hint">\${countStatus(runs, "failed")} runs</div></div>
+              <div class="metric"><div class="label">Tasks</div><div class="value">\${tasks.length}</div><div class="hint">\${runs.length} repository runs</div></div>
+              <div class="metric"><div class="label">Active</div><div class="value">\${activeTasks}</div><div class="hint">\${countStatus(tasks, "running")} running</div></div>
+              <div class="metric"><div class="label">Succeeded</div><div class="value">\${countStatus(tasks, "succeeded")}</div><div class="hint">tasks completed</div></div>
+              <div class="metric"><div class="label">Failed</div><div class="value">\${countStatus(tasks, "failed")}</div><div class="hint">tasks failed</div></div>
             </div>
           </div>
         </div>\`;
@@ -543,14 +553,64 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         const [phaseNotice, setPhaseNotice] = useState(null);
         const [recoverBusy, setRecoverBusy] = useState(false);
         const [cancelBusy, setCancelBusy] = useState(false);
+        const [artifacts, setArtifacts] = useState([]);
         const [progressBusy, setProgressBusy] = useState(false);
         const [progressMarkdown, setProgressMarkdown] = useState(null);
+        const [verificationBusy, setVerificationBusy] = useState(false);
+        const [verificationMarkdown, setVerificationMarkdown] = useState(null);
+        const [activeTaskDocument, setActiveTaskDocument] = useState(null);
+        const [branchMergeOptions, setBranchMergeOptions] = useState(null);
+        const [mergeRepository, setMergeRepository] = useState("");
+        const [mergeTargetBranch, setMergeTargetBranch] = useState("");
+        const [mergeBusy, setMergeBusy] = useState(false);
+        const [mergeNotice, setMergeNotice] = useState(null);
         const activityRun = taskRuns.find((r) => r.status === "running") || taskRuns[0] || null;
         const workflow = task.workflow || null;
-        const stage = fallbackStage(task);
-        const currentPhase = stage.terminalPhase || null;
-        const showPhaseTerminal = Boolean(stage.terminalPhase);
-        const recoverablePhase = stage.recoverPhase || null;
+      const stage = fallbackStage(task);
+      const currentPhase = stage.terminalPhase || null;
+      const showPhaseTerminal = Boolean(stage.terminalPhase);
+      const recoverablePhase = stage.recoverPhase || null;
+      const approveLabel = stage.approveLabel || "Approve plan";
+      const approvingLabel = stage.approvingLabel || "Approving…";
+      const defaultMergeTargetBranch = (repo) => {
+        if (!repo) return "";
+        return repo.currentBranch && repo.targetBranches.includes(repo.currentBranch)
+          ? repo.currentBranch
+          : repo.targetBranches[0] || "";
+      };
+      useEffect(() => {
+          let active = true;
+          setArtifacts([]);
+          setProgressMarkdown(null);
+          setVerificationMarkdown(null);
+          setActiveTaskDocument(null);
+          setBranchMergeOptions(null);
+          setMergeRepository("");
+          setMergeTargetBranch("");
+          setMergeNotice(null);
+          api("/api/tasks/" + task.id + "/artifacts")
+            .then((body) => {
+              if (active) setArtifacts(body.artifacts || []);
+            })
+            .catch(() => {
+              if (active) setArtifacts([]);
+            });
+          api("/api/tasks/" + task.id + "/branch-merge")
+            .then((body) => {
+              if (!active) return;
+              setBranchMergeOptions(body);
+              const first = (body.repositories || [])[0] || null;
+              setMergeRepository(first ? first.name : "");
+              setMergeTargetBranch(defaultMergeTargetBranch(first));
+            })
+            .catch(() => {
+              if (active) setBranchMergeOptions(null);
+            });
+          return () => { active = false; };
+        }, [task.id, task.finishedAt, task.workflow && task.workflow.updatedAt]);
+        const hasVerificationReport =
+          artifacts.some((artifact) => artifact.kind === "verification") ||
+          Boolean(workflow && workflow.verificationStatus);
         const decide = async (decision) => {
           setDecisionBusy(decision);
           const res = await fetch("/api/tasks/" + task.id + "/resume", {
@@ -598,6 +658,20 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           }
           const body = await res.json();
           setProgressMarkdown(body.markdown || "");
+          setActiveTaskDocument("progress");
+        };
+        const viewVerification = async () => {
+          setVerificationBusy(true);
+          const res = await fetch("/api/tasks/" + task.id + "/verification");
+          setVerificationBusy(false);
+          if (!res.ok) {
+            const e = await res.json();
+            alert(e.error || "Failed to load verification");
+            return;
+          }
+          const body = await res.json();
+          setVerificationMarkdown(body.markdown || "");
+          setActiveTaskDocument("verification");
         };
         const cancelTask = async () => {
           setCancelBusy(true);
@@ -607,6 +681,34 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             const e = await res.json();
             alert(e.error || "Failed to cancel task");
           }
+        };
+        const mergeRepositories = (branchMergeOptions && branchMergeOptions.repositories) || [];
+        const selectedMergeOption = mergeRepositories.find((repo) => repo.name === mergeRepository) || mergeRepositories[0] || null;
+        const changeMergeRepository = (name) => {
+          const next = mergeRepositories.find((repo) => repo.name === name) || null;
+          setMergeRepository(name);
+          setMergeTargetBranch(defaultMergeTargetBranch(next));
+          setMergeNotice(null);
+        };
+        const mergeBranch = async () => {
+          if (!selectedMergeOption || !mergeTargetBranch) return;
+          setMergeBusy(true);
+          setMergeNotice(null);
+          const res = await fetch("/api/tasks/" + task.id + "/branch-merge", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ repository: selectedMergeOption.name, targetBranch: mergeTargetBranch }),
+          });
+          setMergeBusy(false);
+          const body = await res.json();
+          if (!res.ok) {
+            setMergeNotice(body.error || "Failed to merge branch");
+            return;
+          }
+          setMergeNotice("Merged " + body.sourceBranch + " into " + body.targetBranch + ".");
+          api("/api/tasks/" + task.id + "/branch-merge")
+            .then(setBranchMergeOptions)
+            .catch(() => {});
         };
         return html\`<div>
           <h3>Task details</h3>
@@ -642,13 +744,38 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
                 <button disabled=\${recoverBusy} onClick=\${recoverTask}>\${recoverBusy ? "Recovering…" : "Recover / Continue from failed phase"}</button>
               </div>\` : null}
             \${task.plan ? html\`
+              <div class="title">Verification</div>
               <div class="actions">
-                <button class="secondary" disabled=\${progressBusy} onClick=\${viewProgress}>\${progressBusy ? "Loading progress…" : "View progress"}</button>
+                <button class=\${"secondary " + (activeTaskDocument === "progress" ? "on" : "")} disabled=\${progressBusy} onClick=\${viewProgress}>\${progressBusy ? "Loading progress…" : "View progress"}</button>
+                \${hasVerificationReport ? html\`<button class=\${"secondary " + (activeTaskDocument === "verification" ? "on" : "")} disabled=\${verificationBusy} onClick=\${viewVerification}>\${verificationBusy ? "Loading verification…" : "View verification"}</button>\` : null}
               </div>\` : null}
-            \${progressMarkdown !== null ? html\`
+            \${activeTaskDocument === "progress" && progressMarkdown !== null ? html\`
               <div class="section">
                 <div class="title">Board progress document</div>
                 <div class="stream"><div class="text">\${progressMarkdown || "No progress document content."}</div></div>
+              </div>\` : null}
+            \${activeTaskDocument === "verification" && verificationMarkdown !== null ? html\`
+              <div class="section">
+                <div class="title">Board verification report</div>
+                <div class="stream"><div class="text">\${verificationMarkdown || "No verification report content."}</div></div>
+              </div>\` : null}
+            \${mergeRepositories.length > 0 ? html\`
+              <div class="section">
+                <div class="title">Branch merge</div>
+                <div class="notice">
+                  <strong>Source</strong> · \${selectedMergeOption && selectedMergeOption.sourceBranch ? selectedMergeOption.sourceBranch : "missing"}
+                  \${selectedMergeOption && selectedMergeOption.reason ? " · " + selectedMergeOption.reason : ""}
+                </div>
+                <div class="actions">
+                  <select class="inline-select" value=\${mergeRepository} onChange=\${(event) => changeMergeRepository(event.target.value)}>
+                    \${mergeRepositories.map((repo) => html\`<option key=\${repo.name} value=\${repo.name}>\${repo.name}</option>\`)}
+                  </select>
+                  <select class="inline-select" value=\${mergeTargetBranch} onChange=\${(event) => { setMergeTargetBranch(event.target.value); setMergeNotice(null); }}>
+                    \${(selectedMergeOption ? selectedMergeOption.targetBranches : []).map((branch) => html\`<option key=\${branch} value=\${branch}>\${branch}</option>\`)}
+                  </select>
+                  <button disabled=\${mergeBusy || !selectedMergeOption || !selectedMergeOption.canMerge || !mergeTargetBranch} onClick=\${mergeBranch}>\${mergeBusy ? "Merging…" : "Merge branch"}</button>
+                </div>
+                \${mergeNotice ? html\`<div class=\${mergeNotice.startsWith("Merged ") ? "notice" : "error-box"}>\${mergeNotice}</div>\` : null}
               </div>\` : null}
             \${stage.canCancel ? html\`
               <div class="actions">
@@ -657,7 +784,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             \${stage.canApprove || stage.canReject ? html\`
               <div class="actions">
                 \${stage.canReject ? html\`<button class="secondary" disabled=\${decisionBusy !== null} onClick=\${() => decide("reject")}>\${decisionBusy === "reject" ? "Rejecting…" : "Reject plan"}</button>\` : null}
-                \${stage.canApprove ? html\`<button disabled=\${decisionBusy !== null} onClick=\${() => decide("approve")}>\${decisionBusy === "approve" ? "Approving…" : "Approve plan"}</button>\` : null}
+                \${stage.canApprove ? html\`<button disabled=\${decisionBusy !== null} onClick=\${() => decide("approve")}>\${decisionBusy === "approve" ? approvingLabel : approveLabel}</button>\` : null}
               </div>\` : null}
           </div>
           \${showPhaseTerminal ? html\`<div class="section">
@@ -671,6 +798,17 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           <div class="section">
             <div class="title">Plan</div>
             \${task.plan ? html\`<\${PlanView} plan=\${task.plan} />\` : html\`<div class="notice">No plan has been reported yet.</div>\`}
+          </div>
+          <div class="section">
+            <div class="title">Task artifacts</div>
+            \${artifacts.length === 0
+              ? html\`<div class="notice">No artifacts have been recorded yet.</div>\`
+              : html\`<div class="artifact-list">\${artifacts.map((artifact) => html\`
+                  <div class="artifact-row" key=\${artifact.kind + ":" + artifact.absolutePath}>
+                    <div class="kind">\${artifact.kind}</div>
+                    <div class="path" title=\${artifact.absolutePath}>\${artifact.displayPath}</div>
+                    <div class="time">\${new Date(artifact.createdAt).toLocaleString()}</div>
+                  </div>\`)}</div>\`}
           </div>
           <div class="section">
             <div class="title">Repository runs</div>

@@ -43,6 +43,16 @@ describe("encodeProjectPath", () => {
     expect(encodeProjectPath("/home/user/")).toBe("-home-user");
   });
 
+  it("encodes Claude Code project paths containing dot-prefixed directories", () => {
+    expect(
+      encodeProjectPath(
+        "/Users/chenshaohui/IdeaProjects/vocmngweb/.sandcastle/worktrees/codex-board-db16dc79-vocmngweb",
+      ),
+    ).toBe(
+      "-Users-chenshaohui-IdeaProjects-vocmngweb--sandcastle-worktrees-codex-board-db16dc79-vocmngweb",
+    );
+  });
+
   it("encodes Windows path with backslashes and drive letter", () => {
     expect(encodeProjectPath("D:\\projektit\\super-app")).toBe(
       "D-projektit-super-app",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { canonicalTestPath } from "../testPath.js";
 import { noSandbox } from "./no-sandbox.js";
 
 const itPosix = process.platform === "win32" ? it.skip : it;
@@ -66,7 +67,7 @@ describe("noSandbox", () => {
       });
 
       const result = await handle.exec("pwd", { cwd: "/tmp" });
-      expect(result.stdout.trim()).toBe("/tmp");
+      expect(result.stdout.trim()).toBe(await canonicalTestPath("/tmp"));
     });
 
     it("exec ignores sudo option (no-op)", async () => {

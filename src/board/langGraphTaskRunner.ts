@@ -1,15 +1,8 @@
 import {
-  Annotation,
-  Command,
-  END,
-  START,
-  StateGraph,
-  interrupt,
-} from "@langchain/langgraph";
-import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
-import {
   createRunRecorder,
+  type BoardRole,
   type BoardStore,
+  type BoardTaskApprovedPlanAction,
   type BoardTaskPlan,
   type BoardTaskRecord,
   type BoardTaskWorkflow,
@@ -22,17 +15,19 @@ import type { RunEvent } from "../RunEvent.js";
 import { assertUniqueWorkspaceTaskPlanRepositories } from "../runWorkspaceTask.js";
 import type {
   WorkspaceTaskPlan,
-  WorkspaceTaskRepositoryOptions,
   WorkspaceTaskRepositoryResult,
 } from "../runWorkspaceTask.js";
+import type { BoardTaskVerificationStatus } from "./taskVerification.js";
+import {
+  boardPlanToWorkspacePlan,
+  handleImportedWorkspacePlanApproval,
+  isImportedWorkspacePlanAwaitingApproval,
+} from "./importedPlanApproval.js";
+import { executeApprovedBoardPlan } from "./approvedPlanExecution.js";
+import type { BoardTaskEvaluator } from "./taskEvaluator.js";
 
 type ApprovalDecision = "approve" | "reject";
 type WorkflowStatus = BoardTaskWorkflowStatus;
-type PhaseCompletion = {
-  readonly type: "complete-phase";
-  readonly phase: BoardTaskWorkflowPhase;
-};
-type WorkflowResume = ApprovalDecision | PhaseCompletion;
 
 interface WorkflowState {
   readonly taskId: string;
@@ -43,6 +38,7 @@ interface WorkflowState {
   readonly retryCount: number;
   readonly status: WorkflowStatus;
   readonly error?: string;
+  readonly verificationStatus?: BoardTaskVerificationStatus;
 }
 
 interface WorkflowCallbacks {
@@ -71,12 +67,24 @@ export interface LangGraphTaskWorkflow {
 
 export interface CreateLangGraphTaskWorkflowOptions {
   readonly store: BoardStore;
-  readonly checkpointPath: string;
   readonly maxRepoRetries?: number;
+  readonly planningOnly?: boolean;
+  readonly exportApprovedPlan?: (args: {
+    readonly taskId: string;
+    readonly title: string;
+    readonly prompt: string;
+    readonly plan: WorkspaceTaskPlan;
+  }) => Promise<void>;
   readonly onPhaseStarted?: (args: {
     readonly taskId: string;
     readonly phase: BoardTaskWorkflowPhase;
   }) => void;
+  readonly requestPhaseRepair?: (args: {
+    readonly taskId: string;
+    readonly phase: BoardTaskWorkflowPhase;
+    readonly message: string;
+  }) => Promise<void> | void;
+  readonly maxWorkspacePlanRepairAttempts?: number;
   readonly plan: (args: {
     readonly taskId: string;
     readonly title: string;
@@ -97,6 +105,7 @@ export interface CreateLangGraphTaskWorkflowOptions {
     readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
     readonly signal: AbortSignal;
   }) => Promise<Record<string, WorkspaceTaskRepositoryResult>>;
+  readonly evaluate?: BoardTaskEvaluator;
 }
 
 const workflowNow = () => new Date().toISOString();
@@ -104,6 +113,37 @@ const workflowNow = () => new Date().toISOString();
 export const workspacePlanToBoardPlan = (
   plan: WorkspaceTaskPlan,
 ): BoardTaskPlan => ({
+  ...(plan.alignment
+    ? {
+        alignment: {
+          summary: plan.alignment.summary,
+          ...(plan.alignment.assumptions
+            ? { assumptions: [...plan.alignment.assumptions] }
+            : {}),
+          ...(plan.alignment.openQuestions
+            ? { openQuestions: [...plan.alignment.openQuestions] }
+            : {}),
+          ...(plan.alignment.domainTerms
+            ? {
+                domainTerms: plan.alignment.domainTerms.map((term) => ({
+                  term: term.term,
+                  meaning: term.meaning,
+                })),
+              }
+            : {}),
+          ...(plan.alignment.adrCandidates
+            ? {
+                adrCandidates: plan.alignment.adrCandidates.map(
+                  (candidate) => ({
+                    title: candidate.title,
+                    reason: candidate.reason,
+                  }),
+                ),
+              }
+            : {}),
+        },
+      }
+    : {}),
   ...(plan.alignment?.summary
     ? { alignmentSummary: plan.alignment.summary }
     : {}),
@@ -140,121 +180,6 @@ export const workspacePlanToBoardPlan = (
   })),
 });
 
-const boardPlanToWorkspacePlan = (plan: BoardTaskPlan): WorkspaceTaskPlan => ({
-  ...(plan.alignmentSummary
-    ? { alignment: { summary: plan.alignmentSummary } }
-    : {}),
-  ...(plan.technicalPlan ? { technicalPlan: plan.technicalPlan } : {}),
-  ...(plan.workspace
-    ? {
-        workspace: {
-          ...(plan.workspace.branchPrefix
-            ? { branchPrefix: plan.workspace.branchPrefix }
-            : {}),
-          ...(plan.workspace.maxIterations !== undefined
-            ? { maxIterations: plan.workspace.maxIterations }
-            : {}),
-          repositories: plan.workspace.repositories.map((repo) => ({
-            name: repo.name,
-            cwd: repo.cwd,
-            ...(repo.kind ? { kind: repo.kind } : {}),
-            ...(repo.description ? { description: repo.description } : {}),
-            ...(repo.copyToWorktree
-              ? { copyToWorktree: [...repo.copyToWorktree] }
-              : {}),
-            ...(repo.branchStrategy
-              ? {
-                  branchStrategy:
-                    repo.branchStrategy as WorkspaceTaskRepositoryOptions["branchStrategy"],
-                }
-              : {}),
-          })),
-        },
-      }
-    : {}),
-  repositories: plan.repositories.map((repo) => ({
-    name: repo.name,
-    task: repo.task,
-    ...(repo.reason ? { reason: repo.reason } : {}),
-    ...(repo.issue ? { issue: repo.issue } : {}),
-  })),
-});
-
-const combineIssueBodies = (
-  entries: ReadonlyArray<WorkspaceTaskPlan["repositories"][number]>,
-): WorkspaceTaskPlan["repositories"][number]["issue"] | undefined => {
-  const issues = entries
-    .map((entry) => entry.issue)
-    .filter((issue): issue is NonNullable<typeof issue> => issue !== undefined);
-  if (issues.length === 0) return undefined;
-  if (issues.length === 1 && entries.length === 1) return issues[0];
-  return {
-    title: `Combined issues for ${entries[0]!.name}`,
-    body: issues
-      .map(
-        (issue, index) =>
-          `## Issue ${index + 1}: ${issue.title}\n\n${issue.body}`,
-      )
-      .join("\n\n---\n\n"),
-  };
-};
-
-const combineText = (label: string, values: ReadonlyArray<string>): string =>
-  values.length === 1
-    ? values[0]!
-    : values
-        .map((value, index) => `## ${label} ${index + 1}\n\n${value}`)
-        .join("\n\n---\n\n");
-
-const mergeDuplicateWorkspacePlanRepositories = (
-  plan: WorkspaceTaskPlan,
-): { readonly plan: WorkspaceTaskPlan; readonly changed: boolean } => {
-  const grouped = new Map<
-    string,
-    WorkspaceTaskPlan["repositories"][number][]
-  >();
-  const order: string[] = [];
-  for (const repo of plan.repositories) {
-    if (!grouped.has(repo.name)) {
-      grouped.set(repo.name, []);
-      order.push(repo.name);
-    }
-    grouped.get(repo.name)!.push(repo);
-  }
-  const changed = [...grouped.values()].some((entries) => entries.length > 1);
-  if (!changed) return { plan, changed: false };
-
-  return {
-    changed: true,
-    plan: {
-      ...plan,
-      repositories: order.map((name) => {
-        const entries = grouped.get(name)!;
-        const reasons = entries.flatMap((entry) =>
-          entry.reason ? [entry.reason] : [],
-        );
-        const issue = combineIssueBodies(entries);
-        return {
-          name,
-          task: combineText(
-            "Approved task",
-            entries.map((entry) => entry.task),
-          ),
-          ...(reasons.length > 0
-            ? { reason: combineText("Reason", reasons) }
-            : {}),
-          ...(issue ? { issue } : {}),
-        };
-      }),
-    },
-  };
-};
-
-const hasFailedRepository = (
-  repositories: Record<string, WorkspaceTaskRepositoryResult>,
-): boolean =>
-  Object.values(repositories).some((repo) => repo.status === "failed");
-
 const WORKFLOW_PHASES = new Set<string>([
   "classifying",
   "aligning-prd",
@@ -262,6 +187,7 @@ const WORKFLOW_PHASES = new Set<string>([
   "creating-issues",
   "awaiting-approval",
   "running",
+  "verifying",
 ]);
 
 const INTERACTIVE_PHASES = new Set<BoardTaskWorkflowPhase>([
@@ -339,6 +265,8 @@ const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
     /Executing approved workspace plan/i.test(message) ||
     /Retrying failed repository execution/i.test(message) ||
     /One or more repository executions failed/i.test(message) ||
+    /Verification failed/i.test(message) ||
+    /Verification needs recovery/i.test(message) ||
     /Interrupted when the board server stopped or restarted/i.test(message) ||
     /Task cancelled/i.test(message)
   );
@@ -347,14 +275,21 @@ const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
 const isFailedExecutionWithPlan = (task: BoardTaskRecord): boolean =>
   task.plan !== undefined &&
   (task.workflow?.currentPhase === "running" ||
+    task.workflow?.currentPhase === "verifying" ||
     task.workflow?.status === "running" ||
+    task.workflow?.status === "verifying" ||
     task.workflow?.status === "retrying" ||
+    task.workflow?.verificationStatus === "failed" ||
+    task.workflow?.verificationStatus === "needs-recovery" ||
     isExecutionRecoveryMessage(task));
 
 const recoveredExecutionPrompt = (
   originalPrompt: string,
   progressMarkdown?: string,
+  verificationMarkdown?: string,
 ): string => `Continue the approved Board workspace execution after an interruption.
+
+Board role: Generator. Stay inside the Generator responsibility boundary.
 
 The workspace plan has already been reviewed and approved. Do not re-plan, do not regenerate Board issues, and do not ask for approval again.
 
@@ -370,6 +305,9 @@ Recovery rules:
 
 Board progress document:
 ${progressMarkdown ?? "No Board progress document was available. Reconstruct progress from the existing repository state and run history before editing."}
+
+Board verification report:
+${verificationMarkdown ?? "No Board verification report was available. Use the progress document and repository state to decide what remains."}
 
 Original task prompt:
 ${originalPrompt}`;
@@ -403,10 +341,25 @@ const errorMessage = (error: unknown): string =>
 const workspacePlanImportFailureMessage =
   "Board could not import a workspace plan from this phase. Fix the <workspace_plan> block, then complete the phase again.";
 
+const workspacePlanRepairPrompt = (error: string): string => `
+The Board could not import a valid workspace plan from this phase.
+
+Import error:
+${error}
+
+Repair the creating-issues output now:
+- produce one valid <workspace_plan> block using the required JSON shape;
+- include each repository name at most once;
+- if the phase prompt provided a workspace plan file path, write the exact JSON object to that file;
+- do not implement the task or start repository execution.
+
+When the repaired plan is ready, print this exact marker on its own line:
+<sandcastle-phase>complete</sandcastle-phase>
+`;
+
 export const createLangGraphTaskWorkflow = (
   options: CreateLangGraphTaskWorkflowOptions,
 ): LangGraphTaskWorkflow => {
-  const checkpointer = SqliteSaver.fromConnString(options.checkpointPath);
   const callbacksByTask = new Map<string, WorkflowCallbacks>();
   const cancelledTasks = new Set<string>();
   const abortControllersByTask = new Map<string, AbortController>();
@@ -419,29 +372,74 @@ export const createLangGraphTaskWorkflow = (
     }
   };
   const maxRepoRetries = options.maxRepoRetries ?? 1;
+  const maxWorkspacePlanRepairAttempts =
+    options.maxWorkspacePlanRepairAttempts ?? 2;
+  const approvedPlanAction: BoardTaskApprovedPlanAction = options.planningOnly
+    ? "export-artifacts"
+    : "execute";
+
+  const roleFor = (
+    status: WorkflowStatus,
+    currentPhase?: BoardTaskWorkflowPhase,
+  ): BoardRole => {
+    if (currentPhase === "verifying") return "evaluator";
+    if (
+      currentPhase === "running" ||
+      status === "approved" ||
+      status === "running" ||
+      status === "retrying"
+    ) {
+      return "generator";
+    }
+    return "planner";
+  };
 
   const updateWorkflow = (
     taskId: string,
     patch: {
       readonly status: WorkflowStatus;
       readonly currentPhase?: BoardTaskWorkflowPhase;
+      readonly role?: BoardRole;
       readonly retryCount?: number;
+      readonly workspacePlanRepairAttempts?: number;
       readonly substatus?: BoardTaskWorkflowSubstatus;
+      readonly verificationStatus?: BoardTaskVerificationStatus;
       readonly message?: string;
       readonly error?: string;
     },
   ) => {
     const previous = options.store.getTask(taskId)?.workflow;
-    const { substatus: previousSubstatus, ...previousWithoutSubstatus } =
-      previous ?? {};
+    const {
+      substatus: previousSubstatus,
+      message: previousMessage,
+      error: previousError,
+      ...previousWithoutSubstatus
+    } = previous ?? {};
+    const shouldRetainPreviousMessage =
+      !("message" in patch) && !("error" in patch);
+    const currentPhase = patch.currentPhase ?? previous?.currentPhase;
     const nextWorkflow: BoardTaskWorkflow = {
       ...previousWithoutSubstatus,
       status: patch.status,
-      currentPhase: patch.currentPhase ?? previous?.currentPhase,
+      currentPhase,
+      role: patch.role ?? roleFor(patch.status, currentPhase),
+      approvedPlanAction: previous?.approvedPlanAction ?? approvedPlanAction,
       checkpointThreadId: previous?.checkpointThreadId ?? taskId,
       ...(patch.retryCount !== undefined
         ? { retryCount: patch.retryCount }
         : {}),
+      ...(patch.workspacePlanRepairAttempts !== undefined
+        ? { workspacePlanRepairAttempts: patch.workspacePlanRepairAttempts }
+        : previous?.workspacePlanRepairAttempts !== undefined
+          ? {
+              workspacePlanRepairAttempts: previous.workspacePlanRepairAttempts,
+            }
+          : {}),
+      ...(patch.verificationStatus !== undefined
+        ? { verificationStatus: patch.verificationStatus }
+        : previous?.verificationStatus
+          ? { verificationStatus: previous.verificationStatus }
+          : {}),
       ...("substatus" in patch && patch.substatus !== undefined
         ? { substatus: patch.substatus }
         : "substatus" in patch
@@ -449,36 +447,21 @@ export const createLangGraphTaskWorkflow = (
           : previous?.substatus
             ? { substatus: previousSubstatus }
             : {}),
-      ...(patch.message ? { message: patch.message } : {}),
-      ...(patch.error ? { error: patch.error } : {}),
+      ...(shouldRetainPreviousMessage && previousMessage
+        ? { message: previousMessage }
+        : {}),
+      ...(shouldRetainPreviousMessage && previousError
+        ? { error: previousError }
+        : {}),
+      ...("message" in patch && patch.message
+        ? { message: patch.message }
+        : {}),
+      ...("error" in patch && patch.error ? { error: patch.error } : {}),
       updatedAt: workflowNow(),
     };
     options.store.updateTask(taskId, {
       workflow: nextWorkflow,
     });
-  };
-
-  const waitForPhaseCompletion = (
-    state: WorkflowState,
-    phase: BoardTaskWorkflowPhase,
-  ): void => {
-    const completion = interrupt<
-      {
-        readonly taskId: string;
-        readonly title: string;
-        readonly phase: string;
-      },
-      PhaseCompletion
-    >({
-      taskId: state.taskId,
-      title: state.title,
-      phase,
-    });
-    if (completion.type !== "complete-phase" || completion.phase !== phase) {
-      throw new Error(
-        `Cannot complete ${phase} with a different phase signal.`,
-      );
-    }
   };
 
   const importPhaseWorkspacePlan = async (
@@ -506,65 +489,27 @@ export const createLangGraphTaskWorkflow = (
     state: Omit<WorkflowState, "plan"> & { readonly plan: WorkspaceTaskPlan },
     callbacks: WorkflowCallbacks,
   ): Promise<
-    Pick<WorkflowState, "repositories" | "retryCount" | "status" | "error">
-  > => {
-    let retryCount = state.retryCount;
-    let repositories: Record<string, WorkspaceTaskRepositoryResult> = {};
-    const executionPlan = mergeDuplicateWorkspacePlanRepositories(state.plan);
-    if (executionPlan.changed) {
-      options.store.updateTask(state.taskId, {
-        plan: workspacePlanToBoardPlan(executionPlan.plan),
-      });
-    }
-
-    while (retryCount <= maxRepoRetries) {
-      throwIfCancelled(state.taskId);
-      updateWorkflow(state.taskId, {
-        status: retryCount === 0 ? "running" : "retrying",
-        currentPhase: "running",
-        substatus: undefined,
-        retryCount,
-        message:
-          retryCount === 0
-            ? "Executing approved workspace plan."
-            : "Retrying failed repository execution.",
-      });
-      const controller = new AbortController();
-      abortControllersByTask.set(state.taskId, controller);
-      try {
-        repositories = await options.execute({
-          taskId: state.taskId,
-          title: state.title,
-          prompt: state.prompt,
-          plan: executionPlan.plan,
-          onRepoRunEvent: callbacks.onRepoRunEvent,
-          signal: controller.signal,
+    Pick<
+      WorkflowState,
+      "repositories" | "retryCount" | "status" | "error" | "verificationStatus"
+    >
+  > =>
+    executeApprovedBoardPlan({
+      store: options.store,
+      state,
+      callbacks,
+      maxRepoRetries,
+      abortControllersByTask,
+      throwIfCancelled,
+      updateWorkflow: (workflow) => updateWorkflow(state.taskId, workflow),
+      execute: options.execute,
+      evaluate: options.evaluate,
+      onPlanChanged: (plan) => {
+        options.store.updateTask(state.taskId, {
+          plan: workspacePlanToBoardPlan(plan),
         });
-        throwIfCancelled(state.taskId);
-        if (!hasFailedRepository(repositories)) break;
-        retryCount += 1;
-        if (retryCount > maxRepoRetries) break;
-      } finally {
-        if (abortControllersByTask.get(state.taskId) === controller) {
-          abortControllersByTask.delete(state.taskId);
-        }
-      }
-    }
-
-    throwIfCancelled(state.taskId);
-    const status = hasFailedRepository(repositories) ? "failed" : "succeeded";
-    const error =
-      status === "failed"
-        ? "One or more repository executions failed."
-        : undefined;
-    updateWorkflow(state.taskId, {
-      status,
-      substatus: undefined,
-      retryCount,
-      ...(error ? { error } : { message: "Workspace task completed." }),
+      },
     });
-    return { repositories, retryCount, status, ...(error ? { error } : {}) };
-  };
 
   const enterInteractivePhase = (
     state: WorkflowState,
@@ -599,175 +544,6 @@ export const createLangGraphTaskWorkflow = (
       onRepoRunEvent,
     };
   };
-
-  const State = Annotation.Root({
-    taskId: Annotation<string>(),
-    title: Annotation<string>(),
-    prompt: Annotation<string>(),
-    plan: Annotation<WorkspaceTaskPlan | undefined>(),
-    repositories: Annotation<Record<string, WorkspaceTaskRepositoryResult>>(),
-    retryCount: Annotation<number>(),
-    status: Annotation<WorkflowStatus>(),
-    error: Annotation<string | undefined>(),
-  });
-
-  const graph = new StateGraph(State)
-    .addNode("classifyTask", (state: typeof State.State) => {
-      enterInteractivePhase(
-        state,
-        "classifying",
-        "Classifying the board task stage.",
-      );
-      waitForPhaseCompletion(state, "classifying");
-      return {
-        status: "classifying" as const,
-        repositories: state.repositories ?? {},
-        retryCount: state.retryCount ?? 0,
-      };
-    })
-    .addNode("alignPrd", async (state: typeof State.State) => {
-      enterInteractivePhase(
-        state,
-        "aligning-prd",
-        "Aligning the PRD with the current workspace.",
-      );
-      waitForPhaseCompletion(state, "aligning-prd");
-      return {
-        repositories: {},
-        retryCount: 0,
-        status: "aligning-prd" as const,
-      };
-    })
-    .addNode("createTechnicalPlan", (state: typeof State.State) => {
-      enterInteractivePhase(
-        state,
-        "technical-planning",
-        "Preparing the technical plan.",
-      );
-      waitForPhaseCompletion(state, "technical-planning");
-      return { status: "technical-planning" as const };
-    })
-    .addNode("createBoardIssues", async (state: typeof State.State) => {
-      enterInteractivePhase(
-        state,
-        "creating-issues",
-        "Creating board issues from the technical plan.",
-      );
-      waitForPhaseCompletion(state, "creating-issues");
-      updateWorkflow(state.taskId, {
-        status: "planning",
-        currentPhase: "creating-issues",
-        substatus: "validating-workspace-plan",
-        message: "Importing workspace plan from the completed phase.",
-      });
-      const callbacks = callbacksByTask.get(state.taskId);
-      let imported = await importPhaseWorkspacePlan(state);
-      let result = imported.result;
-      while (!result) {
-        updateWorkflow(state.taskId, {
-          status: "creating-issues",
-          currentPhase: "creating-issues",
-          substatus: "fixing-workspace-plan",
-          message: imported.error ?? workspacePlanImportFailureMessage,
-        });
-        waitForPhaseCompletion(state, "creating-issues");
-        updateWorkflow(state.taskId, {
-          status: "planning",
-          currentPhase: "creating-issues",
-          substatus: "validating-workspace-plan",
-          message: "Importing workspace plan from the completed phase.",
-        });
-        imported = await importPhaseWorkspacePlan(state);
-        result = imported.result;
-      }
-      if (cancelledTasks.has(state.taskId)) {
-        throw new Error("Task cancelled.");
-      }
-      const boardPlan = workspacePlanToBoardPlan(result.plan);
-      callbacks?.onPlan(boardPlan);
-      options.store.updateTask(state.taskId, { plan: boardPlan });
-      updateWorkflow(state.taskId, {
-        status: "awaiting-approval",
-        currentPhase: "awaiting-approval",
-        substatus: undefined,
-        message: "Board issues are waiting for approval.",
-      });
-      return { plan: result.plan, status: "awaiting-approval" as const };
-    })
-    .addNode(
-      "approveTask",
-      (state: typeof State.State) => {
-        const decision = interrupt<
-          { readonly taskId: string; readonly title: string },
-          ApprovalDecision
-        >({
-          taskId: state.taskId,
-          title: state.title,
-        });
-        if (decision === "reject") {
-          updateWorkflow(state.taskId, {
-            status: "rejected",
-            substatus: undefined,
-            message: "Workspace plan was rejected.",
-          });
-          return new Command({
-            goto: "rejectTask",
-            update: {
-              status: "rejected",
-              error: "Workspace plan was rejected.",
-            },
-          });
-        }
-        updateWorkflow(state.taskId, {
-          status: "approved",
-          currentPhase: "running",
-          substatus: undefined,
-          message: "Workspace plan was approved.",
-        });
-        return new Command({
-          goto: "executeTask",
-          update: { status: "approved" },
-        });
-      },
-      { ends: ["executeTask", "rejectTask"] },
-    )
-    .addNode("executeTask", async (state: typeof State.State) => {
-      if (!state.plan) {
-        throw new Error("Cannot execute a board task before planning.");
-      }
-      const callbacks =
-        callbacksByTask.get(state.taskId) ?? createStoreCallbacks(state.taskId);
-      return executeApprovedPlan(
-        {
-          taskId: state.taskId,
-          title: state.title,
-          prompt: state.prompt,
-          plan: state.plan,
-          repositories: state.repositories ?? {},
-          retryCount: state.retryCount ?? 0,
-          status: state.status,
-          error: state.error,
-        },
-        callbacks,
-      );
-    })
-    .addNode("rejectTask", (state: typeof State.State) => ({
-      repositories: {},
-      status: "rejected" as const,
-      error: state.error ?? "Workspace plan was rejected.",
-    }))
-    .addEdge(START, "classifyTask")
-    .addEdge("classifyTask", "alignPrd")
-    .addEdge("alignPrd", "createTechnicalPlan")
-    .addEdge("createTechnicalPlan", "createBoardIssues")
-    .addEdge("createBoardIssues", "approveTask")
-    .addEdge("executeTask", END)
-    .addEdge("rejectTask", END)
-    .compile({ checkpointer });
-
-  const config = (taskId: string) => ({
-    configurable: { thread_id: taskId, checkpoint_ns: "" },
-  });
 
   const finishTask = (
     taskId: string,
@@ -830,47 +606,50 @@ export const createLangGraphTaskWorkflow = (
     };
   };
 
+  const phaseMessages: Record<BoardTaskWorkflowPhase, string> = {
+    classifying: "Classifying the board task stage.",
+    "aligning-prd": "Aligning the PRD with the current workspace.",
+    "technical-planning": "Preparing the technical plan.",
+    "creating-issues": "Creating board issues from the technical plan.",
+    "awaiting-approval": "Board issues are waiting for approval.",
+    running: "Executing approved workspace plan.",
+    verifying: "Verifying completed repository executions.",
+  };
+
+  const nextInteractivePhase: Partial<
+    Record<BoardTaskWorkflowPhase, BoardTaskWorkflowPhase>
+  > = {
+    classifying: "aligning-prd",
+    "aligning-prd": "technical-planning",
+    "technical-planning": "creating-issues",
+  };
+
   const run: TaskRunner = async (args) => {
-    let keepCallbacks = false;
     callbacksByTask.set(args.taskId, {
       onPlan: args.onPlan,
       onRepoRunEvent: args.onRepoRunEvent,
     });
     try {
       throwIfCancelled(args.taskId);
-      const result = (await graph.invoke(
+      enterInteractivePhase(
         {
           taskId: args.taskId,
           title: args.title,
           prompt: args.prompt,
-          plan: undefined,
           repositories: {},
           retryCount: 0,
           status: "planning",
-          error: undefined,
-        } satisfies WorkflowState,
-        config(args.taskId),
-      )) as WorkflowState & { readonly __interrupt__?: unknown };
-      if (result.__interrupt__ !== undefined) {
-        const paused = pausedResult(args.taskId, result);
-        keepCallbacks = paused.status === "awaiting-phase-completion";
-        return paused;
-      }
-      return finishTask(args.taskId, result) ?? { repositories: {} };
+        },
+        "classifying",
+        phaseMessages.classifying,
+      );
+      return pausedResult(args.taskId);
     } catch (error) {
-      const interruptedPhase = langGraphInterruptPhase(error);
-      if (interruptedPhase) {
-        const paused = pausedResult(args.taskId);
-        keepCallbacks = paused.status === "awaiting-phase-completion";
-        return paused;
-      }
       updateWorkflow(args.taskId, {
         status: "failed",
         error: errorMessage(error),
       });
       throw error;
-    } finally {
-      if (!keepCallbacks) callbacksByTask.delete(args.taskId);
     }
   };
 
@@ -884,25 +663,87 @@ export const createLangGraphTaskWorkflow = (
     if (!callbacksByTask.has(taskId)) {
       callbacksByTask.set(taskId, createStoreCallbacks(taskId));
     }
-    let keepCallbacks = false;
     try {
-      const result = (await graph.invoke(
-        new Command({ resume: { type: "complete-phase", phase } }),
-        config(taskId),
-      )) as WorkflowState & { readonly __interrupt__?: unknown };
-      if (result.__interrupt__ !== undefined) {
-        const paused = pausedResult(taskId, result);
-        keepCallbacks = paused.status === "awaiting-phase-completion";
-        return paused;
+      const currentPhase = task.workflow?.currentPhase;
+      if (currentPhase && currentPhase !== phase) {
+        throw new Error(
+          `Cannot complete ${phase} while ${currentPhase} is active.`,
+        );
       }
-      return finishTask(taskId, result);
+      const nextPhase = nextInteractivePhase[phase];
+      if (nextPhase) {
+        enterInteractivePhase(
+          {
+            taskId: task.id,
+            title: task.title,
+            prompt: task.prompt,
+            repositories: {},
+            retryCount: 0,
+            status: phase,
+          },
+          nextPhase,
+          phaseMessages[nextPhase],
+        );
+        return pausedResult(taskId);
+      }
+      if (phase !== "creating-issues") return pausedResult(taskId);
+
+      updateWorkflow(taskId, {
+        status: "planning",
+        currentPhase: "creating-issues",
+        role: "planner",
+        substatus: "validating-workspace-plan",
+        message: "Importing workspace plan from the completed phase.",
+      });
+      const imported = await importPhaseWorkspacePlan({
+        taskId: task.id,
+        title: task.title,
+        prompt: task.prompt,
+        repositories: {},
+        retryCount: 0,
+        status: phase,
+      });
+      const result = imported.result;
+      if (!result) {
+        const importError = imported.error ?? workspacePlanImportFailureMessage;
+        const repairAttempts = task.workflow?.workspacePlanRepairAttempts ?? 0;
+        updateWorkflow(taskId, {
+          status: "creating-issues",
+          currentPhase: "creating-issues",
+          role: "planner",
+          substatus: "fixing-workspace-plan",
+          workspacePlanRepairAttempts:
+            repairAttempts < maxWorkspacePlanRepairAttempts
+              ? repairAttempts + 1
+              : repairAttempts,
+          message: importError,
+        });
+        if (repairAttempts < maxWorkspacePlanRepairAttempts) {
+          try {
+            await options.requestPhaseRepair?.({
+              taskId,
+              phase: "creating-issues",
+              message: workspacePlanRepairPrompt(importError),
+            });
+          } catch {
+            // Stay in the manual repair state if the phase terminal cannot accept input.
+          }
+        }
+        return pausedResult(taskId);
+      }
+      throwIfCancelled(taskId);
+      const boardPlan = workspacePlanToBoardPlan(result.plan);
+      callbacksByTask.get(taskId)?.onPlan(boardPlan);
+      options.store.updateTask(taskId, { plan: boardPlan });
+      updateWorkflow(taskId, {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        role: "planner",
+        substatus: undefined,
+        message: "Board issues are waiting for approval.",
+      });
+      return pausedResult(taskId, { plan: result.plan });
     } catch (error) {
-      const interruptedPhase = langGraphInterruptPhase(error);
-      if (interruptedPhase) {
-        const paused = pausedResult(taskId);
-        keepCallbacks = paused.status === "awaiting-phase-completion";
-        return paused;
-      }
       const message = errorMessage(error);
       updateWorkflow(taskId, { status: "failed", error: message });
       options.store.updateTask(taskId, {
@@ -911,8 +752,6 @@ export const createLangGraphTaskWorkflow = (
         error: message,
       });
       throw error;
-    } finally {
-      if (!keepCallbacks) callbacksByTask.delete(taskId);
     }
   };
 
@@ -923,18 +762,137 @@ export const createLangGraphTaskWorkflow = (
     const task = options.store.getTask(taskId);
     if (!task) return undefined;
     throwIfCancelled(taskId);
-    callbacksByTask.set(taskId, createStoreCallbacks(taskId));
+    const importedResult = await handleImportedWorkspacePlanApproval({
+      store: options.store,
+      task,
+      decision,
+      planningOnly: options.planningOnly,
+      exportApprovedPlan: options.exportApprovedPlan,
+      updateWorkflow: (workflow) => updateWorkflow(taskId, workflow),
+      failTask: (message) => {
+        updateWorkflow(taskId, { status: "failed", error: message });
+        options.store.updateTask(taskId, {
+          status: "failed",
+          finishedAt: workflowNow(),
+          error: message,
+        });
+      },
+      executeApprovedPlan: async (plan) => {
+        const callbacks = createStoreCallbacks(taskId);
+        callbacksByTask.set(taskId, callbacks);
+        try {
+          const result = await executeApprovedPlan(
+            {
+              taskId,
+              title: task.title,
+              prompt: task.prompt,
+              plan,
+              repositories: {},
+              retryCount: task.workflow?.retryCount ?? 0,
+              status: "approved",
+              error: undefined,
+            },
+            callbacks,
+          );
+          return (
+            finishTask(taskId, {
+              taskId,
+              title: task.title,
+              prompt: task.prompt,
+              plan,
+              repositories: result.repositories,
+              retryCount: result.retryCount,
+              status: result.status,
+              error: result.error,
+              verificationStatus: result.verificationStatus,
+            }) ?? { repositories: result.repositories }
+          );
+        } finally {
+          callbacksByTask.delete(taskId);
+        }
+      },
+    });
+    if (importedResult) return importedResult;
+
     try {
-      const result = (await graph.invoke(
-        new Command({ resume: decision }),
-        config(taskId),
-      )) as WorkflowState;
-      return finishTask(taskId, result);
-    } catch (error) {
-      const interruptedPhase = langGraphInterruptPhase(error);
-      if (interruptedPhase) {
-        return pausedResult(taskId);
+      if (decision === "reject") {
+        updateWorkflow(taskId, {
+          status: "rejected",
+          role: "planner",
+          substatus: undefined,
+          message: "Workspace plan was rejected.",
+        });
+        options.store.updateTask(taskId, {
+          status: "failed",
+          finishedAt: workflowNow(),
+          error: "Workspace plan was rejected.",
+        });
+        return { repositories: {} };
       }
+      if (!task.plan) {
+        throw new Error("Cannot execute a board task before planning.");
+      }
+      const plan = boardPlanToWorkspacePlan(task.plan);
+      updateWorkflow(taskId, {
+        status: "approved",
+        currentPhase: options.planningOnly ? "awaiting-approval" : "running",
+        role: options.planningOnly ? "planner" : "generator",
+        substatus: undefined,
+        message: "Workspace plan was approved.",
+      });
+      if (options.planningOnly) {
+        await options.exportApprovedPlan?.({
+          taskId,
+          title: task.title,
+          prompt: task.prompt,
+          plan,
+        });
+        updateWorkflow(taskId, {
+          status: "succeeded",
+          currentPhase: "awaiting-approval",
+          role: "planner",
+          substatus: undefined,
+          message: "Approved workspace plan artifacts were exported.",
+        });
+        options.store.updateTask(taskId, {
+          status: "succeeded",
+          finishedAt: workflowNow(),
+        });
+        return { repositories: {} };
+      }
+      const callbacks = createStoreCallbacks(taskId);
+      callbacksByTask.set(taskId, callbacks);
+      try {
+        const result = await executeApprovedPlan(
+          {
+            taskId,
+            title: task.title,
+            prompt: task.prompt,
+            plan,
+            repositories: {},
+            retryCount: task.workflow?.retryCount ?? 0,
+            status: "approved",
+            error: undefined,
+          },
+          callbacks,
+        );
+        return (
+          finishTask(taskId, {
+            taskId,
+            title: task.title,
+            prompt: task.prompt,
+            plan,
+            repositories: result.repositories,
+            retryCount: result.retryCount,
+            status: result.status,
+            error: result.error,
+            verificationStatus: result.verificationStatus,
+          }) ?? { repositories: result.repositories }
+        );
+      } finally {
+        callbacksByTask.delete(taskId);
+      }
+    } catch (error) {
       const message = errorMessage(error);
       updateWorkflow(taskId, { status: "failed", error: message });
       options.store.updateTask(taskId, {
@@ -943,8 +901,6 @@ export const createLangGraphTaskWorkflow = (
         error: message,
       });
       throw error;
-    } finally {
-      callbacksByTask.delete(taskId);
     }
   };
 
@@ -960,6 +916,7 @@ export const createLangGraphTaskWorkflow = (
     const workflow: BoardTaskWorkflow = {
       status: phase,
       currentPhase: phase,
+      role: roleFor(phase, phase),
       ...(task.workflow?.phaseSessions
         ? { phaseSessions: task.workflow.phaseSessions }
         : {}),
@@ -982,9 +939,11 @@ export const createLangGraphTaskWorkflow = (
       const progressMarkdown =
         options.store.readTaskProgress(taskId) ??
         options.store.refreshTaskProgress(taskId);
+      const verificationMarkdown = options.store.readTaskVerification(taskId);
       const recoverPrompt = recoveredExecutionPrompt(
         task.prompt,
         progressMarkdown,
+        verificationMarkdown,
       );
       const callbacks = createStoreCallbacks(taskId);
       callbacksByTask.set(taskId, callbacks);
@@ -1012,6 +971,7 @@ export const createLangGraphTaskWorkflow = (
             retryCount: result.retryCount,
             status: result.status,
             error: result.error,
+            verificationStatus: result.verificationStatus,
           }) ?? { repositories: result.repositories }
         );
       } catch (error) {

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Effect, Layer, Ref } from "effect";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   Display,
   type DisplayEntry,
@@ -542,27 +542,53 @@ describe("FileDisplay - toolCall", () => {
 });
 
 describe("terminalStyle", () => {
-  beforeEach(() => {
-    process.env.FORCE_COLOR = "1";
-  });
-  afterEach(() => {
-    delete process.env.FORCE_COLOR;
-  });
-
   it("wraps status messages with bold ANSI codes", () => {
-    const styled = terminalStyle.status("Agent started");
+    const styled = terminalStyle.status("Agent started", {
+      validateStream: false,
+    });
     expect(styled).toBe("\u001b[1mAgent started\u001b[22m");
   });
 
   it("wraps summary title with bold ANSI codes", () => {
-    const styled = terminalStyle.summaryTitle("Token Usage");
+    const styled = terminalStyle.summaryTitle("Token Usage", {
+      validateStream: false,
+    });
     expect(styled).toBe("\u001b[1mToken Usage\u001b[22m");
   });
 
   it("formats summary row with bold key and dim value", () => {
-    const styled = terminalStyle.summaryRow("Tokens", "1,234 in / 567 out");
+    const styled = terminalStyle.summaryRow("Tokens", "1,234 in / 567 out", {
+      validateStream: false,
+    });
     expect(styled).toContain("\u001b[1mTokens\u001b[22m");
     expect(styled).toContain("\u001b[2m1,234 in / 567 out\u001b[22m");
     expect(styled).toContain(": ");
+  });
+
+  it("does not mutate FORCE_COLOR when tests need deterministic ANSI output", () => {
+    const originalNoColor = process.env.NO_COLOR;
+    const originalForceColor = process.env.FORCE_COLOR;
+    try {
+      process.env.NO_COLOR = "1";
+      delete process.env.FORCE_COLOR;
+
+      const styled = terminalStyle.toolCall("Bash(npm test)", {
+        validateStream: false,
+      });
+
+      expect(styled).toBe("\u001b[2mBash(npm test)\u001b[22m");
+      expect(process.env.FORCE_COLOR).toBeUndefined();
+    } finally {
+      if (originalNoColor === undefined) {
+        delete process.env.NO_COLOR;
+      } else {
+        process.env.NO_COLOR = originalNoColor;
+      }
+      if (originalForceColor === undefined) {
+        delete process.env.FORCE_COLOR;
+      } else {
+        process.env.FORCE_COLOR = originalForceColor;
+      }
+    }
   });
 });

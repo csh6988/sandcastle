@@ -4,14 +4,26 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   writeFileSync,
   appendFileSync,
   watch,
   type FSWatcher,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { RunEvent } from "../RunEvent.js";
-import { renderTaskProgress } from "./taskProgress.js";
+import type { PrdVisualAsset } from "./prdAssets.js";
+import { issueStatusForRun, renderTaskProgress } from "./taskProgress.js";
+import {
+  updateLocalIssueStatusMarkdown,
+  type LocalIssueStatus,
+} from "./localIssueMarkdown.js";
+import type { BoardTaskVerificationStatus } from "./taskVerification.js";
+export type {
+  BoardTaskVerificationReport,
+  BoardTaskVerificationRepositorySummary,
+  BoardTaskVerificationStatus,
+} from "./taskVerification.js";
 
 /**
  * Lifecycle status of a board run, derived from the run-event stream.
@@ -76,6 +88,19 @@ export interface BoardUsageByModel {
  * from the orchestration core.
  */
 export interface BoardTaskPlan {
+  readonly alignment?: {
+    readonly summary?: string;
+    readonly assumptions?: readonly string[];
+    readonly openQuestions?: readonly string[];
+    readonly domainTerms?: readonly {
+      readonly term: string;
+      readonly meaning: string;
+    }[];
+    readonly adrCandidates?: readonly {
+      readonly title: string;
+      readonly reason: string;
+    }[];
+  };
   readonly alignmentSummary?: string;
   readonly technicalPlan?: string;
   readonly workspace?: {
@@ -107,7 +132,8 @@ export type BoardTaskWorkflowPhase =
   | "technical-planning"
   | "creating-issues"
   | "awaiting-approval"
-  | "running";
+  | "running"
+  | "verifying";
 
 export type BoardTaskWorkflowStatus =
   | BoardTaskWorkflowPhase
@@ -121,6 +147,21 @@ export type BoardTaskWorkflowStatus =
 export type BoardTaskWorkflowSubstatus =
   | "validating-workspace-plan"
   | "fixing-workspace-plan";
+
+export type BoardTaskApprovedPlanAction = "execute" | "export-artifacts";
+
+export type BoardRole = "planner" | "generator" | "evaluator";
+
+export type BoardTaskSource =
+  | {
+      readonly type: "workspace-plan";
+      readonly planFile: string;
+    }
+  | {
+      readonly type: "prd-file";
+      readonly prdFile: string;
+      readonly assets?: readonly PrdVisualAsset[];
+    };
 
 export interface BoardPhaseSessionSummary {
   readonly taskId: string;
@@ -136,12 +177,16 @@ export interface BoardPhaseSessionSummary {
 export interface BoardTaskWorkflow {
   readonly status: BoardTaskWorkflowStatus;
   readonly currentPhase?: BoardTaskWorkflowPhase;
+  readonly role?: BoardRole;
   readonly substatus?: BoardTaskWorkflowSubstatus;
+  readonly approvedPlanAction?: BoardTaskApprovedPlanAction;
   readonly phaseSessions?: Partial<
     Record<BoardTaskWorkflowPhase, BoardPhaseSessionSummary>
   >;
   readonly checkpointThreadId?: string;
   readonly retryCount?: number;
+  readonly workspacePlanRepairAttempts?: number;
+  readonly verificationStatus?: BoardTaskVerificationStatus;
   readonly message?: string;
   readonly error?: string;
   readonly updatedAt: string;
@@ -152,6 +197,7 @@ export interface BoardTaskRecord {
   readonly id: string;
   readonly title: string;
   readonly prompt: string;
+  readonly source?: BoardTaskSource;
   readonly status: "pending" | "running" | "succeeded" | "failed";
   readonly createdAt: string;
   readonly finishedAt?: string;
@@ -194,6 +240,8 @@ export interface BoardTaskStage {
   readonly canCancel: boolean;
   readonly cancelLabel?: string;
   readonly canApprove: boolean;
+  readonly approveLabel?: string;
+  readonly approvingLabel?: string;
   readonly canReject: boolean;
   readonly canRecover: boolean;
   readonly recoverPhase?: BoardTaskWorkflowPhase;
@@ -202,6 +250,22 @@ export interface BoardTaskStage {
 
 export interface BoardTaskView extends BoardTaskRecord {
   readonly stage: BoardTaskStage;
+}
+
+export type BoardTaskArtifactKind =
+  | "workspace-plan"
+  | "alignment"
+  | "technical-plan"
+  | "issue"
+  | "asset"
+  | "progress"
+  | "verification";
+
+export interface BoardTaskArtifact {
+  readonly kind: BoardTaskArtifactKind;
+  readonly absolutePath: string;
+  readonly displayPath: string;
+  readonly createdAt: string;
 }
 
 /** Input for creating a run, taken from a `run-started` event. */
@@ -245,6 +309,7 @@ const WORKFLOW_PHASES = new Set<string>([
   "creating-issues",
   "awaiting-approval",
   "running",
+  "verifying",
 ]);
 
 const PHASE_LABELS: Record<BoardTaskWorkflowPhase, string> = {
@@ -254,6 +319,7 @@ const PHASE_LABELS: Record<BoardTaskWorkflowPhase, string> = {
   "creating-issues": "Creating issues",
   "awaiting-approval": "Awaiting approval",
   running: "Running AFK execution",
+  verifying: "Verifying delivery",
 };
 
 const PHASE_DESCRIPTIONS: Record<BoardTaskWorkflowPhase, string> = {
@@ -265,6 +331,36 @@ const PHASE_DESCRIPTIONS: Record<BoardTaskWorkflowPhase, string> = {
     "Create the final Board issues and emit the workspace_plan block.",
   "awaiting-approval": "Review and approve the generated workspace plan.",
   running: "Execute the approved workspace plan as AFK repository runs.",
+  verifying:
+    "Run the Evaluator agent against recorded evidence, commits, completion evidence, and failures.",
+};
+
+const sanitizeIssueArtifactSegment = (value: string): string => {
+  const sanitized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "issue";
+};
+
+const withTrailingNewline = (value: string): string =>
+  value.endsWith("\n") ? value : `${value}\n`;
+
+const issueMarkdownFor = (
+  repo: BoardTaskPlan["repositories"][number],
+): string => {
+  if (repo.issue) {
+    return withTrailingNewline(`# ${repo.issue.title}\n\n${repo.issue.body}`);
+  }
+
+  return `# ${repo.name}: ${repo.task}
+
+status: ready-for-agent
+
+## What to build
+
+${repo.task}
+`;
 };
 
 const BASE_TIMELINE: ReadonlyArray<{
@@ -278,11 +374,13 @@ const BASE_TIMELINE: ReadonlyArray<{
   { id: "validating-workspace-plan", label: "Validate plan" },
   { id: "awaiting-approval", label: "Approve" },
   { id: "running", label: "Execute" },
+  { id: "verifying", label: "Verify" },
 ];
 
 const timelineFor = (
   currentId: string,
   failure = false,
+  completeCurrent = false,
 ): BoardTaskStageTimelineItem[] => {
   const currentIndex = BASE_TIMELINE.findIndex((item) => item.id === currentId);
   return BASE_TIMELINE.map((item, index) => {
@@ -292,7 +390,7 @@ const timelineFor = (
     } else if (index < currentIndex) {
       status = "complete";
     } else if (index === currentIndex) {
-      status = failure ? "failed" : "current";
+      status = failure ? "failed" : completeCurrent ? "complete" : "current";
     }
     return { ...item, status };
   });
@@ -309,10 +407,13 @@ const boardTaskStage = (stage: {
   readonly canCancel?: boolean;
   readonly cancelLabel?: string;
   readonly canApprove?: boolean;
+  readonly approveLabel?: string;
+  readonly approvingLabel?: string;
   readonly canReject?: boolean;
   readonly canRecover?: boolean;
   readonly recoverPhase?: BoardTaskWorkflowPhase;
   readonly failureTimeline?: boolean;
+  readonly completeCurrentTimeline?: boolean;
 }): BoardTaskStage => ({
   id: stage.id,
   label: stage.label,
@@ -323,12 +424,15 @@ const boardTaskStage = (stage: {
   canCancel: stage.canCancel ?? false,
   ...(stage.cancelLabel ? { cancelLabel: stage.cancelLabel } : {}),
   canApprove: stage.canApprove ?? false,
+  ...(stage.approveLabel ? { approveLabel: stage.approveLabel } : {}),
+  ...(stage.approvingLabel ? { approvingLabel: stage.approvingLabel } : {}),
   canReject: stage.canReject ?? false,
   canRecover: stage.canRecover ?? false,
   ...(stage.recoverPhase ? { recoverPhase: stage.recoverPhase } : {}),
   timeline: timelineFor(
     stage.currentTimelineId ?? stage.id,
     stage.failureTimeline ?? false,
+    stage.completeCurrentTimeline ?? false,
   ),
 });
 
@@ -387,6 +491,20 @@ const isAwaitingApprovalWithPlan = (task: BoardTaskRecord): boolean =>
   (task.workflow?.status === "awaiting-approval" ||
     task.workflow?.currentPhase === "awaiting-approval");
 
+const shouldExportApprovedPlanArtifacts = (task: BoardTaskRecord): boolean =>
+  task.workflow?.approvedPlanAction === "export-artifacts";
+
+const phaseSessionExitDiagnostic = (
+  task: BoardTaskRecord,
+  phase: BoardTaskWorkflowPhase,
+): string => {
+  const session = task.workflow?.phaseSessions?.[phase];
+  if (session?.status !== "exited") return "";
+  const exit =
+    session.exitCode !== undefined ? ` with code ${session.exitCode}` : "";
+  return ` The ${phase} terminal exited${exit}; inspect terminal output before continuing or recover the phase if it is stale.`;
+};
+
 const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
   const message = [
     task.error,
@@ -400,6 +518,9 @@ const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
     /Executing approved workspace plan/i.test(message) ||
     /Retrying failed repository execution/i.test(message) ||
     /One or more repository executions failed/i.test(message) ||
+    /Verification failed/i.test(message) ||
+    /Verification incomplete/i.test(message) ||
+    /Verification needs recovery/i.test(message) ||
     /Interrupted when the board server stopped or restarted/i.test(message) ||
     /Task cancelled/i.test(message)
   );
@@ -408,8 +529,13 @@ const isExecutionRecoveryMessage = (task: BoardTaskRecord): boolean => {
 const isFailedExecutionWithPlan = (task: BoardTaskRecord): boolean =>
   task.plan !== undefined &&
   (task.workflow?.currentPhase === "running" ||
+    task.workflow?.currentPhase === "verifying" ||
     task.workflow?.status === "running" ||
+    task.workflow?.status === "verifying" ||
     task.workflow?.status === "retrying" ||
+    task.workflow?.verificationStatus === "failed" ||
+    task.workflow?.verificationStatus === "needs-recovery" ||
+    task.workflow?.verificationStatus === "needs-verification" ||
     isExecutionRecoveryMessage(task));
 
 export const recoverableBoardTaskPhase = (
@@ -442,7 +568,8 @@ export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
       label: "Succeeded",
       mode: "complete",
       description: "The board task completed successfully.",
-      currentTimelineId: "running",
+      currentTimelineId: "verifying",
+      completeCurrentTimeline: true,
     });
   }
 
@@ -454,7 +581,10 @@ export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
         label: "Recover workflow phase",
         mode: "failed",
         description: `The task failed while ${PHASE_LABELS[recoverPhase].toLowerCase()} was recoverable.`,
-        currentTimelineId: recoverPhase,
+        currentTimelineId:
+          task.workflow?.currentPhase === "verifying"
+            ? "verifying"
+            : recoverPhase,
         canRecover: true,
         recoverPhase,
         failureTimeline: true,
@@ -529,7 +659,7 @@ export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
       id: currentPhase,
       label: PHASE_LABELS[currentPhase],
       mode: "interactive",
-      description: PHASE_DESCRIPTIONS[currentPhase],
+      description: `${PHASE_DESCRIPTIONS[currentPhase]}${phaseSessionExitDiagnostic(task, currentPhase)}`,
       terminalPhase: currentPhase,
       canComplete: true,
       canCancel: task.status === "running",
@@ -538,12 +668,21 @@ export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
   }
 
   if (workflow.status === "awaiting-approval") {
+    const exportArtifacts = shouldExportApprovedPlanArtifacts(task);
     return boardTaskStage({
       id: "awaiting-approval",
-      label: "Awaiting approval",
+      label: exportArtifacts ? "Awaiting export approval" : "Awaiting approval",
       mode: "approval",
-      description: "Review the generated workspace plan before AFK execution.",
+      description: exportArtifacts
+        ? "Review the generated workspace plan before exporting planning artifacts."
+        : "Review the generated workspace plan before AFK execution.",
       canApprove: true,
+      ...(exportArtifacts
+        ? {
+            approveLabel: "Export artifacts",
+            approvingLabel: "Exporting artifacts...",
+          }
+        : {}),
       canReject: true,
     });
   }
@@ -568,6 +707,22 @@ export const getBoardTaskStage = (task: BoardTaskRecord): BoardTaskStage => {
       canCancel: task.status === "running",
       cancelLabel:
         workflow.status === "retrying" ? "Cancel retry" : "Cancel execution",
+    });
+  }
+
+  if (
+    workflow.currentPhase === "verifying" ||
+    workflow.status === "verifying"
+  ) {
+    return boardTaskStage({
+      id: "verifying",
+      label: "Verifying delivery",
+      mode: "background",
+      description:
+        workflow.message ??
+        "Running the Evaluator agent against repository evidence, completion evidence, commits, and infrastructure failures.",
+      canCancel: task.status === "running",
+      cancelLabel: "Cancel verification",
     });
   }
 
@@ -630,8 +785,32 @@ export class BoardStore {
     return join(this.tasksDir, `${id}.json`);
   }
 
+  private taskDir(id: string): string {
+    return join(this.tasksDir, id);
+  }
+
+  taskAssetsDir(id: string): string {
+    return join(this.taskDir(id), "assets");
+  }
+
   taskProgressPath(id: string): string {
-    return join(this.tasksDir, id, "progress.md");
+    return join(this.taskDir(id), "progress.md");
+  }
+
+  taskVerificationPath(id: string): string {
+    return join(this.taskDir(id), "verification.md");
+  }
+
+  taskArtifactManifestPath(id: string): string {
+    return join(this.taskDir(id), "artifacts.json");
+  }
+
+  taskIssuePath(id: string, repoName: string): string {
+    return join(
+      this.taskDir(id),
+      "issues",
+      `${sanitizeIssueArtifactSegment(repoName)}.md`,
+    );
   }
 
   private writeRun(run: BoardRunRecord): void {
@@ -910,27 +1089,174 @@ export class BoardStore {
     writeFileSync(this.taskProgressPath(id), markdown);
   }
 
+  readTaskIssue(id: string, repoName: string): string | undefined {
+    const path = this.taskIssuePath(id, repoName);
+    if (!existsSync(path)) return undefined;
+    return readFileSync(path, "utf8");
+  }
+
+  writeTaskIssue(id: string, repoName: string, markdown: string): void {
+    const issueDir = join(this.tasksDir, id, "issues");
+    mkdirSync(issueDir, { recursive: true });
+    writeFileSync(this.taskIssuePath(id, repoName), markdown);
+  }
+
+  syncTaskIssueStatuses(
+    id: string,
+    statuses: Partial<Record<string, LocalIssueStatus>>,
+  ): void {
+    const task = this.getTask(id);
+    if (!task?.plan) return;
+    for (const repo of task.plan.repositories) {
+      const status = statuses[repo.name] ?? "ready-for-agent";
+      const current =
+        this.readTaskIssue(id, repo.name) ?? issueMarkdownFor(repo);
+      this.writeTaskIssue(
+        id,
+        repo.name,
+        updateLocalIssueStatusMarkdown(current, status),
+      );
+    }
+  }
+
+  readTaskVerification(id: string): string | undefined {
+    const path = this.taskVerificationPath(id);
+    if (!existsSync(path)) return undefined;
+    return readFileSync(path, "utf8");
+  }
+
+  writeTaskVerification(id: string, markdown: string): void {
+    const taskDir = this.taskDir(id);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(this.taskVerificationPath(id), markdown);
+  }
+
+  writeTaskArtifactManifest(
+    id: string,
+    artifacts: readonly BoardTaskArtifact[],
+  ): void {
+    const taskDir = this.taskDir(id);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(
+      this.taskArtifactManifestPath(id),
+      `${JSON.stringify(
+        artifacts.map((artifact) => ({
+          ...artifact,
+          absolutePath: resolve(artifact.absolutePath),
+        })),
+        null,
+        2,
+      )}\n`,
+    );
+  }
+
+  private readTaskArtifactManifest(id: string): BoardTaskArtifact[] {
+    const path = this.taskArtifactManifestPath(id);
+    if (!existsSync(path)) return [];
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as BoardTaskArtifact[];
+    } catch {
+      return [];
+    }
+  }
+
+  private taskScopedArtifact(
+    kind: BoardTaskArtifactKind,
+    path: string,
+  ): BoardTaskArtifact | undefined {
+    if (!existsSync(path)) return undefined;
+    return {
+      kind,
+      absolutePath: resolve(path),
+      displayPath: relative(this.baseDir, path),
+      createdAt: statSync(path).mtime.toISOString(),
+    };
+  }
+
+  listTaskArtifacts(id: string): BoardTaskArtifact[] {
+    const artifacts = [...this.readTaskArtifactManifest(id)];
+    const progress = this.taskScopedArtifact(
+      "progress",
+      this.taskProgressPath(id),
+    );
+    if (progress) artifacts.push(progress);
+    const verification = this.taskScopedArtifact(
+      "verification",
+      this.taskVerificationPath(id),
+    );
+    if (verification) artifacts.push(verification);
+
+    const issueDir = join(this.taskDir(id), "issues");
+    if (existsSync(issueDir)) {
+      const issues = readdirSync(issueDir)
+        .filter((file) => file.endsWith(".md"))
+        .sort()
+        .map((file) => this.taskScopedArtifact("issue", join(issueDir, file)))
+        .filter(
+          (artifact): artifact is BoardTaskArtifact => artifact !== undefined,
+        );
+      artifacts.push(...issues);
+    }
+    const assetDir = this.taskAssetsDir(id);
+    if (existsSync(assetDir)) {
+      const assets = readdirSync(assetDir)
+        .sort()
+        .map((file) => this.taskScopedArtifact("asset", join(assetDir, file)))
+        .filter(
+          (artifact): artifact is BoardTaskArtifact => artifact !== undefined,
+        );
+      artifacts.push(...assets);
+    }
+    return artifacts;
+  }
+
   refreshTaskProgress(id: string): string | undefined {
     const task = this.getTask(id);
     if (!task?.plan) return undefined;
     const runs = this.listRuns()
-      .filter((run) => run.taskId === id && run.repo !== "(planner)")
+      .filter(
+        (run) =>
+          run.taskId === id &&
+          run.repo !== "(planner)" &&
+          run.repo !== "(evaluator)",
+      )
       .map((run) => ({ run, events: this.getEvents(run.id) }));
     const markdown = renderTaskProgress(task, runs);
     if (!markdown) return undefined;
     this.writeTaskProgress(id, markdown);
+    if (!task.workflow?.verificationStatus) {
+      this.syncTaskIssueStatuses(
+        id,
+        Object.fromEntries(
+          task.plan.repositories.map((repo) => {
+            const latestRun = runs
+              .filter(({ run }) => run.repo === repo.name)
+              .sort((a, b) =>
+                b.run.createdAt.localeCompare(a.run.createdAt),
+              )[0]?.run;
+            return [repo.name, issueStatusForRun(latestRun)];
+          }),
+        ),
+      );
+    }
     return markdown;
   }
 
   listTasks(): BoardTaskRecord[] {
     if (!existsSync(this.tasksDir)) return [];
     return readdirSync(this.tasksDir)
-      .filter((f) => f.endsWith(".json"))
+      .filter((f) => f.endsWith(".json") && !f.endsWith(".workspace-plan.json"))
       .map((f) => {
         try {
-          return JSON.parse(
+          const parsed = JSON.parse(
             readFileSync(join(this.tasksDir, f), "utf8"),
-          ) as BoardTaskRecord;
+          ) as Partial<BoardTaskRecord>;
+          return typeof parsed.id === "string" &&
+            typeof parsed.title === "string" &&
+            typeof parsed.createdAt === "string" &&
+            Array.isArray(parsed.runIds)
+            ? (parsed as BoardTaskRecord)
+            : undefined;
         } catch {
           return undefined;
         }

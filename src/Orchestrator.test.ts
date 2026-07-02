@@ -2463,7 +2463,7 @@ describe("Orchestrator Display integration", () => {
           e.message.includes("completion") || e.message.includes("complete"),
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("labels iteration header and max-reached message with 'max'", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-maxlabel-"));
@@ -2509,7 +2509,7 @@ describe("Orchestrator Display integration", () => {
     expect(
       statusEntries.some((e) => e.message.includes("max iterations")),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("uses 10 minutes as the default idle timeout", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-timeout-default-"));

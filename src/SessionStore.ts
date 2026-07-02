@@ -44,12 +44,13 @@ const pathExists = async (path: string): Promise<boolean> => {
 
 /**
  * Encode a cwd into the Claude Code `~/.claude/projects/<encoded>/` layout.
- * Replaces path separators with hyphens, matching Claude Code's convention.
+ * Replaces path separators and dots with hyphens, matching Claude Code's
+ * convention.
  */
 export const encodeProjectPath = (cwd: string): string => {
   const isRoot = cwd === "/" || /^[A-Za-z]:[\\/]?$/.test(cwd);
   const normalized = isRoot ? cwd : cwd.replace(/[\\/]+$/, "");
-  return normalized.replace(/^([A-Za-z]):/, "$1").replace(/[\\/]/g, "-");
+  return normalized.replace(/^([A-Za-z]):/, "$1").replace(/[\\/.]/g, "-");
 };
 
 /** Absolute host path to a Claude session JSONL file. */

@@ -2,7 +2,7 @@ import * as clack from "@clack/prompts";
 import { FileSystem } from "@effect/platform";
 import { dirname } from "node:path";
 import { Context, Effect, Layer, Ref } from "effect";
-import { styleText } from "node:util";
+import { styleText, type StyleTextOptions } from "node:util";
 
 export type Severity = "info" | "success" | "warn" | "error";
 
@@ -204,11 +204,18 @@ const severityToClack: Record<Severity, (message: string) => void> = {
 };
 
 export const terminalStyle = {
-  status: (message: string): string => styleText("bold", message),
-  summaryTitle: (title: string): string => styleText("bold", title),
-  summaryRow: (key: string, value: string): string =>
-    `${styleText("bold", key)}: ${styleText("dim", value)}`,
-  toolCall: (text: string): string => styleText("dim", text),
+  status: (message: string, options?: StyleTextOptions): string =>
+    styleText("bold", message, options),
+  summaryTitle: (title: string, options?: StyleTextOptions): string =>
+    styleText("bold", title, options),
+  summaryRow: (
+    key: string,
+    value: string,
+    options?: StyleTextOptions,
+  ): string =>
+    `${styleText("bold", key, options)}: ${styleText("dim", value, options)}`,
+  toolCall: (text: string, options?: StyleTextOptions): string =>
+    styleText("dim", text, options),
 };
 
 export const ClackDisplay = {

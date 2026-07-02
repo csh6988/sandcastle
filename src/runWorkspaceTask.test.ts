@@ -17,6 +17,7 @@ import {
 import type { RunEvent } from "./RunEvent.js";
 
 const execAsync = promisify(exec);
+const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
 
 const initRepo = async (dir: string) => {
   await execAsync("git init -b main", { cwd: dir });
@@ -96,7 +97,7 @@ const createWorkspaceTaskProvider = (
   return { provider, createCalls };
 };
 
-describe("runWorkspaceTask", () => {
+describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
   it("plans affected repositories and executes only selected repositories", async () => {
     const api = await createRepo();
     const web = await createRepo();

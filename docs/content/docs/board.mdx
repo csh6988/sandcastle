@@ -50,8 +50,14 @@ per-model token table.
 ## Creating tasks
 
 Use **New task** to submit a title and a prompt/PRD. The board runs the planner
-against your workspace, displays the plan, then executes each affected
-repository as its own run. Task and run status update live.
+phases interactively, imports the generated workspace plan, waits for approval,
+then executes each affected repository as its own run and records verification.
+The phases are split into strict Board roles: Planner creates the plan and
+Board issues, Generator executes only the approved plan, and Evaluator verifies
+delivery from recorded evidence. Verification runs a dedicated Evaluator agent
+step when repository agent activity exists; the deterministic report remains in
+`verification.md` as structured evidence and fallback context. Task and run
+status update live.
 
 ## Data directory
 
@@ -60,7 +66,12 @@ The board stores everything under the data directory (default
 
 - `runs/<id>.json` — run metadata (status, branch, commit count, links to a task)
 - `runs/<id>.events.ndjson` — the run's structured event stream
-- `tasks/<id>.json` — task metadata, including the plan once planning completes
+- `tasks/<id>.json` — task metadata, including workflow state and the plan once
+  planning completes
+- `tasks/<id>/progress.md` — model-agnostic execution progress used for
+  recovery
+- `tasks/<id>/verification.md` — Evaluator output plus deterministic
+  verification evidence and final status
 
 No database is used, so there is no native dependency to install. A board
 server also watches this directory, so runs written by other processes (for
@@ -93,3 +104,6 @@ await run({
 `runWorkspaceTask()` forwards the same stream per repository via
 `onRepoRunEvent`, and the planner phase via `onPlannerRunEvent`. See ADR 0021
 (run-event stream) and ADR 0022 (workflow board) for the design rationale.
+The Board also records the Evaluator agent as a task-linked run with
+`repo="(evaluator)"` so verification activity is visible without mixing it into
+repository delivery evidence.

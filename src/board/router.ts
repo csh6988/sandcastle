@@ -5,6 +5,10 @@ import type {
 } from "./BoardStore.js";
 import { boardTaskView } from "./BoardStore.js";
 import { recoverableFailedTaskPhase } from "./langGraphTaskRunner.js";
+import {
+  listBoardTaskBranchMergeOptions,
+  mergeBoardTaskBranch,
+} from "./taskBranchMerge.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
 
 /** A resolved JSON API response. */
@@ -46,6 +50,7 @@ const WORKFLOW_PHASES = new Set<string>([
   "creating-issues",
   "awaiting-approval",
   "running",
+  "verifying",
 ]);
 
 const parseWorkflowPhase = (
@@ -71,6 +76,7 @@ export const routeApi = async (
   completePhase?: TaskPhaseCompleter,
   recoverTask?: TaskRecoverer,
   cancelTask?: TaskCanceler,
+  defaultRepoDir: string = process.cwd(),
 ): Promise<ApiResponse | undefined> => {
   if (!pathname.startsWith("/api/")) return undefined;
 
@@ -105,6 +111,92 @@ export const routeApi = async (
     return markdown !== undefined
       ? json(200, { markdown })
       : json(404, { error: "task progress not found" });
+  }
+
+  const taskVerificationMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/verification$/,
+  );
+  if (method === "GET" && taskVerificationMatch) {
+    const id = decodeURIComponent(taskVerificationMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    const markdown = store.readTaskVerification(id);
+    return markdown !== undefined
+      ? json(200, { markdown })
+      : json(404, { error: "task verification not found" });
+  }
+
+  const taskArtifactsMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/artifacts$/,
+  );
+  if (method === "GET" && taskArtifactsMatch) {
+    const id = decodeURIComponent(taskArtifactsMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    return json(200, { artifacts: store.listTaskArtifacts(id) });
+  }
+
+  const taskBranchMergeMatch = pathname.match(
+    /^\/api\/tasks\/([^/]+)\/branch-merge$/,
+  );
+  if (taskBranchMergeMatch) {
+    const id = decodeURIComponent(taskBranchMergeMatch[1]!);
+    const task = store.getTask(id);
+    if (!task) return json(404, { error: "task not found" });
+    if (method === "GET") {
+      try {
+        return json(
+          200,
+          listBoardTaskBranchMergeOptions({
+            task,
+            runs: store.listRuns().filter((run) => run.taskId === task.id),
+            defaultRepoDir,
+          }),
+        );
+      } catch (error) {
+        return json(409, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (method === "POST") {
+      let payload: unknown;
+      try {
+        payload = await parseBody();
+      } catch {
+        return json(400, { error: "invalid JSON body" });
+      }
+      const { repository, targetBranch } = (payload ?? {}) as {
+        repository?: unknown;
+        targetBranch?: unknown;
+      };
+      if (typeof repository !== "string" || repository.trim().length === 0) {
+        return json(400, { error: "repository is required" });
+      }
+      if (
+        typeof targetBranch !== "string" ||
+        targetBranch.trim().length === 0
+      ) {
+        return json(400, { error: "targetBranch is required" });
+      }
+      try {
+        return json(
+          200,
+          mergeBoardTaskBranch({
+            task,
+            runs: store.listRuns().filter((run) => run.taskId === task.id),
+            repository: repository.trim(),
+            targetBranch: targetBranch.trim(),
+            defaultRepoDir,
+          }),
+        );
+      } catch (error) {
+        return json(409, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return json(405, { error: "method not allowed" });
   }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);

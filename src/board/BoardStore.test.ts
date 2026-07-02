@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BoardStore,
+  boardTaskView,
   createRunRecorder,
   getBoardTaskStage,
 } from "./BoardStore.js";
@@ -237,6 +238,16 @@ describe("BoardStore", () => {
     expect(store.listTasks().map((t) => t.id)).toContain(task.id);
   });
 
+  it("does not treat task-scoped workspace plan files as board tasks", () => {
+    const task = store.createTask({ title: "Add feature", prompt: "do it" });
+    writeFileSync(
+      join(dir, "tasks", `${task.id}.workspace-plan.json`),
+      JSON.stringify({ repositories: [{ name: "web", task: "do it" }] }),
+    );
+
+    expect(store.listTasks().map((t) => t.id)).toEqual([task.id]);
+  });
+
   it("initializes a board progress document when a task receives a plan", () => {
     const task = store.createTask({ title: "Add feature", prompt: "do it" });
 
@@ -263,8 +274,90 @@ describe("BoardStore", () => {
       "# Board Execution Progress",
     );
     expect(store.readTaskProgress(task.id)).toContain("## Repository: web");
+    expect(store.readTaskProgress(task.id)).toContain(
+      "Issue status: ready-for-agent",
+    );
     expect(store.readTaskProgress(task.id)).toContain("Status: pending");
     expect(store.readTaskProgress(task.id)).toContain("Task: Add the page");
+    expect(store.taskIssuePath(task.id, "web")).toBe(
+      join(dir, "tasks", task.id, "issues", "web.md"),
+    );
+    expect(store.readTaskIssue(task.id, "web")).toContain("# Add page");
+    expect(store.readTaskIssue(task.id, "web")).toContain(
+      "status: ready-for-agent",
+    );
+  });
+
+  it("persists a board task verification report next to progress artifacts", () => {
+    const task = store.createTask({ title: "Verify feature", prompt: "do it" });
+
+    store.writeTaskVerification(
+      task.id,
+      "# Board Verification Report\n\nStatus: passed\n",
+    );
+
+    expect(store.taskVerificationPath(task.id)).toBe(
+      join(dir, "tasks", task.id, "verification.md"),
+    );
+    expect(store.readTaskVerification(task.id)).toBe(
+      "# Board Verification Report\n\nStatus: passed\n",
+    );
+  });
+
+  it("persists and lists a task artifact manifest", () => {
+    const task = store.createTask({ title: "Export plan", prompt: "do it" });
+    const createdAt = "2026-06-30T12:00:00.000Z";
+    const planPath = join(dir, "exports", "workspace-plan.json");
+    const issuePath = join(dir, "exports", "issues", "web.md");
+
+    store.writeTaskArtifactManifest(task.id, [
+      {
+        kind: "workspace-plan",
+        absolutePath: planPath,
+        displayPath: ".scratch/export-plan/workspace-plan.json",
+        createdAt,
+      },
+      {
+        kind: "issue",
+        absolutePath: issuePath,
+        displayPath: ".scratch/export-plan/issues/web.md",
+        createdAt,
+      },
+    ]);
+
+    expect(store.taskArtifactManifestPath(task.id)).toBe(
+      join(dir, "tasks", task.id, "artifacts.json"),
+    );
+    expect(
+      JSON.parse(readFileSync(store.taskArtifactManifestPath(task.id), "utf8")),
+    ).toEqual([
+      {
+        kind: "workspace-plan",
+        absolutePath: planPath,
+        displayPath: ".scratch/export-plan/workspace-plan.json",
+        createdAt,
+      },
+      {
+        kind: "issue",
+        absolutePath: issuePath,
+        displayPath: ".scratch/export-plan/issues/web.md",
+        createdAt,
+      },
+    ]);
+    expect(store.listTaskArtifacts(task.id)).toEqual([
+      {
+        kind: "workspace-plan",
+        absolutePath: planPath,
+        displayPath: ".scratch/export-plan/workspace-plan.json",
+        createdAt,
+      },
+      {
+        kind: "issue",
+        absolutePath: issuePath,
+        displayPath: ".scratch/export-plan/issues/web.md",
+        createdAt,
+      },
+    ]);
   });
 
   it("updates task progress from linked repository run events", () => {
@@ -290,12 +383,47 @@ describe("BoardStore", () => {
     });
 
     const progress = store.readTaskProgress(task.id)!;
+    expect(progress).toContain("Issue status: needs-recovery");
     expect(progress).toContain("Status: needs_recovery");
     expect(progress).toContain("Branch: sandcastle/web");
     expect(progress).toContain(
       "agent text: I changed the component and will run tests next.",
     );
     expect(progress).toContain("Address the last failure: lint failed");
+    expect(store.readTaskIssue(task.id, "web")).toContain(
+      "status: needs-recovery",
+    );
+  });
+
+  it("syncs verification issue status to existing issue markdown without overwriting the body", () => {
+    const task = store.createTask({ title: "Verify UI", prompt: "do it" });
+    store.updateTask(task.id, {
+      plan: {
+        repositories: [
+          {
+            name: "web",
+            task: "Fix UI",
+            issue: {
+              title: "Fix UI",
+              body: "status: ready-for-agent\n\nOriginal issue body.",
+            },
+          },
+        ],
+      },
+    });
+    store.writeTaskIssue(
+      task.id,
+      "web",
+      "# Fix UI\n\nstatus: in-progress\n\nHuman-edited body.\n",
+    );
+
+    store.syncTaskIssueStatuses(task.id, {
+      web: "verification-failed",
+    });
+
+    expect(store.readTaskIssue(task.id, "web")).toBe(
+      "# Fix UI\n\nstatus: verification-failed\n\nHuman-edited body.\n",
+    );
   });
 
   it("maps interactive workflow phases to stable display stages", () => {
@@ -323,6 +451,35 @@ describe("BoardStore", () => {
         (item) => item.id === "creating-issues",
       ),
     ).toMatchObject({ status: "current" });
+  });
+
+  it("surfaces exited phase terminals in the interactive stage description", () => {
+    const task = store.createTask({ title: "Plan", prompt: "do it" });
+    const updated = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "classifying",
+        currentPhase: "classifying",
+        phaseSessions: {
+          classifying: {
+            taskId: task.id,
+            phase: "classifying",
+            pid: 1234,
+            status: "exited",
+            startedAt: "2026-06-26T07:00:00.000Z",
+            exitedAt: "2026-06-26T07:01:00.000Z",
+            exitCode: 130,
+          },
+        },
+        updatedAt: "2026-06-26T07:01:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(updated)).toMatchObject({
+      id: "classifying",
+      description:
+        "Classify the task and decide how the board should treat it. The classifying terminal exited with code 130; inspect terminal output before continuing or recover the phase if it is stale.",
+    });
   });
 
   it("maps workspace plan validation and fix states without exposing planner internals", () => {
@@ -407,6 +564,43 @@ describe("BoardStore", () => {
       cancelLabel: "Cancel execution",
     });
 
+    const verifying = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "verifying",
+        currentPhase: "verifying",
+        verificationStatus: "passed",
+        updatedAt: "2026-06-26T07:01:30.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(verifying)).toMatchObject({
+      id: "verifying",
+      label: "Verifying delivery",
+      mode: "background",
+      canComplete: false,
+      canCancel: true,
+      cancelLabel: "Cancel verification",
+    });
+
+    const succeeded = store.updateTask(task.id, {
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        currentPhase: "verifying",
+        verificationStatus: "passed",
+        updatedAt: "2026-06-26T07:01:40.000Z",
+      },
+    })!;
+
+    expect(
+      getBoardTaskStage(succeeded).timeline.find(
+        (item) => item.id === "verifying",
+      ),
+    ).toMatchObject({
+      status: "complete",
+    });
+
     const failed = store.updateTask(task.id, {
       status: "failed",
       error:
@@ -424,6 +618,38 @@ describe("BoardStore", () => {
       mode: "failed",
       canRecover: true,
       recoverPhase: "creating-issues",
+    });
+  });
+
+  it("maps planning-only approval to artifact export copy", () => {
+    const task = store.createTask({
+      title: "Export artifacts",
+      prompt: "plan only",
+    });
+    const awaitingExport = store.updateTask(task.id, {
+      status: "running",
+      workflow: {
+        status: "awaiting-approval",
+        currentPhase: "awaiting-approval",
+        approvedPlanAction: "export-artifacts",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(boardTaskView(awaitingExport)).toMatchObject({
+      workflow: {
+        approvedPlanAction: "export-artifacts",
+      },
+      stage: {
+        id: "awaiting-approval",
+        label: "Awaiting export approval",
+        description:
+          "Review the generated workspace plan before exporting planning artifacts.",
+        canApprove: true,
+        canReject: true,
+        approveLabel: "Export artifacts",
+        approvingLabel: "Exporting artifacts...",
+      },
     });
   });
 
@@ -500,6 +726,38 @@ describe("BoardStore", () => {
       canRecover: true,
       recoverPhase: "running",
     });
+  });
+
+  it("marks failed verification tasks as recoverable execution repair", () => {
+    const task = store.createTask({
+      title: "Repair verification",
+      prompt: "do it",
+    });
+    const failedVerification = store.updateTask(task.id, {
+      status: "failed",
+      error:
+        "Verification failed: repository web did not pass delivery checks.",
+      plan: {
+        repositories: [{ name: "web", task: "Do it" }],
+      },
+      workflow: {
+        status: "failed",
+        currentPhase: "verifying",
+        verificationStatus: "failed",
+        updatedAt: "2026-06-26T07:00:00.000Z",
+      },
+    })!;
+
+    expect(getBoardTaskStage(failedVerification)).toMatchObject({
+      id: "failed-recoverable",
+      canRecover: true,
+      recoverPhase: "running",
+    });
+    expect(
+      getBoardTaskStage(failedVerification).timeline.find(
+        (item) => item.id === "verifying",
+      ),
+    ).toMatchObject({ status: "failed" });
   });
 
   it("keeps interrupted running execution tasks recoverable after store close", () => {

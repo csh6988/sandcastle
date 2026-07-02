@@ -170,9 +170,13 @@ interface RunningTerminalSession {
   readonly process: TerminalProcess;
   readonly subscribers: Set<(data: string) => void>;
   readonly output: string[];
+  outputLength: number;
   completionScanOffset: number;
+  completionSignaled: boolean;
   record: BoardTerminalSessionRecord;
 }
+
+const MAX_PHASE_OUTPUT_CHARS = 2 * 1024 * 1024;
 
 export interface BoardTerminalManagerOptions {
   readonly onPhaseCompleteSignal?: (args: {
@@ -212,7 +216,9 @@ export class BoardTerminalManager {
       process: terminal,
       subscribers: new Set(),
       output: [],
+      outputLength: 0,
       completionScanOffset: 0,
+      completionSignaled: false,
       record: {
         taskId: options.task.id,
         phase: options.phase,
@@ -225,25 +231,34 @@ export class BoardTerminalManager {
     this.recordPhaseSession(session.record);
 
     terminal.onData((data) => {
-      session.output.push(data);
-      if (session.output.length > 500) session.output.shift();
+      this.appendOutput(session, data);
       for (const subscriber of session.subscribers) subscriber(data);
       const output = session.output.join("");
-      let completionIndex = output.indexOf(
+      const completionIndex = output.indexOf(
         PHASE_COMPLETION_SIGNAL,
         session.completionScanOffset,
       );
-      while (completionIndex !== -1) {
+      if (completionIndex !== -1) {
         session.completionScanOffset =
           completionIndex + PHASE_COMPLETION_SIGNAL.length;
-        this.options.onPhaseCompleteSignal?.({
-          taskId: session.record.taskId,
-          phase: session.record.phase,
-        });
-        completionIndex = output.indexOf(
-          PHASE_COMPLETION_SIGNAL,
-          session.completionScanOffset,
-        );
+        const task = this.store.getTask(session.record.taskId);
+        const activePhase = task?.workflow?.currentPhase;
+        const isActivePhase =
+          activePhase === undefined || activePhase === session.record.phase;
+        const canRetryWorkspacePlan =
+          session.completionSignaled &&
+          session.record.phase === "creating-issues" &&
+          task?.workflow?.substatus === "fixing-workspace-plan";
+        if (
+          isActivePhase &&
+          (!session.completionSignaled || canRetryWorkspacePlan)
+        ) {
+          session.completionSignaled = true;
+          this.options.onPhaseCompleteSignal?.({
+            taskId: session.record.taskId,
+            phase: session.record.phase,
+          });
+        }
       }
     });
     terminal.onExit((event) => {
@@ -353,6 +368,26 @@ export class BoardTerminalManager {
 
   private sessionKey(taskId: string, phase: BoardTaskWorkflowPhase): string {
     return `${taskId}:${phase}`;
+  }
+
+  private appendOutput(session: RunningTerminalSession, data: string): void {
+    const chunk =
+      data.length > MAX_PHASE_OUTPUT_CHARS
+        ? data.slice(-MAX_PHASE_OUTPUT_CHARS)
+        : data;
+    session.output.push(chunk);
+    session.outputLength += chunk.length;
+    while (
+      session.outputLength > MAX_PHASE_OUTPUT_CHARS &&
+      session.output.length > 0
+    ) {
+      const removed = session.output.shift()!;
+      session.outputLength -= removed.length;
+      session.completionScanOffset = Math.max(
+        0,
+        session.completionScanOffset - removed.length,
+      );
+    }
   }
 
   private recordPhaseSession(record: BoardTerminalSessionRecord): void {
