@@ -1,0 +1,638 @@
+src/board/localIssueMarkdown.test.ts
+  f06b9758a54457e6 1-14,17-42
+  45cb72d61dc06178 15-16
+.changeset/board-post-execution-verification.md
+  cedea7aa59997ade 1-4
+  45cb72d61dc06178 5
+.changeset/board-file-backed-workflow.md
+  fab4715d6104606c 1-7
+src/createSandbox.test.ts
+  fab4715d6104606c 27,848-850,896
+src/cli.test.ts
+  370f024702d22f8b 18,397-414,416-428
+  0a2884cab96278d8 22,370-396,447-465
+  95b7735508570609 313-333,431-446,466-467
+  86e67bf15e611cd6 415
+  946b6b68c52782eb 16,429-430,468-471
+  77e4924249c7ec6d 19,23,28,188-189,263-310,521-580
+src/sandboxes/podman.test.ts
+  fab4715d6104606c 1,26-30,33
+.changeset/board-prd-visual-assets.md
+  fab4715d6104606c 1-5
+src/board/prdAssets.ts
+  fab4715d6104606c 1-156
+src/board/prdExecutionAssets.test.ts
+  fab4715d6104606c 1-80
+src/board/taskBranchMerge.test.ts
+  fab4715d6104606c 1-219
+src/testPath.ts
+  fab4715d6104606c 1-17
+.changeset/board-auto-workspace-plan-repair.md
+  fab4715d6104606c 1-5
+.changeset/worktree-macos-private-paths.md
+  fab4715d6104606c 1-5
+src/board/frontendHtml.ts
+  946b6b68c52782eb 611-613
+  5e2e3dac1bb6c8c9 149-153,556,582-583,591-596,608-610,802-811
+  3fb6c6533496a7c7 787
+  645ae24aef32668d 73,173-176,561-566,569-581,584-590,597-607,661,674,685-711,749-750,752,757,761-778
+  cedea7aa59997ade 206,559-560,662-673,747,758-760
+  7db0f23cf234ba8a 510-513
+src/board/taskProgress.ts
+  cedea7aa59997ade 39-44
+  f06b9758a54457e6 7,36-38,153
+docs/adr/0023-langgraph-board-workflow-checkpoints.md
+  77ec68abbc741d14 37,39
+  cedea7aa59997ade 59-64,72
+  86e67bf15e611cd6 1,3-8,12-26,30-36,38,40-45,68-71,73-76
+  f27351afa230bd10 46-58
+docs/content/docs/board.mdx
+  fab4715d6104606c 53-60,69-74,107-109
+src/board/planningArtifacts.test.ts
+  fab4715d6104606c 1-79
+src/board/server.test.ts
+  45cb72d61dc06178 377-380
+  3fb6c6533496a7c7 766-767
+  5e2e3dac1bb6c8c9 199-239,374-375,749-751
+  cedea7aa59997ade 179-198,376,381-392,743-745
+  645ae24aef32668d 1-2,13-25,240-373,746-748,781
+  7db0f23cf234ba8a 735-738
+  946b6b68c52782eb 776-780,782-783
+src/board/prdExecutionAssets.ts
+  fab4715d6104606c 1-66
+.changeset/board-branch-merge.md
+  fab4715d6104606c 1-5
+src/board/prdAssets.test.ts
+  fab4715d6104606c 1-77
+src/Display.test.ts
+  fab4715d6104606c 6,546-548,553-555,560-562,567-592
+.changeset/board-pre-agent-infra-failures.md
+  0b433a35e7588b5d 1-5
+src/runWorkspaceTask.test.ts
+  fab4715d6104606c 20,100
+src/board/router.ts
+  645ae24aef32668d 8-11,79,137-199
+  cedea7aa59997ade 53,116-126
+  5e2e3dac1bb6c8c9 129-136,200-201
+.changeset/board-phase-completion-once.md
+  fab4715d6104606c 1-5
+.changeset/board-prd-verification-matrix.md
+  fab4715d6104606c 1-5
+.changeset/board-evaluator-agent.md
+  fab4715d6104606c 1-5
+.changeset/board-task-overview-counts.md
+  fab4715d6104606c 1-5
+src/board/terminalSession.ts
+  fab4715d6104606c 173,175,179-180,219,221,234,237,241,244-261,373-390
+src/board/taskEvaluator.ts
+  0b433a35e7588b5d 167-174
+src/board/taskVerification.ts
+  cedea7aa59997ade 1-8,10-11,27-31,33-41,43-50,52-62,68-73,275-317,322-331,333-344,348-349,353-357,359-364,366-376,380-392,394,418-421,425,431-441,451-472,474-488,490-497,499-509,520-533
+  0b433a35e7588b5d 63-67,350-352,402-408
+  645ae24aef32668d 9,12-26,32,42,51,74-274,318-321,345-347,365,377-379,395-401,409-417,422-424,426-430,442-450,473,489,510-519
+  86e67bf15e611cd6 498
+src/board/importedPlanApproval.test.ts
+  fab4715d6104606c 1-150
+src/board/approvedPlanExecution.test.ts
+  0b433a35e7588b5d 304-592
+package.json
+  fab4715d6104606c 89
+.changeset/board-phase-terminal-diagnostics.md
+  fab4715d6104606c 1-5
+.changeset/claude-dot-project-path.md
+  fab4715d6104606c 1-5
+docs/adr/0024-v1-library-first-control-plane.md
+  fab4715d6104606c 10-17,27-29,32-37,46-51,53-62,67-75,78-98,100-101
+src/sandboxes/test-isolated.test.ts
+  fab4715d6104606c 11,38-40,51
+.changeset/board-creating-issues-planning-boundary.md
+  fab4715d6104606c 1-5
+src/WorktreeManager.ts
+  fab4715d6104606c 119-128,153-160,365-369
+src/board/approvedPlanExecution.ts
+  0b433a35e7588b5d 162-339
+src/board/langGraphTaskRunner.test.ts
+  cedea7aa59997ade 40-53,218-228,296-362,364-427,431-432,492-547,552,1065-1068,1076-1078,1232,1639,1688
+  77ec68abbc741d14 9,1238-1310
+  eee38158f5923d26 1,1386-1435,1439,1444-1530
+  645ae24aef32668d 483
+  8e12806f5c20d4e1 798-802,805-807,839-848,871-873,876-911
+  93924a9059d45325 1313-1360,1370-1385,1531-1584
+  f06b9758a54457e6 363,428-430,433-482,484-491,548-551
+  f27351afa230bd10 1693-1738,1741-1778
+  370f024702d22f8b 5,12,1436-1438,1440-1443
+  86e67bf15e611cd6 229-295
+  3fb6c6533496a7c7 1361-1369
+src/board/workspacePlanImport.test.ts
+  45cb72d61dc06178 81,99-127
+  3fb6c6533496a7c7 82-98
+  77ec68abbc741d14 1-80,128
+plans/v1-library-first-control-plane.md
+  fab4715d6104606c 6-8,35-42,49-52,72,87,90-96,107-108,112-120,126-130,137-139,143-160,162-172,179-216,222-226,228-233,235-237,248,250-258,260-267,277-286,288,290,303-330
+src/board/prdTask.test.ts
+  fab4715d6104606c 1-71
+plans/rich-run-failure-evidence-prd.md
+  fab4715d6104606c 1-113
+src/board/approvedPlanExport.test.ts
+  fab4715d6104606c 1-92
+src/board/prdTask.ts
+  fab4715d6104606c 1-42
+src/board/server.ts
+  fab4715d6104606c 35-36,191
+src/sandboxes/test-bind-mount.test.ts
+  fab4715d6104606c 5,42-44
+src/board/langGraphTaskRunner.ts
+  645ae24aef32668d 412-419,450-459
+  f27351afa230bd10 27,108,506
+  86e67bf15e611cd6 3,116,118-121,123-142,292-293,381-395,402,420,424-425,609-626,634,642-646,667-671,673-687,689-707,710-714,720,732-746,818-833,835-895,919
+  c820be7c29743708 435
+  3fb6c6533496a7c7 5,377-379,426
+  77ec68abbc741d14 773-778
+  93924a9059d45325 71-77
+  8e12806f5c20d4e1 82-87,344-359,375-376,404,431-434,436-437,708-709,715-719,721-731
+  cedea7aa59997ade 20,41,190,268-269,278,280,282-283,289,309-310,406,438-442,492-495,942,946,974
+  370f024702d22f8b 21-26,496-505,507-509,511,765-772,779-816
+src/board/BoardStore.test.ts
+  645ae24aef32668d 586-603
+  cedea7aa59997ade 277-279,291-304,386,567-583,731-760
+  f27351afa230bd10 1,241-250
+  370f024702d22f8b 456-484
+  5e2e3dac1bb6c8c9 305-360
+  3fb6c6533496a7c7 7,624-655
+  f06b9758a54457e6 282-288,393-426
+docs/agents/board-roadmap.md
+  77e4924249c7ec6d 78,85,130
+  93924a9059d45325 1-13,16-22,37-41,43-48,50-54,56-60,62-69,71-77,79-84,86-91,93,95-96,99-102,104-109,115,117-119,121-129,131-136,141,152
+  3fb6c6533496a7c7 14-15,61
+  5e2e3dac1bb6c8c9 42,49,55
+  eee38158f5923d26 70
+  370f024702d22f8b 23-36,92,97,103,110,116,120,137-140,142-151,153-154
+  86e67bf15e611cd6 94,98,111-114
+.changeset/langgraph-board-workflow.md
+  fab4715d6104606c 5-7
+src/board/approvedPlanExport.ts
+  fab4715d6104606c 1-61
+src/board/planningArtifacts.ts
+  fab4715d6104606c 1-132
+src/board/taskVerification.test.ts
+  0b433a35e7588b5d 117-204
+src/board/importedPlanApproval.ts
+  fab4715d6104606c 1-181
+src/interactive.test.ts
+  fab4715d6104606c 7,755,776
+.changeset/board-phase-terminal-buffer.md
+  fab4715d6104606c 1-9
+.changeset/board-planning-only-export.md
+  fab4715d6104606c 1-7
+src/board/BoardStore.ts
+  86e67bf15e611cd6 91-103,153-154,180
+  f06b9758a54457e6 16-20,338-363,806-809,811-813,1092-1119,1227-1234,1236-1241
+  cedea7aa59997ade 21-26,135-136,189,312,322,334,377,521,523,532,534,536-537,571,584-587,713-721,724-728,800,1120-1128,1130-1131
+  77ec68abbc741d14 165,200
+  f27351afa230bd10 335,722-723,1217-1222,1248,1251,1253-1259
+  645ae24aef32668d 383,393,416,435,522,538,572
+  95b7735508570609 15,163,260,790-793,1200-1209
+  370f024702d22f8b 497-507,662
+  45cb72d61dc06178 155-162,164
+  3fb6c6533496a7c7 151-152,182,243-244,410-411,427-428,494-495,671,674,676-678,680-685
+  8e12806f5c20d4e1 188
+  5e2e3dac1bb6c8c9 7,13,255-259,261-270,788-789,794-795,797,801-805,810,1129,1132-1199,1210
+CONTEXT.md
+  45cb72d61dc06178 242
+  f27351afa230bd10 253-260
+  93924a9059d45325 277-280
+  c95e2652bcccff16 245-248,265-268
+  86e67bf15e611cd6 249-252,274,290
+  95b7735508570609 261-264
+  cedea7aa59997ade 269,271-272,281-283
+  645ae24aef32668d 285-288
+  f06b9758a54457e6 270
+README.md
+  08d4d508d72b9e9a 11,13-15,17,32-34,54,57,60,62-63,66,68,70,72,74-75,77-79,82-83,85,88,96,120,122,126-132,138-147,151,154,157-158,164,167,173-174,176,184-185,188,230,343-344,347,352
+  3fb6c6533496a7c7 1280
+  f06b9758a54457e6 1162,1250
+  5e2e3dac1bb6c8c9 1248
+  77ec68abbc741d14 1256,1266,1275-1276
+  cedea7aa59997ade 1163,1247
+  93924a9059d45325 345-346,1257,1265,1268,1279
+  45cb72d61dc06178 342,1106,1255,1260-1264,1267,1269-1274,1277-1278
+  86e67bf15e611cd6 1244-1246
+src/board/terminalSession.test.ts
+  fab4715d6104606c 173-194,231,255-320
+src/board/workspacePlanImport.ts
+  3fb6c6533496a7c7 3-7,25,29-31,47
+  77ec68abbc741d14 1-2,8-24,26-28,32-46,48-54
+.changeset/phase-board-interaction.md
+  fab4715d6104606c 4
+src/SessionStore.ts
+  fab4715d6104606c 47-48,53
+src/board/taskBranchMerge.ts
+  fab4715d6104606c 1-214
+src/sandboxes/no-sandbox.test.ts
+  fab4715d6104606c 2,70
+src/SessionStore.test.ts
+  fab4715d6104606c 46-55
+src/Display.ts
+  fab4715d6104606c 5,207-218
+src/PromptPreprocessor.test.ts
+  fab4715d6104606c 19,93
+src/SandboxLifecycle.test.ts
+  fab4715d6104606c 11,1487
+.changeset/board-phase-plan-file.md
+  fab4715d6104606c 1-5
+src/cli.ts
+  45cb72d61dc06178 82,1696-1711,1714-1721,2489,2504,2815-2819,2822-2823,2829-2830,2832
+  77ec68abbc741d14 80-81,2488,2503,2825,2836-2838
+  95b7735508570609 84-88,1751-1753,1756-1758,2458,2461,2758-2770,2772,2785-2786
+  93924a9059d45325 93-97,1555,1771,2395-2400,2487,2490,2502,2505,2548-2559,2702-2703,2711,2826,2833
+  370f024702d22f8b 98,2416,2423-2428,2430-2432,2472,2704-2706,2708-2710
+  0a2884cab96278d8 1835-1853,2419-2421,2459-2460,2595-2596,2654-2659,2730-2737
+  5e2e3dac1bb6c8c9 2707
+  8e12806f5c20d4e1 2715-2717
+  f27351afa230bd10 58,74,99-102,2413-2415,2542,2787-2805
+  77e4924249c7ec6d 1723-1739,1741-1748,1750,1754-1755,1759-1763,1765,2813-2814,2820-2821,2824,2827-2828,2831,2834-2835,2909-2936,2940-2942
+  86e67bf15e611cd6 2429
+  946b6b68c52782eb 2401-2412,2751-2757,2775-2778
+src/board/localIssueMarkdown.ts
+  f06b9758a54457e6 1-5,7-22,27-30
+  45cb72d61dc06178 23-26
+  645ae24aef32668d 6
+src/Orchestrator.test.ts
+  fab4715d6104606c 2466,2512
+src/board/taskEvaluator.test.ts
+  0b433a35e7588b5d 1-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "29eb5e363a74719939012ca124cee462f9f0f47d",
+  "prompts": {
+    "08d4d508d72b9e9a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1799-c83c-7602-a51b-35700ea92f1e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 183,
+      "total_deletions": 188,
+      "accepted_lines": 315,
+      "overriden_lines": 2
+    },
+    "0a2884cab96278d8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1d03-e9b3-75f1-a1d0-4532c883845b",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 88,
+      "total_deletions": 1,
+      "accepted_lines": 88,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ef9614415fd32bf406add5220dfb3c3d06c25da461454683f70c4b74e047b4a3"
+    },
+    "0b433a35e7588b5d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "da4f1082-805e-4bdb-8587-eb9a86af8a9f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 489,
+      "total_deletions": 21,
+      "accepted_lines": 483,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e40fa57c6efd00fadaa940283e33195b0d50688bec5afd98d8c726fa46ae3772"
+    },
+    "204d02e0f002d545": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eeefb-5f40-7a31-8406-d98085c36311",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2009,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/064e73eac6c0542d88a013b2f05b90c84854baa2282f0cea810551aba1d55971"
+    },
+    "370f024702d22f8b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f177c-20ef-7bc3-8927-49f6cd24519a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 534,
+      "total_deletions": 495,
+      "accepted_lines": 301,
+      "overriden_lines": 0
+    },
+    "3a8469d3df22cec4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef78f-5871-78f2-a6b1-39525c02b517",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 49,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0a410b5de4bb3b986e9647cf3ce1683d1c60e4fecebad2194ef6be9f02b96d3f"
+    },
+    "3fb6c6533496a7c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f175e-45e8-7622-b3e5-7b6741b5e7a9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 119,
+      "total_deletions": 20,
+      "accepted_lines": 104,
+      "overriden_lines": 0
+    },
+    "45cb72d61dc06178": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f172a-3cd1-7ed3-9f15-d589e0156585",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 241,
+      "total_deletions": 28,
+      "accepted_lines": 219,
+      "overriden_lines": 0
+    },
+    "5216833164ddb92e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef7bf-8aeb-7e53-bb7c-ce87ebf7d938",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "t",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 102,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e148c192a8b77cd0f94ea89dcd6747c883f405d273f7b6b15fde6fed4d4c6e23"
+    },
+    "5e2e3dac1bb6c8c9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1754-786b-7420-b331-782a26a8784f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 1607,
+      "total_deletions": 24,
+      "accepted_lines": 1546,
+      "overriden_lines": 8
+    },
+    "645ae24aef32668d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1b8d-2045-7060-bfbc-2561e474dfad",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 2465,
+      "total_deletions": 74,
+      "accepted_lines": 2126,
+      "overriden_lines": 4
+    },
+    "77e4924249c7ec6d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1772-d6ac-7932-a5ad-8015b3871dfb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 207,
+      "total_deletions": 29,
+      "accepted_lines": 200,
+      "overriden_lines": 0
+    },
+    "77ec68abbc741d14": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "3a0a593a-ccc3-4910-b3c5-72b31eb62145",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 304,
+      "total_deletions": 7,
+      "accepted_lines": 224,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/370afe5af8b48513e2d10b2ade05c191d37a62eeab01ea5cea343eb284430359"
+    },
+    "7db0f23cf234ba8a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1c8c-56f4-7de3-94b5-667e72396f3f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 243,
+      "total_deletions": 210,
+      "accepted_lines": 57,
+      "overriden_lines": 49,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2703b1d18cc7ec24d5ef611acf4c237e51a8648b36a0101ac9e579c896dc4d53"
+    },
+    "86e67bf15e611cd6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1c64-972e-7742-a217-07fe1f8fa8bf",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 648,
+      "total_deletions": 503,
+      "accepted_lines": 626,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/28aa47c0384b4e8264e41ddff582f52c4ec9dcab50c53a6bcbf6f736a2f60b73"
+    },
+    "8e12806f5c20d4e1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1d7a-1386-7bc2-9181-73129b583000",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 381,
+      "total_deletions": 296,
+      "accepted_lines": 374,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/35fcde46379e8012c29f5802ffc21f21b5d646e5b6f2720d5f2d928467d75103"
+    },
+    "93924a9059d45325": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1747-b945-71f0-aa1f-eb2e06a8f6cb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 452,
+      "total_deletions": 122,
+      "accepted_lines": 350,
+      "overriden_lines": 0
+    },
+    "946b6b68c52782eb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f17c1-4767-7742-a547-52812901abaa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 48,
+      "total_deletions": 6,
+      "accepted_lines": 40,
+      "overriden_lines": 0
+    },
+    "95b7735508570609": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1c3d-507a-7553-a90a-7ff341e1392a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 541,
+      "total_deletions": 7,
+      "accepted_lines": 540,
+      "overriden_lines": 0
+    },
+    "b40456fb662af17b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eed1b-3275-74e0-b4e2-44fccbc2ed4e",
+        "model": "x5/gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 24865,
+      "overriden_lines": 16,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2e9bb9c6f8f1075d898fbe435d6069c54bd67b990010387ba4df83f9e2f53b17"
+    },
+    "c820be7c29743708": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1d7f-a34a-7bf0-a77e-56e28b50c677",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 2,
+      "accepted_lines": 1,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2e055f51251a3f98a047c38c9d381465c8016cf84c7c3e4196a8bbb3a095e9a4"
+    },
+    "c95e2652bcccff16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0287-b2fa-7170-85c5-81b04d11f036",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 0,
+      "accepted_lines": 8,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e93fb5bc74a655b959b3f2a536c87d95f923299c3e0d1ed24540ac4338cb425d"
+    },
+    "cedea7aa59997ade": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "f29a8c20-045d-4133-adbd-b3008e56ad92",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 807,
+      "total_deletions": 23,
+      "accepted_lines": 709,
+      "overriden_lines": 3,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/49bfb301472ff9df9a067d12329f92fde85dab32ecf85317cdf64c84fff1ba65"
+    },
+    "eee38158f5923d26": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1768-1989-7831-84ec-d1d0a1d5e551",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 2046,
+      "total_deletions": 51,
+      "accepted_lines": 1882,
+      "overriden_lines": 0
+    },
+    "f06b9758a54457e6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "4cbc8b8e-c0ee-4f10-ac3c-15b75f397b88",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 297,
+      "total_deletions": 23,
+      "accepted_lines": 265,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e75feaa6bb04f26d53111acf9667a654728d04b9879ae606b9cd6873ca1debc5"
+    },
+    "f27351afa230bd10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f1d88-7e87-7200-bcf9-319f4ff51e95",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 690,
+      "total_deletions": 16,
+      "accepted_lines": 686,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0fa079be597e4f676ccc1b0f5f1c18e5f3327b8ffe2c3090ba5ba9f816bbeeb6"
+    },
+    "fab4715d6104606c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2173-6011-7f82-a1da-52c3843d75c4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 2365,
+      "total_deletions": 122,
+      "accepted_lines": 2365,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/35a4a352ac8cdd082fcdd076ce29213a887a2c82a2ca71023fd4bcf5f060eeb9"
+    }
+  }
+}
