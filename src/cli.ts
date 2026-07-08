@@ -98,6 +98,12 @@ import {
 } from "./board/planningArtifacts.js";
 import { exportApprovedBoardPlan } from "./board/approvedPlanExport.js";
 import {
+  DEFAULT_ROLE_PROFILES,
+  loadRoleProfiles,
+  renderRoleProfilePromptSection,
+  type RoleProfile,
+} from "./board/roleProfiles.js";
+import {
   BOARD_EVALUATOR_REPO,
   runBoardEvaluatorAgent,
 } from "./board/taskEvaluator.js";
@@ -2419,15 +2425,17 @@ export const buildBoardPhasePrompt = (
   phase: BoardTaskWorkflowPhase,
   options: {
     readonly workspacePlanFile?: string;
+    readonly roleProfile?: RoleProfile;
   } = {},
 ): string => {
+  const plannerProfile = options.roleProfile ?? DEFAULT_ROLE_PROFILES.planner;
   const planningBoundaryInstructions =
     phase === "classifying" ||
     phase === "aligning-prd" ||
     phase === "technical-planning" ||
     phase === "creating-issues"
       ? `
-Board role: Planner. Stay inside the Planner responsibility boundary.
+${renderRoleProfilePromptSection(plannerProfile)}
 This is a planning-only Board phase. You may read CLAUDE.md and AGENTS.md, plus project docs, only to understand required skills/workflows, repository rules, verification expectations, and issue formatting requirements. Do not implement the task. Do not edit source files. Do not run long-lived agents. Do not commit changes. Preserve required skill/workflow instructions inside generated plans and issues so the later execution phase can follow them. If repository docs conflict with this planning-only boundary, this Board phase instruction wins.
 `
       : "";
@@ -2479,6 +2487,20 @@ ${PHASE_COMPLETION_SIGNAL}
 The Board will detect that marker and advance to the next phase. The user can still click "Complete phase / Continue" as a fallback. Do not start multi-repository execution from this terminal.`;
 };
 
+/**
+ * Prepend the Generator role-profile boundary to the Board execution task
+ * prompt. Recovery prompts already carry their own Generator boundary line,
+ * so the section is only added when missing.
+ */
+export const buildBoardExecutionTaskPrompt = (
+  generatorProfile: RoleProfile,
+  prompt: string,
+  assetsPromptSection: string,
+): string =>
+  prompt.includes("Board role: Generator")
+    ? `${prompt}${assetsPromptSection}`
+    : `${renderRoleProfilePromptSection(generatorProfile)}\n\n${prompt}${assetsPromptSection}`;
+
 const boardCommand = Command.make(
   "board",
   {
@@ -2520,6 +2542,9 @@ const boardCommand = Command.make(
           ? resolve(cwd, dataDir.value)
           : resolve(cwd, ".sandcastle", "board");
       const store = new BoardStore(resolvedDataDir);
+      // Fail fast on an invalid role-profiles.json instead of running the
+      // board with silently ignored role configuration.
+      const roleProfiles = loadRoleProfiles(resolve(cwd, ".sandcastle"));
 
       // Resolve the planner context lazily so the board starts without a
       // workspace config. The PRD planner still determines the task workspace;
@@ -2657,6 +2682,7 @@ const boardCommand = Command.make(
                 phase === "creating-issues"
                   ? phaseWorkspacePlanFile(task.id)
                   : undefined,
+              roleProfile: roleProfiles.planner,
             }),
             dangerouslySkipPermissions: true,
           });
@@ -2770,7 +2796,11 @@ const boardCommand = Command.make(
           return executeWorkspaceTaskPlan({
             repositories: executionAssets.repositories,
             plan,
-            taskPrompt: `${prompt}${executionAssets.promptSection}`,
+            taskPrompt: buildBoardExecutionTaskPrompt(
+              roleProfiles.generator,
+              prompt,
+              executionAssets.promptSection,
+            ),
             agent: executionAgent,
             sandbox: sandboxProvider,
             branchPrefix:
@@ -2794,6 +2824,7 @@ const boardCommand = Command.make(
             branch: boardEvaluatorBranch(input.task.id),
             input,
             signal: input.signal,
+            roleProfile: roleProfiles.evaluator,
             idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
             onRuntimeEvent: (event) => {
               recorder ??= createRunRecorder(store, {
@@ -2967,6 +2998,7 @@ Resolve the git merge conflict between source branch \`${context.sourceBranch}\`
           port: port._tag === "Some" ? port.value : 4318,
           launchTask,
           terminalManager,
+          roleProfiles,
           resumeTask: (task, decision) => {
             reportWorkflowPromise(
               task.id,

@@ -1254,6 +1254,23 @@ sandcastle workspace run --prd-file ./prd.md
 
 Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, task workflow state, tasks, progress documents, and verification reports to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
 
+The board frontend is the v1 **company control plane** shell (ADR 0026): a company-level left navigation with **Departments**, **Projects**, **Artifacts**, **Reviews**, and **Settings**, defaulting to the one operational department — **Software R&D** (the board itself). Projects come from `.sandcastle/workspace.json`, Artifacts aggregate every task's artifact manifest, Reviews list tasks with a verification status, and Settings shows the department's **role profiles**. The backing endpoints are `GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and `GET /api/role-profiles`.
+
+Role profiles make the Planner / Generator / Evaluator boundaries explicit configuration: each profile carries a responsibility statement, allowed and forbidden actions, progressive **skill flows** (loaded via `.sandcastle/SKILL_ROUTER.md`, never all at once), optional extra prompt guidance, and advisory agent/model preferences. Built-in defaults ship with the board; override any subset per role in `.sandcastle/role-profiles.json` (invalid files fail fast at board startup):
+
+```jsonc
+// .sandcastle/role-profiles.json
+{
+  "planner": {
+    "skillFlows": ["grill-with-docs", "to-issues"],
+    "promptGuidance": "Always confirm non-goals before planning.",
+  },
+  "evaluator": { "model": "claude-opus-4-8" },
+}
+```
+
+The resolved profiles are injected into the Planner phase prompts, the Generator execution prompt, and the Evaluator verification prompt. Agent/model preferences are advisory in v1 — the `--agent` / `--model` / `--planner-model` flags still decide which agent actually runs.
+
 Creating a task starts an interactive Board phase flow with strict roles: Planner phases classify the task, align the PRD, draft the technical plan, and generate repository issues; the Generator executes only the approved workspace plan; the Evaluator verifies the delivery against recorded evidence. Each interactive phase opens a board terminal and advances when the agent prints the phase completion marker or when you click **Complete phase / Continue**. The `creating-issues` phase must emit a valid `<workspace_plan>` block before approval. After approval, Sandcastle runs one executor per planned repository using the approved plan and the resolved workspace config, then enters `verifying` before marking the task succeeded. In planning-only mode, the approval stage and button use export-oriented copy because approval writes artifacts instead of starting AFK execution.
 
 The Board also keeps task artifacts next to each task record: `.sandcastle/board/tasks/<taskId>/progress.md`, `.sandcastle/board/tasks/<taskId>/verification.md`, `.sandcastle/board/tasks/<taskId>/issues/<repo>.md`, and `.sandcastle/board/tasks/<taskId>/artifacts.json` when planning-only export writes artifacts outside the Board data directory. Issue markdown is initialized from the approved Board issue body, then only its `status:` line is rewritten as repository runs start, fail, recover, or pass verification. Task artifacts are exposed through `GET /api/tasks/:id/artifacts` and rendered in the task detail panel.

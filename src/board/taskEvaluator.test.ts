@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { BoardRunRecord } from "./BoardStore.js";
-import { repositoryAgentWorkWasRecorded } from "./taskEvaluator.js";
+import {
+  buildBoardEvaluatorPrompt,
+  repositoryAgentWorkWasRecorded,
+} from "./taskEvaluator.js";
+import { DEFAULT_ROLE_PROFILES } from "./roleProfiles.js";
 import type { TaskProgressRun } from "./taskProgress.js";
 import type { WorkspaceTaskRepositoryResult } from "../runWorkspaceTask.js";
+import type { BoardTaskVerificationReport } from "./taskVerification.js";
 
 const failedRun: BoardRunRecord = {
   id: "run-1",
@@ -114,5 +119,57 @@ describe("repositoryAgentWorkWasRecorded", () => {
         api: { ...failedResult, commits: [{ sha: "abc123" }] },
       }),
     ).toBe(true);
+  });
+});
+
+describe("buildBoardEvaluatorPrompt", () => {
+  const deterministicReport: BoardTaskVerificationReport = {
+    taskId: "task-1",
+    status: "passed",
+    generatedAt: "2026-07-02T00:00:00.000Z",
+    repositories: [],
+    criteria: [],
+    errors: [],
+    infrastructureFailures: [],
+    suggestedNextAction: "None.",
+  };
+  const promptInput = {
+    task: {
+      id: "task-1",
+      title: "Ship the API",
+      prompt: "Build the API endpoint.",
+      status: "running" as const,
+      createdAt: "2026-07-02T00:00:00.000Z",
+      runIds: [],
+    },
+    repositoryResults: {},
+    runs: [],
+    deterministicReport,
+    deterministicMarkdown: "evidence markdown",
+  };
+
+  it("renders the default Evaluator role profile boundary and skill flows", () => {
+    const prompt = buildBoardEvaluatorPrompt(promptInput);
+    expect(prompt).toContain(
+      "Board role: Evaluator. Stay inside the Evaluator responsibility boundary.",
+    );
+    expect(prompt).toContain("Allowed actions:");
+    expect(prompt).toContain("Do not:");
+    for (const flow of DEFAULT_ROLE_PROFILES.evaluator.skillFlows) {
+      expect(prompt).toContain(flow);
+    }
+    expect(prompt).toMatch(/do not copy every installed skill/i);
+  });
+
+  it("uses a configured Evaluator role profile override", () => {
+    const prompt = buildBoardEvaluatorPrompt(promptInput, {
+      ...DEFAULT_ROLE_PROFILES.evaluator,
+      promptGuidance: "Prefer verification.md evidence over transcripts.",
+      skillFlows: ["review", "qa-verification"],
+    });
+    expect(prompt).toContain(
+      "Prefer verification.md evidence over transcripts.",
+    );
+    expect(prompt).toContain("qa-verification");
   });
 });

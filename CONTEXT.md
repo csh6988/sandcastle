@@ -266,6 +266,26 @@ _Avoid_: "issue source" (conflicts with **issue tracker**), "task source" (alrea
 One of the strict responsibilities in a **board task** workflow: Planner turns requirements into reviewed plans and Board issues, Generator executes only the approved plan, and Evaluator verifies delivery against recorded evidence. A **board phase** may expose the current **Board role**, but the role is the responsibility boundary rather than the UI step name.
 _Avoid_: "agent role" (too broad), "worker" (ambiguous), conflating with **board phase**
 
+**Company**:
+The top-level v1 product object: the local AI company a user opens in the **control plane** -- one host machine, one `.sandcastle/` config root, one board store, and the **departments** that operate inside it. A product framing and navigation/ownership layer, not a tenant, org chart, or access-control domain. Exactly one company per control plane instance in v1. See ADR 0026.
+_Avoid_: "organization" (Rudder's enterprise term), "tenant", "workspace" (overloaded with the multi-repo workspace)
+
+**Department**:
+An execution unit inside the **company** that owns one kind of work: its workflow phases, **Board roles**, **role profiles**, task sources, artifact kinds, and verification semantics. V1 ships exactly one complete department -- the **Software R&D department** -- plus optional inert placeholder departments that only communicate the product model. Not a generic workflow engine.
+_Avoid_: "team" (role/skill boundary matters), "module" (too code-shaped), "workflow" (a department owns workflows, it is not one)
+
+**Software R&D department**:
+The first complete **department** in the v1 **company**: the current **workflow board** promoted rather than rebuilt -- a local software-development operating unit made of **Board roles**, repositories, task artifacts, review loops, and skill-guided agent work. Its PRD-to-plan-to-approval-to-execution-to-verification loop is the template future departments are measured against.
+_Avoid_: "company" (the department lives inside one), "organization" when referring to the v1 Sandcastle scope, "team" when the role/skill boundary matters, "the board" when the department product boundary is meant
+
+**Role profile**:
+The configuration behind a **Board role**: its responsibility boundary, allowed actions, preferred skill flows, prompt guidance, and optional agent/model preferences. Role profiles belong to a **department**, not to the **company** or an **agent provider** -- any agent can fill the same role. A role profile describes how a role should work; it is not the same as an **agent provider**.
+_Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too narrow)
+
+**Skill flow**:
+A selected set of skills and operating instructions used for a specific kind of software work, such as planning, implementation, review, debugging, or merge-conflict resolution. A **role profile** may choose one or more skill flows, but the flow should still be loaded progressively instead of copying every available skill into context.
+_Avoid_: "skill bundle" when it implies loading everything at once, "prompt pack" (too narrow)
+
 **Evaluator run**:
 The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **runtime events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
 _Avoid_: "static verification", "post-run summary", treating a successful **completion signal** as proof of delivery

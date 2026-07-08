@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   boardExecutionBranchPrefix,
   buildWorkspaceSandboxProvider,
+  buildBoardExecutionTaskPrompt,
   buildBoardPhasePrompt,
   createBoardStartupTask,
   DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
@@ -26,6 +27,7 @@ import {
 import type { BindMountSandboxProvider } from "./SandboxProvider.js";
 import { encodeProjectPath } from "./SessionStore.js";
 import { BoardStore } from "./board/BoardStore.js";
+import { DEFAULT_ROLE_PROFILES } from "./board/roleProfiles.js";
 
 const execAsync = promisify(exec);
 
@@ -426,6 +428,50 @@ describe("sandcastle CLI", () => {
     expect(buildBoardPhasePrompt(task, "running")).not.toContain(
       "Do not implement the task.",
     );
+  });
+
+  it("board execution task prompts carry the Generator role profile boundary", () => {
+    const prompt = buildBoardExecutionTaskPrompt(
+      DEFAULT_ROLE_PROFILES.generator,
+      "Build the API endpoint.",
+      "\n\n## PRD visual assets\n- mock.png",
+    );
+    expect(prompt).toContain("Board role: Generator");
+    expect(prompt).toContain("Build the API endpoint.");
+    expect(prompt).toContain("## PRD visual assets");
+    for (const flow of DEFAULT_ROLE_PROFILES.generator.skillFlows) {
+      expect(prompt).toContain(flow);
+    }
+    expect(prompt.indexOf("Board role: Generator")).toBeLessThan(
+      prompt.indexOf("Build the API endpoint."),
+    );
+  });
+
+  it("board planning phase prompts carry the Planner role profile skill flows", () => {
+    const task = {
+      id: "task-1",
+      title: "Create scoped work",
+      prompt: "Split this PRD into implementation issues.",
+      status: "running" as const,
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runIds: [],
+    };
+
+    const prompt = buildBoardPhasePrompt(task, "aligning-prd");
+    for (const flow of DEFAULT_ROLE_PROFILES.planner.skillFlows) {
+      expect(prompt).toContain(flow);
+    }
+    expect(prompt).toMatch(/do not copy every installed skill/i);
+
+    const overridden = buildBoardPhasePrompt(task, "aligning-prd", {
+      roleProfile: {
+        ...DEFAULT_ROLE_PROFILES.planner,
+        skillFlows: ["grill-with-docs"],
+        promptGuidance: "Always confirm non-goals before planning.",
+      },
+    });
+    expect(overridden).toContain("grill-with-docs");
+    expect(overridden).toContain("Always confirm non-goals before planning.");
   });
 
   it("tells the creating-issues phase to preserve PRD visual assets in generated issues", () => {

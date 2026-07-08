@@ -5,6 +5,11 @@ import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type { SandboxProvider } from "../SandboxProvider.js";
 import type { WorkspaceTaskRepositoryResult } from "../runWorkspaceTask.js";
 import type { BoardTaskRecord } from "./BoardStore.js";
+import {
+  DEFAULT_ROLE_PROFILES,
+  renderRoleProfilePromptSection,
+  type RoleProfile,
+} from "./roleProfiles.js";
 import type { TaskProgressRun } from "./taskProgress.js";
 import type {
   BoardTaskVerificationReport,
@@ -181,9 +186,10 @@ export const repositoryAgentWorkWasRecorded = (
 
 export const buildBoardEvaluatorPrompt = (
   input: Omit<BoardTaskEvaluationInput, "signal">,
+  roleProfile: RoleProfile = DEFAULT_ROLE_PROFILES.evaluator,
 ): string => `# Sandcastle Board Evaluator
 
-Board role: Evaluator. Stay inside the Evaluator responsibility boundary.
+${renderRoleProfilePromptSection(roleProfile)}
 
 You verify delivery only. Do not re-plan, do not regenerate Board issues, do not edit files, do not run implementation commands, and do not commit. Judge the approved plan against recorded evidence. If evidence is missing, say so clearly instead of assuming delivery worked.
 
@@ -275,13 +281,14 @@ export const runBoardEvaluatorAgent = async (args: {
   readonly idleTimeoutSeconds?: number;
   readonly timeouts?: Timeouts;
   readonly onRuntimeEvent?: (event: RuntimeEvent) => void;
+  readonly roleProfile?: RoleProfile;
 }): Promise<BoardTaskEvaluationResult> => {
   const result = await run({
     cwd: args.cwd,
     agent: args.agent,
     sandbox: args.sandbox,
     branchStrategy: { type: "branch", branch: args.branch },
-    prompt: buildBoardEvaluatorPrompt(args.input),
+    prompt: buildBoardEvaluatorPrompt(args.input, args.roleProfile),
     maxIterations: 1,
     logging: args.logging,
     idleTimeoutSeconds: args.idleTimeoutSeconds,

@@ -156,6 +156,102 @@ describe("routeApi", () => {
     });
   });
 
+  it("returns the company view with departments and projects", async () => {
+    const res = await routeApi(
+      store,
+      "GET",
+      "/api/company",
+      noBody,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      dir,
+    );
+    expect(res?.status).toBe(200);
+    const company = res?.body as {
+      name: string;
+      departments: Array<{ id: string; operational: boolean }>;
+      projects: unknown[];
+    };
+    expect(company.name.length).toBeGreaterThan(0);
+    expect(
+      company.departments.filter((department) => department.operational),
+    ).toEqual([expect.objectContaining({ id: "software-rnd" })]);
+    expect(company.projects).toEqual([]);
+  });
+
+  it("returns company-wide artifacts across tasks", async () => {
+    const task = store.createTask({ title: "Artifacts", prompt: "do it" });
+    store.writeTaskArtifactManifest(task.id, [
+      {
+        kind: "workspace-plan",
+        absolutePath: join(dir, "exports", "workspace-plan.json"),
+        displayPath: ".scratch/artifacts/workspace-plan.json",
+        createdAt: "2026-06-30T12:00:00.000Z",
+      },
+    ]);
+    const empty = store.createTask({ title: "No artifacts", prompt: "later" });
+
+    const res = await routeApi(store, "GET", "/api/artifacts", noBody);
+    expect(res?.status).toBe(200);
+    const body = res?.body as {
+      artifacts: Array<{ taskId: string; taskTitle: string; kind: string }>;
+    };
+    expect(body.artifacts).toEqual([
+      expect.objectContaining({
+        taskId: task.id,
+        taskTitle: "Artifacts",
+        kind: "workspace-plan",
+      }),
+    ]);
+    expect(
+      body.artifacts.some((artifact) => artifact.taskId === empty.id),
+    ).toBe(false);
+  });
+
+  it("returns reviews for tasks with a verification status", async () => {
+    const verified = store.createTask({ title: "Verified", prompt: "do it" });
+    store.updateTask(verified.id, {
+      status: "succeeded",
+      workflow: {
+        status: "succeeded",
+        verificationStatus: "passed",
+        updatedAt: "2026-07-03T00:00:00.000Z",
+      },
+    });
+    store.createTask({ title: "Unverified", prompt: "still planning" });
+
+    const res = await routeApi(store, "GET", "/api/reviews", noBody);
+    expect(res?.status).toBe(200);
+    const body = res?.body as {
+      reviews: Array<{ taskId: string; verificationStatus: string }>;
+    };
+    expect(body.reviews).toEqual([
+      expect.objectContaining({
+        taskId: verified.id,
+        title: "Verified",
+        verificationStatus: "passed",
+      }),
+    ]);
+  });
+
+  it("returns the role profiles for the Software R&D department", async () => {
+    const res = await routeApi(store, "GET", "/api/role-profiles", noBody);
+    expect(res?.status).toBe(200);
+    const body = res?.body as {
+      roleProfiles: Record<string, { skillFlows: string[] }>;
+    };
+    expect(Object.keys(body.roleProfiles).sort()).toEqual([
+      "evaluator",
+      "generator",
+      "planner",
+    ]);
+    expect(body.roleProfiles.planner!.skillFlows.length).toBeGreaterThan(0);
+  });
+
   it("returns a board task progress document", async () => {
     const task = store.createTask({ title: "Progress", prompt: "do it" });
     store.updateTask(task.id, {
@@ -858,7 +954,8 @@ describe("startBoardServer", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body).toContain("Sandcastle Board");
-    expect(body).toContain("Managed agent console");
+    expect(body).toContain("Software R&D department");
+    expect(body).toContain("Local AI company");
     expect(body).toContain("--glow");
     expect(body).toContain("return html`");
     expect(body).not.toContain("html\\`");
@@ -913,6 +1010,28 @@ describe("startBoardServer", () => {
       "No interactive terminal session is attached to this task.",
     );
     expect(body).not.toContain('"phase " + currentPhase');
+  });
+
+  it("serves the company shell navigation defaulting into the Software R&D department", async () => {
+    const res = await fetch(server.url + "/");
+    const body = await res.text();
+
+    expect(body).toContain("company-nav");
+    for (const label of [
+      "Departments",
+      "Projects",
+      "Artifacts",
+      "Reviews",
+      "Settings",
+    ]) {
+      expect(body).toContain(label);
+    }
+    expect(body).toContain('useState("department")');
+    expect(body).toContain('api("/api/company")');
+    expect(body).toContain('api("/api/artifacts")');
+    expect(body).toContain('api("/api/reviews")');
+    expect(body).toContain('api("/api/role-profiles")');
+    expect(body).toContain("not yet operational");
   });
 
   it("guards the verification report button until a report exists", async () => {
