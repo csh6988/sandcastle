@@ -1,4 +1,5 @@
 import { NodeContext, NodeFileSystem } from "@effect/platform-node";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path, { join } from "node:path";
 import { styleText } from "node:util";
@@ -31,7 +32,11 @@ import {
   agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
-import { runEventEmitterLayer, type RunEvent } from "./RunEvent.js";
+import {
+  runtimeEventEmitterLayer,
+  type RuntimeEvent,
+  type RuntimeEventHandler,
+} from "./RuntimeEvent.js";
 import type { SandboxHooks } from "./SandboxLifecycle.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
@@ -365,16 +370,13 @@ export interface RunOptions<A extends AgentProvider = AgentProvider> {
   /** Logging mode (default: { type: 'file' } with auto-generated path under .sandcastle/logs/) */
   readonly logging?: LoggingOption;
   /**
-   * Optional callback invoked for each structured run event (run lifecycle,
-   * iteration boundaries, agent text/tool activity, token usage, commits).
-   *
-   * Unlike `logging.onAgentStreamEvent` — which is file-mode-only and carries
-   * agent stdout activity only — this callback works in **both** logging modes
-   * and covers the full run shape. Intended for forwarding a run to an external
-   * observability system or workflow board. Errors thrown by the callback are
-   * swallowed. See ADR 0021.
+   * Protocol-oriented runtime event stream. This is the stable internal event
+   * model for adapters such as AG-UI, ACP facades, and observability sinks.
+   * Callback errors and rejected promises are swallowed.
    */
-  readonly onRunEvent?: (event: RunEvent) => void;
+  readonly events?: {
+    readonly onRuntimeEvent?: RuntimeEventHandler;
+  };
   /** Substring(s) the agent emits to stop the iteration loop early. Matched via `includes` against agent output. (default: `"<promise>COMPLETE</promise>"`) */
   readonly completionSignal?: string | string[];
   /** Idle timeout in seconds. If the agent produces no output for this long, it fails. Default: 600 (10 minutes) */
@@ -705,26 +707,24 @@ export async function run(
     buildAgentStreamHandler(resolvedLogging),
   );
 
-  // Run-event stream — works regardless of logging mode. A thrown callback
-  // error is swallowed by the layer so a broken observer cannot kill the run.
-  const runEventLayer = runEventEmitterLayer(options.onRunEvent);
-
-  // Safe, synchronous emit for run-level lifecycle events (started/finished/
-  // failed) that happen outside the orchestrate Effect context.
-  const emitRunEvent = (event: RunEvent): void => {
-    if (!options.onRunEvent) return;
-    try {
-      options.onRunEvent(event);
-    } catch {
-      // Swallow — a broken observer must not kill the run.
+  const runId = randomUUID();
+  const emitRuntimeEvent = (event: RuntimeEvent): void => {
+    if (options.events?.onRuntimeEvent) {
+      try {
+        Promise.resolve(options.events.onRuntimeEvent(event)).catch(() => {});
+      } catch {
+        // Swallow — a broken adapter must not kill the run.
+      }
     }
   };
+
+  const runtimeEventLayer = runtimeEventEmitterLayer(emitRuntimeEvent);
 
   const runLayer = Layer.mergeAll(
     factoryLayer,
     displayLayer,
     streamEmitterLayer,
-    runEventLayer,
+    runtimeEventLayer,
   );
 
   const baseEffect = Effect.gen(function* () {
@@ -783,6 +783,7 @@ export async function run(
       signal: options.signal,
       skipPromptExpansion: isInlinePrompt,
       timeouts: options.timeouts,
+      runId,
     });
 
     const completion = buildCompletionMessage(
@@ -829,8 +830,9 @@ export async function run(
           ),
         );
 
-  emitRunEvent({
-    type: "run-started",
+  emitRuntimeEvent({
+    type: "run.started",
+    runId,
     name: options.name ?? agentName,
     agent: agentName,
     model: provider.model,
@@ -856,8 +858,9 @@ export async function run(
       evidenceError instanceof StructuredOutputError
         ? evidenceError.commits.map((c) => c.sha)
         : undefined;
-    emitRunEvent({
-      type: "run-failed",
+    emitRuntimeEvent({
+      type: "run.error",
+      runId,
       message: error instanceof Error ? error.message : String(error),
       recovery: buildRunFailureRecovery(evidenceError, {
         runLogPath:
@@ -871,10 +874,12 @@ export async function run(
     throw error;
   }
 
-  emitRunEvent({
-    type: "run-finished",
+  emitRuntimeEvent({
+    type: "run.finished",
+    runId,
     completionSignal: result.completionSignal,
     iterationsRun: result.iterations.length,
+    commits: result.commits,
     timestamp: new Date(),
   });
 

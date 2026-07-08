@@ -13,6 +13,7 @@ import {
   type TaskResumer,
 } from "./router.js";
 import { BOARD_FRONTEND_HTML } from "./frontendHtml.js";
+import type { RoleProfiles } from "./roleProfiles.js";
 import type { BoardTerminalManager } from "./terminalSession.js";
 
 export interface BoardServerOptions {
@@ -37,6 +38,8 @@ export interface BoardServerOptions {
   readonly terminalManager?: BoardTerminalManager;
   /** Host repository directory used for Board git actions. Defaults to process.cwd(). */
   readonly repoDir?: string;
+  /** Role profiles served at /api/role-profiles. Defaults to the built-in profiles. */
+  readonly roleProfiles?: RoleProfiles;
 }
 
 export interface BoardServer {
@@ -193,6 +196,7 @@ export const startBoardServer = (
       options.cancelTask,
       options.repoDir ?? process.cwd(),
       options.resolveBranchMergeConflict,
+      options.roleProfiles,
     ).then((apiResponse) => {
       if (apiResponse) {
         const payload = JSON.stringify(apiResponse.body);

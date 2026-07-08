@@ -1,0 +1,52 @@
+{
+  "name": "sandcastle-desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Sandcastle desktop shell: Electron around the local project workbench and board server. Not shipped with the npm package.",
+  "main": "dist-electron/main/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
+    "dev:electron": "tsc -p tsconfig.main.json && SANDCASTLE_DESKTOP_DEV_URL=http://localhost:5273 electron .",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.main.json",
+    "dist": "npm run build && electron-builder --dir",
+    "test": "tsx --test \"tests/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "http-proxy-middleware": "^3.0.7",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "concurrently": "^10.0.3",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "tsx": "^4.22.5",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.3"
+  },
+  "build": {
+    "appId": "dev.sandcastle.desktop",
+    "productName": "Sandcastle",
+    "files": [
+      "dist-electron/**",
+      "dist/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    }
+  }
+}

@@ -217,15 +217,23 @@ The display mode where Sandcastle renders an interactive UI in the terminal with
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
 
 **Agent stream event**:
-A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`. Narrower than a **run event**, which is its logging-mode-independent superset.
+A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`. Narrower than a **runtime event**, which is its logging-mode-independent superset.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)
 
-**Run event**:
-A single item in a run's structured lifecycle stream surfaced to the caller of `run()` via the `onRunEvent` callback, working in **both** display modes. A superset of the **agent stream event**: covers run lifecycle (`run-started`/`run-finished`/`run-failed`), `iteration-started`, `agent-text`, `agent-tool-call`, token `usage` (with the **agent**'s model), and `commit`. A plain (Effect-free) discriminated union so it can be consumed by non-Effect hosts such as the **workflow board**. See ADR 0021.
-_Avoid_: "agent stream event" (narrower), "log event", "lifecycle event" (too generic)
+**Runtime event**:
+The structured lifecycle and stream event model emitted by Sandcastle core for a run. Surfaced to callers through `events.onRuntimeEvent` and used by the **workflow board**. Uses stable dotted event names such as `run.started`, `iteration.started`, `message.delta`, `tool.call`, `tool.result`, `raw`, `commit.created`, `usage.recorded`, `run.finished`, and `run.error`, all correlated by a `runId`. **Runtime events** are the source for protocol adapters such as the **AG-UI adapter** and future **ACP facade**.
+_Avoid_: "run event" (old name), "AG-UI event" (an adapter output), "ACP event" (a facade concern), "log event"
+
+**AG-UI adapter**:
+A protocol adapter that maps **runtime events** to AG-UI-style event names (`RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START`, etc.) for web UI/event-stream consumers. It does not change how Sandcastle runs an **agent** and does not make AG-UI part of core orchestration.
+_Avoid_: "AG-UI runtime" (Sandcastle runtime events remain internal), "frontend event model"
+
+**ACP facade**:
+A future runtime boundary that exposes Sandcastle to external Agent Runtime protocol clients by mapping ACP methods onto existing Sandcastle operations. The **ACP facade** wraps Sandcastle; it does not replace `run()` or the **sandbox provider** model.
+_Avoid_: "ACP core", "ACP server" (unless referring to a concrete transport implementation)
 
 **Run failure evidence**:
-Optional structured, plain (Effect-free) recovery metadata carried on a `run-failed` **run event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional; a minimal/legacy `run-failed` event without it still renders. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports. See ADR 0021.
+Optional structured, plain (Effect-free) recovery metadata carried on a `run.error` **runtime event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports.
 _Avoid_: "error details" (too generic), "failure report" (reserved for the Board verification report), "diagnostics" (overloaded with prompt diagnostics)
 
 **Run failure kind**:
@@ -239,11 +247,11 @@ The productized local coordination layer built on top of Sandcastle's orchestrat
 _Avoid_: "dashboard" (too generic), "desktop app" (one possible shell), "Rudder clone"
 
 **Workflow board**:
-A local web view of runs, started with `sandcastle board`. Consumes the **run event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
+A local web view of runs, started with `sandcastle board`. Consumes the **runtime event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
 _Avoid_: "dashboard" (too generic), "UI", "console"
 
 **Board run**:
-A single `run()` invocation as recorded on the **workflow board** -- its metadata plus fields derived from the **run event** stream (status, completion, commit count, token usage). Linked to a **board task** when launched from one.
+A single `run()` invocation as recorded on the **workflow board** -- its metadata plus fields derived from the **runtime event** stream (status, completion, commit count, token usage). Linked to a **board task** when launched from one.
 _Avoid_: "job", "session" (overloaded), conflating with the JS **iteration**
 
 **Board task**:
@@ -258,8 +266,44 @@ _Avoid_: "issue source" (conflicts with **issue tracker**), "task source" (alrea
 One of the strict responsibilities in a **board task** workflow: Planner turns requirements into reviewed plans and Board issues, Generator executes only the approved plan, and Evaluator verifies delivery against recorded evidence. A **board phase** may expose the current **Board role**, but the role is the responsibility boundary rather than the UI step name.
 _Avoid_: "agent role" (too broad), "worker" (ambiguous), conflating with **board phase**
 
+**Company**:
+The top-level v1 product object: the local AI company a user opens in the **control plane** -- one host machine, one `.sandcastle/` config root, one board store, and the **departments** that operate inside it. A product framing and navigation/ownership layer, not a tenant, org chart, or access-control domain. Exactly one company per control plane instance in v1. See ADR 0026.
+_Avoid_: "organization" (Rudder's enterprise term), "tenant", "workspace" (overloaded with the multi-repo workspace)
+
+**Department**:
+An execution unit inside the **company** that owns one kind of work: its workflow phases, **Board roles**, **role profiles**, task sources, artifact kinds, and verification semantics. V1 ships exactly one complete department -- the **Software R&D department** -- plus optional inert placeholder departments that only communicate the product model. Not a generic workflow engine.
+_Avoid_: "team" (role/skill boundary matters), "module" (too code-shaped), "workflow" (a department owns workflows, it is not one)
+
+**Software R&D department**:
+The first complete **department** in the v1 **company**: the current **workflow board** promoted rather than rebuilt -- a local software-development operating unit made of **Board roles**, repositories, task artifacts, review loops, and skill-guided agent work. Its PRD-to-plan-to-approval-to-execution-to-verification loop is the template future departments are measured against.
+_Avoid_: "company" (the department lives inside one), "organization" when referring to the v1 Sandcastle scope, "team" when the role/skill boundary matters, "the board" when the department product boundary is meant
+
+**Project**:
+A Desktop v1 delivery object inside a **company** that moves through PRD, Design, R&D Execution, Review, and Artifacts. A **Repository** may be linked to a Project as an R&D resource, but it is not the Project itself.
+_Avoid_: "repository" when referring to the delivery object, "board task" when referring to the whole PRD-to-artifacts object
+
+**Local AI company directory**:
+The host directory a user opens in Desktop v1 to store company-owned project files, project metadata, board metadata, skill flows, role profiles, and indexes. Electron `userData` stores personal preferences only, not company/project source data.
+_Avoid_: "repository", "workspace" (overloaded), "userData" when referring to company-owned data
+
+**AI member**:
+A role-like execution member inside a **department**, such as Planner, Designer, Generator, or Evaluator, with responsibilities and bound **skill flows**. An AI member is not an always-on chat persona and does not imply default LLM activity while browsing or configuring Desktop.
+_Avoid_: "chat agent", "persona", "bot"
+
+**Role profile**:
+The configuration behind a **Board role**: its responsibility boundary, allowed actions, preferred skill flows, prompt guidance, and optional agent/model preferences. Role profiles belong to a **department**, not to the **company** or an **agent provider** -- any agent can fill the same role. A role profile describes how a role should work; it is not the same as an **agent provider**.
+_Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too narrow)
+
+**Skill flow**:
+A selected set of skills and operating instructions used for a specific kind of software work, such as planning, implementation, review, debugging, or merge-conflict resolution. A **role profile** or **AI member** may choose one or more skill flows, but the flow should still be loaded progressively instead of copying every available skill into context.
+_Avoid_: "skill bundle" when it implies loading everything at once, "prompt pack" (too narrow)
+
+**Desktop shell**:
+The optional Electron app in `apps/desktop/` that wraps the local **control plane** as a project-first **company** workbench. It selects a **local AI company directory**, supervises board processes only for R&D execution against linked repositories, serves the React renderer plus a reverse proxy to the active board API, and raises native notifications; it does not host CopilotKit or own orchestration semantics. See ADR 0027.
+_Avoid_: "the app" (ambiguous), "desktop board" (the **workflow board** stays the embedded default UI), "client" (too generic)
+
 **Evaluator run**:
-The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **run events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
+The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **runtime events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
 _Avoid_: "static verification", "post-run summary", treating a successful **completion signal** as proof of delivery
 
 **Board verification report**:
@@ -296,7 +340,7 @@ _Avoid_: "auto-merge" (implies no human target selection), "deploy" (too broad)
 
 **Phase session**:
 An interactive terminal session attached to a specific **board task** and **board phase**. A phase session lets the user collaborate with the **agent** during that phase, and can advance the workflow by emitting the structured phase completion signal. Its process exit does not determine the **board task** result; the file-backed board task workflow does.
-_Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **run event** backed execution)
+_Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **runtime event** backed execution)
 
 **Artifact**:
 A durable output from a **board run** or **board task** that a human can inspect, such as a file path, generated document, screenshot, preview URL, pull request link, or plan artifact. Artifacts are evidence of work, distinct from raw agent transcript text.

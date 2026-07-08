@@ -11,7 +11,7 @@ import {
   type FSWatcher,
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type { PrdVisualAsset } from "./prdAssets.js";
 import { issueStatusForRun, renderTaskProgress } from "./taskProgress.js";
 import {
@@ -26,24 +26,24 @@ export type {
 } from "./taskVerification.js";
 
 /**
- * Lifecycle status of a board run, derived from the run-event stream.
+ * Lifecycle status of a board run, derived from the runtime event stream.
  */
 export type BoardRunStatus = "running" | "succeeded" | "failed";
 
 /**
- * A run-event with its `Date` timestamp serialized to an ISO string, as stored
+ * A runtime event with its `Date` timestamp serialized to an ISO string, as stored
  * on disk and sent to the board frontend.
  */
-export type SerializedRunEvent = RunEvent extends infer T
+export type SerializedRuntimeEvent = RuntimeEvent extends infer T
   ? T extends { timestamp: Date }
     ? Omit<T, "timestamp"> & { timestamp: string }
     : T
   : never;
 
-/** A stored run-event plus its monotonically increasing per-run sequence. */
-export interface BoardRunEventRecord {
+/** A stored runtime event plus its monotonically increasing per-run sequence. */
+export interface BoardRuntimeEventRecord {
   readonly seq: number;
-  readonly event: SerializedRunEvent;
+  readonly event: SerializedRuntimeEvent;
 }
 
 /** A run as surfaced on the board — metadata plus fields derived from events. */
@@ -64,7 +64,7 @@ export interface BoardRunRecord {
   readonly error?: string;
   readonly commits: number;
   readonly totalTokens?: number;
-  readonly lastEventType?: RunEvent["type"];
+  readonly lastEventType?: RuntimeEvent["type"];
   readonly lastEventAt?: string;
   /** Optional link to a board task (set for workspace task runs). */
   readonly taskId?: string;
@@ -268,7 +268,7 @@ export interface BoardTaskArtifact {
   readonly createdAt: string;
 }
 
-/** Input for creating a run, taken from a `run-started` event. */
+/** Input for creating a run, taken from a `run.started` event. */
 export interface CreateRunInput {
   readonly name: string;
   readonly agent: string;
@@ -284,16 +284,16 @@ export interface CreateRunInput {
 export type BoardChange =
   | { readonly kind: "run-updated"; readonly run: BoardRunRecord }
   | {
-      readonly kind: "run-event";
+      readonly kind: "runtime-event";
       readonly runId: string;
-      readonly record: BoardRunEventRecord;
+      readonly record: BoardRuntimeEventRecord;
     }
   | { readonly kind: "task-updated"; readonly task: BoardTaskRecord };
 
 type ChangeListener = (change: BoardChange) => void;
 
-const serializeEvent = (event: RunEvent): SerializedRunEvent =>
-  JSON.parse(JSON.stringify(event)) as SerializedRunEvent;
+const serializeEvent = (event: RuntimeEvent): SerializedRuntimeEvent =>
+  JSON.parse(JSON.stringify(event)) as SerializedRuntimeEvent;
 
 const INTERACTIVE_WORKFLOW_PHASES = new Set<BoardTaskWorkflowPhase>([
   "classifying",
@@ -777,7 +777,7 @@ export class BoardStore {
     return join(this.runsDir, `${id}.json`);
   }
 
-  private runEventsPath(id: string): string {
+  private runtimeEventsPath(id: string): string {
     return join(this.runsDir, `${id}.events.ndjson`);
   }
 
@@ -832,16 +832,20 @@ export class BoardStore {
         error: message,
       };
       this.writeRun(failed);
-      const record: BoardRunEventRecord = {
+      const record: BoardRuntimeEventRecord = {
         seq: this.nextSeq(run.id),
         event: {
-          type: "run-failed",
+          type: "run.error",
+          runId: run.id,
           message,
           timestamp: now,
         },
       };
-      appendFileSync(this.runEventsPath(run.id), JSON.stringify(record) + "\n");
-      this.publish({ kind: "run-event", runId: run.id, record });
+      appendFileSync(
+        this.runtimeEventsPath(run.id),
+        JSON.stringify(record) + "\n",
+      );
+      this.publish({ kind: "runtime-event", runId: run.id, record });
     }
     for (const task of this.listTasks()) {
       if (task.status !== "running") continue;
@@ -922,13 +926,13 @@ export class BoardStore {
     }
   }
 
-  getEvents(id: string): BoardRunEventRecord[] {
-    const path = this.runEventsPath(id);
+  getEvents(id: string): BoardRuntimeEventRecord[] {
+    const path = this.runtimeEventsPath(id);
     if (!existsSync(path)) return [];
     return readFileSync(path, "utf8")
       .split("\n")
       .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as BoardRunEventRecord);
+      .map((l) => JSON.parse(l) as BoardRuntimeEventRecord);
   }
 
   private nextSeq(runId: string): number {
@@ -946,16 +950,19 @@ export class BoardStore {
   }
 
   /**
-   * Append a run-event for `runId`, persist it, fold its effect into the run
+   * Append a runtime event for `runId`, persist it, fold its effect into the run
    * record (status, completion, commit count), and broadcast to subscribers.
    */
-  recordEvent(runId: string, event: RunEvent): BoardRunEventRecord {
-    const record: BoardRunEventRecord = {
+  recordEvent(runId: string, event: RuntimeEvent): BoardRuntimeEventRecord {
+    const record: BoardRuntimeEventRecord = {
       seq: this.nextSeq(runId),
       event: serializeEvent(event),
     };
-    appendFileSync(this.runEventsPath(runId), JSON.stringify(record) + "\n");
-    this.publish({ kind: "run-event", runId, record });
+    appendFileSync(
+      this.runtimeEventsPath(runId),
+      JSON.stringify(record) + "\n",
+    );
+    this.publish({ kind: "runtime-event", runId, record });
 
     const run = this.getRun(runId);
     if (run) {
@@ -964,12 +971,12 @@ export class BoardStore {
         lastEventType: event.type,
         lastEventAt: event.timestamp.toISOString(),
       };
-      if (event.type === "iteration-started") {
+      if (event.type === "iteration.started") {
         next = {
           ...next,
           currentIteration: event.iteration,
         };
-      } else if (event.type === "usage") {
+      } else if (event.type === "usage.recorded") {
         const usage = event.usage;
         next = {
           ...next,
@@ -981,21 +988,19 @@ export class BoardStore {
             usage.cacheReadInputTokens +
             usage.outputTokens,
         };
-      } else if (event.type === "agent-text") {
+      } else if (event.type === "message.delta") {
         next = { ...next, currentIteration: event.iteration };
-      } else if (event.type === "agent-tool-call") {
+      } else if (event.type === "tool.call") {
         next = { ...next, currentIteration: event.iteration };
-      } else if (event.type === "agent-tool-result") {
+      } else if (event.type === "tool.result") {
         next = { ...next, currentIteration: event.iteration };
-      } else if (event.type === "agent-idle-warning") {
-        next = { ...next, currentIteration: event.iteration };
-      } else if (event.type === "commit") {
+      } else if (event.type === "commit.created") {
         next = {
           ...next,
           commits: run.commits + 1,
           currentIteration: event.iteration,
         };
-      } else if (event.type === "run-finished") {
+      } else if (event.type === "run.finished") {
         next = {
           ...next,
           status: "succeeded",
@@ -1004,7 +1009,7 @@ export class BoardStore {
           iterationsRun: event.iterationsRun,
           currentIteration: event.iterationsRun,
         };
-      } else if (event.type === "run-failed") {
+      } else if (event.type === "run.error") {
         next = {
           ...next,
           status: "failed",
@@ -1018,11 +1023,11 @@ export class BoardStore {
     return record;
   }
 
-  /** Aggregate per-model token usage from a run's `usage` events. */
+  /** Aggregate per-model token usage from a run's `usage.recorded` events. */
   aggregateUsageByModel(runId: string): BoardUsageByModel[] {
     const totals = new Map<string, BoardUsageByModel>();
     for (const { event } of this.getEvents(runId)) {
-      if (event.type !== "usage") continue;
+      if (event.type !== "usage.recorded") continue;
       const model = event.model ?? "unknown";
       const prev =
         totals.get(model) ??
@@ -1291,7 +1296,7 @@ export class BoardStore {
 
   /**
    * Watch the on-disk store for changes made by *other* processes (e.g. a
-   * `sandcastle run` writing run events to the same board directory) and
+   * `sandcastle run` writing runtime events to the same board directory) and
    * republish them to in-process subscribers, so a single board server can
    * surface runs it did not itself launch.
    *
@@ -1356,27 +1361,27 @@ export class BoardStore {
 }
 
 /**
- * Build an `onRunEvent` callback that records a single run into the store.
+ * Build a runtime-event callback that records a single run into the store.
  *
- * The run is created lazily on the `run-started` event, so the recorder needs
+ * The run is created lazily on the `run.started` event, so the recorder needs
  * no run id up front. Optional `taskId`/`repo` link the run to a board task
  * (used by the workspace task launcher).
  */
 export const createRunRecorder = (
   store: BoardStore,
   link?: { taskId?: string; repo?: string },
-): ((event: RunEvent) => void) => {
+): ((event: RuntimeEvent) => void) => {
   let runId: string | undefined;
   let closed = false;
-  return (event: RunEvent) => {
-    if (event.type === "run-started") {
+  return (event: RuntimeEvent) => {
+    if (event.type === "run.started") {
       runId = store.createRun({
-        name: event.name,
-        agent: event.agent,
+        name: event.name ?? event.agent ?? "sandcastle",
+        agent: event.agent ?? "unknown",
         model: event.model,
-        sandbox: event.sandbox,
-        branch: event.branch,
-        maxIterations: event.maxIterations,
+        sandbox: event.sandbox ?? "unknown",
+        branch: event.branch ?? "",
+        maxIterations: event.maxIterations ?? 1,
         taskId: link?.taskId,
         repo: link?.repo,
       }).id;
@@ -1384,7 +1389,7 @@ export const createRunRecorder = (
     }
     if (!runId || closed) return;
     store.recordEvent(runId, event);
-    if (event.type === "run-failed" || event.type === "run-finished") {
+    if (event.type === "run.error" || event.type === "run.finished") {
       closed = true;
       runId = undefined;
     }

@@ -11,7 +11,7 @@ import {
   type BoardTaskWorkflowStatus,
 } from "./BoardStore.js";
 import type { TaskRunner, TaskRunResult } from "./launchTask.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import { assertUniqueWorkspaceTaskPlanRepositories } from "../runWorkspaceTask.js";
 import type {
   WorkspaceTaskPlan,
@@ -43,7 +43,7 @@ interface WorkflowState {
 
 interface WorkflowCallbacks {
   readonly onPlan: (plan: BoardTaskPlan) => void;
-  readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
+  readonly onRepoRuntimeEvent: (repo: string, event: RuntimeEvent) => void;
 }
 
 export interface LangGraphPlanResult {
@@ -89,7 +89,7 @@ export interface CreateLangGraphTaskWorkflowOptions {
     readonly taskId: string;
     readonly title: string;
     readonly prompt: string;
-    readonly onPlannerRunEvent: (event: RunEvent) => void;
+    readonly onPlannerRuntimeEvent: (event: RuntimeEvent) => void;
   }) => Promise<LangGraphPlanResult>;
   readonly planFromPhase?: (args: {
     readonly taskId: string;
@@ -102,7 +102,7 @@ export interface CreateLangGraphTaskWorkflowOptions {
     readonly title: string;
     readonly prompt: string;
     readonly plan: WorkspaceTaskPlan;
-    readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
+    readonly onRepoRuntimeEvent: (repo: string, event: RuntimeEvent) => void;
     readonly signal: AbortSignal;
   }) => Promise<Record<string, WorkspaceTaskRepositoryResult>>;
   readonly evaluate?: BoardTaskEvaluator;
@@ -530,8 +530,8 @@ export const createLangGraphTaskWorkflow = (
   };
 
   const createStoreCallbacks = (taskId: string): WorkflowCallbacks => {
-    const recorders = new Map<string, (event: RunEvent) => void>();
-    const onRepoRunEvent = (repo: string, event: RunEvent) => {
+    const recorders = new Map<string, (event: RuntimeEvent) => void>();
+    const onRepoRuntimeEvent = (repo: string, event: RuntimeEvent) => {
       let recorder = recorders.get(repo);
       if (!recorder) {
         recorder = createRunRecorder(options.store, { taskId, repo });
@@ -541,7 +541,7 @@ export const createLangGraphTaskWorkflow = (
     };
     return {
       onPlan: (plan) => options.store.updateTask(taskId, { plan }),
-      onRepoRunEvent,
+      onRepoRuntimeEvent,
     };
   };
 
@@ -627,7 +627,7 @@ export const createLangGraphTaskWorkflow = (
   const run: TaskRunner = async (args) => {
     callbacksByTask.set(args.taskId, {
       onPlan: args.onPlan,
-      onRepoRunEvent: args.onRepoRunEvent,
+      onRepoRuntimeEvent: args.onRepoRuntimeEvent,
     });
     try {
       throwIfCancelled(args.taskId);

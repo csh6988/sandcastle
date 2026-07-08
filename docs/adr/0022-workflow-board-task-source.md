@@ -4,7 +4,7 @@ Until now a Sandcastle run could only be observed in the terminal or by tailing
 a **run log**. There was no way to see runs at a glance, watch live agent
 activity outside the terminal, or assign work without editing files and invoking
 the CLI. We add a **workflow board**: a local web view started with
-`sandcastle board` that consumes the **run event** stream (ADR 0021) to persist
+`sandcastle board` that consumes the **runtime event** stream (ADR 0028) to persist
 and visualize runs, and that can itself create work — a **board task** — that is
 fanned out into per-repository **board runs** via `runWorkspaceTask`.
 
@@ -32,8 +32,8 @@ fanned out into per-repository **board runs** via `runWorkspaceTask`.
   without a real agent and avoiding a hard coupling to a specific provider.
 - **Write-back via the existing workspace task pipeline.** Creating a board task
   triggers `runWorkspaceTask`, which plans and fans the work out per repository.
-  Each repo's `run()` forwards its **run event** stream through a new
-  `onRepoRunEvent` option, recorded into the store and linked to the task. The
+  Each repo's `run()` forwards its **runtime event** stream through
+  `onRepoRuntimeEvent`, recorded into the store and linked to the task. The
   board is therefore a **task** source that reuses the existing pipeline rather
   than introducing a parallel execution path.
 - **Local by default.** The server binds to `127.0.0.1`. Remote/team deployment
@@ -48,7 +48,7 @@ fanned out into per-repository **board runs** via `runWorkspaceTask`.
   build risk for an optional local feature outweigh the query benefits at this
   scale; file-backed storage is adequate and dependency-free.
 - **Tail the run log to populate the board.** Rejected: the log is
-  human-readable text without stable structure; the run-event stream is the
+  human-readable text without stable structure; the runtime event stream is the
   intended structured seam (ADR 0021).
 
 ## Consequences

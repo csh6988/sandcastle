@@ -177,8 +177,53 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       .modal input:focus, .modal textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(138, 180, 255, .14); }
       .modal textarea { min-height: 120px; resize: vertical; }
       .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+      .app-shell { display: flex; min-height: 100vh; }
+      .company-nav {
+        width: 216px; flex-shrink: 0; border-right: 1px solid var(--border);
+        background: rgba(7, 10, 18, .78); backdrop-filter: blur(16px);
+        padding: 18px 12px; position: sticky; top: 0; height: 100vh;
+        display: flex; flex-direction: column; gap: 3px; overflow: auto;
+      }
+      .company-nav .company-brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 14px; }
+      .company-nav .company-name { font-weight: 850; font-size: 15px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+      .company-nav .company-kind { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; }
+      .company-nav .nav-section { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; padding: 12px 8px 4px; }
+      .company-nav .nav-item {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        background: transparent; border: 1px solid transparent; border-radius: 11px;
+        color: var(--muted); padding: 8px 10px; font: inherit; font-weight: 650;
+        cursor: pointer; text-align: left; box-shadow: none;
+      }
+      .company-nav .nav-item:hover { color: var(--text); border-color: var(--border); transform: none; box-shadow: none; }
+      .company-nav .nav-item.on { color: var(--text); background: rgba(138, 180, 255, .14); border-color: rgba(138, 180, 255, .3); }
+      .company-nav .nav-item .nav-hint { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+      .app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .company-page { padding: 22px; max-width: 1120px; overflow: auto; }
+      .company-page h2 { margin: 0 0 4px; font-size: 20px; letter-spacing: -.02em; }
+      .company-page .page-sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+      .dept-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+      .dept-card { background: linear-gradient(180deg, rgba(16, 24, 39, .9), rgba(10, 16, 29, .9)); border: 1px solid var(--border); border-radius: 16px; padding: 15px; }
+      .dept-card.operational { cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s; }
+      .dept-card.operational:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 0 34px var(--glow); }
+      .dept-card .dept-name { font-weight: 800; margin-bottom: 4px; }
+      .dept-card .dept-desc { color: var(--muted); font-size: 12px; }
+      .dept-card .badge { margin-top: 10px; display: inline-block; }
+      .badge.placeholder { background: rgba(148, 163, 184, .1); color: var(--muted); border-color: rgba(148, 163, 184, .22); }
+      .role-card { background: linear-gradient(180deg, rgba(16, 24, 39, .9), rgba(10, 16, 29, .9)); border: 1px solid var(--border); border-radius: 16px; padding: 15px; margin-bottom: 14px; }
+      .role-card .role-name { font-weight: 800; margin-bottom: 2px; }
+      .role-card .role-resp { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+      .role-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 8px 0 3px; }
+      .role-card ul { margin: 0; padding-left: 18px; font-size: 12px; }
+      .flow-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .flow-chip { background: rgba(138, 180, 255, .12); border: 1px solid rgba(138, 180, 255, .28); color: var(--accent); border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 700; }
+      .clickable-row { cursor: pointer; }
+      .clickable-row:hover { border-color: var(--border-strong); }
       @media (max-width: 980px) {
         header { align-items: flex-start; flex-wrap: wrap; gap: 14px; }
+        .app-shell { flex-direction: column; }
+        .company-nav { width: auto; height: auto; position: static; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
+        .company-nav .company-brand { padding: 0 10px 0 4px; }
+        .company-nav .nav-section { display: none; }
         .layout { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 71px); }
         .board { padding: 18px; }
         .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -261,7 +306,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       };
       const formatRunActivityRecord = (record) => {
         const e = record.event;
-        if (e.type === "run-started") {
+        if (e.type === "run.started") {
           return [
             terminalPrefix(e, "$") + "run started: " + e.name,
             "  agent: " + e.agent + (e.model ? " · " + e.model : ""),
@@ -269,15 +314,16 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             "  max iterations: " + e.maxIterations,
           ];
         }
-        if (e.type === "iteration-started") return [terminalPrefix(e, "==>") + "iteration " + e.iteration + "/" + e.maxIterations];
-        if (e.type === "agent-text") return [indentTerminalText(terminalPrefix(e, "agent>"), e.message)];
-        if (e.type === "agent-tool-call") return [indentTerminalText(terminalPrefix(e, "tool>"), e.name + " " + e.formattedArgs)];
-        if (e.type === "agent-tool-result") return [indentTerminalText(terminalPrefix(e, "result>"), e.content)];
-        if (e.type === "agent-idle-warning") return [terminalPrefix(e, "warn>") + "Agent idle for " + e.minutes + " minute" + (e.minutes === 1 ? "" : "s")];
-        if (e.type === "usage") return [terminalPrefix(e, "usage>") + fmtTokens(eventTokenTotal(e)) + " tokens" + (e.model ? " · " + e.model : "") + " · iteration " + e.iteration];
-        if (e.type === "commit") return [terminalPrefix(e, "commit>") + e.sha.slice(0, 9) + " · iteration " + e.iteration];
-        if (e.type === "run-finished") return [terminalPrefix(e, "done>") + "finished after " + e.iterationsRun + " iteration" + (e.iterationsRun === 1 ? "" : "s") + (e.completionSignal ? " · " + e.completionSignal : "")];
-        if (e.type === "run-failed") return [indentTerminalText(terminalPrefix(e, "failed>"), e.message)];
+        if (e.type === "iteration.started") return [terminalPrefix(e, "==>") + "iteration " + e.iteration + "/" + e.maxIterations];
+        if (e.type === "iteration.finished") return [terminalPrefix(e, "<==") + "iteration " + e.iteration + " finished"];
+        if (e.type === "message.delta") return [indentTerminalText(terminalPrefix(e, "agent>"), e.text)];
+        if (e.type === "tool.call") return [indentTerminalText(terminalPrefix(e, "tool>"), e.name + " " + e.args)];
+        if (e.type === "tool.result") return [indentTerminalText(terminalPrefix(e, "result>"), e.content)];
+        if (e.type === "usage.recorded") return [terminalPrefix(e, "usage>") + fmtTokens(eventTokenTotal(e)) + " tokens" + (e.model ? " · " + e.model : "") + " · iteration " + e.iteration];
+        if (e.type === "commit.created") return [terminalPrefix(e, "commit>") + e.sha.slice(0, 9) + " · iteration " + e.iteration];
+        if (e.type === "raw") return [indentTerminalText(terminalPrefix(e, "raw>"), e.line)];
+        if (e.type === "run.finished") return [terminalPrefix(e, "done>") + "finished after " + e.iterationsRun + " iteration" + (e.iterationsRun === 1 ? "" : "s") + (e.completionSignal ? " · " + e.completionSignal : "")];
+        if (e.type === "run.error") return [indentTerminalText(terminalPrefix(e, "failed>"), e.message)];
         return [terminalPrefix(e, "event>") + e.type];
       };
       const summarizeRunProgress = (records, run) => {
@@ -292,24 +338,24 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         for (const record of records) {
           const e = record.event;
           lastType = e.type;
-          if (e.type === "run-started") {
+          if (e.type === "run.started") {
             maxIterations = e.maxIterations;
             status = status || "running";
-          } else if (e.type === "iteration-started") {
+          } else if (e.type === "iteration.started") {
             currentIteration = e.iteration;
             maxIterations = e.maxIterations;
-          } else if (e.type === "usage") {
+          } else if (e.type === "usage.recorded") {
             currentIteration = e.iteration;
             totalTokens += eventTokenTotal(e);
           } else if (e.iteration) {
             currentIteration = e.iteration;
           }
-          if (e.type === "commit") commits += 1;
-          if (e.type === "run-finished") {
+          if (e.type === "commit.created") commits += 1;
+          if (e.type === "run.finished") {
             status = "succeeded";
             currentIteration = e.iterationsRun;
           }
-          if (e.type === "run-failed") {
+          if (e.type === "run.error") {
             status = "failed";
             failure = e.message;
           }
@@ -377,7 +423,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           const es = new EventSource("/api/stream");
           es.addEventListener("change", (m) => {
             const c = JSON.parse(m.data);
-            if (c.kind === "run-event" && c.runId === runId) {
+            if (c.kind === "runtime-event" && c.runId === runId) {
               setEvents((prev) => [...prev, c.record]);
             }
           });
@@ -946,6 +992,104 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         </div>\`;
       }
 
+      function DepartmentsPage({ company, onEnterDepartment }) {
+        const departments = (company && company.departments) || [];
+        return html\`<div class="company-page">
+          <h2>Departments</h2>
+          <div class="page-sub">Execution units inside this company. V1 ships one complete department: Software R&D.</div>
+          <div class="dept-grid">
+            \${departments.map((d) => html\`<div class=\${"dept-card " + (d.operational ? "operational" : "")} key=\${d.id} onClick=\${() => { if (d.operational) onEnterDepartment(); }}>
+              <div class="dept-name">\${d.name}</div>
+              <div class="dept-desc">\${d.description}</div>
+              <span class=\${"badge " + (d.operational ? "succeeded" : "placeholder")}>\${d.operational ? "operational" : "not yet operational"}</span>
+            </div>\`)}
+          </div>
+        </div>\`;
+      }
+
+      function ProjectsPage({ company }) {
+        const projects = (company && company.projects) || [];
+        return html\`<div class="company-page">
+          <h2>Projects</h2>
+          <div class="page-sub">Repositories this company operates on, projected from .sandcastle/workspace.json.</div>
+          \${projects.length === 0
+            ? html\`<div class="notice">No workspace repositories found. Add repositories to .sandcastle/workspace.json to give departments a workspace.</div>\`
+            : html\`<div class="detail-list">\${projects.map((p) => html\`<div class="repo-chip" key=\${p.name}>
+                <div class="rrepo">\${p.name}\${p.kind ? html\`<span class="rmeta"> · \${p.kind}</span>\` : null}</div>
+                <div class="rmeta">\${p.cwd}</div>
+                \${p.description ? html\`<div class="rmeta">\${p.description}</div>\` : null}
+              </div>\`)}</div>\`}
+        </div>\`;
+      }
+
+      function ArtifactsPage({ onOpenTask }) {
+        const [artifacts, setArtifacts] = useState(null);
+        useEffect(() => {
+          api("/api/artifacts").then((body) => setArtifacts(body.artifacts || [])).catch(() => setArtifacts([]));
+        }, []);
+        if (artifacts === null) return html\`<div class="company-page"><h2>Artifacts</h2><div class="empty">Loading…</div></div>\`;
+        return html\`<div class="company-page">
+          <h2>Artifacts</h2>
+          <div class="page-sub">Durable outputs recorded across all department tasks. Click an artifact to open its task.</div>
+          \${artifacts.length === 0
+            ? html\`<div class="notice">No artifacts have been recorded yet. Approved plans, progress documents, issues, and verification reports appear here.</div>\`
+            : html\`<div class="artifact-list">\${artifacts.map((a) => html\`
+                <div class="artifact-row clickable-row" key=\${a.taskId + ":" + a.kind + ":" + a.absolutePath} onClick=\${() => onOpenTask(a.taskId)}>
+                  <div class="kind">\${a.kind} · \${a.taskTitle}</div>
+                  <div class="path" title=\${a.absolutePath}>\${a.displayPath}</div>
+                  <div class="time">\${new Date(a.createdAt).toLocaleString()}</div>
+                </div>\`)}</div>\`}
+        </div>\`;
+      }
+
+      function ReviewsPage({ onOpenTask }) {
+        const [reviews, setReviews] = useState(null);
+        useEffect(() => {
+          api("/api/reviews").then((body) => setReviews(body.reviews || [])).catch(() => setReviews([]));
+        }, []);
+        if (reviews === null) return html\`<div class="company-page"><h2>Reviews</h2><div class="empty">Loading…</div></div>\`;
+        return html\`<div class="company-page">
+          <h2>Reviews</h2>
+          <div class="page-sub">Verified tasks awaiting human judgment. Open a task to read its verification report and evidence.</div>
+          \${reviews.length === 0
+            ? html\`<div class="notice">No verified tasks yet. Tasks appear here after the Evaluator writes a verification report.</div>\`
+            : html\`<div class="detail-list">\${reviews.map((r) => html\`<div class="repo-chip clickable-row" key=\${r.taskId} onClick=\${() => onOpenTask(r.taskId)}>
+                <div class="rrepo">\${r.title}</div>
+                <div class="rmeta">
+                  <span class=\${"badge " + (r.verificationStatus === "passed" || r.verificationStatus === "infra-warning" ? "succeeded" : "failed")}>\${r.verificationStatus}</span>
+                  \${r.finishedAt ? html\`<span> · finished \${new Date(r.finishedAt).toLocaleString()}</span>\` : null}
+                </div>
+              </div>\`)}</div>\`}
+        </div>\`;
+      }
+
+      function SettingsPage() {
+        const [profiles, setProfiles] = useState(null);
+        useEffect(() => {
+          api("/api/role-profiles").then((body) => setProfiles(body.roleProfiles || {})).catch(() => setProfiles({}));
+        }, []);
+        if (profiles === null) return html\`<div class="company-page"><h2>Settings</h2><div class="empty">Loading…</div></div>\`;
+        const order = ["planner", "generator", "evaluator"];
+        return html\`<div class="company-page">
+          <h2>Settings</h2>
+          <div class="page-sub">Role profiles for the Software R&D department. Override them in .sandcastle/role-profiles.json; skill flows load progressively via .sandcastle/SKILL_ROUTER.md.</div>
+          \${order.filter((role) => profiles[role]).map((role) => {
+            const p = profiles[role];
+            return html\`<div class="role-card" key=\${role}>
+              <div class="role-name">\${p.label}</div>
+              <div class="role-resp">\${p.responsibility}</div>
+              <div class="label">Skill flows (progressive)</div>
+              <div class="flow-chips">\${p.skillFlows.map((flow) => html\`<span class="flow-chip" key=\${flow}>\${flow}</span>\`)}</div>
+              <div class="label">Allowed</div>
+              <ul>\${p.allowedActions.map((a, i) => html\`<li key=\${i}>\${a}</li>\`)}</ul>
+              <div class="label">Do not</div>
+              <ul>\${p.forbiddenActions.map((a, i) => html\`<li key=\${i}>\${a}</li>\`)}</ul>
+              \${p.agent || p.model ? html\`<div class="label">Preferences</div><div class="rmeta">\${[p.agent, p.model].filter(Boolean).join(" · ")}</div>\` : null}
+            </div>\`;
+          })}
+        </div>\`;
+      }
+
       function App() {
         const [runs, setRuns] = useState([]);
         const [tasks, setTasks] = useState([]);
@@ -953,6 +1097,11 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         const [showModal, setShowModal] = useState(false);
         const [refreshKey, setRefreshKey] = useState(0);
         const [view, setView] = useState("task");
+        const [nav, setNav] = useState("department");
+        const [company, setCompany] = useState(null);
+        useEffect(() => {
+          api("/api/company").then(setCompany).catch(() => setCompany(null));
+        }, []);
         const [detailWidth, setDetailWidth] = useState(() => Number(localStorage.getItem("sandcastle:detailWidth")) || 500);
         const [draggingDetail, setDraggingDetail] = useState(false);
 
@@ -1005,7 +1154,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
               });
               setSelected((cur) => cur ?? { type: "task", id: c.task.id });
             }
-            if (c.kind === "run-event") setRefreshKey((k) => k + 1);
+            if (c.kind === "runtime-event") setRefreshKey((k) => k + 1);
           });
           return () => es.close();
         }, []);
@@ -1015,13 +1164,24 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         const selectedRun = runs.find((r) => r.id === selectedRunId) || null;
         const selectedTask = tasks.find((t) => t.id === selectedTaskId) || null;
         const selectedTaskRuns = selectedTask ? runs.filter((r) => r.taskId === selectedTask.id) : [];
+        const openTask = (taskId) => {
+          setSelected({ type: "task", id: taskId });
+          setNav("department");
+        };
+        const NAV_ITEMS = [
+          { id: "departments", label: "Departments" },
+          { id: "projects", label: "Projects" },
+          { id: "artifacts", label: "Artifacts" },
+          { id: "reviews", label: "Reviews" },
+          { id: "settings", label: "Settings" },
+        ];
 
-        return html\`<div>
+        const departmentView = html\`<div>
           <header>
             <div class="brand">
               <div class="brand-mark">S</div>
               <div>
-                <div class="tagline">Managed agent console</div>
+                <div class="tagline">Software R&D department</div>
                 <h1>Sandcastle Board</h1>
                 <span class="dot">\${runs.length} run\${runs.length === 1 ? "" : "s"} · \${tasks.length} task\${tasks.length === 1 ? "" : "s"}</span>
               </div>
@@ -1061,6 +1221,35 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             <div class="detail">
               <\${Detail} run=\${selectedRun} task=\${selectedTask} taskRuns=\${selectedTaskRuns} onSelectRun=\${(id) => setSelected({ type: "run", id })} refreshKey=\${refreshKey} />
             </div>
+          </div>
+        </div>\`;
+
+        return html\`<div class="app-shell">
+          <nav class="company-nav">
+            <div class="company-brand">
+              <div class="brand-mark">S</div>
+              <div>
+                <div class="company-name">\${(company && company.name) || "Sandcastle"}</div>
+                <div class="company-kind">Local AI company</div>
+              </div>
+            </div>
+            <div class="nav-section">Departments</div>
+            <button class=\${"nav-item " + (nav === "department" ? "on" : "")} onClick=\${() => setNav("department")}>
+              <span>Software R&D</span>
+              <span class="nav-hint">active</span>
+            </button>
+            <div class="nav-section">Company</div>
+            \${NAV_ITEMS.map((item) => html\`<button class=\${"nav-item " + (nav === item.id ? "on" : "")} key=\${item.id} onClick=\${() => setNav(item.id)}>
+              <span>\${item.label}</span>
+            </button>\`)}
+          </nav>
+          <div class="app-main">
+            \${nav === "department" ? departmentView : null}
+            \${nav === "departments" ? html\`<\${DepartmentsPage} company=\${company} onEnterDepartment=\${() => setNav("department")} />\` : null}
+            \${nav === "projects" ? html\`<\${ProjectsPage} company=\${company} />\` : null}
+            \${nav === "artifacts" ? html\`<\${ArtifactsPage} onOpenTask=\${openTask} />\` : null}
+            \${nav === "reviews" ? html\`<\${ReviewsPage} onOpenTask=\${openTask} />\` : null}
+            \${nav === "settings" ? html\`<\${SettingsPage} />\` : null}
           </div>
           \${showModal ? html\`<\${NewTaskModal} onClose=\${() => setShowModal(false)} onCreated=\${load} />\` : null}
         </div>\`;

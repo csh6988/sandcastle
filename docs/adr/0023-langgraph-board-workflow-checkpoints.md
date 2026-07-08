@@ -2,9 +2,9 @@
 
 The workflow board uses the existing file-backed `BoardStore` as the durable
 state for **board task** workflow progress. The Board keeps the same task UI,
-phase flow, approval gate, run-event persistence, progress documents, and
+phase flow, approval gate, runtime-event persistence, progress documents, and
 verification reports, but workflow resume now comes from task JSON, plan
-artifacts, progress documents, verification reports, and run-event files under
+artifacts, progress documents, verification reports, and runtime-event files under
 `.sandcastle/board/` instead of a SQLite checkpoint database.
 
 ## Decisions
@@ -49,7 +49,7 @@ artifacts, progress documents, verification reports, and run-event files under
   runs an **Evaluator run** when repository agent activity was recorded. The
   **Board verification report** contains Evaluator output plus the deterministic
   evidence, approved repositories, local issue status, repository execution
-  results, linked **run event** evidence, completion-signal and commit evidence,
+  results, linked **runtime event** evidence, completion-signal and commit evidence,
   errors, infrastructure/capture failures, and suggested next action.
 - **Deterministic verification remains the fallback evidence.** If no
   repository agent activity was recorded, the Evaluator is skipped and the
@@ -68,7 +68,7 @@ artifacts, progress documents, verification reports, and run-event files under
 The board workflow no longer has a separate database artifact to back up,
 inspect, or migrate. Durable recovery depends on keeping
 `.sandcastle/board/tasks/<taskId>.json`, task-scoped artifacts, run records, and
-run event streams together.
+runtime event streams together.
 
 The legacy `createLangGraphTaskWorkflow` name remains as an internal API
 compatibility point while the workflow implementation shifts to BoardStore

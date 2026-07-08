@@ -4,7 +4,9 @@ import type {
   BoardTaskWorkflowPhase,
 } from "./BoardStore.js";
 import { boardTaskView } from "./BoardStore.js";
+import { getCompanyView } from "./company.js";
 import { recoverableFailedTaskPhase } from "./langGraphTaskRunner.js";
+import { DEFAULT_ROLE_PROFILES, type RoleProfiles } from "./roleProfiles.js";
 import {
   listBoardTaskBranchMergeOptions,
   mergeBoardTaskBranch,
@@ -86,11 +88,45 @@ export const routeApi = async (
   cancelTask?: TaskCanceler,
   defaultRepoDir: string = process.cwd(),
   resolveBranchMergeConflict?: TaskBranchMergeConflictResolver,
+  roleProfiles: RoleProfiles = DEFAULT_ROLE_PROFILES,
 ): Promise<ApiResponse | undefined> => {
   if (!pathname.startsWith("/api/")) return undefined;
 
   if (method === "GET" && pathname === "/api/runs") {
     return json(200, store.listRuns());
+  }
+
+  if (method === "GET" && pathname === "/api/company") {
+    return json(200, getCompanyView(defaultRepoDir));
+  }
+
+  if (method === "GET" && pathname === "/api/role-profiles") {
+    return json(200, { roleProfiles });
+  }
+
+  if (method === "GET" && pathname === "/api/artifacts") {
+    const artifacts = store.listTasks().flatMap((task) =>
+      store.listTaskArtifacts(task.id).map((artifact) => ({
+        taskId: task.id,
+        taskTitle: task.title,
+        ...artifact,
+      })),
+    );
+    return json(200, { artifacts });
+  }
+
+  if (method === "GET" && pathname === "/api/reviews") {
+    const reviews = store
+      .listTasks()
+      .filter((task) => task.workflow?.verificationStatus !== undefined)
+      .map((task) => ({
+        taskId: task.id,
+        title: task.title,
+        status: task.status,
+        verificationStatus: task.workflow!.verificationStatus,
+        ...(task.finishedAt ? { finishedAt: task.finishedAt } : {}),
+      }));
+    return json(200, { reviews });
   }
 
   const runMatch = pathname.match(/^\/api\/runs\/([^/]+)(\/events|\/usage)?$/);

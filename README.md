@@ -533,6 +533,17 @@ const result = await run({
   },
   // logging: { type: "stdout", verbose: true }, // OR terminal mode (verbose: raw lines to stdout)
 
+  // Optional: forward protocol-facing runtime events to a UI, event stream,
+  // or observability adapter. Runtime events cover run/iteration lifecycle,
+  // agent text deltas, tool calls, raw debug lines, usage, commits, and final
+  // completion. Errors thrown or rejected by the callback are swallowed.
+  events: {
+    onRuntimeEvent: (event) => {
+      // event.type is "run.started" | "message.delta" | "tool.call" | ...
+      myRuntimeSink.write(event);
+    },
+  },
+
   // String (or array of strings) the agent emits to end the iteration loop early.
   // Default: "<promise>COMPLETE</promise>"
   completionSignal: "<promise>COMPLETE</promise>",
@@ -1243,6 +1254,23 @@ sandcastle workspace run --prd-file ./prd.md
 
 Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, task workflow state, tasks, progress documents, and verification reports to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
 
+The board frontend is the v1 **company control plane** shell (ADR 0026): a company-level left navigation with **Departments**, **Projects**, **Artifacts**, **Reviews**, and **Settings**, defaulting to the one operational department — **Software R&D** (the board itself). Projects come from `.sandcastle/workspace.json`, Artifacts aggregate every task's artifact manifest, Reviews list tasks with a verification status, and Settings shows the department's **role profiles**. The backing endpoints are `GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and `GET /api/role-profiles`.
+
+Role profiles make the Planner / Generator / Evaluator boundaries explicit configuration: each profile carries a responsibility statement, allowed and forbidden actions, progressive **skill flows** (loaded via `.sandcastle/SKILL_ROUTER.md`, never all at once), optional extra prompt guidance, and advisory agent/model preferences. Built-in defaults ship with the board; override any subset per role in `.sandcastle/role-profiles.json` (invalid files fail fast at board startup):
+
+```jsonc
+// .sandcastle/role-profiles.json
+{
+  "planner": {
+    "skillFlows": ["grill-with-docs", "to-issues"],
+    "promptGuidance": "Always confirm non-goals before planning.",
+  },
+  "evaluator": { "model": "claude-opus-4-8" },
+}
+```
+
+The resolved profiles are injected into the Planner phase prompts, the Generator execution prompt, and the Evaluator verification prompt. Agent/model preferences are advisory in v1 — the `--agent` / `--model` / `--planner-model` flags still decide which agent actually runs.
+
 Creating a task starts an interactive Board phase flow with strict roles: Planner phases classify the task, align the PRD, draft the technical plan, and generate repository issues; the Generator executes only the approved workspace plan; the Evaluator verifies the delivery against recorded evidence. Each interactive phase opens a board terminal and advances when the agent prints the phase completion marker or when you click **Complete phase / Continue**. The `creating-issues` phase must emit a valid `<workspace_plan>` block before approval. After approval, Sandcastle runs one executor per planned repository using the approved plan and the resolved workspace config, then enters `verifying` before marking the task succeeded. In planning-only mode, the approval stage and button use export-oriented copy because approval writes artifacts instead of starting AFK execution.
 
 The Board also keeps task artifacts next to each task record: `.sandcastle/board/tasks/<taskId>/progress.md`, `.sandcastle/board/tasks/<taskId>/verification.md`, `.sandcastle/board/tasks/<taskId>/issues/<repo>.md`, and `.sandcastle/board/tasks/<taskId>/artifacts.json` when planning-only export writes artifacts outside the Board data directory. Issue markdown is initialized from the approved Board issue body, then only its `status:` line is rewritten as repository runs start, fail, recover, or pass verification. Task artifacts are exposed through `GET /api/tasks/:id/artifacts` and rendered in the task detail panel.
@@ -1279,7 +1307,7 @@ sandcastle board --prd-file ./prd.md --planning-only
 
 `sandcastle board --prd-file <path> --planning-only` keeps the interactive Board planning phases and approval gate, then writes `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md` to the same artifact shape as `workspace plan` without starting repository runs. The Board records those exported paths in the task artifact manifest so they stay visible in the task detail panel after approval. While awaiting approval, the task detail panel says it will export planning artifacts and the primary action is **Export artifacts**. Pass `--artifacts-dir <dir>` to choose the output directory; otherwise PRD-backed tasks default to `.scratch/<prd-name>` and imported plans default to `.scratch/workspace-task`.
 
-Programmatically, `run()` accepts an `onRunEvent` callback that emits the same structured `RunEvent` stream (run lifecycle, iterations, agent text/tool calls, token usage with the model, and commits) in **both** logging modes — use it to forward runs to your own observability system. `runWorkspace()` accepts the same `onRunEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRunEvent`, the planner phase via `onPlannerRunEvent`, and the extracted plan via `onPlan`. See ADR 0021.
+Programmatically, `run()` accepts `events.onRuntimeEvent`, a protocol-facing `RuntimeEvent` stream with stable dotted event names (`run.started`, `iteration.started`, `iteration.finished`, `message.delta`, `tool.call`, `tool.result`, `raw`, `usage.recorded`, `commit.created`, `run.finished`, `run.error`). Use `runtimeEventToAgUiEvents()` to map these events to the minimal AG-UI-compatible event set (`RUN_STARTED`, `STEP_STARTED`, `STEP_FINISHED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END`, `RAW`, `RUN_FINISHED`, `RUN_ERROR`, plus `sandcastle.commits.created` and `sandcastle.usage.recorded` custom events). `runWorkspace()` accepts `events.onRuntimeEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRuntimeEvent`, the planner phase via `onPlannerRuntimeEvent`, and the extracted plan via `onPlan`. See ADR 0028.
 
 ### `sandcastle docker build-image`
 

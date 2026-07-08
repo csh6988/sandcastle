@@ -8,12 +8,13 @@ import {
   createRunRecorder,
   getBoardTaskStage,
 } from "./BoardStore.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 
 const startedEvent = (
-  overrides: Partial<Extract<RunEvent, { type: "run-started" }>> = {},
-): RunEvent => ({
-  type: "run-started",
+  overrides: Partial<Extract<RuntimeEvent, { type: "run.started" }>> = {},
+): RuntimeEvent => ({
+  type: "run.started",
+  runId: "run-1",
   name: "my-run",
   agent: "claude-code",
   model: "claude-opus-4-8",
@@ -67,29 +68,32 @@ describe("BoardStore", () => {
       maxIterations: 1,
     });
     store.recordEvent(run.id, {
-      type: "iteration-started",
+      type: "iteration.started",
+      runId: "run-1",
       iteration: 1,
       maxIterations: 1,
       timestamp: new Date(),
     });
     store.recordEvent(run.id, {
-      type: "agent-text",
-      message: "hello",
+      type: "message.delta",
+      runId: "run-1",
+      messageId: "message-1",
+      text: "hello",
       iteration: 1,
       timestamp: new Date(),
     });
     const events = store.getEvents(run.id);
     expect(events.map((e) => e.seq)).toEqual([1, 2]);
-    expect(events[1]!.event.type).toBe("agent-text");
+    expect(events[1]!.event.type).toBe("message.delta");
     // Timestamp serialized to an ISO string.
     expect(typeof events[1]!.event.timestamp).toBe("string");
     expect(store.getRun(run.id)).toMatchObject({
       currentIteration: 1,
-      lastEventType: "agent-text",
+      lastEventType: "message.delta",
     });
   });
 
-  it("folds run-finished into a succeeded status and commit count", () => {
+  it("folds run.finished into a succeeded status and commit count", () => {
     const run = store.createRun({
       name: "r1",
       agent: "claude-code",
@@ -98,13 +102,16 @@ describe("BoardStore", () => {
       maxIterations: 2,
     });
     store.recordEvent(run.id, {
-      type: "commit",
+      type: "commit.created",
+      runId: "run-1",
       sha: "abc",
       iteration: 1,
       timestamp: new Date(),
     });
     store.recordEvent(run.id, {
-      type: "run-finished",
+      type: "run.finished",
+      runId: "run-1",
+      commits: [],
       completionSignal: "<promise>COMPLETE</promise>",
       iterationsRun: 1,
       timestamp: new Date(),
@@ -115,11 +122,11 @@ describe("BoardStore", () => {
     expect(updated.completionSignal).toBe("<promise>COMPLETE</promise>");
     expect(updated.iterationsRun).toBe(1);
     expect(updated.currentIteration).toBe(1);
-    expect(updated.lastEventType).toBe("run-finished");
+    expect(updated.lastEventType).toBe("run.finished");
     expect(updated.finishedAt).toBeTruthy();
   });
 
-  it("folds run-failed into a failed status with the error message", () => {
+  it("folds run.error into a failed status with the error message", () => {
     const run = store.createRun({
       name: "r1",
       agent: "claude-code",
@@ -128,17 +135,18 @@ describe("BoardStore", () => {
       maxIterations: 1,
     });
     store.recordEvent(run.id, {
-      type: "run-failed",
+      type: "run.error",
+      runId: "run-1",
       message: "boom",
       timestamp: new Date(),
     });
     const updated = store.getRun(run.id)!;
     expect(updated.status).toBe("failed");
     expect(updated.error).toBe("boom");
-    expect(updated.lastEventType).toBe("run-failed");
+    expect(updated.lastEventType).toBe("run.error");
   });
 
-  it("preserves structured recovery evidence on run-failed through serialization", () => {
+  it("preserves structured recovery evidence on run.error through serialization", () => {
     const run = store.createRun({
       name: "r1",
       agent: "claude-code",
@@ -147,7 +155,8 @@ describe("BoardStore", () => {
       maxIterations: 1,
     });
     store.recordEvent(run.id, {
-      type: "run-failed",
+      type: "run.error",
+      runId: "run-1",
       message: "agent exited with code 1",
       recovery: {
         failureKind: "agent",
@@ -167,9 +176,9 @@ describe("BoardStore", () => {
     const failed = reopened
       .getEvents(run.id)
       .map((r) => r.event)
-      .find((e) => e.type === "run-failed");
+      .find((e) => e.type === "run.error");
     expect(failed).toBeDefined();
-    if (failed?.type === "run-failed") {
+    if (failed?.type === "run.error") {
       expect(failed.recovery).toEqual({
         failureKind: "agent",
         failurePhase: "agent",
@@ -204,7 +213,7 @@ describe("BoardStore", () => {
       error: "Interrupted when the board server stopped or restarted.",
     });
     expect(
-      restarted.getEvents(run.id).some((r) => r.event.type === "run-failed"),
+      restarted.getEvents(run.id).some((r) => r.event.type === "run.error"),
     ).toBe(true);
   });
 
@@ -223,14 +232,16 @@ describe("BoardStore", () => {
       outputTokens: 5,
     };
     store.recordEvent(run.id, {
-      type: "usage",
+      type: "usage.recorded",
+      runId: "run-1",
       usage,
       model: "claude-opus-4-8",
       iteration: 1,
       timestamp: new Date(),
     });
     store.recordEvent(run.id, {
-      type: "usage",
+      type: "usage.recorded",
+      runId: "run-1",
       usage,
       model: "claude-opus-4-8",
       iteration: 2,
@@ -246,7 +257,7 @@ describe("BoardStore", () => {
     });
     expect(store.getRun(run.id)).toMatchObject({
       currentIteration: 2,
-      lastEventType: "usage",
+      lastEventType: "usage.recorded",
       totalTokens: 270,
     });
   });
@@ -262,13 +273,15 @@ describe("BoardStore", () => {
       maxIterations: 1,
     });
     store.recordEvent(run.id, {
-      type: "run-finished",
+      type: "run.finished",
+      runId: "run-1",
+      commits: [],
       iterationsRun: 1,
       timestamp: new Date(),
     });
     unsubscribe();
     expect(kinds).toContain("run-updated");
-    expect(kinds).toContain("run-event");
+    expect(kinds).toContain("runtime-event");
   });
 
   it("manages task lifecycle", () => {
@@ -404,7 +417,7 @@ describe("BoardStore", () => {
     ]);
   });
 
-  it("updates task progress from linked repository run events", () => {
+  it("updates task progress from linked repository runtime events", () => {
     const task = store.createTask({ title: "Fix UI", prompt: "do it" });
     store.updateTask(task.id, {
       plan: {
@@ -415,13 +428,16 @@ describe("BoardStore", () => {
 
     recorder(startedEvent({ name: "task web", branch: "sandcastle/web" }));
     recorder({
-      type: "agent-text",
-      message: "I changed the component and will run tests next.",
+      type: "message.delta",
+      runId: "run-1",
+      messageId: "message-1",
+      text: "I changed the component and will run tests next.",
       iteration: 1,
       timestamp: new Date(),
     });
     recorder({
-      type: "run-failed",
+      type: "run.error",
+      runId: "run-1",
       message: "lint failed",
       timestamp: new Date(),
     });
@@ -897,17 +913,21 @@ describe("createRunRecorder", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("creates a run lazily on run-started and records subsequent events", () => {
+  it("creates a run lazily on run.started and records subsequent events", () => {
     const record = createRunRecorder(store, { taskId: "t1", repo: "web" });
     record(startedEvent());
     record({
-      type: "agent-text",
-      message: "working",
+      type: "message.delta",
+      runId: "run-1",
+      messageId: "message-1",
+      text: "working",
       iteration: 1,
       timestamp: new Date(),
     });
     record({
-      type: "run-finished",
+      type: "run.finished",
+      runId: "run-1",
+      commits: [],
       completionSignal: "<promise>COMPLETE</promise>",
       iterationsRun: 1,
       timestamp: new Date(),
@@ -926,13 +946,16 @@ describe("createRunRecorder", () => {
     const record = createRunRecorder(store, { taskId: "t1", repo: "web" });
     record(startedEvent());
     record({
-      type: "run-failed",
+      type: "run.error",
+      runId: "run-1",
       message: "cannot lock ref",
       timestamp: new Date(),
     });
     record({
-      type: "agent-text",
-      message: "late output",
+      type: "message.delta",
+      runId: "run-1",
+      messageId: "message-1",
+      text: "late output",
       iteration: 1,
       timestamp: new Date(),
     });
@@ -940,16 +963,18 @@ describe("createRunRecorder", () => {
     const run = store.listRuns()[0]!;
     expect(store.getRun(run.id)?.status).toBe("failed");
     expect(store.getEvents(run.id).map((event) => event.event.type)).toEqual([
-      "run-started",
-      "run-failed",
+      "run.started",
+      "run.error",
     ]);
   });
 
-  it("ignores events emitted before run-started", () => {
+  it("ignores events emitted before run.started", () => {
     const record = createRunRecorder(store);
     record({
-      type: "agent-text",
-      message: "orphan",
+      type: "message.delta",
+      runId: "run-1",
+      messageId: "message-1",
+      text: "orphan",
       iteration: 1,
       timestamp: new Date(),
     });

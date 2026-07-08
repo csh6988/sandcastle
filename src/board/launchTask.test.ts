@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BoardStore } from "./BoardStore.js";
 import { createTaskLauncher, type TaskRunner } from "./launchTask.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 
-const started = (name: string, repo: string): RunEvent => ({
-  type: "run-started",
+const started = (name: string, repo: string): RuntimeEvent => ({
+  type: "run.started",
+  runId: "run-1",
   name,
   agent: "claude-code",
   model: "claude-opus-4-8",
@@ -29,17 +30,21 @@ describe("createTaskLauncher", () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("records per-repo runs linked to the task and marks it succeeded", async () => {
-    const run: TaskRunner = async ({ onRepoRunEvent }) => {
-      onRepoRunEvent("web", started("task web", "web"));
-      onRepoRunEvent("web", {
-        type: "run-finished",
+    const run: TaskRunner = async ({ onRepoRuntimeEvent }) => {
+      onRepoRuntimeEvent("web", started("task web", "web"));
+      onRepoRuntimeEvent("web", {
+        type: "run.finished",
+        runId: "run-1",
+        commits: [],
         completionSignal: "<promise>COMPLETE</promise>",
         iterationsRun: 1,
         timestamp: new Date(),
       });
-      onRepoRunEvent("api", started("task api", "api"));
-      onRepoRunEvent("api", {
-        type: "run-finished",
+      onRepoRuntimeEvent("api", started("task api", "api"));
+      onRepoRuntimeEvent("api", {
+        type: "run.finished",
+        runId: "run-1",
+        commits: [],
         iterationsRun: 1,
         timestamp: new Date(),
       });
@@ -64,10 +69,11 @@ describe("createTaskLauncher", () => {
   });
 
   it("marks the task failed when a repository run fails", async () => {
-    const run: TaskRunner = async ({ onRepoRunEvent }) => {
-      onRepoRunEvent("web", started("task web", "web"));
-      onRepoRunEvent("web", {
-        type: "run-failed",
+    const run: TaskRunner = async ({ onRepoRuntimeEvent }) => {
+      onRepoRuntimeEvent("web", started("task web", "web"));
+      onRepoRuntimeEvent("web", {
+        type: "run.error",
+        runId: "run-1",
         message: "agent crashed",
         timestamp: new Date(),
       });
@@ -86,7 +92,7 @@ describe("createTaskLauncher", () => {
   });
 
   it("stores the plan on the task as soon as the runner reports it", async () => {
-    const run: TaskRunner = async ({ onRepoRunEvent, onPlan }) => {
+    const run: TaskRunner = async ({ onRepoRuntimeEvent, onPlan }) => {
       onPlan({
         alignmentSummary: "aligned interpretation",
         technicalPlan: "do it carefully",
@@ -98,9 +104,11 @@ describe("createTaskLauncher", () => {
           { name: "api", task: "add endpoint" },
         ],
       });
-      onRepoRunEvent("web", started("task web", "web"));
-      onRepoRunEvent("web", {
-        type: "run-finished",
+      onRepoRuntimeEvent("web", started("task web", "web"));
+      onRepoRuntimeEvent("web", {
+        type: "run.finished",
+        runId: "run-1",
+        commits: [],
         iterationsRun: 1,
         timestamp: new Date(),
       });
@@ -125,18 +133,21 @@ describe("createTaskLauncher", () => {
   });
 
   it("updates the board progress document from repository lifecycle events", async () => {
-    const run: TaskRunner = async ({ onRepoRunEvent, onPlan }) => {
+    const run: TaskRunner = async ({ onRepoRuntimeEvent, onPlan }) => {
       onPlan({ repositories: [{ name: "web", task: "add page" }] });
-      onRepoRunEvent("web", started("task web", "web"));
-      onRepoRunEvent("web", {
-        type: "agent-tool-call",
+      onRepoRuntimeEvent("web", started("task web", "web"));
+      onRepoRuntimeEvent("web", {
+        type: "tool.call",
+        runId: "run-1",
+        toolCallId: "tool-1",
         name: "ReadFile",
-        formattedArgs: "src/page.ts",
+        args: "src/page.ts",
         iteration: 1,
         timestamp: new Date(),
       });
-      onRepoRunEvent("web", {
-        type: "run-failed",
+      onRepoRuntimeEvent("web", {
+        type: "run.error",
+        runId: "run-1",
         message: "verification failed",
         timestamp: new Date(),
       });
@@ -156,17 +167,21 @@ describe("createTaskLauncher", () => {
   });
 
   it("records the planner phase as its own run when reported", async () => {
-    const run: TaskRunner = async ({ onRepoRunEvent, onPlan }) => {
-      onRepoRunEvent("(planner)", started("task planner", "planner"));
-      onRepoRunEvent("(planner)", {
-        type: "run-finished",
+    const run: TaskRunner = async ({ onRepoRuntimeEvent, onPlan }) => {
+      onRepoRuntimeEvent("(planner)", started("task planner", "planner"));
+      onRepoRuntimeEvent("(planner)", {
+        type: "run.finished",
+        runId: "run-1",
+        commits: [],
         iterationsRun: 1,
         timestamp: new Date(),
       });
       onPlan({ repositories: [{ name: "web", task: "add page" }] });
-      onRepoRunEvent("web", started("task web", "web"));
-      onRepoRunEvent("web", {
-        type: "run-finished",
+      onRepoRuntimeEvent("web", started("task web", "web"));
+      onRepoRuntimeEvent("web", {
+        type: "run.finished",
+        runId: "run-1",
+        commits: [],
         iterationsRun: 1,
         timestamp: new Date(),
       });

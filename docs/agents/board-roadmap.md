@@ -1,6 +1,6 @@
 # Board Roadmap
 
-Last updated: 2026-06-30
+Last updated: 2026-07-03
 
 This document is the durable progress tracker for the **workflow board**. Keep
 it current when changing Board planning, approval, execution, verification,
@@ -150,5 +150,56 @@ artifacts`, and six artifact rows with no horizontal overflow.
 
 ## Next Recommended Task
 
-Board roadmap P0-P3 is complete. Next work should come from a fresh roadmap or
-from issues discovered during broader product hardening.
+Board roadmap P0-P3 is complete. Per ADR 0026, v1 is a local **company**
+control plane whose first complete **department** is the **Software R&D
+department** — the current Board, promoted rather than rebuilt. The next
+roadmap should productize the Board as that department instead of adding more
+isolated Board features:
+
+1. **Done.** Role profiles for Planner, Generator, and Evaluator are explicit
+   configuration in `src/board/roleProfiles.ts`: responsibility boundaries,
+   allowed/forbidden actions, progressive skill flows, optional prompt
+   guidance, and advisory agent/model preferences, rendered into the Planner
+   phase prompts, the Generator execution prompt, and the Evaluator
+   verification prompt.
+
+2. **Done.** Role profiles live in `.sandcastle/role-profiles.json` (partial
+   per-role overrides onto built-in defaults; invalid files fail fast at board
+   startup). `SKILL_ROUTER.md` remains the skill-flow catalog the profiles
+   reference; progressive loading is spelled out in the rendered prompt
+   section.
+
+3. **Done (embedded shell).** The embedded board frontend carries the company
+   shell: Departments / Projects / Artifacts / Reviews / Settings navigation
+   landing in the Software R&D department by default, backed by
+   `GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and
+   `GET /api/role-profiles` (`src/board/company.ts`, `src/board/router.ts`).
+   Other departments are inert placeholders with a "not yet operational"
+   state. `BoardTaskView`, `BoardTaskStage`, `BoardTaskSource`, `BoardRole`,
+   `BoardTaskArtifact`, and the artifact/verification/recovery APIs are reused
+   as-is.
+
+4. **Done (spike, promoted into the desktop renderer).** A React/CopilotKit
+   board shell consumes the existing board API and SSE stream only, shares
+   the company view, role profiles, task stages, and the selected task's
+   workflow/plan/artifacts as agent context, and maps six frontend tools 1:1
+   onto existing endpoints: `completePhase`, `decideApproval`
+   (human-in-the-loop approve/reject via `POST /api/tasks/:id/resume`),
+   `cancelTask` (human-in-the-loop), `recoverTask`, `openArtifacts`, and
+   `startReview` (surfaces `GET /api/tasks/:id/verification`). Approval and
+   cancellation render decision UI that a person clicks; the assistant cannot
+   trigger those gates itself. The shell now lives at
+   `apps/desktop/renderer/`; the embedded HTML board and the orchestration
+   core stay CopilotKit-free (ADR 0026 boundary).
+
+5. **Done (desktop shell).** `apps/desktop/` is the Electron wrapper decided
+   in ADR 0027: repository picker (persisted, menu-switchable), a supervised
+   `sandcastle board` child process, a shell server (built renderer +
+   CopilotKit runtime at `/api/copilotkit` + reverse proxy for `/api/*`
+   including terminal WebSockets), and native notifications from the board
+   SSE stream. It owns process/config/notification concerns only — every
+   action goes through existing board endpoints, and the app is never
+   published to npm.
+
+6. Add human review and feedback on top of existing approval, verification,
+   artifacts, and role profiles.

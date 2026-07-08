@@ -19,7 +19,7 @@ import {
   runWorkspace,
   type WorkspaceRepositoryOptions,
 } from "./runWorkspace.js";
-import type { RunEvent } from "./RunEvent.js";
+import type { RuntimeEvent } from "./RuntimeEvent.js";
 import type { BranchStrategy, SandboxProvider } from "./SandboxProvider.js";
 
 export interface WorkspaceTaskRepositoryOptions extends Omit<
@@ -112,16 +112,16 @@ export interface RunWorkspaceTaskOptions<
    */
   readonly allowPlannerWorkspace?: boolean;
   /**
-   * Optional callback invoked for each structured run event produced while
-   * executing a repository's task, tagged with the repository name. Lets a
-   * caller (e.g. the workflow board) record per-repo runs as they happen.
+   * Optional callback invoked for each runtime event produced while executing
+   * a repository's task, tagged with the repository name. Lets a caller (e.g.
+   * the workflow board) record per-repo runs as they happen.
    */
-  readonly onRepoRunEvent?: (repo: string, event: RunEvent) => void;
+  readonly onRepoRuntimeEvent?: (repo: string, event: RuntimeEvent) => void;
   /**
-   * Optional callback invoked for each structured run event produced by the
-   * planner phase. Lets a caller surface planning progress as its own run.
+   * Optional callback invoked for each runtime event produced by the planner
+   * phase. Lets a caller surface planning progress as its own run.
    */
-  readonly onPlannerRunEvent?: (event: RunEvent) => void;
+  readonly onPlannerRuntimeEvent?: (event: RuntimeEvent) => void;
   /**
    * Optional callback invoked with the extracted plan as soon as planning
    * completes, before execution begins. Lets a caller display the plan while
@@ -151,8 +151,8 @@ export interface ExecuteWorkspaceTaskPlanOptions<
   readonly idleTimeoutSeconds?: number;
   readonly signal?: AbortSignal;
   readonly timeouts?: Timeouts;
-  /** Optional per-repo run-event callback (see RunWorkspaceTaskOptions.onRepoRunEvent). */
-  readonly onRepoRunEvent?: (repo: string, event: RunEvent) => void;
+  /** Optional per-repo runtime-event callback (see RunWorkspaceTaskOptions.onRepoRuntimeEvent). */
+  readonly onRepoRuntimeEvent?: (repo: string, event: RuntimeEvent) => void;
 }
 
 const WORKSPACE_PLAN_TAG = "workspace_plan";
@@ -755,8 +755,11 @@ export async function executeWorkspaceTaskPlan(
           maxIterations: options.maxIterations ?? 1,
           logging: options.logging,
           idleTimeoutSeconds: options.idleTimeoutSeconds,
-          onRunEvent: options.onRepoRunEvent
-            ? (event) => options.onRepoRunEvent!(repo.name, event)
+          events: options.onRepoRuntimeEvent
+            ? {
+                onRuntimeEvent: (event) =>
+                  options.onRepoRuntimeEvent!(repo.name, event),
+              }
             : undefined,
           name: options.name
             ? `${options.name} ${repo.name}`
@@ -828,7 +831,9 @@ export async function runWorkspaceTask(
     idleTimeoutSeconds: options.idleTimeoutSeconds,
     signal: options.signal,
     timeouts: options.timeouts,
-    onRunEvent: options.onPlannerRunEvent,
+    events: options.onPlannerRuntimeEvent
+      ? { onRuntimeEvent: options.onPlannerRuntimeEvent }
+      : undefined,
   });
 
   const extracted = extractWorkspaceTaskPlan(
@@ -868,7 +873,7 @@ export async function runWorkspaceTask(
       idleTimeoutSeconds: options.idleTimeoutSeconds,
       signal: options.signal,
       timeouts: options.timeouts,
-      onRepoRunEvent: options.onRepoRunEvent,
+      onRepoRuntimeEvent: options.onRepoRuntimeEvent,
     }),
     plannerStdout: planner.stdout,
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
-  BoardRunEventRecord,
+  BoardRuntimeEventRecord,
   BoardRunRecord,
   BoardTaskRecord,
 } from "./BoardStore.js";
@@ -35,9 +35,9 @@ const failedRun = (): BoardRunRecord => ({
 });
 
 const eventRecord = (
-  event: BoardRunEventRecord["event"],
+  event: BoardRuntimeEventRecord["event"],
   seq = 1,
-): BoardRunEventRecord => ({ seq, event });
+): BoardRuntimeEventRecord => ({ seq, event });
 
 describe("renderTaskProgress recovery evidence", () => {
   it("surfaces preserved worktree, run log, session, and completion state", () => {
@@ -46,7 +46,8 @@ describe("renderTaskProgress recovery evidence", () => {
         run: failedRun(),
         events: [
           eventRecord({
-            type: "run-failed",
+            type: "run.error",
+            runId: "run-1",
             message: "agent exited with code 1",
             recovery: {
               failureKind: "agent",
@@ -82,7 +83,8 @@ describe("renderTaskProgress recovery evidence", () => {
         run: failedRun(),
         events: [
           eventRecord({
-            type: "run-failed",
+            type: "run.error",
+            runId: "run-1",
             message:
               "Provider 'docker' create failed: Image 'sandcastle:sandcastle' not found locally.",
             recovery: {
@@ -101,13 +103,14 @@ describe("renderTaskProgress recovery evidence", () => {
     expect(output).toContain("did not claim completion");
   });
 
-  it("renders a minimal legacy run-failed event (message-only) without crashing", () => {
+  it("renders a minimal run.error event without crashing", () => {
     const runs: TaskProgressRun[] = [
       {
         run: failedRun(),
         events: [
           eventRecord({
-            type: "run-failed",
+            type: "run.error",
+            runId: "run-1",
             message: "something went wrong",
             timestamp: "2026-07-01T01:05:00.000Z",
           }),

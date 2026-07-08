@@ -1,10 +1,15 @@
 import type { AgentProvider } from "../AgentProvider.js";
 import { Output } from "../Output.js";
 import { run, type LoggingOption, type Timeouts } from "../run.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type { SandboxProvider } from "../SandboxProvider.js";
 import type { WorkspaceTaskRepositoryResult } from "../runWorkspaceTask.js";
 import type { BoardTaskRecord } from "./BoardStore.js";
+import {
+  DEFAULT_ROLE_PROFILES,
+  renderRoleProfilePromptSection,
+  type RoleProfile,
+} from "./roleProfiles.js";
 import type { TaskProgressRun } from "./taskProgress.js";
 import type {
   BoardTaskVerificationReport,
@@ -138,7 +143,7 @@ export const parseBoardEvaluatorOutput = (
   };
 };
 
-const compactRunEvents = (runs: readonly TaskProgressRun[]) =>
+const compactRuntimeEvents = (runs: readonly TaskProgressRun[]) =>
   runs.map(({ run, events }) => ({
     run: {
       id: run.id,
@@ -164,23 +169,27 @@ export const repositoryAgentWorkWasRecorded = (
   ) {
     return true;
   }
-  // Lifecycle events (run-started, iteration-started, run-failed) are emitted
+  // Lifecycle events (run.started, iteration.started, run.error) are emitted
   // before the sandbox/agent produces anything, so they are not agent work --
   // only events carrying agent output or commits count as delivery evidence.
   return runs.some(({ events }) =>
     events.some((record) =>
-      ["agent-text", "agent-tool-call", "commit", "usage"].includes(
-        record.event.type,
-      ),
+      [
+        "message.delta",
+        "tool.call",
+        "commit.created",
+        "usage.recorded",
+      ].includes(record.event.type),
     ),
   );
 };
 
 export const buildBoardEvaluatorPrompt = (
   input: Omit<BoardTaskEvaluationInput, "signal">,
+  roleProfile: RoleProfile = DEFAULT_ROLE_PROFILES.evaluator,
 ): string => `# Sandcastle Board Evaluator
 
-Board role: Evaluator. Stay inside the Evaluator responsibility boundary.
+${renderRoleProfilePromptSection(roleProfile)}
 
 You verify delivery only. Do not re-plan, do not regenerate Board issues, do not edit files, do not run implementation commands, and do not commit. Judge the approved plan against recorded evidence. If evidence is missing, say so clearly instead of assuming delivery worked.
 
@@ -203,8 +212,8 @@ ${input.progressMarkdown ?? "No Board progress document was available."}
 Repository execution results:
 ${JSON.stringify(input.repositoryResults, null, 2)}
 
-Repository run events:
-${JSON.stringify(compactRunEvents(input.runs), null, 2)}
+Repository runtime events:
+${JSON.stringify(compactRuntimeEvents(input.runs), null, 2)}
 
 Deterministic structured evidence:
 ${input.deterministicMarkdown}
@@ -271,21 +280,24 @@ export const runBoardEvaluatorAgent = async (args: {
   readonly logging?: LoggingOption;
   readonly idleTimeoutSeconds?: number;
   readonly timeouts?: Timeouts;
-  readonly onRunEvent?: (event: RunEvent) => void;
+  readonly onRuntimeEvent?: (event: RuntimeEvent) => void;
+  readonly roleProfile?: RoleProfile;
 }): Promise<BoardTaskEvaluationResult> => {
   const result = await run({
     cwd: args.cwd,
     agent: args.agent,
     sandbox: args.sandbox,
     branchStrategy: { type: "branch", branch: args.branch },
-    prompt: buildBoardEvaluatorPrompt(args.input),
+    prompt: buildBoardEvaluatorPrompt(args.input, args.roleProfile),
     maxIterations: 1,
     logging: args.logging,
     idleTimeoutSeconds: args.idleTimeoutSeconds,
     timeouts: args.timeouts,
     name: `${args.input.task.title} evaluator`,
     signal: args.signal,
-    onRunEvent: args.onRunEvent,
+    events: args.onRuntimeEvent
+      ? { onRuntimeEvent: args.onRuntimeEvent }
+      : undefined,
     output: Output.string({ tag: BOARD_EVALUATION_TAG }),
   });
   return parseBoardEvaluatorOutput(result.output);

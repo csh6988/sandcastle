@@ -1,5 +1,5 @@
 import type {
-  BoardRunEventRecord,
+  BoardRuntimeEventRecord,
   BoardRunRecord,
   BoardTaskPlan,
   BoardTaskRecord,
@@ -8,7 +8,7 @@ import type { LocalIssueStatus } from "./localIssueMarkdown.js";
 
 export interface TaskProgressRun {
   readonly run: BoardRunRecord;
-  readonly events: readonly BoardRunEventRecord[];
+  readonly events: readonly BoardRuntimeEventRecord[];
 }
 
 const MAX_DIGEST_ITEMS = 8;
@@ -52,28 +52,26 @@ const approvedWorkLines = (repo: BoardTaskPlan["repositories"][number]) => {
   return lines;
 };
 
-const eventTimestamp = (record: BoardRunEventRecord): string =>
+const eventTimestamp = (record: BoardRuntimeEventRecord): string =>
   "timestamp" in record.event && typeof record.event.timestamp === "string"
     ? record.event.timestamp
     : "unknown-time";
 
-const digestLine = (record: BoardRunEventRecord): string | undefined => {
+const digestLine = (record: BoardRuntimeEventRecord): string | undefined => {
   const event = record.event;
   const prefix = `[${eventTimestamp(record)}]`;
   switch (event.type) {
-    case "agent-text":
-      return `${prefix} agent text: ${truncate(event.message)}`;
-    case "agent-tool-call":
-      return `${prefix} tool call: ${event.name} ${truncate(event.formattedArgs)}`;
-    case "agent-tool-result":
+    case "message.delta":
+      return `${prefix} agent text: ${truncate(event.text)}`;
+    case "tool.call":
+      return `${prefix} tool call: ${event.name} ${truncate(event.args)}`;
+    case "tool.result":
       return `${prefix} tool result: ${truncate(event.content)}`;
-    case "agent-idle-warning":
-      return `${prefix} idle warning: agent idle for ${event.minutes} minute${event.minutes === 1 ? "" : "s"}`;
-    case "commit":
+    case "commit.created":
       return `${prefix} commit: ${event.sha}`;
-    case "run-failed":
+    case "run.error":
       return `${prefix} run failed: ${truncate(event.message)}`;
-    case "run-finished":
+    case "run.finished":
       return `${prefix} run finished after ${event.iterationsRun} iteration${event.iterationsRun === 1 ? "" : "s"}`;
     default:
       return undefined;
@@ -82,14 +80,14 @@ const digestLine = (record: BoardRunEventRecord): string | undefined => {
 
 const completedEvidence = (
   run: BoardRunRecord | undefined,
-  events: readonly BoardRunEventRecord[],
+  events: readonly BoardRuntimeEventRecord[],
 ): string[] => {
   if (!run) return [];
   const evidence = events
     .map((record) => {
       const event = record.event;
-      if (event.type === "commit") return `Commit ${event.sha}`;
-      if (event.type === "run-finished") {
+      if (event.type === "commit.created") return `Commit ${event.sha}`;
+      if (event.type === "run.finished") {
         return `Run ${run.id} finished successfully after ${event.iterationsRun} iteration${event.iterationsRun === 1 ? "" : "s"}.`;
       }
       return undefined;
@@ -110,18 +108,17 @@ const failureKindLabel: Record<string, string> = {
 
 /**
  * Board-specific recovery wording projected from the generic
- * `RunFailureRecovery` evidence carried on the latest `run-failed` event. Falls
- * back to nothing when the event is a minimal/legacy one without `recovery`, so
- * historical events still render safely.
+ * `RunFailureRecovery` evidence carried on the latest `run.error` event.
+ * Falls back to nothing when recovery evidence is unavailable.
  */
 const recoveryEvidenceLines = (
-  events: readonly BoardRunEventRecord[],
+  events: readonly BoardRuntimeEventRecord[],
 ): string[] => {
   const failed = [...events]
     .reverse()
     .map((record) => record.event)
-    .find((event) => event.type === "run-failed");
-  if (!failed || failed.type !== "run-failed") return [];
+    .find((event) => event.type === "run.error");
+  if (!failed || failed.type !== "run.error") return [];
   const recovery = failed.recovery;
   if (!recovery) return [];
 
@@ -161,7 +158,7 @@ const recoveryEvidenceLines = (
 
 const currentNextStep = (
   run: BoardRunRecord | undefined,
-  events: readonly BoardRunEventRecord[],
+  events: readonly BoardRuntimeEventRecord[],
 ): string[] => {
   if (!run) return ["Start this repository's approved work."];
   if (run.status === "succeeded") {
