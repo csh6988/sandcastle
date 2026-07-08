@@ -278,13 +278,29 @@ _Avoid_: "team" (role/skill boundary matters), "module" (too code-shaped), "work
 The first complete **department** in the v1 **company**: the current **workflow board** promoted rather than rebuilt -- a local software-development operating unit made of **Board roles**, repositories, task artifacts, review loops, and skill-guided agent work. Its PRD-to-plan-to-approval-to-execution-to-verification loop is the template future departments are measured against.
 _Avoid_: "company" (the department lives inside one), "organization" when referring to the v1 Sandcastle scope, "team" when the role/skill boundary matters, "the board" when the department product boundary is meant
 
+**Project**:
+A Desktop v1 delivery object inside a **company** that moves through PRD, Design, R&D Execution, Review, and Artifacts. A **Repository** may be linked to a Project as an R&D resource, but it is not the Project itself.
+_Avoid_: "repository" when referring to the delivery object, "board task" when referring to the whole PRD-to-artifacts object
+
+**Local AI company directory**:
+The host directory a user opens in Desktop v1 to store company-owned project files, project metadata, board metadata, skill flows, role profiles, and indexes. Electron `userData` stores personal preferences only, not company/project source data.
+_Avoid_: "repository", "workspace" (overloaded), "userData" when referring to company-owned data
+
+**AI member**:
+A role-like execution member inside a **department**, such as Planner, Designer, Generator, or Evaluator, with responsibilities and bound **skill flows**. An AI member is not an always-on chat persona and does not imply default LLM activity while browsing or configuring Desktop.
+_Avoid_: "chat agent", "persona", "bot"
+
 **Role profile**:
 The configuration behind a **Board role**: its responsibility boundary, allowed actions, preferred skill flows, prompt guidance, and optional agent/model preferences. Role profiles belong to a **department**, not to the **company** or an **agent provider** -- any agent can fill the same role. A role profile describes how a role should work; it is not the same as an **agent provider**.
 _Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too narrow)
 
 **Skill flow**:
-A selected set of skills and operating instructions used for a specific kind of software work, such as planning, implementation, review, debugging, or merge-conflict resolution. A **role profile** may choose one or more skill flows, but the flow should still be loaded progressively instead of copying every available skill into context.
+A selected set of skills and operating instructions used for a specific kind of software work, such as planning, implementation, review, debugging, or merge-conflict resolution. A **role profile** or **AI member** may choose one or more skill flows, but the flow should still be loaded progressively instead of copying every available skill into context.
 _Avoid_: "skill bundle" when it implies loading everything at once, "prompt pack" (too narrow)
+
+**Desktop shell**:
+The optional Electron app in `apps/desktop/` that wraps the local **control plane** as a project-first **company** workbench. It selects a **local AI company directory**, supervises board processes only for R&D execution against linked repositories, serves the React renderer plus a reverse proxy to the active board API, and raises native notifications; it does not host CopilotKit or own orchestration semantics. See ADR 0027.
+_Avoid_: "the app" (ambiguous), "desktop board" (the **workflow board** stays the embedded default UI), "client" (too generic)
 
 **Evaluator run**:
 The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **runtime events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.

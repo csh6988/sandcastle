@@ -12,14 +12,23 @@ simple task/run viewer. The board now has a concrete PRD-to-plan-to-approval-to
 execution-to-verification loop: PRD-file task creation, workspace-plan import,
 planning-only export, interactive planning phases, workspace-plan validation
 and fix loops, cancellation, recovery, progress documents, generated local
-issue status, verification reports, and a derived stage/timeline view. V1 should
+issue status, artifact manifests, Evaluator-backed verification reports,
+Board-visible task artifacts, and a derived stage/timeline view. V1 should
 stabilize these existing product primitives before adding another product layer.
+
+ADR 0026 refines the product framing on top of this decision: v1 is a local
+**company** control plane whose first complete **department** is the
+**Software R&D department** — the current board, promoted rather than rebuilt.
+Where this ADR says "model Sandcastle as a software R&D department, not a whole
+company", read it together with ADR 0026: the company exists as a product shell
+and navigation layer, while the department boundary below still holds — v1
+ships exactly one complete department and no organization-system machinery.
 
 ## Decisions
 
 - **Keep the orchestration core library-first.** `run()`, `createSandbox()`,
   `createWorktree()`, `runWorkspace()`, `runWorkspaceTask()`, provider
-  factories, `Output`, and the **run event** stream stay the primary public
+  factories, `Output`, and the **runtime event** stream stay the primary public
   surface. The control plane should use those surfaces rather than creating a
   parallel execution path.
 - **Make the workflow board the first control plane.** `sandcastle board` is
@@ -39,6 +48,17 @@ stabilize these existing product primitives before adding another product layer.
   reporting line, chat, calendar, automation, and enterprise access control are
   out of scope for v1. Sandcastle's unit of coordination remains a local host
   repo or workspace plus board tasks created for that workspace.
+- **Model Sandcastle as a software R&D department, not a whole company.**
+  Rudder is useful as a reference for a local, productized control plane with
+  multiple roles. Sandcastle v1 should keep the narrower product boundary: a
+  **software R&D department** with Board roles such as Planner, Generator, and
+  Evaluator. Other company roles can be future role profiles, but they should
+  not widen the v1 core.
+- **Attach skills to role profiles, not to agents globally.** Each Board role
+  should eventually select a focused **skill flow**: planning skills for
+  Planner, implementation/TDD skills for Generator, review/verification skills
+  for Evaluator. This should extend `SKILL_ROUTER.md` and project guidance
+  rather than loading every installed skill into every agent invocation.
 - **Use tasks, not a second issue model.** The project already reserves
   **issue tracker** for external task sources such as GitHub Issues and Beads.
   The v1 control plane should deepen **board task** instead of introducing a
@@ -60,50 +80,64 @@ stabilize these existing product primitives before adding another product layer.
   verification. V1 should add human review and feedback on top of that evidence
   instead of replacing either gate. Promotion of feedback into skills or
   workflows can come after the loop is reliable.
+- **Keep CopilotKit out of the orchestration core.** CopilotKit is a promising
+  React frontend layer for chat, generative UI, shared app state, frontend
+  tools, and human-in-the-loop interactions. It should be evaluated for a
+  future React board or desktop shell, not added to the published library core
+  while the board frontend is still an embedded self-contained HTML asset.
 
 ## Sequenced plan
 
-1. **Stabilize current board workflow work.** Finish the in-progress
-   file-backed board phases, approval resume, phase sessions, filesystem
-   watching, startup sources, planning-only export, cancellation, recovery,
-   verification, issue status sync, and related README/docs updates. Keep the
-   existing tests green.
+1. **Stabilize current board workflow work.** Keep the file-backed board phases,
+   approval resume, phase sessions, filesystem watching, startup sources,
+   planning-only export, artifact visibility, cancellation, recovery,
+   Evaluator-backed verification, issue status sync, and related README/docs
+   updates green.
 2. **Board contract audit.** Treat the existing board as the baseline product
    surface. Audit `BoardTaskView`, `BoardTaskStage`, `BoardTaskSource`,
    planning artifact paths, task progress paths, verification report paths,
    stage controls, and router endpoints. Decide which are v1 commitments and
    which remain POC internals.
-3. **Library event and result audit.** Audit `RunEvent`, `RunResult`,
+3. **Library event and result audit.** Audit `RuntimeEvent`, `RunResult`,
    `WorkspaceTaskPlan`, `WorkspaceTaskRepositoryResult`, and board-local
    projections. Identify the smallest additions needed for artifact references,
    human review state, feedback, and richer failure/output evidence.
 4. **Verification and recovery audit.** Stabilize the semantics of
-   `passed`, `failed`, `needs-recovery`, and `infra-warning`; define when
-   recovery resumes execution versus returns to an interactive phase; and keep
-   verification evidence readable without relying on raw transcripts.
+   `passed`, `needs-verification`, `needs-recovery`, `infra-warning`, and
+   `failed`; define when recovery resumes execution versus returns to an
+   interactive phase; and keep verification evidence readable without relying on
+   raw transcripts.
 5. **Concrete artifact audit.** Stabilize the artifact set that already exists:
    planning artifacts, progress documents, generated issue markdown with local
-   issue status, verification reports, run events, usage, commits, and external
-   links. The immediate product slice should follow the board roadmap: persist
-   an artifact manifest, expose task artifacts through the board API, and render
-   them in task detail. Only then extract a generic artifact representation if
-   the shared shape is obvious.
-6. **Review and feedback model.** Add board task review state with accepted,
+   issue status, verification reports, artifact manifests, PRD visual assets,
+   runtime events, usage, commits, and external links. The initial artifact
+   manifest/API/detail-view slice is complete; the next artifact work should
+   decide what is stable enough for desktop and public API consumers.
+6. **Role profile and skill-flow model.** Make Planner, Generator, and
+   Evaluator role profiles explicit enough that each can select focused skill
+   flows without coupling the orchestration core to a specific agent or skill
+   runtime.
+7. **Review and feedback model.** Add board task review state with accepted,
    rejected, and changes-requested outcomes, based on the approved plan,
    verification report, run evidence, and artifacts. Keep approval before
    execution and verification after execution as separate gates.
-7. **Control plane store interface.** Introduce a narrow store interface that
+8. **Control plane store interface.** Introduce a narrow store interface that
    the file-backed store implements before the desktop shell depends on board
    internals. The interface should cover tasks, runs/events, stage views,
-   artifacts, progress, verification, review, and feedback.
-8. **Board UI product pass.** Update the embedded frontend around the loop:
+   artifacts, progress, verification, role profiles, review, and feedback.
+9. **Board UI product pass.** Update the embedded frontend around the loop:
    task intake, source labels, phase progress, stage timeline, plan approval,
    progress/verification artifacts, recovery, run detail, review, feedback, and
    usage. Raw transcript remains a lower-level detail.
-9. **Desktop shell.** Add desktop only after the board loop is stable. The
-   desktop shell should start the local board/server, manage local config and
-   credentials, open repositories/worktrees/artifacts, and surface native
-   notifications.
+10. **CopilotKit/React frontend spike.** Prototype whether a React board shell
+    can use CopilotKit for role-aware chat, human-in-the-loop controls,
+    frontend tools backed by board API actions, and generative UI for artifacts
+    and verification evidence. Keep this outside the core package until the
+    frontend packaging boundary is clear.
+11. **Desktop shell.** Add desktop only after the board loop is stable. The
+    desktop shell should start the local board/server, manage local config and
+    credentials, open repositories/worktrees/artifacts, and surface native
+    notifications.
 
 ## Acceptance criteria
 
