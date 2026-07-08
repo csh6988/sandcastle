@@ -1,0 +1,368 @@
+src/runWorkspace.ts
+  7635675586b7818c 3,36,103-104,106-108,482-484,486,488,606-608,627-629,643,654-658,665,677-680,682,696-702,775-777,785-794,812-814,817,850-852
+docs/adr/0024-v1-library-first-control-plane.md
+  c95e2652bcccff16 15-16,51-61,83-87,91-95,106-109,112,114-120,124,127-128,132-140
+  9f83f81541e721e9 31,101,113
+  c9416211566848ff 19-26
+apps/desktop/.gitignore
+  c9416211566848ff 3-4
+CONTEXT.md
+  c9416211566848ff 269-279,294,301,303-304
+  ea4811cb36f6f52b 223,226-233
+  9f83f81541e721e9 220,224-225,236,250,254,306,343
+  3d0f78aed5166511 281-292,298,302
+.changeset/rich-run-failure-evidence.md
+  7635675586b7818c 5,14
+.prettierignore
+  7635675586b7818c 4-5
+apps/desktop/package.json
+  4cd7de45659969cf 40-44
+  3d0f78aed5166511 6,13
+  c9416211566848ff 2,7-12,14-15,37-39,45-50
+  5df514304f73d182 17-36
+docs/adr/0023-langgraph-board-workflow-checkpoints.md
+  7635675586b7818c 5,7,52,71
+src/board/launchTask.ts
+  7635675586b7818c 1,25,31,41,54-55,73
+src/board/taskProgress.ts
+  7635675586b7818c 2,11,55,60,64-68,70,72,74,83,89-90,111-112,115,120-121,161
+plans/v1-library-first-control-plane.md
+  c9416211566848ff 4-10,37,39-45,52-54,75-76,120-123,133-135,167-169,172-176,178-180,207,210,221-294,296,319,321,337,350,352,357-359,363-382,390-404,406-452,462-480,484,493-526
+src/runWorkspaceTask.ts
+  7635675586b7818c 22,115-117,119,121-122,124,154-155,758-762,834-836,876
+apps/desktop/tests/companyDirectory.test.ts
+  7635675586b7818c 1-70
+src/board/server.ts
+  c9416211566848ff 16,41-42,199
+src/index.ts
+  7635675586b7818c 60-65
+apps/desktop/index.html
+  c9416211566848ff 6-10
+apps/desktop/main/projectStore.ts
+  7635675586b7818c 1-472
+apps/desktop/tests/skillFlowStore.test.ts
+  7635675586b7818c 1-47
+apps/desktop/tests/shellServer.test.ts
+  7635675586b7818c 1-471
+src/board/launchTask.test.ts
+  7635675586b7818c 7,9-11,33-38,43-47,72-76,95,107-111,136,138-142,144,148-150,170-175,180-184
+src/board/roleProfiles.ts
+  9f83f81541e721e9 77
+  c9416211566848ff 1-76,78-105,110-209
+  4cd7de45659969cf 106-109
+apps/desktop/tsconfig.main.json
+  c9416211566848ff 1-18
+src/Orchestrator.test.ts
+  7635675586b7818c 37,1372,1398,1406-1407,1449,1456,1460,1465,1467,1470,1473,1475,1479,1499-1500,1505,1557,1563,1566,1607,1615-1616,1642
+src/run.ts
+  7635675586b7818c 2,35-39,373-375,377-379,710-717,721-722,727,786,833-835,861-863,877-879,882
+src/board/taskEvaluator.test.ts
+  9f83f81541e721e9 33-34,46-47,56-57,95-98
+  c9416211566848ff 3-7,10,124-175
+apps/desktop/renderer/styles.css
+  c9416211566848ff 52,54,57-58,77-81,83,86-94,122-123,140-148,150-152,160-161,167-168,173-174,178-179,183-184,187-189,195-196,331-332,341-342,347-348
+  3d0f78aed5166511 3,6,8-10,12-14,36-46,59,61-63,65-67,69-71,74-75,82,95,97,153-158,162-166,169-170,175,180-182,185,191,207-209,330,338-339,343-345,349-357,361-362,368-372,378,391,393,397-402,409-411,413-414,416,418,432-439,441-445,450,472,516-518,524-525,534-536,538-539,548-552,555,557-559,561-563,565-566,585-593,595-596,599,601-604,608-609,618-620,628,648-650,701-702,709-710,738-751,755-770,775-776,781-783,785-786,788-789,796,798,803,820-821,824-832,841-842,850
+  3a3aee1b54164f7b 2,4-5,7,11,15-17,53,55-56,60,64,68,72-73,76,84-85,96,98-121,124-139,149,159,171-172,176-177,186,190,192-194,197-206,210-329,333-337,340,346,358,365-367,373-377,379-390,392,394,403-406,412,415,417,419-429,440,446-449,451-471,473-515,519-523,526-533,537,540-547,553-554,556,560,564,567-584,594,597-598,600,605-607,610-615,621-627,630-647,651-700,703-708,711-737,752-754,771-774,777-780,784,787,792-793,797,799-802,804-819,822-823,833-840,843-849
+docs/adr/0027-desktop-shell.md
+  3d0f78aed5166511 1-13,17,21-31,35-49,53-59,61-62,66-71,74-75,77-78
+  c9416211566848ff 14-16,18-20,32-34,50-52,60,63-65,72-73,76
+apps/desktop/vite.config.ts
+  3d0f78aed5166511 4-5
+  c9416211566848ff 6-14
+.changeset/fuzzy-task-terminal.md
+  7635675586b7818c 5
+docs/adr/0022-workflow-board-task-source.md
+  7635675586b7818c 7,35-36,51
+docs/content/docs/board.mdx
+  7635675586b7818c 81,83-88,98-102,108-110
+.changeset/board-role-profiles.md
+  c9416211566848ff 1-5
+docs/adr/0026-v1-company-control-plane.md
+  c9416211566848ff 1-7,9-33,35-37,39-97,99,101-102,104-106,108-109,111-178
+  4cd7de45659969cf 8,34,38,98,100,103,107,110
+.changeset/board-pre-agent-infra-failures.md
+  7635675586b7818c 5
+src/board/langGraphTaskRunner.ts
+  7635675586b7818c 14,46,92,105,533-534,544,630
+src/board/taskProgress.test.ts
+  7635675586b7818c 3,38,40,49-50,86-87,106,112-113
+src/board/langGraphTaskRunner.test.ts
+  7635675586b7818c 13,17-19,29-32,37-40,44-48,53-55,100,102-103,130,249,251-254,273,314-316,320-321,344,384-391,413,454-456,477,515-517,534,577,579,581,592,610,651,710,769,835,904,947,1012,1180,1184-1185,1266,1270-1271,1365,1476,1601,1604-1605,1661,1663-1664,1712,1714-1716
+docs/adr/0025-run-failure-evidence.md
+  7635675586b7818c 1,3-5,14,23,25,37-40,46,53,55-56
+src/cli.test.ts
+  c9416211566848ff 18,30,433-476
+src/board/BoardStore.ts
+  7635675586b7818c 14,29,34,37,43-44,46,67,271,287,289,295-296,780,835,838-839,844-848,929-930,935,953,956-957,961-965,974,979,991,993,995,997,1003,1012,1026,1030,1299,1364,1366,1373,1376-1377,1379-1380,1382-1384,1392
+src/runWorkspaceTask.test.ts
+  7635675586b7818c 17,280,299,306,326,328,338,346,351-353,358
+apps/desktop/renderer/markdownPreview.ts
+  7635675586b7818c 1-87
+src/Orchestrator.ts
+  7635675586b7818c 3,294-295,336-341,364,374-376,443-444,456-460,470-471,484-487,489,498-501,517-525,646-655,657-659,667-669
+src/board/approvedPlanExecution.ts
+  7635675586b7818c 7,44,60,190
+apps/desktop/main/companyDirectory.ts
+  7635675586b7818c 1-39
+src/board/frontendHtml.ts
+  9f83f81541e721e9 309,317-326,341,344,347,353-354,358,426,1157
+  c9416211566848ff 180-220,223-226,995-1092,1100-1104,1167-1177,1179,1184,1225-1252
+src/board/taskEvaluator.ts
+  9f83f81541e721e9 4,146,172,177-182,215-216,283,298-300
+  c9416211566848ff 8-12,189,192,284,291
+apps/desktop/main/boardNotifications.ts
+  4cd7de45659969cf 83-85
+  c9416211566848ff 1-82,86-99
+src/board/server.test.ts
+  c9416211566848ff 159-254,957-958,1015-1036
+  9f83f81541e721e9 62-63
+apps/desktop/main/boardProcess.ts
+  c9416211566848ff 1-50,55-110
+  4cd7de45659969cf 51-54
+apps/desktop/tests/config.test.ts
+  7635675586b7818c 1-29
+src/agUiAdapter.ts
+  7635675586b7818c 1-230
+apps/desktop/renderer/useBoardState.ts
+  7635675586b7818c 1-108
+apps/desktop/tests/startup.test.ts
+  7635675586b7818c 1-47
+apps/desktop/main/startup.ts
+  7635675586b7818c 1-30
+apps/desktop/tests/boardApi.test.ts
+  7635675586b7818c 1-83
+apps/desktop/main/main.ts
+  c9416211566848ff 5-19,21,23-39,48-56,90,101,108-113,115-116,122,124-125,127-133,135-136,138,140-142,144-161,163-173,179-181,186,191,196,198-217
+  3d0f78aed5166511 1-4,20,22,40-47,57-89,91-100,102-107,114,117-121,123,126,134,137,139,143,162,174-178,182-185,187-190,192-195,197
+src/RuntimeEvent.ts
+  7635675586b7818c 4-7,16-18,40,42-43,45,47-50,52-54,58-62,66-67,69,73-74,76,80-81,83-85,89-93,97-102,106-115,117-118,122-125,129-132,136-139,142-144,148-149,151-154,159,161
+src/board/BoardStore.test.ts
+  7635675586b7818c 11,14-17,71-72,78-81,87,92,96,105-106,112-114,125,129,138-139,146,149,158-159,179,181,216,235-236,243-244,260,276-278,284,420,431-434,439-440,916,920-923,928-930,949-950,955-958,966-967,971,974-977
+src/RunFailureEvidence.ts
+  7635675586b7818c 1,8
+src/board/taskVerification.test.ts
+  7635675586b7818c 78-81,89-91,152-153,162-163
+apps/desktop/renderer/main.tsx
+  7635675586b7818c 1-10
+apps/desktop/tests/projectStore.test.ts
+  7635675586b7818c 1-230
+apps/desktop/tests/projectViewModel.test.ts
+  7635675586b7818c 1-49
+src/board/taskVerification.ts
+  7635675586b7818c 286,291,298-300
+apps/desktop/renderer/projectViewModel.ts
+  7635675586b7818c 1-73
+apps/desktop/README.md
+  3d0f78aed5166511 3-4,8-14,16-17,19-28,46-49,53-55,62-64,69
+  c9416211566848ff 1-2,5-7,15,18,33-45,50-52,56-60,65,70-72
+docs/adr/0021-run-event-stream.md
+  7635675586b7818c 3-5
+README.md
+  4cd7de45659969cf 1266,1268
+  ea4811cb36f6f52b 536-546
+  c9416211566848ff 1257-1265,1267,1269-1273
+  9f83f81541e721e9 1310
+src/AgentProvider.ts
+  7635675586b7818c 289
+src/board/roleProfiles.test.ts
+  c9416211566848ff 1-44,48-129
+  4cd7de45659969cf 45-47
+docs/adr/0028-runtime-events-ag-ui-and-acp-facade.md
+  9f83f81541e721e9 23-24
+  ea4811cb36f6f52b 1-22,25-62
+src/board/approvedPlanExecution.test.ts
+  7635675586b7818c 8,14-16,25-29,34-36,42-45,83,98,111-115,206,224,245-248,346,413,474,512,531,546,559-563,568-570
+apps/desktop/tsconfig.json
+  c9416211566848ff 16
+apps/desktop/renderer/App.tsx
+  c9416211566848ff 18-20,24-26,33-37,39-45,47-51,86
+  3a3aee1b54164f7b 2-16,22-23,30-32,46,52-85
+  3d0f78aed5166511 17,21,28-29,38
+src/board/company.ts
+  c9416211566848ff 1-101
+.changeset/runtime-events-ag-ui.md
+  7635675586b7818c 1-5
+apps/desktop/tests/markdownPreview.test.ts
+  7635675586b7818c 1-28
+apps/desktop/server/shellServer.ts
+  4cd7de45659969cf 526-527
+  c9416211566848ff 1,4-7,33-34,41,43-58,487-489,505-513,515-525,528-536
+  3d0f78aed5166511 2-3,8-32,35-40,42,59-486,490-504,514
+src/board/router.ts
+  c9416211566848ff 7,9,91,98-129
+src/board/company.test.ts
+  c9416211566848ff 1-56
+apps/desktop/main/config.ts
+  3d0f78aed5166511 5-8
+  c9416211566848ff 1-4,9-33
+docs/agents/board-roadmap.md
+  c9416211566848ff 3,153-205
+src/cli.ts
+  c9416211566848ff 101-105,2428,2431,2438,2490-2503,2545-2547,2685,2799-2803,2827,3001
+  9f83f81541e721e9 58,2783,2814,2819,2829,2869,2926
+apps/desktop/renderer/companyPages.tsx
+  3a3aee1b54164f7b 8,11-12,15,17-18,26-35,40-43,45-49,79-81,90,113-119,125,128-129,134-140,142,144-149,151-183,186-221,227-241,247-249,251-252,254-261,264-265,270,276-291,294-300,302,304-359,361-379,381-551,556,566-577,579,581-587,604,607-616,627-630,652,655-659,661-665,667,679,689-690,692-705,708-712,714-715,720-724,727,729,750-751,753-754,757,764-765,767-768,771,782,787-789,792-793,795-807,809-836,846,923,935,937,942,949,956-963,967,969-971,973-974,981-991,994-1002,1004-1008,1011-1014,1019,1023,1029-1030,1032-1048,1051-1053,1055-1111,1121-1122,1128-1130,1133-1147,1149-1153
+  3d0f78aed5166511 1,3-7,9-10,13-14,16,19-24,36-39,44,50-78,82-89,91-112,120,123-124,126-127,130-133,141,143,184-185,226,242-246,250,253,266-269,271-272,274-275,292-293,301,303,360,380,552-555,557-565,578,580,588-603,605-606,617-626,631-651,653-654,660,666,668-678,680-688,691,706-707,713,716-719,725-726,728,730-749,752,755-756,758-763,766,769-770,772-777,783-785,794,808,841-845,847-922,924-930,933-934,936,938-941,943-948,950-953,955,964-966,968,972,975-980,992-993,1003,1009-1010,1015-1018,1020-1022,1024-1028,1031,1049-1050,1054,1112,1118-1119,1126-1127,1131,1148
+  c9416211566848ff 2,25,121-122,150,222-225,262-263,273,778-781,786,790-791,837-840,931-932,954,1113-1117,1120,1123-1125,1132,1154-1157
+apps/desktop/renderer/boardApi.ts
+  c9416211566848ff 1-49,92-104,157-160
+  3d0f78aed5166511 78-91,105-123,128-155,162-176,178-208,213-247
+  3a3aee1b54164f7b 124-127,177,209-212
+src/run.test.ts
+  9f83f81541e721e9 1508,1511,1566,1568-1569,1576-1581,1591-1594,1596-1599,1601-1602,1607,1609,1611,1616-1617,1624-1628,1632,1634,1638-1639,1656-1674
+plans/desktop-shell-ux-refresh-prd.md
+  7635675586b7818c 1-879
+src/agUiAdapter.test.ts
+  7635675586b7818c 1-210
+.changeset/company-control-plane-shell.md
+  c9416211566848ff 1-5
+apps/desktop/main/skillFlowStore.ts
+  7635675586b7818c 1-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "3b73cb95993aeb20800a344b02a93c02f9f0c24c",
+  "prompts": {
+    "3a3aee1b54164f7b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3b12-79ad-7730-bf2b-9e21d4d7fd02",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 2668,
+      "total_deletions": 997,
+      "accepted_lines": 2246,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0e65d001531852a483ce6d586d39cebf8d7aee018eab6eca09374aca5c631f7f"
+    },
+    "3d0f78aed5166511": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f372e-3401-7d13-afca-38b02ea5b62e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 5094,
+      "total_deletions": 933,
+      "accepted_lines": 3967,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/dd000cd5e90fbfb86fe28ec99aaf4abaf87dcb4b38d02aab4bf3a42be63fdda5"
+    },
+    "4cd7de45659969cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f354a-18a5-7e73-b4cf-dd75dfcc0aa7",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 34,
+      "total_deletions": 17,
+      "accepted_lines": 31,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0c1812f36991f35dc664fbefe6b97f0822a95908268a0f1e5db61529b068b724"
+    },
+    "5df514304f73d182": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3564-86ea-76e1-bb38-bf09d7422504",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 22,
+      "total_deletions": 0,
+      "accepted_lines": 20,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/1722bb02ff3fe3dc1abc997bbfb2e85ec1af6c05237bed871c0b895820777dfd"
+    },
+    "7635675586b7818c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f403a-ed35-7ef2-bbca-f11b4d18c523",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 4160,
+      "total_deletions": 655,
+      "accepted_lines": 4160,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/4a9411a8f0ece26a5c86d47d9fd7f4db3126978d448ae39de38fe5ea22333aa9"
+    },
+    "9f83f81541e721e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3fb6-df1a-7bc1-9a76-0f8246627d82",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 33767,
+      "total_deletions": 346,
+      "accepted_lines": 33534,
+      "overriden_lines": 8,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/3f81d28ac8cdac7d30ec30aaca94743be2ba336aa42ec10396cac817c3b01619"
+    },
+    "c9416211566848ff": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "797821bf-0cd8-4564-bbef-1d8d6ded09b7",
+        "model": "claude-fable-5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 3686,
+      "total_deletions": 240,
+      "accepted_lines": 2055,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/cc1521c3f3ad05469c57ca59449899bdb9c7c27dd0ab3581248569212f8f5b94"
+    },
+    "c95e2652bcccff16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0287-b2fa-7170-85c5-81b04d11f036",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 48,
+      "total_deletions": 22,
+      "accepted_lines": 47,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/66d79762cf966a85e4c830e351c82a2962bd80b25350d05052e1709defbaaa45"
+    },
+    "ea4811cb36f6f52b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3fa8-9944-7d61-81dd-83978788ceaa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 4958,
+      "total_deletions": 1,
+      "accepted_lines": 4862,
+      "overriden_lines": 1,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/33eb88b2d1532ecd9730909d92c6fc925ea3a37b96a3b496d3c7b094d6191ce6"
+    },
+    "fab4715d6104606c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2173-6011-7f82-a1da-52c3843d75c4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "陈少辉",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 282,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/548f10f4173f109b85b650c28399569db49fb46685e47296f61c569cd230ffd4"
+    }
+  }
+}
