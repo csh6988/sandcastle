@@ -5,14 +5,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BoardStore, createRunRecorder } from "./BoardStore.js";
 import { executeApprovedBoardPlan } from "./approvedPlanExecution.js";
 import { workspacePlanToBoardPlan } from "./langGraphTaskRunner.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type {
   WorkspaceTaskPlan,
   WorkspaceTaskRepositoryResult,
 } from "../runWorkspaceTask.js";
 
-const started = (repo: string): RunEvent => ({
-  type: "run-started",
+const started = (repo: string): RuntimeEvent => ({
+  type: "run.started",
+  runId: "run-1",
   name: repo,
   agent: "claude-code",
   sandbox: "docker",
@@ -21,22 +22,27 @@ const started = (repo: string): RunEvent => ({
   timestamp: new Date(),
 });
 
-const agentText = (message: string): RunEvent => ({
-  type: "agent-text",
-  message,
+const agentText = (text: string): RuntimeEvent => ({
+  type: "message.delta",
+  runId: "run-1",
+  messageId: "message-1",
+  text,
   iteration: 1,
   timestamp: new Date(),
 });
 
-const commit = (sha: string): RunEvent => ({
-  type: "commit",
+const commit = (sha: string): RuntimeEvent => ({
+  type: "commit.created",
+  runId: "run-1",
   sha,
   iteration: 1,
   timestamp: new Date(),
 });
 
-const finished = (): RunEvent => ({
-  type: "run-finished",
+const finished = (): RuntimeEvent => ({
+  type: "run.finished",
+  runId: "run-1",
+  commits: [],
   iterationsRun: 1,
   timestamp: new Date(),
 });
@@ -74,7 +80,7 @@ describe("executeApprovedBoardPlan", () => {
       plan: workspacePlanToBoardPlan(plan),
     });
     const workflowUpdates: unknown[] = [];
-    const recorders = new Map<string, (event: RunEvent) => void>();
+    const recorders = new Map<string, (event: RuntimeEvent) => void>();
     const evaluatorInputs: string[] = [];
 
     const result = await executeApprovedBoardPlan({
@@ -89,7 +95,7 @@ describe("executeApprovedBoardPlan", () => {
         status: "approved",
       },
       callbacks: {
-        onRepoRunEvent: (repo, event) => {
+        onRepoRuntimeEvent: (repo, event) => {
           let recorder = recorders.get(repo);
           if (!recorder) {
             recorder = createRunRecorder(store, { taskId: task.id, repo });
@@ -102,11 +108,11 @@ describe("executeApprovedBoardPlan", () => {
       abortControllersByTask: new Map(),
       throwIfCancelled: () => {},
       updateWorkflow: (workflow) => workflowUpdates.push(workflow),
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("api", started("api"));
-        onRepoRunEvent("api", agentText("<promise>COMPLETE</promise>"));
-        onRepoRunEvent("api", commit("abc123"));
-        onRepoRunEvent("api", finished());
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("api", started("api"));
+        onRepoRuntimeEvent("api", agentText("<promise>COMPLETE</promise>"));
+        onRepoRuntimeEvent("api", commit("abc123"));
+        onRepoRuntimeEvent("api", finished());
         return {
           api: {
             task: "Ship the API task.",
@@ -197,7 +203,7 @@ describe("executeApprovedBoardPlan", () => {
       plan: workspacePlanToBoardPlan(plan),
     });
     const workflowUpdates: unknown[] = [];
-    const recorders = new Map<string, (event: RunEvent) => void>();
+    const recorders = new Map<string, (event: RuntimeEvent) => void>();
     const evaluatorInputs: Array<{
       readonly progressMarkdown?: string;
       readonly deterministicMarkdown: string;
@@ -215,7 +221,7 @@ describe("executeApprovedBoardPlan", () => {
         status: "approved",
       },
       callbacks: {
-        onRepoRunEvent: (repo, event) => {
+        onRepoRuntimeEvent: (repo, event) => {
           let recorder = recorders.get(repo);
           if (!recorder) {
             recorder = createRunRecorder(store, { taskId: task.id, repo });
@@ -236,10 +242,10 @@ describe("executeApprovedBoardPlan", () => {
           },
         });
       },
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("web", started("web"));
-        onRepoRunEvent("web", agentText("npm run build passed"));
-        onRepoRunEvent("web", finished());
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("web", started("web"));
+        onRepoRuntimeEvent("web", agentText("npm run build passed"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "Ship the UI task.",
@@ -337,7 +343,7 @@ describe("executeApprovedBoardPlan", () => {
         retryCount: 0,
         status: "approved",
       },
-      callbacks: { onRepoRunEvent: () => {} },
+      callbacks: { onRepoRuntimeEvent: () => {} },
       maxRepoRetries: 1,
       abortControllersByTask: new Map(),
       throwIfCancelled: () => {},
@@ -404,7 +410,7 @@ describe("executeApprovedBoardPlan", () => {
         retryCount: 2,
         status: "running",
       },
-      callbacks: { onRepoRunEvent: () => {} },
+      callbacks: { onRepoRuntimeEvent: () => {} },
       maxRepoRetries: 1,
       abortControllersByTask: new Map(),
       throwIfCancelled: () => {},
@@ -465,7 +471,7 @@ describe("executeApprovedBoardPlan", () => {
         retryCount: 0,
         status: "approved",
       },
-      callbacks: { onRepoRunEvent: () => {} },
+      callbacks: { onRepoRuntimeEvent: () => {} },
       maxRepoRetries: 0,
       abortControllersByTask: new Map(),
       throwIfCancelled: () => {},
@@ -503,7 +509,7 @@ describe("executeApprovedBoardPlan", () => {
     );
   });
 
-  it("does not launch the evaluator when the sandbox failed before any agent work, even with lifecycle run events", async () => {
+  it("does not launch the evaluator when the sandbox failed before any agent work, even with lifecycle runtime events", async () => {
     const plan: WorkspaceTaskPlan = {
       repositories: [
         {
@@ -522,7 +528,7 @@ describe("executeApprovedBoardPlan", () => {
     });
     const createFailure =
       "Provider 'docker' create failed: Image 'sandcastle:sandcastle' not found locally. Build it first with 'sandcastle docker build-image'.";
-    const recorders = new Map<string, (event: RunEvent) => void>();
+    const recorders = new Map<string, (event: RuntimeEvent) => void>();
     let evaluatorCalls = 0;
 
     const result = await executeApprovedBoardPlan({
@@ -537,7 +543,7 @@ describe("executeApprovedBoardPlan", () => {
         status: "approved",
       },
       callbacks: {
-        onRepoRunEvent: (repo, event) => {
+        onRepoRuntimeEvent: (repo, event) => {
           let recorder = recorders.get(repo);
           if (!recorder) {
             recorder = createRunRecorder(store, { taskId: task.id, repo });
@@ -550,16 +556,18 @@ describe("executeApprovedBoardPlan", () => {
       abortControllersByTask: new Map(),
       throwIfCancelled: () => {},
       updateWorkflow: () => {},
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("sandcastle", started("sandcastle"));
-        onRepoRunEvent("sandcastle", {
-          type: "iteration-started",
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("sandcastle", started("sandcastle"));
+        onRepoRuntimeEvent("sandcastle", {
+          type: "iteration.started",
+          runId: "run-1",
           iteration: 1,
           maxIterations: 1,
           timestamp: new Date(),
         });
-        onRepoRunEvent("sandcastle", {
-          type: "run-failed",
+        onRepoRuntimeEvent("sandcastle", {
+          type: "run.error",
+          runId: "run-1",
           message: createFailure,
           timestamp: new Date(),
         });

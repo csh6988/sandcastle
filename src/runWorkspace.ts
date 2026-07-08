@@ -1,5 +1,6 @@
 import { NodeContext, NodeFileSystem } from "@effect/platform-node";
 import { Effect, Layer } from "effect";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { resolveCwd } from "./resolveCwd.js";
 import type { AgentProvider } from "./AgentProvider.js";
@@ -32,7 +33,7 @@ import {
 } from "./PromptArgumentSubstitution.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { resolvePrompt } from "./PromptResolver.js";
-import type { RunEvent } from "./RunEvent.js";
+import type { RuntimeEvent, RuntimeEventHandler } from "./RuntimeEvent.js";
 import {
   buildAgentStreamHandler,
   buildCompletionMessage,
@@ -99,13 +100,12 @@ export interface RunWorkspaceOptions<A extends AgentProvider = AgentProvider> {
   readonly signal?: AbortSignal;
   readonly timeouts?: Timeouts;
   /**
-   * Optional callback emitting the structured run-event stream for this
-   * workspace run (run lifecycle, iterations, agent text/tool calls, token
-   * usage). Works in both display modes, mirroring `run()`'s `onRunEvent`.
-   * Lets a caller (e.g. the workflow board) surface the planner phase as its
-   * own visible run. See ADR 0021.
+   * Protocol-oriented runtime event stream for this workspace run. Lets callers
+   * surface the planner/workspace phase as its own visible run.
    */
-  readonly onRunEvent?: (event: RunEvent) => void;
+  readonly events?: {
+    readonly onRuntimeEvent?: RuntimeEventHandler;
+  };
 }
 
 export interface RunWorkspaceResult {
@@ -479,14 +479,13 @@ export async function runWorkspace(
   assertValidRepositoryNames(options.repositories, options.primaryRepository);
   const sandboxProvider = getSupportedSandbox(options.sandbox);
 
-  // Safe, synchronous run-event emit. A thrown observer must never abort the
-  // workspace run, so callback errors are swallowed.
-  const emitRunEvent = (event: RunEvent): void => {
-    if (!options.onRunEvent) return;
+  const runId = randomUUID();
+  const emitRuntimeEvent = (event: RuntimeEvent): void => {
+    if (!options.events?.onRuntimeEvent) return;
     try {
-      options.onRunEvent(event);
+      Promise.resolve(options.events.onRuntimeEvent(event)).catch(() => {});
     } catch {
-      // Swallow — a broken observer must not kill the run.
+      // Swallow — a broken adapter must not kill the run.
     }
   };
 
@@ -604,8 +603,9 @@ export async function runWorkspace(
       }),
     );
 
-    emitRunEvent({
-      type: "run-started",
+    emitRuntimeEvent({
+      type: "run.started",
+      runId,
       name: options.name ?? options.agent.name,
       agent: options.agent.name,
       model: options.agent.model,
@@ -624,8 +624,9 @@ export async function runWorkspace(
       await Effect.runPromise(
         display.status(`Workspace iteration ${i}/${maxIterations}`, "info"),
       );
-      emitRunEvent({
-        type: "iteration-started",
+      emitRuntimeEvent({
+        type: "iteration.started",
+        runId,
         iteration: i,
         maxIterations,
         timestamp: new Date(),
@@ -639,6 +640,7 @@ export async function runWorkspace(
           () =>
             Effect.gen(function* () {
               const streamEmitter = yield* AgentStreamEmitter;
+              let toolCallSeq = 0;
               const textBuffer = new TextDeltaBuffer((chunk) => {
                 Effect.runPromise(display.text(chunk));
                 Effect.runPromise(
@@ -649,15 +651,18 @@ export async function runWorkspace(
                     timestamp: new Date(),
                   }),
                 );
-                emitRunEvent({
-                  type: "agent-text",
-                  message: chunk,
+                emitRuntimeEvent({
+                  type: "message.delta",
+                  runId,
+                  messageId: `${runId}:iteration:${i}:message`,
+                  text: chunk,
                   iteration: i,
                   timestamp: new Date(),
                 });
               });
               const onText = (text: string) => textBuffer.write(text);
               const onToolCall = (name: string, formattedArgs: string) => {
+                toolCallSeq++;
                 textBuffer.flush();
                 Effect.runPromise(display.toolCall(name, formattedArgs));
                 Effect.runPromise(
@@ -669,10 +674,12 @@ export async function runWorkspace(
                     timestamp: new Date(),
                   }),
                 );
-                emitRunEvent({
-                  type: "agent-tool-call",
+                emitRuntimeEvent({
+                  type: "tool.call",
+                  runId,
+                  toolCallId: `${runId}:iteration:${i}:tool:${toolCallSeq}`,
                   name,
-                  formattedArgs,
+                  args: formattedArgs,
                   iteration: i,
                   timestamp: new Date(),
                 });
@@ -686,6 +693,13 @@ export async function runWorkspace(
                     timestamp: new Date(),
                   }),
                 ).catch(() => {});
+                emitRuntimeEvent({
+                  type: "raw",
+                  runId,
+                  line,
+                  iteration: i,
+                  timestamp: new Date(),
+                });
               };
               const onIdleWarning = (minutes: number) => {
                 const message =
@@ -758,14 +772,25 @@ export async function runWorkspace(
       allIterations.push(iterationResult.iteration);
 
       if (iterationResult.iteration.usage) {
-        emitRunEvent({
-          type: "usage",
+        emitRuntimeEvent({
+          type: "usage.recorded",
+          runId,
           usage: iterationResult.iteration.usage,
           model: options.agent.model,
           iteration: i,
           timestamp: new Date(),
         });
       }
+
+      emitRuntimeEvent({
+        type: "iteration.finished",
+        runId,
+        iteration: i,
+        sessionId: iterationResult.iteration.sessionId,
+        sessionFilePath: iterationResult.iteration.sessionFilePath,
+        usage: iterationResult.iteration.usage,
+        timestamp: new Date(),
+      });
 
       if (iterationResult.completionSignal !== undefined) {
         matchedCompletionSignal = iterationResult.completionSignal;
@@ -784,10 +809,12 @@ export async function runWorkspace(
       await Effect.runPromise(display.text(line));
     }
 
-    emitRunEvent({
-      type: "run-finished",
+    emitRuntimeEvent({
+      type: "run.finished",
+      runId,
       completionSignal: matchedCompletionSignal,
       iterationsRun: allIterations.length,
+      commits: prepared.flatMap((repo) => repo.commits),
       timestamp: new Date(),
     });
 
@@ -820,8 +847,9 @@ export async function runWorkspace(
     const workspaceCommits = prepared.flatMap((repo) =>
       repo.commits.map((commit) => commit.sha),
     );
-    emitRunEvent({
-      type: "run-failed",
+    emitRuntimeEvent({
+      type: "run.error",
+      runId,
       message: error instanceof Error ? error.message : String(error),
       recovery: buildRunFailureRecovery(error, {
         runLogPath: displayConfig.logFilePath,

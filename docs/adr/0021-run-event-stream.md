@@ -1,5 +1,8 @@
 # Run-event stream: a logging-mode-independent observability seam
 
+Status: Superseded by ADR 0028. Runtime events are now the single structured
+core event model; `RunEvent`, `RunEventEmitter`, and `onRunEvent` were removed.
+
 Sandcastle's progress and agent output have historically been observable in two
 ways only: the `Display` layer (an interactive terminal UI or an appended log
 file) and the `AgentStreamEvent` callback. The callback is the single

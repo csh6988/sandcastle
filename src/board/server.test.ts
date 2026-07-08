@@ -59,7 +59,8 @@ describe("routeApi", () => {
       maxIterations: 1,
     });
     store.recordEvent(run.id, {
-      type: "usage",
+      type: "usage.recorded",
+      runId: "run-1",
       usage: {
         inputTokens: 10,
         cacheCreationInputTokens: 0,

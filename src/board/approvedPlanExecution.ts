@@ -4,7 +4,7 @@ import type {
   BoardTaskWorkflowStatus,
   BoardTaskWorkflowSubstatus,
 } from "./BoardStore.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type {
   WorkspaceTaskPlan,
   WorkspaceTaskRepositoryResult,
@@ -41,7 +41,7 @@ export interface ApprovedPlanExecutionState {
 }
 
 export interface ApprovedPlanExecutionCallbacks {
-  readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
+  readonly onRepoRuntimeEvent: (repo: string, event: RuntimeEvent) => void;
 }
 
 export interface ApprovedPlanExecutionResult {
@@ -57,7 +57,7 @@ export type ApprovedPlanExecutor = (args: {
   readonly title: string;
   readonly prompt: string;
   readonly plan: WorkspaceTaskPlan;
-  readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
+  readonly onRepoRuntimeEvent: (repo: string, event: RuntimeEvent) => void;
   readonly signal: AbortSignal;
 }) => Promise<Record<string, WorkspaceTaskRepositoryResult>>;
 
@@ -187,7 +187,7 @@ export const executeApprovedBoardPlan = async (opts: {
         title: opts.state.title,
         prompt: opts.state.prompt,
         plan: attemptPlan,
-        onRepoRunEvent: opts.callbacks.onRepoRunEvent,
+        onRepoRuntimeEvent: opts.callbacks.onRepoRuntimeEvent,
         signal: controller.signal,
       });
       repositories = { ...repositories, ...attemptResults };

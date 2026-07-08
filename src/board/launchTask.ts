@@ -1,4 +1,4 @@
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import {
   BoardStore,
   createRunRecorder,
@@ -22,13 +22,13 @@ export interface TaskRunResult {
  * Runs a board task as a multi-repo workspace task. Injected so the board
  * stays decoupled from the orchestration core: the CLI binds the real
  * `runWorkspaceTask` (with the resolved agent, sandbox, and repositories)
- * and forwards per-repo run events via `onRepoRunEvent`.
+ * and forwards per-repo runtime events via `onRepoRuntimeEvent`.
  */
 export type TaskRunner = (args: {
   readonly taskId: string;
   readonly prompt: string;
   readonly title: string;
-  readonly onRepoRunEvent: (repo: string, event: RunEvent) => void;
+  readonly onRepoRuntimeEvent: (repo: string, event: RuntimeEvent) => void;
   /** Invoked as soon as the planner produces a plan, before execution. */
   readonly onPlan: (plan: BoardTaskPlan) => void;
 }) => Promise<TaskRunResult>;
@@ -38,7 +38,7 @@ const errorMessage = (error: unknown): string =>
 
 /**
  * Build a {@link TaskLauncher} that, on task creation, kicks off a workspace
- * task run, records each repository's run-event stream into the store (linked
+ * task run, records each repository's runtime-event stream into the store (linked
  * to the task), and folds the final outcome back into the task status.
  *
  * The run is fire-and-forget: the board API responds as soon as the task is
@@ -51,8 +51,8 @@ export const createTaskLauncher = (deps: {
   return (task: BoardTaskRecord) => {
     deps.store.updateTask(task.id, { status: "running" });
 
-    const recorders = new Map<string, (event: RunEvent) => void>();
-    const onRepoRunEvent = (repo: string, event: RunEvent) => {
+    const recorders = new Map<string, (event: RuntimeEvent) => void>();
+    const onRepoRuntimeEvent = (repo: string, event: RuntimeEvent) => {
       let recorder = recorders.get(repo);
       if (!recorder) {
         recorder = createRunRecorder(deps.store, { taskId: task.id, repo });
@@ -70,7 +70,7 @@ export const createTaskLauncher = (deps: {
         taskId: task.id,
         prompt: task.prompt,
         title: task.title,
-        onRepoRunEvent,
+        onRepoRuntimeEvent,
         onPlan,
       })
       .then((result) => {

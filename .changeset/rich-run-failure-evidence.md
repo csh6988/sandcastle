@@ -2,7 +2,7 @@
 "@chenshaohui6988/sandcastle": minor
 ---
 
-Add optional structured recovery evidence to `run-failed` run events. Failed
+Add optional structured recovery evidence to `run.error` runtime events. Failed
 runs from `run()`, `runWorkspace()`, and `runWorkspaceTask()` now carry an
 optional `recovery` object with a stable `RunFailureKind`
 (`infrastructure` | `agent` | `task` | `unknown`), a best-effort failure phase,
@@ -11,4 +11,4 @@ state, and commit evidence — all optional and Effect-free. The original error 
 still thrown unchanged. `RunFailureKind` and `RunFailureRecovery` are exported so
 library callers can route infrastructure failures differently from agent or task
 failures, and the workflow board surfaces the evidence in its recovery text.
-Minimal legacy message-only `run-failed` events still render safely.
+Message-only `run.error` events still render safely.

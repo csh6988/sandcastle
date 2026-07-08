@@ -25,7 +25,8 @@ const preAgentFailureEvents: TaskProgressRun["events"] = [
   {
     seq: 1,
     event: {
-      type: "run-started",
+      type: "run.started",
+      runId: "run-1",
       name: "api",
       agent: "codex",
       sandbox: "docker",
@@ -37,7 +38,8 @@ const preAgentFailureEvents: TaskProgressRun["events"] = [
   {
     seq: 2,
     event: {
-      type: "iteration-started",
+      type: "iteration.started",
+      runId: "run-1",
       iteration: 1,
       maxIterations: 1,
       timestamp: "2026-07-02T00:00:00.100Z",
@@ -46,7 +48,8 @@ const preAgentFailureEvents: TaskProgressRun["events"] = [
   {
     seq: 3,
     event: {
-      type: "run-failed",
+      type: "run.error",
+      runId: "run-1",
       message:
         "Provider 'docker' create failed: Image 'sandcastle:sandcastle' not found locally.",
       timestamp: "2026-07-02T00:00:00.900Z",
@@ -84,8 +87,10 @@ describe("repositoryAgentWorkWasRecorded", () => {
               {
                 seq: 4,
                 event: {
-                  type: "agent-text",
-                  message: "Working on the task.",
+                  type: "message.delta",
+                  runId: "run-1",
+                  messageId: "message-1",
+                  text: "Working on the task.",
                   iteration: 1,
                   timestamp: "2026-07-02T00:00:00.500Z",
                 },

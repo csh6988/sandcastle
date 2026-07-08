@@ -286,7 +286,7 @@ export interface AgentSessionStorage {
 
 export interface AgentProvider {
   readonly name: string;
-  /** Agent model this provider was constructed with, when known. Used to attribute token usage per model in the run-event stream. Optional so test fakes and providers without a fixed model need not set it. */
+  /** Agent model this provider was constructed with, when known. Used to attribute token usage per model in the runtime event stream. Optional so test fakes and providers without a fixed model need not set it. */
   readonly model?: string;
   /** Environment variables injected by this agent provider. Merged at launch time with env resolver and sandbox provider env. */
   readonly env: Record<string, string>;

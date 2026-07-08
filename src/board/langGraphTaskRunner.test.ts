@@ -10,12 +10,13 @@ import {
   type LangGraphPlanResult,
 } from "./langGraphTaskRunner.js";
 import { exportApprovedBoardPlan } from "./approvedPlanExport.js";
-import type { RunEvent } from "../RunEvent.js";
+import type { RuntimeEvent } from "../RuntimeEvent.js";
 import type { BoardTaskPlan } from "./BoardStore.js";
 import type { WorkspaceTaskPlan } from "../runWorkspaceTask.js";
 
-const started = (name: string, repo: string): RunEvent => ({
-  type: "run-started",
+const started = (name: string, repo: string): RuntimeEvent => ({
+  type: "run.started",
+  runId: "run-1",
   name,
   agent: "claude-code",
   model: "claude-opus-4-8",
@@ -25,27 +26,33 @@ const started = (name: string, repo: string): RunEvent => ({
   timestamp: new Date(),
 });
 
-const finished = (): RunEvent => ({
-  type: "run-finished",
+const finished = (): RuntimeEvent => ({
+  type: "run.finished",
+  runId: "run-1",
+  commits: [],
   iterationsRun: 1,
   timestamp: new Date(),
 });
 
-const failed = (message: string): RunEvent => ({
-  type: "run-failed",
-  message,
+const failed = (text: string): RuntimeEvent => ({
+  type: "run.error",
+  runId: "run-1",
+  message: text,
   timestamp: new Date(),
 });
 
-const agentText = (message: string): RunEvent => ({
-  type: "agent-text",
-  message,
+const agentText = (text: string): RuntimeEvent => ({
+  type: "message.delta",
+  runId: "run-1",
+  messageId: "message-1",
+  text,
   iteration: 1,
   timestamp: new Date(),
 });
 
-const commit = (sha: string): RunEvent => ({
-  type: "commit",
+const commit = (sha: string): RuntimeEvent => ({
+  type: "commit.created",
+  runId: "run-1",
   sha,
   iteration: 1,
   timestamp: new Date(),
@@ -90,10 +97,10 @@ describe("createLangGraphTaskWorkflow", () => {
         calls.push("background-plan");
         return { plan, plannerStdout: "ok" };
       },
-      execute: async ({ onRepoRunEvent }) => {
+      execute: async ({ onRepoRuntimeEvent }) => {
         calls.push("execute");
-        onRepoRunEvent("web", started("web", "web"));
-        onRepoRunEvent("web", finished());
+        onRepoRuntimeEvent("web", started("web", "web"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "add page",
@@ -120,7 +127,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: "Add page",
       prompt: "Please add a page",
       onPlan: (p) => reportedPlans.push(p),
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
 
     expect(runResult.status).toBe("awaiting-phase-completion");
@@ -239,12 +246,12 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
+      execute: async ({ onRepoRuntimeEvent }) => {
         roles.push(store.getTask(task.id)?.workflow?.role ?? "missing");
-        onRepoRunEvent("api", started("api", "api"));
-        onRepoRunEvent("api", agentText("<promise>COMPLETE</promise>"));
-        onRepoRunEvent("api", commit("abc123"));
-        onRepoRunEvent("api", finished());
+        onRepoRuntimeEvent("api", started("api", "api"));
+        onRepoRuntimeEvent("api", agentText("<promise>COMPLETE</promise>"));
+        onRepoRuntimeEvent("api", commit("abc123"));
+        onRepoRuntimeEvent("api", finished());
         return {
           api: {
             task: "ship endpoint",
@@ -263,7 +270,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
 
     expect(store.getTask(task.id)?.workflow).toMatchObject({
@@ -304,14 +311,14 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("api", started("api", "api"));
-        onRepoRunEvent(
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("api", started("api", "api"));
+        onRepoRuntimeEvent(
           "api",
           agentText("Implemented it.\n<promise>COMPLETE</promise>"),
         );
-        onRepoRunEvent("api", commit("abc123"));
-        onRepoRunEvent("api", finished());
+        onRepoRuntimeEvent("api", commit("abc123"));
+        onRepoRuntimeEvent("api", finished());
         return {
           api: {
             task: "ship endpoint",
@@ -334,7 +341,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -374,11 +381,14 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("api", started("api", "api"));
-        onRepoRunEvent("api", agentText("<promise>COMPLETE</promise>"));
-        onRepoRunEvent("api", commit("def456"));
-        onRepoRunEvent("api", failed("Session capture failed: missing jsonl"));
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("api", started("api", "api"));
+        onRepoRuntimeEvent("api", agentText("<promise>COMPLETE</promise>"));
+        onRepoRuntimeEvent("api", commit("def456"));
+        onRepoRuntimeEvent(
+          "api",
+          failed("Session capture failed: missing jsonl"),
+        );
         return {
           api: {
             task: "capture finished work",
@@ -400,7 +410,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -441,9 +451,9 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("api", started("api", "api"));
-        onRepoRunEvent("api", failed("tests failed"));
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("api", started("api", "api"));
+        onRepoRuntimeEvent("api", failed("tests failed"));
         return {
           api: {
             task: "fix failing delivery",
@@ -464,7 +474,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -502,9 +512,9 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
-        onRepoRunEvent("api", started("api", "api"));
-        onRepoRunEvent("api", finished());
+      execute: async ({ onRepoRuntimeEvent }) => {
+        onRepoRuntimeEvent("api", started("api", "api"));
+        onRepoRuntimeEvent("api", finished());
         return {
           api: {
             task: "ship api",
@@ -521,7 +531,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -564,11 +574,11 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("background planner should not start");
       },
-      execute: async ({ onRepoRunEvent }) => {
+      execute: async ({ onRepoRuntimeEvent }) => {
         attempts += 1;
-        onRepoRunEvent("api", started("api", "api"));
+        onRepoRuntimeEvent("api", started("api", "api"));
         if (attempts === 1) {
-          onRepoRunEvent("api", failed("temporary failure"));
+          onRepoRuntimeEvent("api", failed("temporary failure"));
           return {
             api: {
               task: "fix endpoint",
@@ -579,7 +589,7 @@ describe("createLangGraphTaskWorkflow", () => {
             },
           };
         }
-        onRepoRunEvent("api", finished());
+        onRepoRuntimeEvent("api", finished());
         return {
           api: {
             task: "fix endpoint",
@@ -597,7 +607,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: "Fix endpoint",
       prompt: "Fix it",
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -638,7 +648,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -697,7 +707,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -756,7 +766,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -822,7 +832,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -891,7 +901,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -934,7 +944,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -999,7 +1009,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -1167,12 +1177,12 @@ describe("createLangGraphTaskWorkflow", () => {
     const workflow = createLangGraphTaskWorkflow({
       store,
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
-      execute: async ({ prompt, plan, onRepoRunEvent }) => {
+      execute: async ({ prompt, plan, onRepoRuntimeEvent }) => {
         executeCalls++;
         recoveredPrompt = prompt;
         recoveredPlan = plan;
-        onRepoRunEvent("web", started("web", "web"));
-        onRepoRunEvent("web", finished());
+        onRepoRuntimeEvent("web", started("web", "web"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "execute it",
@@ -1253,12 +1263,12 @@ describe("createLangGraphTaskWorkflow", () => {
       plan: async () => {
         throw new Error("imported plan should not re-plan");
       },
-      execute: async ({ prompt, plan, onRepoRunEvent }) => {
+      execute: async ({ prompt, plan, onRepoRuntimeEvent }) => {
         executeCalls++;
         approvedPrompt = prompt;
         approvedPlan = plan;
-        onRepoRunEvent("web", started("web", "web"));
-        onRepoRunEvent("web", finished());
+        onRepoRuntimeEvent("web", started("web", "web"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "Ship the imported UI task",
@@ -1352,7 +1362,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -1463,7 +1473,7 @@ describe("createLangGraphTaskWorkflow", () => {
       title: task.title,
       prompt: task.prompt,
       onPlan: () => {},
-      onRepoRunEvent: () => {},
+      onRepoRuntimeEvent: () => {},
     });
     await workflow.completePhase(task.id, "classifying");
     await workflow.completePhase(task.id, "aligning-prd");
@@ -1588,11 +1598,11 @@ Add the API contract.
     const workflow = createLangGraphTaskWorkflow({
       store,
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
-      execute: async ({ plan, onRepoRunEvent }) => {
+      execute: async ({ plan, onRepoRuntimeEvent }) => {
         executeCalls++;
         recoveredPlan = plan;
-        onRepoRunEvent("vocmngweb", started("vocmngweb", "vocmngweb"));
-        onRepoRunEvent("vocmngweb", finished());
+        onRepoRuntimeEvent("vocmngweb", started("vocmngweb", "vocmngweb"));
+        onRepoRuntimeEvent("vocmngweb", finished());
         return {
           vocmngweb: {
             task: "combined",
@@ -1648,10 +1658,10 @@ Add the API contract.
     const workflow = createLangGraphTaskWorkflow({
       store,
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
-      execute: async ({ onRepoRunEvent }) => {
+      execute: async ({ onRepoRuntimeEvent }) => {
         executeCalls++;
-        onRepoRunEvent("web", started("web", "web"));
-        onRepoRunEvent("web", finished());
+        onRepoRuntimeEvent("web", started("web", "web"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "execute it",
@@ -1699,11 +1709,11 @@ Add the API contract.
     const workflow = createLangGraphTaskWorkflow({
       store,
       plan: async () => ({ plan: { repositories: [] }, plannerStdout: "ok" }),
-      execute: async ({ onRepoRunEvent }) => {
+      execute: async ({ onRepoRuntimeEvent }) => {
         executeCalls++;
-        onRepoRunEvent("web", started("web", "web"));
-        onRepoRunEvent("web", agentText("<promise>COMPLETE</promise>"));
-        onRepoRunEvent("web", finished());
+        onRepoRuntimeEvent("web", started("web", "web"));
+        onRepoRuntimeEvent("web", agentText("<promise>COMPLETE</promise>"));
+        onRepoRuntimeEvent("web", finished());
         return {
           web: {
             task: "execute it",

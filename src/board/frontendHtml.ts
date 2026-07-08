@@ -261,7 +261,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
       };
       const formatRunActivityRecord = (record) => {
         const e = record.event;
-        if (e.type === "run-started") {
+        if (e.type === "run.started") {
           return [
             terminalPrefix(e, "$") + "run started: " + e.name,
             "  agent: " + e.agent + (e.model ? " · " + e.model : ""),
@@ -269,15 +269,16 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
             "  max iterations: " + e.maxIterations,
           ];
         }
-        if (e.type === "iteration-started") return [terminalPrefix(e, "==>") + "iteration " + e.iteration + "/" + e.maxIterations];
-        if (e.type === "agent-text") return [indentTerminalText(terminalPrefix(e, "agent>"), e.message)];
-        if (e.type === "agent-tool-call") return [indentTerminalText(terminalPrefix(e, "tool>"), e.name + " " + e.formattedArgs)];
-        if (e.type === "agent-tool-result") return [indentTerminalText(terminalPrefix(e, "result>"), e.content)];
-        if (e.type === "agent-idle-warning") return [terminalPrefix(e, "warn>") + "Agent idle for " + e.minutes + " minute" + (e.minutes === 1 ? "" : "s")];
-        if (e.type === "usage") return [terminalPrefix(e, "usage>") + fmtTokens(eventTokenTotal(e)) + " tokens" + (e.model ? " · " + e.model : "") + " · iteration " + e.iteration];
-        if (e.type === "commit") return [terminalPrefix(e, "commit>") + e.sha.slice(0, 9) + " · iteration " + e.iteration];
-        if (e.type === "run-finished") return [terminalPrefix(e, "done>") + "finished after " + e.iterationsRun + " iteration" + (e.iterationsRun === 1 ? "" : "s") + (e.completionSignal ? " · " + e.completionSignal : "")];
-        if (e.type === "run-failed") return [indentTerminalText(terminalPrefix(e, "failed>"), e.message)];
+        if (e.type === "iteration.started") return [terminalPrefix(e, "==>") + "iteration " + e.iteration + "/" + e.maxIterations];
+        if (e.type === "iteration.finished") return [terminalPrefix(e, "<==") + "iteration " + e.iteration + " finished"];
+        if (e.type === "message.delta") return [indentTerminalText(terminalPrefix(e, "agent>"), e.text)];
+        if (e.type === "tool.call") return [indentTerminalText(terminalPrefix(e, "tool>"), e.name + " " + e.args)];
+        if (e.type === "tool.result") return [indentTerminalText(terminalPrefix(e, "result>"), e.content)];
+        if (e.type === "usage.recorded") return [terminalPrefix(e, "usage>") + fmtTokens(eventTokenTotal(e)) + " tokens" + (e.model ? " · " + e.model : "") + " · iteration " + e.iteration];
+        if (e.type === "commit.created") return [terminalPrefix(e, "commit>") + e.sha.slice(0, 9) + " · iteration " + e.iteration];
+        if (e.type === "raw") return [indentTerminalText(terminalPrefix(e, "raw>"), e.line)];
+        if (e.type === "run.finished") return [terminalPrefix(e, "done>") + "finished after " + e.iterationsRun + " iteration" + (e.iterationsRun === 1 ? "" : "s") + (e.completionSignal ? " · " + e.completionSignal : "")];
+        if (e.type === "run.error") return [indentTerminalText(terminalPrefix(e, "failed>"), e.message)];
         return [terminalPrefix(e, "event>") + e.type];
       };
       const summarizeRunProgress = (records, run) => {
@@ -292,24 +293,24 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
         for (const record of records) {
           const e = record.event;
           lastType = e.type;
-          if (e.type === "run-started") {
+          if (e.type === "run.started") {
             maxIterations = e.maxIterations;
             status = status || "running";
-          } else if (e.type === "iteration-started") {
+          } else if (e.type === "iteration.started") {
             currentIteration = e.iteration;
             maxIterations = e.maxIterations;
-          } else if (e.type === "usage") {
+          } else if (e.type === "usage.recorded") {
             currentIteration = e.iteration;
             totalTokens += eventTokenTotal(e);
           } else if (e.iteration) {
             currentIteration = e.iteration;
           }
-          if (e.type === "commit") commits += 1;
-          if (e.type === "run-finished") {
+          if (e.type === "commit.created") commits += 1;
+          if (e.type === "run.finished") {
             status = "succeeded";
             currentIteration = e.iterationsRun;
           }
-          if (e.type === "run-failed") {
+          if (e.type === "run.error") {
             status = "failed";
             failure = e.message;
           }
@@ -377,7 +378,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
           const es = new EventSource("/api/stream");
           es.addEventListener("change", (m) => {
             const c = JSON.parse(m.data);
-            if (c.kind === "run-event" && c.runId === runId) {
+            if (c.kind === "runtime-event" && c.runId === runId) {
               setEvents((prev) => [...prev, c.record]);
             }
           });
@@ -1005,7 +1006,7 @@ export const BOARD_FRONTEND_HTML = `<!doctype html>
               });
               setSelected((cur) => cur ?? { type: "task", id: c.task.id });
             }
-            if (c.kind === "run-event") setRefreshKey((k) => k + 1);
+            if (c.kind === "runtime-event") setRefreshKey((k) => k + 1);
           });
           return () => es.close();
         }, []);

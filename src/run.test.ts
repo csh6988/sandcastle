@@ -1505,10 +1505,10 @@ describe("output.maxRetries end-to-end", () => {
 });
 
 // ---------------------------------------------------------------------------
-// onRunEvent structured run-event stream (ADR 0021)
+// RuntimeEvent stream
 // ---------------------------------------------------------------------------
 
-describe("run() onRunEvent", () => {
+describe("run() events.onRuntimeEvent", () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1563,18 +1563,22 @@ describe("run() onRunEvent", () => {
     });
 
   it.each(["file", "default"] as const)(
-    "emits run lifecycle events in %s logging mode",
+    "emits runtime events in %s logging mode",
     async (mode) => {
-      const logDir = mkdtempSync(join(tmpdir(), "sandcastle-evt-"));
-      const events: import("./RunEvent.js").RunEvent[] = [];
+      const logDir = mkdtempSync(join(tmpdir(), "sandcastle-runtime-"));
+      const events: import("./RuntimeEvent.js").RuntimeEvent[] = [];
       try {
         await run({
           agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
           sandbox: completingSandbox(),
           prompt: "do the thing",
           branchStrategy: { type: "head" },
-          name: "evt-run",
-          onRunEvent: (e) => events.push(e),
+          name: "runtime-run",
+          events: {
+            onRuntimeEvent: (e) => {
+              events.push(e);
+            },
+          },
           ...(mode === "file"
             ? { logging: { type: "file", path: join(logDir, "run.log") } }
             : {}),
@@ -1584,46 +1588,55 @@ describe("run() onRunEvent", () => {
       }
 
       const types = events.map((e) => e.type);
-      expect(types).toContain("run-started");
-      expect(types).toContain("iteration-started");
-      expect(types).toContain("run-finished");
+      expect(types).toContain("run.started");
+      expect(types).toContain("iteration.started");
+      expect(types).toContain("raw");
+      expect(types).toContain("run.finished");
 
-      const started = events.find((e) => e.type === "run-started");
+      const runIds = new Set(events.map((e) => e.runId));
+      expect(runIds.size).toBe(1);
+
+      const started = events.find((e) => e.type === "run.started");
       expect(started).toMatchObject({
-        type: "run-started",
-        name: "evt-run",
+        type: "run.started",
+        name: "runtime-run",
         agent: "claude-code",
         model: "claude-opus-4-8",
         maxIterations: DEFAULT_MAX_ITERATIONS,
       });
-      const finished = events.find((e) => e.type === "run-finished");
+      const finished = events.find((e) => e.type === "run.finished");
       expect(finished).toMatchObject({
-        type: "run-finished",
+        type: "run.finished",
         completionSignal: "<promise>COMPLETE</promise>",
+        commits: [],
       });
     },
   );
 
-  it("emits run-failed and rethrows when the agent errors", async () => {
-    const events: import("./RunEvent.js").RunEvent[] = [];
+  it("emits run.error and rethrows when the agent errors", async () => {
+    const events: import("./RuntimeEvent.js").RuntimeEvent[] = [];
     await expect(
       run({
         agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
         sandbox: throwingSandbox(),
         prompt: "do the thing",
         branchStrategy: { type: "head" },
-        onRunEvent: (e) => events.push(e),
+        events: {
+          onRuntimeEvent: (e) => {
+            events.push(e);
+          },
+        },
       }),
     ).rejects.toThrow();
 
-    const failed = events.find((e) => e.type === "run-failed");
+    const failed = events.find((e) => e.type === "run.error");
     expect(failed).toBeDefined();
-    expect(events.map((e) => e.type)).toContain("run-started");
+    expect(events.map((e) => e.type)).toContain("run.started");
 
     // The failure carries structured recovery evidence with a stable kind and
     // a best-effort failure phase. A sandbox exec error is infrastructure.
-    expect(failed).toMatchObject({ type: "run-failed" });
-    if (failed?.type === "run-failed") {
+    expect(failed).toMatchObject({ type: "run.error" });
+    if (failed?.type === "run.error") {
       expect(failed.message).toMatch(/agent boom/i);
       expect(failed.recovery).toBeDefined();
       expect(["infrastructure", "agent", "task", "unknown"]).toContain(
@@ -1640,8 +1653,25 @@ describe("run() onRunEvent", () => {
       sandbox: completingSandbox(),
       prompt: "do the thing",
       branchStrategy: { type: "head" },
-      onRunEvent: () => {
-        throw new Error("observer boom");
+      events: {
+        onRuntimeEvent: () => {
+          throw new Error("observer boom");
+        },
+      },
+    });
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
+  });
+
+  it("a rejecting runtime observer does not abort the run", async () => {
+    const result = await run({
+      agent: claudeCode("claude-opus-4-8", { captureSessions: false }),
+      sandbox: completingSandbox(),
+      prompt: "do the thing",
+      branchStrategy: { type: "head" },
+      events: {
+        onRuntimeEvent: async () => {
+          throw new Error("runtime observer boom");
+        },
       },
     });
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");

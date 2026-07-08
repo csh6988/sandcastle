@@ -533,6 +533,17 @@ const result = await run({
   },
   // logging: { type: "stdout", verbose: true }, // OR terminal mode (verbose: raw lines to stdout)
 
+  // Optional: forward protocol-facing runtime events to a UI, event stream,
+  // or observability adapter. Runtime events cover run/iteration lifecycle,
+  // agent text deltas, tool calls, raw debug lines, usage, commits, and final
+  // completion. Errors thrown or rejected by the callback are swallowed.
+  events: {
+    onRuntimeEvent: (event) => {
+      // event.type is "run.started" | "message.delta" | "tool.call" | ...
+      myRuntimeSink.write(event);
+    },
+  },
+
   // String (or array of strings) the agent emits to end the iteration loop early.
   // Default: "<promise>COMPLETE</promise>"
   completionSignal: "<promise>COMPLETE</promise>",
@@ -1279,7 +1290,7 @@ sandcastle board --prd-file ./prd.md --planning-only
 
 `sandcastle board --prd-file <path> --planning-only` keeps the interactive Board planning phases and approval gate, then writes `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md` to the same artifact shape as `workspace plan` without starting repository runs. The Board records those exported paths in the task artifact manifest so they stay visible in the task detail panel after approval. While awaiting approval, the task detail panel says it will export planning artifacts and the primary action is **Export artifacts**. Pass `--artifacts-dir <dir>` to choose the output directory; otherwise PRD-backed tasks default to `.scratch/<prd-name>` and imported plans default to `.scratch/workspace-task`.
 
-Programmatically, `run()` accepts an `onRunEvent` callback that emits the same structured `RunEvent` stream (run lifecycle, iterations, agent text/tool calls, token usage with the model, and commits) in **both** logging modes — use it to forward runs to your own observability system. `runWorkspace()` accepts the same `onRunEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRunEvent`, the planner phase via `onPlannerRunEvent`, and the extracted plan via `onPlan`. See ADR 0021.
+Programmatically, `run()` accepts `events.onRuntimeEvent`, a protocol-facing `RuntimeEvent` stream with stable dotted event names (`run.started`, `iteration.started`, `iteration.finished`, `message.delta`, `tool.call`, `tool.result`, `raw`, `usage.recorded`, `commit.created`, `run.finished`, `run.error`). Use `runtimeEventToAgUiEvents()` to map these events to the minimal AG-UI-compatible event set (`RUN_STARTED`, `STEP_STARTED`, `STEP_FINISHED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END`, `RAW`, `RUN_FINISHED`, `RUN_ERROR`, plus `sandcastle.commits.created` and `sandcastle.usage.recorded` custom events). `runWorkspace()` accepts `events.onRuntimeEvent`, and `runWorkspaceTask()` forwards per-repository events via `onRepoRuntimeEvent`, the planner phase via `onPlannerRuntimeEvent`, and the extracted plan via `onPlan`. See ADR 0028.
 
 ### `sandcastle docker build-image`
 

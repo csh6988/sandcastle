@@ -55,7 +55,7 @@ import type {
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
 import { noSandbox } from "./sandboxes/no-sandbox.js";
-import type { RunEvent } from "./RunEvent.js";
+import type { RuntimeEvent } from "./RuntimeEvent.js";
 import { run } from "./run.js";
 import {
   executeWorkspaceTaskPlan,
@@ -2754,7 +2754,7 @@ const boardCommand = Command.make(
           prompt,
           title,
           plan,
-          onRepoRunEvent,
+          onRepoRuntimeEvent,
           signal,
         }) => {
           const task = store.getTask(taskId);
@@ -2781,12 +2781,12 @@ const boardCommand = Command.make(
               resolvedMaxIterations ?? plan.workspace?.maxIterations,
             name: title,
             idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-            onRepoRunEvent,
+            onRepoRuntimeEvent,
             signal,
           });
         },
         evaluate: async (input) => {
-          let recorder: ((event: RunEvent) => void) | undefined;
+          let recorder: ((event: RuntimeEvent) => void) | undefined;
           return runBoardEvaluatorAgent({
             cwd,
             agent: evaluatorAgent,
@@ -2795,7 +2795,7 @@ const boardCommand = Command.make(
             input,
             signal: input.signal,
             idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-            onRunEvent: (event) => {
+            onRuntimeEvent: (event) => {
               recorder ??= createRunRecorder(store, {
                 taskId: input.task.id,
                 repo: BOARD_EVALUATOR_REPO,
@@ -2835,7 +2835,7 @@ const boardCommand = Command.make(
           stdio: ["ignore", "ignore", "pipe"],
         });
 
-        let recorder: ((event: RunEvent) => void) | undefined;
+        let recorder: ((event: RuntimeEvent) => void) | undefined;
         const promise = executeWorkspaceTaskPlan({
           repositories: [
             {
@@ -2892,7 +2892,7 @@ Resolve the git merge conflict between source branch \`${context.sourceBranch}\`
           maxIterations: resolvedMaxIterations,
           name: `${task.title} resolve merge`,
           idleTimeoutSeconds: DEFAULT_BOARD_TASK_IDLE_TIMEOUT_SECONDS,
-          onRepoRunEvent: (repo, event) => {
+          onRepoRuntimeEvent: (repo, event) => {
             recorder ??= createRunRecorder(store, {
               taskId: task.id,
               repo,

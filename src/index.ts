@@ -55,10 +55,14 @@ export type {
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
 export type {
-  RunEvent,
   RunFailureKind,
   RunFailureRecovery,
-} from "./RunEvent.js";
+  RuntimeCommit,
+  RuntimeEvent,
+  RuntimeEventHandler,
+} from "./RuntimeEvent.js";
+export { runtimeEventToAgUiEvents } from "./agUiAdapter.js";
+export type { AgUiEvent } from "./agUiAdapter.js";
 export {
   transferClaudeSession,
   transferCodexSession,

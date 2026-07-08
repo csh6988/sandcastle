@@ -283,21 +283,21 @@ const latestRunForRepo = (
 
 const eventErrors = (run: TaskProgressRun | undefined): string[] =>
   (run?.events ?? []).flatMap((record) =>
-    record.event.type === "run-failed" ? [record.event.message] : [],
+    record.event.type === "run.error" ? [record.event.message] : [],
   );
 
 const eventCommitShas = (run: TaskProgressRun | undefined): string[] =>
   (run?.events ?? []).flatMap((record) =>
-    record.event.type === "commit" ? [record.event.sha] : [],
+    record.event.type === "commit.created" ? [record.event.sha] : [],
   );
 
 const eventClaimedCompletion = (run: TaskProgressRun | undefined): boolean =>
   (run?.events ?? []).some((record) => {
     const event = record.event;
     return (
-      (event.type === "agent-text" &&
-        event.message.includes(COMPLETION_SIGNAL)) ||
-      (event.type === "run-finished" &&
+      (event.type === "message.delta" &&
+        event.text.includes(COMPLETION_SIGNAL)) ||
+      (event.type === "run.finished" &&
         event.completionSignal === COMPLETION_SIGNAL)
     );
   });

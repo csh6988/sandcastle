@@ -34,7 +34,7 @@ import {
   agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
-import { runEventEmitterLayer, type RunEvent } from "./RunEvent.js";
+import { runtimeEventEmitterLayer, type RuntimeEvent } from "./RuntimeEvent.js";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 const noopAgentStreamEmitterLayer = agentStreamEmitterLayer();
@@ -1369,7 +1369,7 @@ describe("Orchestrator agent stream emitter", () => {
   });
 });
 
-describe("Orchestrator run-event emitter", () => {
+describe("Orchestrator runtime-event emitter", () => {
   const makeClaudeStreamFactory = (
     hostDir: string,
     lines: string[],
@@ -1395,7 +1395,7 @@ describe("Orchestrator run-event emitter", () => {
       };
     });
 
-  it("emits iteration-started, agent-text and agent-tool-call events with iteration index and timestamps", async () => {
+  it("emits iteration, text delta and tool call runtime events with iteration index and timestamps", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-"));
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
@@ -1403,8 +1403,8 @@ describe("Orchestrator run-event emitter", () => {
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
     const displayLayer = SilentDisplay.layer(ref);
 
-    const events: RunEvent[] = [];
-    const runEventLayer = runEventEmitterLayer((e) => {
+    const events: RuntimeEvent[] = [];
+    const runtimeEventLayer = runtimeEventEmitterLayer((e) => {
       events.push(e);
     });
 
@@ -1446,37 +1446,37 @@ describe("Orchestrator run-event emitter", () => {
             mockLayer.factoryLayer,
             displayLayer,
             noopAgentStreamEmitterLayer,
-            runEventLayer,
+            runtimeEventLayer,
           ),
         ),
       ),
     );
 
     const iterationStarted = events.filter(
-      (e) => e.type === "iteration-started",
+      (e) => e.type === "iteration.started",
     );
     expect(iterationStarted).toHaveLength(1);
     expect(iterationStarted[0]).toMatchObject({
+      runId: "orchestrate",
       iteration: 1,
       maxIterations: 1,
     });
 
-    const textEvents = events.filter((e) => e.type === "agent-text");
+    const textEvents = events.filter((e) => e.type === "message.delta");
     expect(textEvents.length).toBeGreaterThan(0);
-    expect(textEvents[0]!.message).toContain("Working now");
+    expect(textEvents[0]!.text).toContain("Working now");
     expect(textEvents[0]!.iteration).toBe(1);
 
-    const toolEvents = events.filter((e) => e.type === "agent-tool-call");
+    const toolEvents = events.filter((e) => e.type === "tool.call");
     expect(toolEvents).toHaveLength(1);
     expect(toolEvents[0]).toMatchObject({
+      runId: "orchestrate",
       name: "Bash",
-      formattedArgs: "ls",
+      args: "ls",
       iteration: 1,
     });
 
-    const toolResultEvents = events.filter(
-      (e) => e.type === "agent-tool-result",
-    );
+    const toolResultEvents = events.filter((e) => e.type === "tool.result");
     expect(toolResultEvents).toHaveLength(1);
     expect(toolResultEvents[0]).toMatchObject({
       content: "hello.txt\npackage.json\n",
@@ -1496,13 +1496,13 @@ describe("Orchestrator run-event emitter", () => {
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
     const displayLayer = SilentDisplay.layer(ref);
 
-    const events: RunEvent[] = [];
-    const runEventLayer = runEventEmitterLayer((e) => {
+    const events: RuntimeEvent[] = [];
+    const runtimeEventLayer = runtimeEventEmitterLayer((e) => {
       events.push(e);
     });
 
     // Codex surfaces token usage on its `turn.completed` stream event, so the
-    // usage RunEvent flows without session capture.
+    // usage RuntimeEvent flows without session capture.
     const codexProvider = codexFactory("test-codex-model", {
       captureSessions: false,
     });
@@ -1554,15 +1554,16 @@ describe("Orchestrator run-event emitter", () => {
             mockLayer.factoryLayer,
             displayLayer,
             noopAgentStreamEmitterLayer,
-            runEventLayer,
+            runtimeEventLayer,
           ),
         ),
       ),
     );
 
-    const usageEvents = events.filter((e) => e.type === "usage");
+    const usageEvents = events.filter((e) => e.type === "usage.recorded");
     expect(usageEvents).toHaveLength(1);
     expect(usageEvents[0]).toMatchObject({
+      runId: "orchestrate",
       model: "test-codex-model",
       iteration: 1,
     });
@@ -1603,7 +1604,7 @@ describe("Orchestrator run-event emitter", () => {
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
 
-  it("swallows errors thrown by the run-event callback", async () => {
+  it("swallows errors thrown by the runtime-event callback", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-runevent-err-"));
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
@@ -1611,8 +1612,8 @@ describe("Orchestrator run-event emitter", () => {
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
     const displayLayer = SilentDisplay.layer(ref);
 
-    const runEventLayer = runEventEmitterLayer(() => {
-      throw new Error("run-event callback intentionally broken");
+    const runtimeEventLayer = runtimeEventEmitterLayer(() => {
+      throw new Error("runtime-event callback intentionally broken");
     });
 
     const mockLayer = makeClaudeStreamFactory(hostDir, [
@@ -1638,7 +1639,7 @@ describe("Orchestrator run-event emitter", () => {
             mockLayer.factoryLayer,
             displayLayer,
             noopAgentStreamEmitterLayer,
-            runEventLayer,
+            runtimeEventLayer,
           ),
         ),
       ),

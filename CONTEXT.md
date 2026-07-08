@@ -217,15 +217,23 @@ The display mode where Sandcastle renders an interactive UI in the terminal with
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
 
 **Agent stream event**:
-A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`. Narrower than a **run event**, which is its logging-mode-independent superset.
+A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`. Narrower than a **runtime event**, which is its logging-mode-independent superset.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)
 
-**Run event**:
-A single item in a run's structured lifecycle stream surfaced to the caller of `run()` via the `onRunEvent` callback, working in **both** display modes. A superset of the **agent stream event**: covers run lifecycle (`run-started`/`run-finished`/`run-failed`), `iteration-started`, `agent-text`, `agent-tool-call`, token `usage` (with the **agent**'s model), and `commit`. A plain (Effect-free) discriminated union so it can be consumed by non-Effect hosts such as the **workflow board**. See ADR 0021.
-_Avoid_: "agent stream event" (narrower), "log event", "lifecycle event" (too generic)
+**Runtime event**:
+The structured lifecycle and stream event model emitted by Sandcastle core for a run. Surfaced to callers through `events.onRuntimeEvent` and used by the **workflow board**. Uses stable dotted event names such as `run.started`, `iteration.started`, `message.delta`, `tool.call`, `tool.result`, `raw`, `commit.created`, `usage.recorded`, `run.finished`, and `run.error`, all correlated by a `runId`. **Runtime events** are the source for protocol adapters such as the **AG-UI adapter** and future **ACP facade**.
+_Avoid_: "run event" (old name), "AG-UI event" (an adapter output), "ACP event" (a facade concern), "log event"
+
+**AG-UI adapter**:
+A protocol adapter that maps **runtime events** to AG-UI-style event names (`RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START`, etc.) for web UI/event-stream consumers. It does not change how Sandcastle runs an **agent** and does not make AG-UI part of core orchestration.
+_Avoid_: "AG-UI runtime" (Sandcastle runtime events remain internal), "frontend event model"
+
+**ACP facade**:
+A future runtime boundary that exposes Sandcastle to external Agent Runtime protocol clients by mapping ACP methods onto existing Sandcastle operations. The **ACP facade** wraps Sandcastle; it does not replace `run()` or the **sandbox provider** model.
+_Avoid_: "ACP core", "ACP server" (unless referring to a concrete transport implementation)
 
 **Run failure evidence**:
-Optional structured, plain (Effect-free) recovery metadata carried on a `run-failed` **run event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional; a minimal/legacy `run-failed` event without it still renders. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports. See ADR 0021.
+Optional structured, plain (Effect-free) recovery metadata carried on a `run.error` **runtime event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports.
 _Avoid_: "error details" (too generic), "failure report" (reserved for the Board verification report), "diagnostics" (overloaded with prompt diagnostics)
 
 **Run failure kind**:
@@ -239,11 +247,11 @@ The productized local coordination layer built on top of Sandcastle's orchestrat
 _Avoid_: "dashboard" (too generic), "desktop app" (one possible shell), "Rudder clone"
 
 **Workflow board**:
-A local web view of runs, started with `sandcastle board`. Consumes the **run event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
+A local web view of runs, started with `sandcastle board`. Consumes the **runtime event** stream to persist and visualize **board runs** -- a kanban grouped by status, live **agent** activity, per-repo progress, and per-model token usage -- replacing terminal-only observation. Serves a self-contained HTML frontend, a small JSON REST API, and a Server-Sent Events stream from a file-backed store under `.sandcastle/board/`.
 _Avoid_: "dashboard" (too generic), "UI", "console"
 
 **Board run**:
-A single `run()` invocation as recorded on the **workflow board** -- its metadata plus fields derived from the **run event** stream (status, completion, commit count, token usage). Linked to a **board task** when launched from one.
+A single `run()` invocation as recorded on the **workflow board** -- its metadata plus fields derived from the **runtime event** stream (status, completion, commit count, token usage). Linked to a **board task** when launched from one.
 _Avoid_: "job", "session" (overloaded), conflating with the JS **iteration**
 
 **Board task**:
@@ -259,7 +267,7 @@ One of the strict responsibilities in a **board task** workflow: Planner turns r
 _Avoid_: "agent role" (too broad), "worker" (ambiguous), conflating with **board phase**
 
 **Evaluator run**:
-The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **run events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
+The **Evaluator** **agent** invocation in the **verifying** **board phase**. It reviews the PRD, approved plan, **Board progress document**, repository **runtime events**, commits, errors, and deterministic evidence, then writes or enriches the **Board verification report**. It must not plan, implement, or commit.
 _Avoid_: "static verification", "post-run summary", treating a successful **completion signal** as proof of delivery
 
 **Board verification report**:
@@ -296,7 +304,7 @@ _Avoid_: "auto-merge" (implies no human target selection), "deploy" (too broad)
 
 **Phase session**:
 An interactive terminal session attached to a specific **board task** and **board phase**. A phase session lets the user collaborate with the **agent** during that phase, and can advance the workflow by emitting the structured phase completion signal. Its process exit does not determine the **board task** result; the file-backed board task workflow does.
-_Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **run event** backed execution)
+_Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **runtime event** backed execution)
 
 **Artifact**:
 A durable output from a **board run** or **board task** that a human can inspect, such as a file path, generated document, screenshot, preview URL, pull request link, or plan artifact. Artifacts are evidence of work, distinct from raw agent transcript text.

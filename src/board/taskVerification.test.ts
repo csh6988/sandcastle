@@ -75,9 +75,10 @@ describe("renderTaskVerificationReport", () => {
             {
               seq: 1,
               event: {
-                type: "agent-text",
-                message:
-                  "npm run build passed\nFor browser verification, use e2e-testing when needed.\nSee https://rollupjs.org/configuration-options/#output-manualchunks\n<promise>COMPLETE</promise>",
+                type: "message.delta",
+                runId: "run-1",
+                messageId: "message-1",
+                text: "npm run build passed\nFor browser verification, use e2e-testing when needed.\nSee https://rollupjs.org/configuration-options/#output-manualchunks\n<promise>COMPLETE</promise>",
                 iteration: 1,
                 timestamp: "2026-07-01T00:00:30.000Z",
               },
@@ -85,7 +86,9 @@ describe("renderTaskVerificationReport", () => {
             {
               seq: 2,
               event: {
-                type: "run-finished",
+                type: "run.finished",
+                runId: "run-1",
+                commits: [],
                 iterationsRun: 1,
                 timestamp: "2026-07-01T00:01:00.000Z",
               },
@@ -146,7 +149,8 @@ describe("renderTaskVerificationReport", () => {
             {
               seq: 1,
               event: {
-                type: "iteration-started",
+                type: "iteration.started",
+                runId: "run-1",
                 iteration: 1,
                 maxIterations: 1,
                 timestamp: "2026-07-01T00:00:00.100Z",
@@ -155,7 +159,8 @@ describe("renderTaskVerificationReport", () => {
             {
               seq: 2,
               event: {
-                type: "run-failed",
+                type: "run.error",
+                runId: "run-1",
                 message: createFailure,
                 timestamp: "2026-07-01T00:00:00.900Z",
               },

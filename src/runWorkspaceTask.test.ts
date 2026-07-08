@@ -14,7 +14,7 @@ import {
   type BindMountCreateOptions,
   type BindMountSandboxHandle,
 } from "./SandboxProvider.js";
-import type { RunEvent } from "./RunEvent.js";
+import type { RuntimeEvent } from "./RuntimeEvent.js";
 
 const execAsync = promisify(exec);
 const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
@@ -277,7 +277,7 @@ describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
 
   it("rejects duplicate plan repositories before starting repository runs", async () => {
     const api = await createRepo();
-    const runEvents: RunEvent[] = [];
+    const runtimeEvents: RuntimeEvent[] = [];
     const { provider, createCalls } = createWorkspaceTaskProvider(async () => {
       throw new Error("executor should not start");
     });
@@ -296,14 +296,14 @@ describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
         sandbox: provider,
         branchPrefix: "codex/duplicate-plan",
         logging: { type: "stdout" },
-        onRepoRunEvent: (_repo, event) => runEvents.push(event),
+        onRepoRuntimeEvent: (_repo, event) => runtimeEvents.push(event),
       }),
     ).rejects.toThrow(
       'Workspace plan contains duplicate repository "api". Combine same-repository issues into one repository entry or use distinct repository names.',
     );
 
     expect(createCalls).toEqual([]);
-    expect(runEvents).toEqual([]);
+    expect(runtimeEvents).toEqual([]);
   });
 
   it("rejects planner output that references an unknown repository", async () => {
@@ -323,9 +323,9 @@ describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
     ).rejects.toThrow('Planner referenced unknown repository "missing"');
   });
 
-  it("forwards richer per-repository failure evidence through onRepoRunEvent", async () => {
+  it("forwards richer per-repository failure evidence through onRepoRuntimeEvent", async () => {
     const api = await createRepo();
-    const runEvents: Array<{ repo: string; event: RunEvent }> = [];
+    const runtimeEvents: Array<{ repo: string; event: RuntimeEvent }> = [];
     const { provider } = createWorkspaceTaskProvider(async ({ prompt }) => {
       if (prompt.includes("workspace task planner")) {
         return `<workspace_plan>{"repositories":[{"name":"api","task":"Add API"}]}</workspace_plan><promise>COMPLETE</promise>`;
@@ -335,7 +335,7 @@ describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
     });
 
     // runWorkspaceTask captures per-repo failures into the result rather than
-    // rejecting; the run-failed event still flows through onRepoRunEvent.
+    // rejecting; the run.error event still flows through onRepoRuntimeEvent.
     const result = await runWorkspaceTask({
       repositories: [{ name: "api", cwd: api, kind: "backend" }],
       prompt: "Add API",
@@ -343,17 +343,19 @@ describe("runWorkspaceTask", { timeout: INTEGRATION_TEST_TIMEOUT_MS }, () => {
       sandbox: provider,
       branchPrefix: "codex/task",
       logging: { type: "stdout" },
-      onRepoRunEvent: (repo, event) => runEvents.push({ repo, event }),
+      onRepoRuntimeEvent: (repo, event) => runtimeEvents.push({ repo, event }),
     });
 
     expect(result.repositories.api!.status).toBe("failed");
 
-    const failed = runEvents.find(({ event }) => event.type === "run-failed");
+    const failed = runtimeEvents.find(
+      ({ event }) => event.type === "run.error",
+    );
     expect(failed).toBeDefined();
     // The failure event is tagged with the repository name...
     expect(failed!.repo).toBe("api");
     // ...and carries structured recovery evidence with a stable failure kind.
-    if (failed!.event.type === "run-failed") {
+    if (failed!.event.type === "run.error") {
       expect(failed!.event.recovery).toBeDefined();
       expect(["infrastructure", "agent", "task", "unknown"]).toContain(
         failed!.event.recovery?.failureKind,

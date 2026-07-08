@@ -1,11 +1,11 @@
-import type { RunFailureKind, RunFailureRecovery } from "./RunEvent.js";
+import type { RunFailureKind, RunFailureRecovery } from "./RuntimeEvent.js";
 
 /**
  * Pure classification + evidence-gathering for failed runs.
  *
  * This module holds the logic that turns a caught error (plus whatever context
  * the emit site has in scope) into the {@link RunFailureRecovery} object carried
- * on a `run-failed` {@link import("./RunEvent.js").RunEvent}. Keeping it here
+ * on a `run.error` {@link import("./RuntimeEvent.js").RuntimeEvent}. Keeping it here
  * lets the emit-site wiring in `run.ts` / `runWorkspace.ts` stay thin and lets
  * the classification be unit-tested without running a real agent.
  *

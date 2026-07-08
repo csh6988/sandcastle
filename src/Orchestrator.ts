@@ -1,6 +1,6 @@
 import { Deferred, Duration, Effect, Fiber, Option } from "effect";
 import { AgentStreamEmitter } from "./AgentStreamEmitter.js";
-import { RunEventEmitter, type RunEvent } from "./RunEvent.js";
+import { RuntimeEventEmitter, type RuntimeEvent } from "./RuntimeEvent.js";
 import { Display } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import {
@@ -291,6 +291,8 @@ export interface OrchestrateOptions {
   readonly timeouts?: Timeouts;
   /** Forwarded to `withSandboxLifecycle` — see `SandboxLifecycleOptions.keepSourceBranch`. */
   readonly keepSourceBranch?: boolean;
+  /** Stable id attached to runtime events for this run. */
+  readonly runId?: string;
 }
 
 /** Per-iteration result carrying an optional session ID. */
@@ -331,12 +333,12 @@ export const orchestrate = (
     const factory = yield* SandboxFactory;
     const display = yield* Display;
     const streamEmitter = yield* AgentStreamEmitter;
-    // Optional run-event emitter: used when a layer is provided (e.g. by run()
-    // with onRunEvent), silently absent otherwise. Read via serviceOption so it
-    // adds no requirement to orchestrate's signature. See ADR 0021.
-    const runEmitterOpt = yield* Effect.serviceOption(RunEventEmitter);
-    const emitRun = (event: RunEvent): Effect.Effect<void> =>
-      Option.match(runEmitterOpt, {
+    // Optional runtime-event emitter: used when a layer is provided (e.g. by
+    // run() with events.onRuntimeEvent), silently absent otherwise. Read via
+    // serviceOption so it adds no requirement to orchestrate's signature.
+    const runtimeEmitterOpt = yield* Effect.serviceOption(RuntimeEventEmitter);
+    const emitRuntime = (event: RuntimeEvent): Effect.Effect<void> =>
+      Option.match(runtimeEmitterOpt, {
         onNone: () => Effect.void,
         onSome: (e) => e.emit(event),
       });
@@ -359,6 +361,7 @@ export const orchestrate = (
     let allStdout = "";
     let resolvedBranch = "";
     let iterationPreservedPath: string | undefined;
+    const runId = options.runId ?? "orchestrate";
 
     // Helper: check abort signal and bail via defect so run() can
     // re-throw the signal's reason verbatim (no Sandcastle wrapping).
@@ -368,8 +371,9 @@ export const orchestrate = (
     for (let i = 1; i <= iterations; i++) {
       yield* checkAbort();
       yield* display.status(label(`Iteration ${i}/${iterations}`), "info");
-      yield* emitRun({
-        type: "iteration-started",
+      yield* emitRuntime({
+        type: "iteration.started",
+        runId,
         iteration: i,
         maxIterations: iterations,
         timestamp: new Date(),
@@ -436,6 +440,8 @@ export const orchestrate = (
 
                 // Invoke the agent — buffer text deltas so Pi's single-token
                 // chunks are displayed as readable multi-word lines.
+                let toolCallSeq = 0;
+                let lastToolCallId: string | undefined;
                 const textBuffer = new TextDeltaBuffer((chunk) => {
                   Effect.runPromise(display.text(chunk));
                   Effect.runPromise(
@@ -447,9 +453,11 @@ export const orchestrate = (
                     }),
                   );
                   Effect.runPromise(
-                    emitRun({
-                      type: "agent-text",
-                      message: chunk,
+                    emitRuntime({
+                      type: "message.delta",
+                      runId,
+                      messageId: `${runId}:iteration:${i}:message`,
+                      text: chunk,
                       iteration: i,
                       timestamp: new Date(),
                     }),
@@ -459,6 +467,8 @@ export const orchestrate = (
                   textBuffer.write(text);
                 };
                 const onToolCall = (name: string, formattedArgs: string) => {
+                  toolCallSeq++;
+                  lastToolCallId = `${runId}:iteration:${i}:tool:${toolCallSeq}`;
                   textBuffer.flush();
                   Effect.runPromise(display.toolCall(name, formattedArgs));
                   Effect.runPromise(
@@ -471,10 +481,12 @@ export const orchestrate = (
                     }),
                   );
                   Effect.runPromise(
-                    emitRun({
-                      type: "agent-tool-call",
+                    emitRuntime({
+                      type: "tool.call",
+                      runId,
+                      toolCallId: lastToolCallId,
                       name,
-                      formattedArgs,
+                      args: formattedArgs,
                       iteration: i,
                       timestamp: new Date(),
                     }),
@@ -483,8 +495,10 @@ export const orchestrate = (
                 const onToolResult = (content: string) => {
                   textBuffer.flush();
                   Effect.runPromise(
-                    emitRun({
-                      type: "agent-tool-result",
+                    emitRuntime({
+                      type: "tool.result",
+                      runId,
+                      toolCallId: lastToolCallId,
                       content,
                       iteration: i,
                       timestamp: new Date(),
@@ -500,6 +514,15 @@ export const orchestrate = (
                       timestamp: new Date(),
                     }),
                   );
+                  Effect.runPromise(
+                    emitRuntime({
+                      type: "raw",
+                      runId,
+                      line,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
                 };
                 const onIdleWarning = (minutes: number) => {
                   const msg =
@@ -507,14 +530,6 @@ export const orchestrate = (
                       ? "Agent idle for 1 minute"
                       : `Agent idle for ${minutes} minutes`;
                   Effect.runPromise(display.status(label(msg), "warn"));
-                  Effect.runPromise(
-                    emitRun({
-                      type: "agent-idle-warning",
-                      minutes,
-                      iteration: i,
-                      timestamp: new Date(),
-                    }),
-                  );
                 };
                 const onCompletionTimeout = (timeoutMs: number) => {
                   Effect.runPromise(
@@ -628,9 +643,20 @@ export const orchestrate = (
         usage: lifecycleResult.result.usage,
       });
 
+      yield* emitRuntime({
+        type: "iteration.finished",
+        runId,
+        iteration: i,
+        sessionId: lifecycleResult.result.sessionId,
+        sessionFilePath: lifecycleResult.result.sessionFilePath,
+        usage: lifecycleResult.result.usage,
+        timestamp: new Date(),
+      });
+
       if (lifecycleResult.result.usage) {
-        yield* emitRun({
-          type: "usage",
+        yield* emitRuntime({
+          type: "usage.recorded",
+          runId,
           usage: lifecycleResult.result.usage,
           model: provider.model,
           iteration: i,
@@ -638,8 +664,9 @@ export const orchestrate = (
         });
       }
       for (const commit of lifecycleResult.commits) {
-        yield* emitRun({
-          type: "commit",
+        yield* emitRuntime({
+          type: "commit.created",
+          runId,
           sha: commit.sha,
           iteration: i,
           timestamp: new Date(),

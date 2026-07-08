@@ -78,13 +78,14 @@ server also watches this directory, so runs written by other processes (for
 example a `sandcastle run` pointed at the same data directory) appear without a
 manual refresh.
 
-## Programmatic run events
+## Programmatic runtime events
 
-The board is built on the same `onRunEvent` callback that `run()` exposes.
-Unlike the file-mode-only `onAgentStreamEvent`, `onRunEvent` fires in **both**
-display modes and emits the full run shape — `run-started` / `run-finished` /
-`run-failed`, `iteration-started`, `agent-text`, `agent-tool-call`, token
-`usage` (carrying the agent model), and `commit`:
+The board is built on the same `events.onRuntimeEvent` callback that `run()`
+exposes. Unlike the file-mode-only `onAgentStreamEvent`, runtime events fire in
+**both** display modes and emit the full run shape — `run.started` /
+`run.finished` / `run.error`, `iteration.started` / `iteration.finished`,
+`message.delta`, `tool.call`, `tool.result`, `raw`, token `usage.recorded`
+(carrying the agent model), and `commit.created`:
 
 ```ts
 import { run, claudeCode } from "@chenshaohui6988/sandcastle";
@@ -94,16 +95,19 @@ await run({
   agent: claudeCode("claude-opus-4-8"),
   sandbox: docker(),
   prompt: "implement the feature",
-  onRunEvent: (event) => {
-    // forward to your own dashboard / observability system
-    console.log(event.type, event.timestamp);
+  events: {
+    onRuntimeEvent: (event) => {
+      // forward to your own dashboard / observability system
+      console.log(event.type, event.timestamp);
+    },
   },
 });
 ```
 
 `runWorkspaceTask()` forwards the same stream per repository via
-`onRepoRunEvent`, and the planner phase via `onPlannerRunEvent`. See ADR 0021
-(run-event stream) and ADR 0022 (workflow board) for the design rationale.
+`onRepoRuntimeEvent`, and the planner phase via `onPlannerRuntimeEvent`. See
+ADR 0028 (runtime events and protocol adapters) and ADR 0022 (workflow board)
+for the design rationale.
 The Board also records the Evaluator agent as a task-linked run with
 `repo="(evaluator)"` so verification activity is visible without mixing it into
 repository delivery evidence.
