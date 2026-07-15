@@ -1,0 +1,542 @@
+apps/desktop/runtime/acp.test.ts
+  2f216cc364d192a6 1-166
+.changeset/phase-board-interaction.md
+  2f216cc364d192a6 1
+apps/desktop/runtime/adapters/sandcastleExecutionPort.test.ts
+  2f216cc364d192a6 1-378
+.changeset/company-runtime-stability.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/entry.ts
+  2f216cc364d192a6 1-29
+apps/desktop/runtime/interface.ts
+  88775a0d3c079fb2 70,79-89,121-165,181-215,221,229-232,298-302,308-309,313-315,959,962-964,969,973-977,980-983,989-990,993-1039
+  79963d9b40328cb4 1-43,65-69,71-78,166-172,174-179,216-220,222-228,294-297,303-307,310-312,316-319,330-333,752-755,757-758,807-817,855-857,933-938,953-955,1155-1161,1220-1257,1259-1281
+  ca73052e0401f67e 320-329,956-958,960-961,965-968,970-972,978-979,984-988,991-992,1101
+  ea1bab22598a95f9 404,530-534,537-571,1102,1141-1154
+  2f216cc364d192a6 90-120,499,514-515,535-536,583-751,777-806,832-854,858-932,1103-1140,1162-1219
+  dce84874ab6fd00c 44-64,756,818-823,939-952
+  c711e4c34d08d863 180,334-397,760-763,824-827,1040-1079
+  060d9b2b15d0e1bd 173,233-293,759,764-770,775,1080-1088,1095,1100
+  ac4a74c4aa6a79d9 398-403,405-498,500-513,516-529,572-582,771-774,776,828-831,1089-1094,1096-1099,1258
+.changeset/company-runtime-pipeline-configuration.md
+  2f216cc364d192a6 1-5
+apps/desktop/tests/shellServer.test.ts
+  2f216cc364d192a6 1-2,15,18-22,25,28,36-37,39,41-42,45-46,48,50-51,56-60,62-64,66-73,75,77,79-80
+.github/workflows/desktop-company-runtime.yml
+  2f216cc364d192a6 1-70
+apps/desktop/runtime/skill/skillConfiguration.test.ts
+  2f216cc364d192a6 1-732
+apps/desktop/runtime/pipeline/pipelineRuntime.test.ts
+  2f216cc364d192a6 1-3129
+plans/v1-ai-software-company-design/mockup.html
+  329cafd7881d29e1 1-1905
+apps/desktop/renderer/i18n.ts
+  88775a0d3c079fb2 188-206,211-216,229,231-280,284-288,516-532,536-538,551,553-597,600-604
+  c711e4c34d08d863 180-187,281-283,289-299,511-515,598-599,605-615
+  dce84874ab6fd00c 76-88,416-428
+  d4d36a89d5d281c6 32,50-63,65,68,71,117-122,375,392-404,406,408,411,457-460
+  b87914d610c1ce70 1-6,9-31,33-35,37,66-67,70,72-75,113-116,340-342,353-358,371-374,376-378,380,407,410,412-415,453-456,652-653,663-668,681-691,761-762,778
+  ea1bab22598a95f9 94-99,110-112,207-210,336,434-439,450-452,533-535,648,773
+  2f216cc364d192a6 36,38-49,100-109,346-352,359-370,379,381-391,440-449,656-662,669-680
+  ac4a74c4aa6a79d9 89-93,332-335,337-339,429-433,644-647,649-651,769-772,774-776
+  ca73052e0401f67e 129,131,137-140,220-224,227-228,230,467,469,475-477,542-546,549-550,552,692-694,712-722,724-728,730-741
+  060d9b2b15d0e1bd 141-179,478-510
+  79963d9b40328cb4 7-8,64,69,123-128,130,132-136,217-219,225-226,300-331,343-345,405,409,461-466,468,470-474,539-541,547-548,616-643,654-655,695-711,723,729,742-760,763-768,777
+apps/desktop/runtime/catalog/companyCatalog.test.ts
+  2f216cc364d192a6 1-330
+apps/desktop/runtime/interaction.ts
+  2f216cc364d192a6 1-551
+apps/desktop/runtime/testing/departmentInspectContract.ts
+  2f216cc364d192a6 1-268
+.changeset/company-runtime-snapshot-recovery.md
+  2f216cc364d192a6 1-5
+docs/adr/0031-declarative-department-pipeline-engine.md
+  2f216cc364d192a6 1-3
+apps/desktop/runtime/storage/migrations.ts
+  88775a0d3c079fb2 511-583
+  ac4a74c4aa6a79d9 584-637,800
+  2f216cc364d192a6 7,768-799,801-851,854-1253,1294-1304,1325-1330,1337-1340
+  c711e4c34d08d863 314-510
+  dce84874ab6fd00c 297-313
+  79963d9b40328cb4 1,6,8-267,852-853,1254-1293,1305-1324,1331-1336,1341-1342
+  060d9b2b15d0e1bd 2-5,268-296
+  ea1bab22598a95f9 638-767
+apps/desktop/preload/bridge.test.ts
+  dce84874ab6fd00c 20,22,24,99-101,215-216,241-291
+  c711e4c34d08d863 44-49,52,115-120,160-214
+  8a212f450d89d609 1-2,54-55,57-59,79-82,84,86-92,537,668
+  88775a0d3c079fb2 15-18,41-43,108,110-114,217-240,556-561,581,584-586,588-591,599-600,603-604,607-648,659-664
+  2f216cc364d192a6 26-29,33-36,40,127-149,151,153-156,378-425,453-457,460-534,666
+  ca73052e0401f67e 6-7,13,19,105-107,109,552-555,562-565,579-580,582-583,587,592-598,601-602,605-606,655-658
+  ac4a74c4aa6a79d9 30,32,37,39,53,125-126,150,152,340-375,446-452
+  060d9b2b15d0e1bd 9-12,121-124,292-339,535-536
+  79963d9b40328cb4 8,51,103,549-551,577,653
+  ea1bab22598a95f9 31,38,157-158,376-377,426-445,458-459
+  d4d36a89d5d281c6 3-5,14,21,23,25,50,56,60-78,83,85,93-98,102,104,159,538-548,566-576,578,649-652,654,665,667
+.changeset/company-runtime-department-inspect.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/interaction.test.ts
+  2f216cc364d192a6 1-73
+.changeset/company-runtime-production-adapter.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/adapters/sandcastleCoreRuntime.test.ts
+  2f216cc364d192a6 2-23,25-27,29-43,45-47,49-50,52-53,55-59
+apps/desktop/runtime/diagnostics.ts
+  2f216cc364d192a6 1-94
+apps/desktop/runtime/memory.ts
+  2f216cc364d192a6 1-2,4-15,18,20-26,28,31-52,55-62,65-68,70-90,93-108,111-145,148-229,231-302,304-312,314-322,324-325
+apps/desktop/main/runtimeBrowserWindowSmoke.ts
+  2f216cc364d192a6 1-1674
+apps/desktop/runtime/adapters/sandcastleCoreRuntime.ts
+  2f216cc364d192a6 1-249
+apps/desktop/scripts/electron-runtime-smoke.mjs
+  ac4a74c4aa6a79d9 47-67,147-150,164
+  d4d36a89d5d281c6 1-42,138-142,151-156,165-185
+  c711e4c34d08d863 43-46,143-146,157-161
+  ea1bab22598a95f9 68-137,162-163
+apps/desktop/runtime/agUiAdapter.ts
+  2f216cc364d192a6 1-114
+apps/desktop/runtime/storage/sqlite.test.ts
+  dce84874ab6fd00c 225,384-386,409,434-443,445,451-454,456-461,463-478
+  d4d36a89d5d281c6 1-17,192-209,211-222,244-251,269,286-293,815-824,827-831,833-844,846-852,854-876,878-887,889-895,936-940,942,944-946,948,951-956,1190
+  88775a0d3c079fb2 174,176-188,227,377,444,485,516-536,538-549,589-593,965,968-970,989-992,1029-1030,1033-1034,1046-1052,1054,1068-1069,1072-1073
+  060d9b2b15d0e1bd 224,294-355,357-363,365-376,378,387-404,410-417,419-420,427-433
+  ca73052e0401f67e 910,957-964,966-967,971-988,993-1028,1031-1032,1035-1045,1053,1055-1067,1070-1071,1074-1075,1093,1095-1125,1146-1148,1161-1175,1185-1189
+  c711e4c34d08d863 226,379-383,446-450,455,479-484,486-500,502-515,1076-1092,1094,1126-1145,1149-1160,1176-1184
+  2f216cc364d192a6 18-139,149-161,210,230-243,252,270-285,356,364,405-408,418,421-426,462,501,537,578,614-615,626,687-814,825-826,832,845,853,877,888,907,928
+  ac4a74c4aa6a79d9 148,163-173,175,189-191,228,550-577,579-588
+  ea1bab22598a95f9 140-147,162,229,253-268,594-613,616-625,627-686
+  79963d9b40328cb4 223,896-906,908-909,911-927,929-935,941,943,947,949-950
+apps/desktop/tsconfig.main.json
+  2f216cc364d192a6 17
+.changeset/company-runtime-ag-ui-replay.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/adapters/scriptedExecutionAdapter.ts
+  2f216cc364d192a6 1-76
+docs/adr/0038-catalog-mutation-audit-triggers.md
+  2f216cc364d192a6 1-26
+apps/desktop/runtime/adapters/configuredExecutionAdapter.test.ts
+  2f216cc364d192a6 2-22,24-34,36-39,41-43,45-54
+apps/desktop/main/companyDirectory.ts
+  2f216cc364d192a6 1
+apps/desktop/runtime/memory.test.ts
+  2f216cc364d192a6 1-72
+apps/desktop/runtime/testing/runContract.ts
+  2f216cc364d192a6 1-110
+.changeset/company-runtime-scheduler-leases.md
+  2f216cc364d192a6 1-5
+docs/adr/0030-company-runtime-process.md
+  2f216cc364d192a6 1-3
+apps/desktop/runtime/address.ts
+  2f216cc364d192a6 1-28
+apps/desktop/runtime/storage/sqlite.ts
+  060d9b2b15d0e1bd 9-12,51,122
+  dce84874ab6fd00c 13-16,53,124
+  ac4a74c4aa6a79d9 21-28,52,66-67,72,109-111,116,123
+  d4d36a89d5d281c6 1-4,29-33,47-49,59-65,73-93,118-120,130-143
+  2f216cc364d192a6 34-46,55-58,68-71,105-108,112-115,117,126-129
+  79963d9b40328cb4 5-8,50,121
+  c711e4c34d08d863 17-20,54,94-104,125
+.changeset/desktop-open-project-folders.md
+  2f216cc364d192a6 1-5
+apps/desktop/scripts/start-dev-electron.mjs
+  b87914d610c1ce70 1-11,13-27,29,31-33,37-40,44-54,57-59,61-65,68-81
+apps/desktop/runtime/v1CompletionE2E.test.ts
+  2f216cc364d192a6 1-255
+.changeset/company-runtime-interaction.md
+  2f216cc364d192a6 1-5
+CONTEXT.md
+  2f216cc364d192a6 227-234,236,240-241,282,285-328,330,334-339,345-348,350-387,393-396,398,446-447
+apps/desktop/scripts/run-packaged-app-smoke.mjs
+  c711e4c34d08d863 66-67,123-127,133-135
+  dce84874ab6fd00c 92-100
+  d4d36a89d5d281c6 1-65,68-77,85,87-91,162-172
+  88775a0d3c079fb2 128-132,136-145
+  ac4a74c4aa6a79d9 151,153
+  ca73052e0401f67e 78-84,86,121-122,146-148
+  2f216cc364d192a6 104,120,157-161
+  060d9b2b15d0e1bd 105,119,149-150
+  ea1bab22598a95f9 152,154-156
+  79963d9b40328cb4 101-103,106-118
+apps/desktop/runtime/adapters/productionExecutionAdapter.test.ts
+  2f216cc364d192a6 1-3,5-25,27-58,61-97,100-144
+apps/desktop/runtime/server.ts
+  ea1bab22598a95f9 591-606
+  2f216cc364d192a6 11-17,20,26,46-49,59-61,108,174-220,231-339,508-514,544-590,626-630,638-642
+  88775a0d3c079fb2 6,379,394-439,622,634
+  060d9b2b15d0e1bd 7,162-167,483-498,621,631-633,643-644
+  ca73052e0401f67e 230,340-344,359-378,380-393,499-500,607-612
+  c711e4c34d08d863 10,158-161,440-482,625,637
+  ac4a74c4aa6a79d9 8,107,127,168-173,501-507,515-543,619-620,624,636
+  d4d36a89d5d281c6 1-5,18-19,21-25,27-45,50-58,62-106,109-126,128-144,146,152,221-229,613-618,645-665
+  dce84874ab6fd00c 9,148-151,345-358,623,635
+  79963d9b40328cb4 145,147,153-157
+apps/desktop/README.md
+  2f216cc364d192a6 8-10,21-80,83-84,95-97,106-111,121-123,127-135,140-149
+apps/desktop/runtime/pipeline/pipelineConfiguration.ts
+  2f216cc364d192a6 1-734
+apps/desktop/main/companyRuntimeSupervisor.test.ts
+  2f216cc364d192a6 1-507
+apps/desktop/runtime/agUiAdapter.test.ts
+  2f216cc364d192a6 1-98
+apps/desktop/assets/sandcastle-icon.svg
+  2f216cc364d192a6 1-12
+apps/desktop/preload/bridge.ts
+  88775a0d3c079fb2 22,71-80,140-196,228,231-233,235-238,240-243,246-249,254-255,258-270,272-296,514-516,523,527,539,543,545,547,551-555,559-595,603,607-611,615,619,623,644-648,653-657
+  2f216cc364d192a6 3-9,19-20,23-41,52-53,99,101-104,107-138,355-447,452-456,461-486,668-783,787-790,795-818
+  c711e4c34d08d863 21,54,81-87,297-334,596-602,604-606,612-614,616-618,620-622
+  dce84874ab6fd00c 1-2,10-11,13-18,42-44,46-51,55-70,88-95,139,197-227,229-230,234,239,244-245,250-253,256-257,271,335-350,500-513,517-522,524-526,528-538,540-542,544,546,548-550,556-558,624-643,649-652,827-829
+  ac4a74c4aa6a79d9 12,45,96-98,100,351-354,448-451,457-460,658-667,784-786,791-794
+  ea1bab22598a95f9 105-106,487-499,819-826
+.changeset/company-runtime-acp.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/client.ts
+  2f216cc364d192a6 5-17,26-27,74-86,200-236,250-254,257-305,342,344-347
+  ea1bab22598a95f9 343,348-349
+  dce84874ab6fd00c 24,168-171,255-256,306-311
+  8a212f450d89d609 1-3,25,28,30,32,34-35,37-54,59-61,63-73,87-106,108-120,122,149,154,156-158,238,243,245-247,366,371-372
+  d4d36a89d5d281c6 4,18-19,31,33,36,55-58,62,107,121,123-148,150-153,155,159-167,172-175,237,239-242,244,248-249,312-316,328-330,359-365,367-370,373-380
+  ca73052e0401f67e 331,355-358
+  ac4a74c4aa6a79d9 20,192-199,337-341,350-351
+  c711e4c34d08d863 29,180-183,317-327
+  060d9b2b15d0e1bd 21,23,184-191,332-336,352-354
+  79963d9b40328cb4 22,176-179
+apps/desktop/runtime/acp.ts
+  2f216cc364d192a6 1-186
+plans/v1-ai-software-company-prd.md
+  329cafd7881d29e1 1-535
+.changeset/company-runtime-node-attempt-recovery.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/pipeline/pipelineRuntime.ts
+  2f216cc364d192a6 1-3819
+apps/desktop/runtime/runtime.test.ts
+  2f216cc364d192a6 2,4,37,43-102,108-357,780-781,784,1010-1064,1322,1333
+  d4d36a89d5d281c6 3,6-7,103-107,358-381,383-385,391-417,522-526,1221-1321,1323-1332,1334-1337
+  ca73052e0401f67e 527-543,545-546,550-554,557-558,561-570,572-604
+  dce84874ab6fd00c 426-500
+  88775a0d3c079fb2 544,547-549,555-556,559-560,571,605-734
+  79963d9b40328cb4 12,382,418-425,501-521
+  8a212f450d89d609 1,5,8-11,14-36,38-42,386-390,1176-1220,1338-1341
+  060d9b2b15d0e1bd 735-779,782-783,785-823
+  ac4a74c4aa6a79d9 13,824-899,906-909,912-930,932-934,971-1009
+  ea1bab22598a95f9 900-905,910-911,931,935-970
+  c711e4c34d08d863 1065-1175
+plans/v1-ai-software-company-technical-design.md
+  329cafd7881d29e1 1-1080
+apps/desktop/runtime/storage/backups.ts
+  2f216cc364d192a6 1-111
+apps/desktop/tests/companyDirectory.test.ts
+  2f216cc364d192a6 1,20-22,24-26,28-30,34
+apps/desktop/tests/i18n.test.ts
+  2f216cc364d192a6 1-71
+.changeset/company-runtime-memory.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/adapters/sandcastleExecutionPort.ts
+  2f216cc364d192a6 1-287
+apps/desktop/runtime/testing/scriptedRuntime.ts
+  2f216cc364d192a6 2-9,11-16,18-21,23-26,28-32,35-52
+docs/adr/0033-immutable-run-snapshot-revisions.md
+  2f216cc364d192a6 1-3
+apps/desktop/runtime/pipeline/canonicalPipeline.ts
+  2f216cc364d192a6 1-22
+docs/adr/0029-desktop-company-storage.md
+  2f216cc364d192a6 1-3
+docs/adr/0036-pipeline-versions-freeze-skill-flow-configuration.md
+  2f216cc364d192a6 1-3
+.changeset/company-runtime-project-configuration.md
+  2f216cc364d192a6 1-5
+.changeset/company-runtime-run-controls.md
+  2f216cc364d192a6 1-5
+apps/desktop/main/runtimeIpc.ts
+  2f216cc364d192a6 1-732
+apps/desktop/runtime/artifactRegistry.ts
+  2f216cc364d192a6 1-471
+apps/desktop/runtime/catalog/companyCatalog.ts
+  2f216cc364d192a6 1-1336
+apps/desktop/runtime/testing/skillConfigurationContract.ts
+  2f216cc364d192a6 1-65
+apps/desktop/main/companyRuntimeSupervisor.ts
+  2f216cc364d192a6 1-798
+apps/desktop/package.json
+  d4d36a89d5d281c6 5,7,15-16,47-48
+  79963d9b40328cb4 14
+  2f216cc364d192a6 17,19
+  b87914d610c1ce70 11,50,57-58
+apps/desktop/runtime/diagnostics.test.ts
+  2f216cc364d192a6 1,6,8-9,11-36,38-55
+apps/desktop/renderer/App.tsx
+  2f216cc364d192a6 3,5,10-15,18,22,25-34,38-40,42-47,54,59,64,71-72,76,81-85,87-91
+apps/desktop/server/shellServer.ts
+  2f216cc364d192a6 1-3,10,29,34,36,51,58,60,69-70
+.changeset/company-runtime-phase-one-configuration.md
+  2f216cc364d192a6 1-5
+apps/desktop/renderer/sandcastle.d.ts
+  2f216cc364d192a6 1-9
+apps/desktop/runtime/project/projectConfiguration.test.ts
+  2f216cc364d192a6 1-2,6-7,9-10,12-13,15-18,21-70,73-77,80-118
+docs/adr/0034-parallel-node-workspace-isolation.md
+  2f216cc364d192a6 1-3
+apps/desktop/main/runtimeIpc.test.ts
+  2f216cc364d192a6 1-637
+.changeset/company-runtime-phase-two-run-tracer.md
+  2f216cc364d192a6 1-5
+.changeset/company-runtime-artifact-registry.md
+  2f216cc364d192a6 1-5
+.changeset/company-runtime-health.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/scriptedRuntime.test.ts
+  2f216cc364d192a6 1-829
+apps/desktop/main/main.ts
+  8a212f450d89d609 14,24,26,51,57-61,73-87,126-130,198-203,279
+  d4d36a89d5d281c6 5,27,36,192,246-267
+  b87914d610c1ce70 15,37-45,195,197,213-215
+apps/desktop/runtime/client.test.ts
+  2f216cc364d192a6 1-63
+apps/desktop/scripts/runtime-capacity-smoke.ts
+  2f216cc364d192a6 1-80
+apps/desktop/runtime/adapters/configuredExecutionAdapter.ts
+  2f216cc364d192a6 1-22
+apps/desktop/runtime/pipeline/pipelineConfiguration.test.ts
+  2f216cc364d192a6 1-805
+apps/desktop/runtime/address.test.ts
+  2f216cc364d192a6 2-3,5-14,16-19,23-31,33,36-40
+apps/desktop/renderer/companyPages.test.tsx
+  2f216cc364d192a6 1-753
+.changeset/company-runtime-department-edit.md
+  2f216cc364d192a6 1-5
+apps/desktop/runtime/adapters/productionExecutionAdapter.ts
+  2f216cc364d192a6 1-114
+.changeset/company-runtime-skill-configuration.md
+  2f216cc364d192a6 1-5
+plans/v1-ai-software-company-design.md
+  329cafd7881d29e1 1-598
+.changeset/company-runtime-phase-two-scripted-pipeline.md
+  2f216cc364d192a6 1-5
+apps/desktop/renderer/companyPages.tsx
+  2f216cc364d192a6 1-21,23-157,161,163-166,169-171,173,180,184-186,189,191-193,195-205,207-257,263-267,269-271,277,280-282,285,287,289,292-293,299-302,307-309,311,314,317,324-327,329,334,336-339,342,346,350-359,361-384,386-394,396-397,399-431,433-442,444-447,449-554,556-563,566,568-639,641-648,650-695,697-743,747,749-755,757-774,776-793,795-846,848-869,873-2049,2051-2570,2572-2624,2626-2673,2675-2676,2680-2684,2686-2696,2698-2701,2703-2716,2718-3149,3152-3153,3156-3158,3160-3164,3168,3171,3175-3202,3204-3233,3235-3253,3257-3261,3263-3266,3268-3299,3301-3332,3334-3337,3339-3341,3343-3354,3356-3365,3369-3382,3384-3396,3398-3399,3401-3409,3412,3414-4043,4045-4107,4109-4139,4141-4144,4146-4184,4186-4250,4252-4256,4258-4312,4314-4317,4321-4323,4325-4326,4328,4330-4355,4359-4373,4375-4389,4391-4399,4401-4429,4431-4434,4437-4452,4454-4463,4466-4474,4478-4486,4488-4490,4493-4502,4505-4512,4514,4518,4521-4523,4525-4531,4533-4549,4551-4552,4555,4557-4586,4588-4590,4592-4595,4597,4599,4601,4604-4607,4609-4610,4612-4643,4645,4649-4652,4654-4656,4658-4706,4708,4711-4713,4716-4746,4750-4756,4758-4763,4766-4783,4785-4791,4794-4806,4810-4812,4814-4815,4818-4820
+apps/desktop/runtime/artifactRegistry.test.ts
+  2f216cc364d192a6 1-97
+apps/desktop/runtime/project/projectConfiguration.ts
+  2f216cc364d192a6 1-181
+apps/desktop/runtime/runtimeLock.ts
+  2f216cc364d192a6 1-10,12-16,18-25,27-40,42-46,48-52,54-82,86
+apps/desktop/runtime/acpEntry.ts
+  2f216cc364d192a6 1-25
+docs/adr/0037-pipeline-runtime-durable-node-leases.md
+  2f216cc364d192a6 1-3
+docs/adr/0035-v1-company-model-starts-fresh.md
+  2f216cc364d192a6 1-3
+apps/desktop/preload/index.ts
+  2f216cc364d192a6 1-9
+docs/adr/0032-state-audit-and-runtime-event-outbox.md
+  2f216cc364d192a6 1-3
+apps/desktop/runtime/skill/skillConfiguration.ts
+  2f216cc364d192a6 1-905
+apps/desktop/renderer/styles.css
+  2f216cc364d192a6 153,196-222,233,243,251,257,276-277,293-325,340-343,346-347,350-357,360,362-363,366-377,379-380,383-386,389-392,395-398,401,403-404,407-410,413-418,420-421,424-426,429-435,438-442,445-449,452,454-457,460-461,465-466,469,471,474-475,478-486,489-491,494-501,504,506-509,512-513,516,521-526,528,530,533-536,539-541,544-546,549-551,554-559,562,565,568,570,572-574,577,579-581,583-585,588-590,593-601,604-606,609-612,615-617,620-623,626-627,630-633,636-641,645,647-649,652-653,656-657,660,662,666-669,673-674,678-682,685-686,689-691,694-696,699,701,704,710-719,722-723,726-733,736-738,741-744,747,749-750,753-756,759-762,764,767,771-775,778-782,785-787,789,792-809,811-814,817,820,823-826,830-834,837-840,843-846,850-852,870
+.changeset/company-runtime-audit-outbox.md
+  2f216cc364d192a6 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "69a381b4fda1b21dfa61366ef11840fc8880a7c0",
+  "prompts": {
+    "060d9b2b15d0e1bd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f42-f512-7460-804d-3d14679561d6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2753,
+      "total_deletions": 96,
+      "accepted_lines": 2672,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0717523dae00b1cc85542dd0910d6009d1eb3d46afeb8227b8d0d445b030c961"
+    },
+    "2f216cc364d192a6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f64c4-0d0a-7af1-a93d-3c7cc4285d46",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 51782,
+      "total_deletions": 6387,
+      "accepted_lines": 51228,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/8361abcc4357f428b463d73d0e583f5cc2cc15106baa667bb9ca28388f49325f"
+    },
+    "329cafd7881d29e1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5959-1f7c-7dc1-9a47-94c3a18a8941",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 4504,
+      "total_deletions": 386,
+      "accepted_lines": 4118,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/03bc1fff3f3885d78bd34a4f389b607092a238e5b7b51bb43d6b2d32bf2f7b4d"
+    },
+    "79963d9b40328cb4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5ebb-448e-70b2-b163-9d463a65f6e6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 1659,
+      "total_deletions": 513,
+      "accepted_lines": 1498,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a75314f4e1df1a2578a75e7caf385e7e4bc0eabfe13ef50266da5293fd4a7f8d"
+    },
+    "88775a0d3c079fb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f600e-6c1a-7533-b6fb-b57c49e689c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 4435,
+      "total_deletions": 278,
+      "accepted_lines": 4310,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/6d95a5639de9cbffbea9c9ff28aeed12dbe991fd8b9043295b39f2196221c226"
+    },
+    "8a212f450d89d609": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a93-68a9-79b1-939d-b2957afe7c81",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 521,
+      "total_deletions": 8,
+      "accepted_lines": 446,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/f87cb6672125133be6b4310f3680ff2ec163d0637d243fcc12863bc1896a93af"
+    },
+    "ac4a74c4aa6a79d9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6382-4929-77d0-accf-1ba7e413a375",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2925,
+      "total_deletions": 164,
+      "accepted_lines": 2632,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/7ddaf15e1eaace93e2b850c88d8c7e716be77f93af419f32c6b6ea8366e2cb34"
+    },
+    "b87914d610c1ce70": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f407d-7899-7963-81ae-a02c5a839144",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 1931,
+      "total_deletions": 79,
+      "accepted_lines": 426,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/229effee2547afe24033b65bc0d8e3c950a0b75b8ddccc43852f719c66c862cb"
+    },
+    "bbb62571d08f96c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f45fb-d631-7fb2-907c-2f0239a5ae7c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2033,
+      "total_deletions": 132,
+      "accepted_lines": 47,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a8add38c40e063dd7def8a5baf99bcca9d603358781b0694749f03f144512edc"
+    },
+    "c711e4c34d08d863": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5faf-b80b-74b3-b198-38dea949a7f3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 4146,
+      "total_deletions": 76,
+      "accepted_lines": 4012,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ba0dd600c95033e355a5d2b9d47a7fee1732fe529121a38ab238690aac093ca5"
+    },
+    "ca73052e0401f67e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f29-174c-7460-8361-39f77918f40a",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 1254,
+      "total_deletions": 111,
+      "accepted_lines": 1144,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2982a74b6f840de7aecbed4f892eee0d23253ae9249f392aa4ab6bd24f0f22ec"
+    },
+    "d4d36a89d5d281c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e57-d121-7b00-8de4-c4a99c99607f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2144,
+      "total_deletions": 1695,
+      "accepted_lines": 1556,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/02fde493b2dcb79b593cc005f21c71ad732aa6dd5d4679109b307f35ed35f827"
+    },
+    "dce84874ab6fd00c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f7a-d3d9-7e83-9fb7-f7e4dc251c23",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 1039,
+      "total_deletions": 32,
+      "accepted_lines": 992,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a236692bd82c4158b7b26a2ab23a92daf15fd672b02cac152ecf49b26a23d025"
+    },
+    "ea1bab22598a95f9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f63be-2293-7ca2-a773-e7dba19e70cd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3744,
+      "total_deletions": 148,
+      "accepted_lines": 3649,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ed89462e6099cb05d092e401e56fe0d6172af25a25e4c5b004d415d524fcea0f"
+    }
+  }
+}
