@@ -1,0 +1,70 @@
+name: Desktop Company Runtime
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: desktop-company-runtime-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-runtime:
+    name: Desktop Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+          - windows-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm run test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Electron BrowserWindow smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:electron-smoke
+
+      - name: Electron BrowserWindow smoke (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:electron-smoke
+
+      - name: Package unpacked app
+        run: npm run dist
+
+      - name: Packaged app smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:packaged-app-smoke
+
+      - name: Packaged app smoke (macOS/Windows)
+        if: runner.os != 'Linux'
+        run: npm run test:packaged-app-smoke

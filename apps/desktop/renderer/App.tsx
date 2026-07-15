@@ -1,86 +1,94 @@
 import { useState } from "react";
 import {
+  CompanyOverviewPage,
   CompanyArtifactsPage,
+  CompanyInteractionPage,
   DepartmentsPage,
   ProjectsPage,
-  RunsBoardPage,
   SettingsPage,
 } from "./companyPages.js";
-import type { DesktopProject } from "./boardApi.js";
+import {
+  loadPreferredLanguage,
+  messages,
+  savePreferredLanguage,
+  type Language,
+} from "./i18n.js";
 
 type CompanyNav =
+  | "overview"
   | "projects"
   | "departments"
-  | "runs"
   | "artifacts"
+  | "interaction"
   | "settings";
-type Language = "en" | "zh";
 
-const NAV_ITEMS: ReadonlyArray<{ id: CompanyNav; label: string }> = [
-  { id: "projects", label: "Projects" },
-  { id: "departments", label: "Departments" },
-  { id: "runs", label: "Runs / Board" },
-  { id: "artifacts", label: "Artifacts" },
-  { id: "settings", label: "Settings" },
+const NAV_ITEMS: ReadonlyArray<{
+  id: CompanyNav;
+  labelKey: keyof typeof messages.en;
+}> = [
+  { id: "overview", labelKey: "navOverview" },
+  { id: "projects", labelKey: "navProjects" },
+  { id: "departments", labelKey: "navDepartments" },
+  { id: "artifacts", labelKey: "navArtifacts" },
+  { id: "interaction", labelKey: "navInteraction" },
+  { id: "settings", labelKey: "navSettings" },
 ];
 
 export function App() {
-  const [nav, setNav] = useState<CompanyNav>("projects");
-  const [language, setLanguage] = useState<Language>("en");
-  const [projectContext, setProjectContext] = useState<DesktopProject | null>(
-    null,
+  const [nav, setNav] = useState<CompanyNav>("overview");
+  const [language, setLanguageState] = useState<Language>(() =>
+    loadPreferredLanguage(window.localStorage, navigator.languages),
   );
+  const t = messages[language];
+
+  const setLanguage = (nextLanguage: Language) => {
+    savePreferredLanguage(window.localStorage, nextLanguage);
+    setLanguageState(nextLanguage);
+  };
 
   return (
     <div className="shell">
       <nav className="company-nav">
         <div className="brand">
           <div className="brand-name">Sandcastle</div>
-          <div className="brand-sub">Local AI company</div>
+          <div className="brand-sub">{t.appSubtitle}</div>
         </div>
         {NAV_ITEMS.map((item) => (
           <button
             key={item.id}
+            data-nav={item.id}
             className={`nav-item ${nav === item.id ? "on" : ""}`}
             onClick={() => setNav(item.id)}
             type="button"
           >
-            {item.label}
+            {t[item.labelKey]}
           </button>
         ))}
       </nav>
       <div className="workspace">
         <header className="topbar">
           <div>
-            <span className="eyebrow">Local AI company</span>
-            <strong>Sandcastle Desktop</strong>
+            <span className="eyebrow">{t.appSubtitle}</span>
+            <strong>{t.appTitle}</strong>
           </div>
           <div className="topbar-status">
             <span>
-              Project:{" "}
-              <strong>{projectContext?.name ?? "None selected"}</strong>
-            </span>
-            <span>
-              Board:{" "}
-              <strong>
-                {projectContext?.rd.currentBoardTaskId
-                  ? `active ${projectContext.rd.currentBoardTaskId}`
-                  : "idle"}
-              </strong>
+              {t.runtimeStatus} <strong>{t.runtimeConnected}</strong>
             </span>
           </div>
         </header>
         <main className="content">
-          {nav === "projects" && (
-            <ProjectsPage onProjectContextChange={setProjectContext} />
-          )}
-          {nav === "departments" && <DepartmentsPage />}
-          {nav === "runs" && <RunsBoardPage project={projectContext} />}
-          {nav === "artifacts" && (
-            <CompanyArtifactsPage project={projectContext} />
-          )}
+          {nav === "overview" && <CompanyOverviewPage t={t} />}
+          {nav === "projects" && <ProjectsPage t={t} />}
+          {nav === "departments" && <DepartmentsPage t={t} />}
+          {nav === "artifacts" && <CompanyArtifactsPage t={t} />}
+          {nav === "interaction" && <CompanyInteractionPage t={t} />}
           {nav === "settings" && (
-            <SettingsPage language={language} onLanguageChange={setLanguage} />
+            <SettingsPage
+              t={t}
+              language={language}
+              onLanguageChange={setLanguage}
+            />
           )}
         </main>
       </div>

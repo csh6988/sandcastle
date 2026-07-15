@@ -1,0 +1,3 @@
+# Pipeline Versions freeze Skill Flow configuration at publication
+
+Each new Pipeline Version stores an immutable snapshot of every selected Skill Flow's stable ID, revision, name, instructions, and ordered Skill IDs inside the published graph, and includes that snapshot in the Pipeline Version hash. Pipeline Drafts continue to reference mutable Skill Flow IDs, while historical Pipeline Versions remain readable after the live Skill Flow changes or is archived; this publish-time snapshot is chosen over a separate Skill Flow revision-history subsystem because Phase 1 has no Run Snapshot or Pipeline Engine yet and publication is the existing immutable configuration boundary.

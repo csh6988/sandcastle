@@ -2,16 +2,21 @@
   "name": "sandcastle-desktop",
   "private": true,
   "version": "0.0.0",
+  "author": "Sandcastle contributors",
   "type": "module",
-  "description": "Sandcastle desktop shell: Electron around the local project workbench and board server. Not shipped with the npm package.",
+  "description": "Sandcastle Desktop: an Electron-supervised local AI company runtime and control plane. Not shipped with the npm package.",
   "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
-    "dev:electron": "tsc -p tsconfig.main.json && SANDCASTLE_DESKTOP_DEV_URL=http://localhost:5273 electron .",
+    "dev:electron": "tsc -p tsconfig.main.json && node scripts/start-dev-electron.mjs",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.main.json",
     "dist": "npm run build && electron-builder --dir",
-    "test": "tsx --test \"tests/**/*.test.ts\"",
+    "test": "tsx --test \"tests/**/*.test.ts\" \"main/**/*.test.ts\" \"runtime/**/*.test.ts\" \"preload/**/*.test.ts\" \"renderer/**/*.test.tsx\"",
+    "test:electron-smoke": "electron scripts/electron-runtime-smoke.mjs",
+    "test:packaged-app-smoke": "node scripts/run-packaged-app-smoke.mjs",
+    "test:runtime-capacity": "tsx scripts/runtime-capacity-smoke.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "acp": "tsx runtime/acpEntry.ts",
     "start": "npm run build && electron ."
   },
   "dependencies": {
@@ -39,14 +44,18 @@
     "productName": "Sandcastle",
     "files": [
       "dist-electron/**",
+      "!dist-electron/**/*.test.js",
+      "!dist-electron/**/*.test.js.map",
       "dist/**",
+      "assets/**",
       "package.json"
     ],
     "directories": {
       "output": "release"
     },
     "mac": {
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/sandcastle-icon.png"
     }
   }
 }

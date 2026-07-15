@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -17,36 +17,21 @@ describe("ensureCompanyDirectory", () => {
     assert.equal(result.companyDir, companyDir);
     assert.equal(result.projectsDir, join(companyDir, "projects"));
     assert.equal(result.sandcastleDir, join(companyDir, ".sandcastle"));
-    assert.deepEqual(
-      JSON.parse(
-        readFileSync(
-          join(companyDir, ".sandcastle", "project-index.json"),
-          "utf8",
-        ),
-      ),
-      { projects: [] },
+    assert.equal(
+      existsSync(join(companyDir, ".sandcastle", "project-index.json")),
+      false,
     );
-    assert.deepEqual(
-      JSON.parse(
-        readFileSync(
-          join(companyDir, ".sandcastle", "skill-flows.json"),
-          "utf8",
-        ),
-      ),
-      { flows: [] },
+    assert.equal(
+      existsSync(join(companyDir, ".sandcastle", "skill-flows.json")),
+      false,
     );
-    assert.deepEqual(
-      JSON.parse(
-        readFileSync(
-          join(companyDir, ".sandcastle", "role-profiles.json"),
-          "utf8",
-        ),
-      ),
-      { departments: [] },
+    assert.equal(
+      existsSync(join(companyDir, ".sandcastle", "role-profiles.json")),
+      false,
     );
   });
 
-  it("does not overwrite existing company configuration", () => {
+  it("leaves historical company configuration untouched", () => {
     const companyDir = tempCompanyDir();
     const existing = { projects: [{ id: "existing" }] };
     ensureCompanyDirectory(companyDir);

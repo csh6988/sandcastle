@@ -224,13 +224,21 @@ _Avoid_: "log event" (the log file contains more than just agent output), "displ
 The structured lifecycle and stream event model emitted by Sandcastle core for a run. Surfaced to callers through `events.onRuntimeEvent` and used by the **workflow board**. Uses stable dotted event names such as `run.started`, `iteration.started`, `message.delta`, `tool.call`, `tool.result`, `raw`, `commit.created`, `usage.recorded`, `run.finished`, and `run.error`, all correlated by a `runId`. **Runtime events** are the source for protocol adapters such as the **AG-UI adapter** and future **ACP facade**.
 _Avoid_: "run event" (old name), "AG-UI event" (an adapter output), "ACP event" (a facade concern), "log event"
 
+**Runtime audit record**:
+An immutable record of a Company Runtime state mutation, including the affected entity, prior state when available, resulting state, and timestamp. It is written with the current-state mutation and is distinct from a **runtime event**, which is the replayable protocol-neutral observation.
+_Avoid_: "event log" (ambiguous with the outbox), "application log"
+
+**Runtime event outbox**:
+The durable, append-only queue of protocol-neutral **runtime events** persisted in the same SQLite transaction as Company Runtime state changes. Consumers advance independent cursors so AG-UI, ACP, and diagnostics can replay without becoming state owners.
+_Avoid_: "message queue" (implies a remote broker), "event source" (v1 is not full event sourcing)
+
 **AG-UI adapter**:
-A protocol adapter that maps **runtime events** to AG-UI-style event names (`RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START`, etc.) for web UI/event-stream consumers. It does not change how Sandcastle runs an **agent** and does not make AG-UI part of core orchestration.
+A protocol adapter that maps **runtime events** to AG-UI-style event names (`RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START`, etc.) for the Desktop **agent interaction workspace** and other web UI/event-stream consumers. It carries live messages, steps, tool activity, usage, and Sandcastle-specific artifact or approval updates without making AG-UI part of core orchestration.
 _Avoid_: "AG-UI runtime" (Sandcastle runtime events remain internal), "frontend event model"
 
 **ACP facade**:
-A future runtime boundary that exposes Sandcastle to external Agent Runtime protocol clients by mapping ACP methods onto existing Sandcastle operations. The **ACP facade** wraps Sandcastle; it does not replace `run()` or the **sandbox provider** model.
-_Avoid_: "ACP core", "ACP server" (unless referring to a concrete transport implementation)
+A v1 local protocol boundary that exposes Sandcastle's AI members and sessions to external ACP clients by mapping initialization, session creation, prompting, cancellation, updates, and permission requests onto existing Sandcastle operations. It runs through stdio or local IPC, uses the same permissions and runtime events as Desktop, and never replaces `run()` or the **sandbox provider** model.
+_Avoid_: "ACP core", "public ACP service" (v1 is local-only), treating an ACP session as an AI-member identity
 
 **Run failure evidence**:
 Optional structured, plain (Effect-free) recovery metadata carried on a `run.error` **runtime event** (the `recovery` object) alongside the unchanged `message`. Surfaces what Sandcastle already knows about a failed run so a caller or the **workflow board** can recover: **run failure kind** and failure phase, preserved worktree path, **run log** path, **session** id/file, whether the **completion signal** was seen, and commit SHAs. Every field is optional. Observability/recovery metadata only — it never replaces the thrown error, logs, or verification reports.
@@ -271,31 +279,123 @@ The top-level v1 product object: the local AI company a user opens in the **cont
 _Avoid_: "organization" (Rudder's enterprise term), "tenant", "workspace" (overloaded with the multi-repo workspace)
 
 **Department**:
-An execution unit inside the **company** that owns one kind of work: its workflow phases, **Board roles**, **role profiles**, task sources, artifact kinds, and verification semantics. V1 ships exactly one complete department -- the **Software R&D department** -- plus optional inert placeholder departments that only communicate the product model. Not a generic workflow engine.
+An execution unit inside the **company** that owns one **department pipeline**, including its positions, task inputs, artifact kinds, and verification semantics. V1 lets users create, copy, and edit departments instead of limiting the company to a fixed set of built-in or placeholder departments.
 _Avoid_: "team" (role/skill boundary matters), "module" (too code-shaped), "workflow" (a department owns workflows, it is not one)
 
+**Department pipeline**:
+The explicit, visual flow owned by one **department** that coordinates positions to transform a task input into one or more **artifacts**. Its v1 graph uses start, AI-task, human-approval, conditional-branch, parallel/join, and completion nodes; it is editable and resumable but does not allow arbitrary code nodes or an AI member to silently rewrite the overall flow while it runs.
+_Avoid_: "workflow" (too generic), "board" (the current board is only the Software R&D implementation), "process" (does not express the product execution contract)
+
+**Pipeline Draft**:
+The mutable, revisioned **department pipeline** graph being edited before publication. Saving a Pipeline Draft never changes the Department's active **Pipeline Version**.
+_Avoid_: "working version" (confuses a mutable draft with an immutable published version), "current pipeline" (ambiguous between draft and active published version)
+
+**Pipeline Version**:
+An immutable published **department pipeline** graph with a Department-local version number and integrity identity. Publishing freezes the selected **skill flow** meaning for that version, creates a new Pipeline Version, and preserves every earlier version.
+_Avoid_: "draft version" (published versions are immutable), "pipeline snapshot" (reserved for the broader **run configuration snapshot**)
+
+**Department run**:
+One user-started execution of a versioned **department pipeline** for a **project**, with an explicit work goal, selected input artifacts, a **run configuration snapshot**, node state, AI-member activity, approvals, and produced **artifacts**. A run proceeds autonomously between configured approval gates while remaining pausable and cancellable; node failure pauses with evidence and bounded recovery options instead of silently changing the goal, inputs, nodes, or pipeline.
+_Avoid_: "project stage" (stages belong to the selected pipeline), "board task" (the current Software R&D implementation), "agent session" (one run may involve several members and sessions)
+
+**Run configuration snapshot**:
+The immutable version captured when a **department run** starts, covering the department pipeline graph, positions, AI-member configuration, selected skills and skill flows, execution defaults, and artifact contracts. Editing live department configuration affects only future runs; recovery uses the original snapshot, and moving an active run to a newer version requires an explicit compatibility-checked migration.
+_Avoid_: "current config" (mutable), "backup" (the snapshot is an execution contract), "copy" (does not express version identity)
+
+**Snapshot revision**:
+An immutable, integrity-identified revision of a **run configuration snapshot** used by one **department run**. The first revision is `r1`; any allowed recovery-time execution change creates a later revision linked to its parent, while the earlier revision remains unchanged and inspectable.
+_Avoid_: "snapshot version" (confuses a run-scoped revision with a Pipeline Version), "updated snapshot" (revisions are appended rather than mutated)
+
+**Node run**:
+The persistent execution state of one node from the frozen **department pipeline** inside a **department run**, including its dependency state, selected **snapshot revision**, status, and attempts. The Pipeline Runtime owns every Node run state transition; an AI member, execution adapter, or renderer may report facts but cannot write the state directly.
+_Avoid_: "agent run" (a Node run may use an agent but is a pipeline concept), "pipeline step" (does not express persistent execution identity), "task" (reserved for an issue-tracker work item)
+
+**Node attempt**:
+One bounded execution attempt within a **Node run** using a specific **snapshot revision**. Retrying the same Node run creates a new attempt without replacing the earlier attempt's evidence or changing the Node run's stable identity.
+_Avoid_: "retry" when referring to the persisted execution record, "iteration" (one agent invocation inside Sandcastle core), "node run" (an attempt belongs to a Node run)
+
+**Recovery Attempt**:
+A **Node attempt** created by an allowed Recovery Override and bound to a new **Snapshot revision**. A Recovery Attempt preserves the parent revision and prior evidence and does not consume the ordinary Retry allowance.
+_Avoid_: treating Recovery Attempt as a normal Retry, mutating the parent Snapshot revision, or changing the project goal through recovery
+
+**Node lease**:
+The durable, time-bounded ownership record that lets one scheduler worker execute a **Node attempt**. An expired or released Node lease makes the attempt fail with recoverable evidence; it never silently returns side-effecting work to Ready state.
+_Avoid_: "lock" (does not express expiry and recovery), "claim" when referring to the persisted ownership record, "worker session" (not an Agent session)
+
+**Node feedback**:
+A durable human instruction attached to a **Node run** and consumed by a later **Node attempt**, such as changes requested at a human-approval gate. Node feedback does not mutate the **run configuration snapshot**, replace evidence from an earlier attempt, or become project or AI-member memory automatically.
+_Avoid_: "prompt edit" (the frozen execution contract is unchanged), "approval result" (the feedback guides a later attempt), "memory" (promotion is a separate explicit action)
+
 **Software R&D department**:
-The first complete **department** in the v1 **company**: the current **workflow board** promoted rather than rebuilt -- a local software-development operating unit made of **Board roles**, repositories, task artifacts, review loops, and skill-guided agent work. Its PRD-to-plan-to-approval-to-execution-to-verification loop is the template future departments are measured against.
+The built-in, runnable **department** template in the v1 **company**: the current **workflow board** promoted into a software-delivery **department pipeline** made of positions, repositories, artifacts, review loops, and skill-guided agent work. Users may copy or edit it, and its PRD-to-plan-to-approval-to-execution-to-verification flow is a default template rather than the definition of every department.
 _Avoid_: "company" (the department lives inside one), "organization" when referring to the v1 Sandcastle scope, "team" when the role/skill boundary matters, "the board" when the department product boundary is meant
 
 **Project**:
-A Desktop v1 delivery object inside a **company** that moves through PRD, Design, R&D Execution, Review, and Artifacts. A **Repository** may be linked to a Project as an R&D resource, but it is not the Project itself.
-_Avoid_: "repository" when referring to the delivery object, "board task" when referring to the whole PRD-to-artifacts object
+A durable company goal and shared context that groups **department runs** and their **artifacts**. A project has no universal PRD-to-Design-to-R&D state machine; its visible progress comes from the pipelines the user runs for it.
+_Avoid_: "repository" when referring to the company goal, "board task" or "department run" when referring to the whole project
+
+**Repository reference**:
+A Project-scoped pointer to a source repository that a future **department run** may use. Linking a repository does not make it the **project**, copy its contents into the Company Directory, or start execution.
+_Avoid_: "project repository" (a project may reference several repositories), "workspace" (overloaded), "department run" (linking is configuration, not execution)
 
 **Local AI company directory**:
 The host directory a user opens in Desktop v1 to store company-owned project files, project metadata, board metadata, skill flows, role profiles, and indexes. Electron `userData` stores personal preferences only, not company/project source data.
 _Avoid_: "repository", "workspace" (overloaded), "userData" when referring to company-owned data
 
+**Position**:
+A persistent seat in a **department pipeline** that defines one responsibility and is occupied by exactly one **AI member** in v1. A position configures the member's complete skill catalog and owns the expected inputs, actions, and artifacts at its points in the pipeline; each pipeline node activates only the skills or **skill flows** needed for that node.
+_Avoid_: "Board role" (the current Software R&D implementation), "persona", "pipeline phase" (a position may participate in more than one phase)
+
 **AI member**:
-A role-like execution member inside a **department**, such as Planner, Designer, Generator, or Evaluator, with responsibilities and bound **skill flows**. An AI member is not an always-on chat persona and does not imply default LLM activity while browsing or configuring Desktop.
-_Avoid_: "chat agent", "persona", "bot"
+A long-lived digital employee inside a **department**, with a stable identity, position, responsibilities, bound **skill flows**, memory, and work history. Its identity is independent of the replaceable agent provider, model, sandbox, and execution limits used for a particular run; changing those execution choices does not create a new member or discard reviewed memory.
+_Avoid_: "chat agent", "persona", "bot", a provider/model name, conflating the member with one agent process or session
+
+**Execution Profile**:
+A reusable **department** configuration that selects an agent provider reference, model, Sandbox reference, branch strategy, limits, retry policy, permission policy, and non-sensitive **Secret References** for future execution. It is independent of **AI member** identity.
+_Avoid_: "AI member profile" (identity metadata), "provider credentials", "agent identity"
+
+**Secret Reference**:
+A non-sensitive company-owned identifier and provider scope that points to credentials held outside Company Runtime state. It never contains a token, API key, private key, environment dump, or secret value.
+_Avoid_: "secret" when the value is meant, "credential record", "environment variable"
+
+**Artifact Contract**:
+A stable, schema-versioned declaration of an Artifact kind accepted or produced by a **department pipeline** or node. It describes configuration compatibility without creating an Artifact or Artifact Registry entry.
+_Avoid_: "Artifact" (a concrete deliverable), "file type" (too narrow), "output format" (direction-specific)
+
+**AI member memory**:
+Reviewed, durable knowledge attached to an **AI member**, such as stable working preferences and reusable experience, that may be used across projects. Project-specific knowledge reaches member memory only through an explicit summarise-and-review promotion step; raw run records never become member memory automatically.
+_Avoid_: "chat history", "transcript", "automatic learning" (promotion is controlled)
+
+**AI member consultation**:
+A user conversation with an **AI member** for discussion, clarification, or advice in a visible project and execution context. Consultation cannot directly mutate a department run or create an official artifact; the user must explicitly convert relevant content into a new run, node feedback, or reviewed memory.
+_Avoid_: "department run" (consultation is not formal execution), "artifact" (conversation output is unofficial until promoted), "automatic memory"
+
+**Agent interaction workspace**:
+The contextual Desktop surface for live interaction with an **AI member**, either as an informal **AI member consultation** or as collaboration on a specific department-run node. It renders AG-UI events for messages, tools, steps, permissions, usage, artifacts, and status while applying the same run snapshot, approval, memory, and artifact boundaries to Desktop and external ACP sessions.
+_Avoid_: "chat sidebar" (too narrow and context-free), "terminal" (one evidence view), "ACP client" (one external access path)
+
+**Discussion topic**:
+A future project-, department-run-, or pipeline-node-scoped conversation space where a human and multiple **AI members** can discuss one explicit goal in a threaded, Discord-like channel. A topic records participants, moderator, referenced artifacts, budget, stop conditions, and a reviewed conclusion; conversation alone does not change a run, create an official artifact, or become memory.
+_Avoid_: "group chat" (misses scope and execution controls), "company channel" (too broad), "department run" (discussion is not formal execution)
+
+**Project memory**:
+Durable context, decisions, constraints, and feedback scoped to one **project** and available to its later **department runs**. Project memory is isolated from other projects unless selected knowledge is explicitly promoted into **AI member memory**.
+_Avoid_: "company memory" (broader scope), "run history" (audit evidence rather than curated context)
+
+**Run record**:
+The auditable evidence of a **department run**, including agent transcripts, events, commands, logs, approvals, costs, and failures. A run record supports inspection and recovery but is not automatically loaded as **project memory** or **AI member memory**.
+_Avoid_: "memory" (records are evidence until curated), "artifact" (records describe execution rather than delivery)
 
 **Role profile**:
 The configuration behind a **Board role**: its responsibility boundary, allowed actions, preferred skill flows, prompt guidance, and optional agent/model preferences. Role profiles belong to a **department**, not to the **company** or an **agent provider** -- any agent can fill the same role. A role profile describes how a role should work; it is not the same as an **agent provider**.
 _Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too narrow)
 
+**Skill**:
+A stable, versioned capability reference in the **company**-wide Skill Catalog that a **position** may bind for use by its **skill flows**. A Skill is reusable across departments, while each position explicitly owns the subset available to its flows.
+_Avoid_: "prompt" (too narrow), "skill flow" (a flow selects and instructs multiple skills), department-owned skill copies
+
 **Skill flow**:
-A selected set of skills and operating instructions used for a specific kind of software work, such as planning, implementation, review, debugging, or merge-conflict resolution. A **role profile** or **AI member** may choose one or more skill flows, but the flow should still be loaded progressively instead of copying every available skill into context.
+A selected subset of a **position**'s skills and operating instructions activated by a **department pipeline** node for a specific kind of work, such as planning, implementation, review, debugging, or merge-conflict resolution. The **AI member** keeps its identity and memory across nodes, but each execution loads only the current node's selected flow instead of the member's complete skill catalog.
 _Avoid_: "skill bundle" when it implies loading everything at once, "prompt pack" (too narrow)
 
 **Desktop shell**:
@@ -343,8 +443,8 @@ An interactive terminal session attached to a specific **board task** and **boar
 _Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / **runtime event** backed execution)
 
 **Artifact**:
-A durable output from a **board run** or **board task** that a human can inspect, such as a file path, generated document, screenshot, preview URL, pull request link, or plan artifact. Artifacts are evidence of work, distinct from raw agent transcript text.
-_Avoid_: "output" (too broad), "result" (ambiguous with `RunResult`)
+A typed, versioned deliverable produced or registered by a **department run**, such as a document, image, design file, structured record, commit, branch, pull request, build, preview URL, or verification report. Each artifact version records its producing run, pipeline node, **AI member**, input-artifact versions, and inspectable location; later changes create a new version instead of silently overwriting delivery history.
+_Avoid_: "output" (too broad), "result" (ambiguous with `RunResult`), treating only local files as artifacts
 
 **Review**:
 A human decision on a **board task** or **artifact** that marks the work as accepted, rejected, or needing changes before the next execution step.

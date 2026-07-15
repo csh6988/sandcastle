@@ -1,0 +1,1905 @@
+<!doctype html>
+<!-- PROTOTYPE ONLY — in-memory clickable design exploration, not production code. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sandcastle v1.0 Design Mockup</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --canvas: #f4f6f8;
+        --surface: #ffffff;
+        --subtle: #f8fafc;
+        --border: #d9e0e8;
+        --border-strong: #c5cfdb;
+        --text: #172033;
+        --muted: #64748b;
+        --brand: #2357d9;
+        --brand-strong: #173ea6;
+        --brand-soft: #eaf0ff;
+        --success: #16875d;
+        --success-soft: #e9f7f1;
+        --warning: #c47a12;
+        --warning-soft: #fff4dd;
+        --danger: #c73b45;
+        --danger-soft: #fff0f1;
+        --purple: #7c5ac7;
+        --teal: #168c99;
+        --shadow:
+          0 1px 2px rgb(15 23 42 / 0.05), 0 8px 24px rgb(15 23 42 / 0.06);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+      }
+      body {
+        font:
+          14px/1.45 Inter,
+          ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          sans-serif;
+        color: var(--text);
+        background: var(--canvas);
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      .app {
+        display: grid;
+        grid-template-columns: 244px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+      .sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        padding: 20px 14px 14px;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--border);
+        background: #fbfcfe;
+      }
+      .brand {
+        padding: 0 10px 22px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .brand-mark {
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        border-radius: 10px;
+        color: white;
+        background: linear-gradient(145deg, var(--brand), #3b7bf0);
+        font-weight: 900;
+        box-shadow: 0 8px 18px rgb(35 87 217 / 0.22);
+      }
+      .brand-name {
+        font-size: 17px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+      }
+      .company-name {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .nav {
+        display: grid;
+        gap: 5px;
+      }
+      .nav button {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        border: 1px solid transparent;
+        border-radius: 9px;
+        padding: 10px 11px;
+        color: #536179;
+        background: transparent;
+        text-align: left;
+        font-weight: 700;
+      }
+      .nav button:hover {
+        border-color: var(--border);
+        color: var(--text);
+      }
+      .nav button.active {
+        color: var(--brand);
+        background: var(--brand-soft);
+        border-color: #c8d7ff;
+      }
+      .nav-icon {
+        width: 18px;
+        text-align: center;
+        font-size: 15px;
+      }
+      .sidebar-bottom {
+        margin-top: auto;
+        padding: 12px 6px 0;
+        border-top: 1px solid var(--border);
+      }
+      .health {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 10px;
+      }
+      .health-dot {
+        width: 8px;
+        height: 8px;
+        background: var(--success);
+        border-radius: 999px;
+        box-shadow: 0 0 0 3px var(--success-soft);
+      }
+      .language-switch {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        padding: 3px;
+        background: #edf1f6;
+        border-radius: 8px;
+      }
+      .language-switch button {
+        border: 0;
+        border-radius: 6px;
+        padding: 6px;
+        color: var(--muted);
+        background: transparent;
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .language-switch button.active {
+        color: var(--text);
+        background: white;
+        box-shadow: 0 1px 4px rgb(15 23 42 / 0.12);
+      }
+      .workspace {
+        min-width: 0;
+      }
+      .topbar {
+        height: 66px;
+        padding: 0 28px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+        background: rgb(255 255 255 / 0.92);
+        backdrop-filter: blur(14px);
+      }
+      .crumbs {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .crumbs strong {
+        color: var(--text);
+        font-size: 14px;
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .search {
+        width: 260px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--subtle);
+        color: var(--muted);
+        padding: 8px 10px;
+      }
+      .button {
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 8px 12px;
+        background: white;
+        color: var(--text);
+        font-weight: 750;
+      }
+      .button.primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: white;
+      }
+      .button.warning {
+        background: var(--warning);
+        border-color: var(--warning);
+        color: white;
+      }
+      .notification {
+        position: relative;
+        width: 34px;
+        height: 34px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: white;
+      }
+      .notification::after {
+        content: "2";
+        position: absolute;
+        top: -6px;
+        right: -5px;
+        width: 17px;
+        height: 17px;
+        display: grid;
+        place-items: center;
+        color: white;
+        background: var(--danger);
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 800;
+      }
+      main {
+        padding: 26px 28px 38px;
+      }
+      .page-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        align-items: flex-start;
+        margin-bottom: 20px;
+      }
+      .eyebrow {
+        color: var(--brand);
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      h1 {
+        margin: 5px 0 5px;
+        font-size: 27px;
+        line-height: 1.1;
+        letter-spacing: -0.025em;
+      }
+      h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+      h3 {
+        margin: 0;
+        font-size: 14px;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+      .header-actions {
+        display: flex;
+        gap: 9px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .card {
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .metric {
+        padding: 15px 16px;
+        min-height: 106px;
+        position: relative;
+        overflow: hidden;
+      }
+      .metric::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto;
+        height: 3px;
+        background: var(--brand);
+      }
+      .metric.warning::before {
+        background: var(--warning);
+      }
+      .metric.danger::before {
+        background: var(--danger);
+      }
+      .metric.success::before {
+        background: var(--success);
+      }
+      .metric-label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .metric-value {
+        display: block;
+        margin-top: 12px;
+        font-size: 29px;
+        line-height: 1;
+        letter-spacing: -0.03em;
+      }
+      .metric-foot {
+        display: block;
+        margin-top: 9px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .overview-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.65fr) minmax(330px, 0.75fr);
+        gap: 16px;
+      }
+      .stack {
+        display: grid;
+        gap: 16px;
+        align-content: start;
+      }
+      .section-head {
+        padding: 16px 17px 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+      .section-head span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .attention-list,
+      .run-list,
+      .artifact-list {
+        display: grid;
+      }
+      .attention-item,
+      .run-row,
+      .artifact-row {
+        padding: 13px 16px;
+        display: grid;
+        align-items: center;
+        gap: 12px;
+        border-bottom: 1px solid #edf1f5;
+      }
+      .attention-item:last-child,
+      .run-row:last-child,
+      .artifact-row:last-child {
+        border-bottom: 0;
+      }
+      .attention-item {
+        grid-template-columns: 9px minmax(0, 1fr) auto;
+      }
+      .attention-bar {
+        width: 7px;
+        height: 38px;
+        border-radius: 9px;
+        background: var(--warning);
+      }
+      .attention-bar.danger {
+        background: var(--danger);
+      }
+      .item-title {
+        font-weight: 780;
+      }
+      .item-meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 3px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        width: fit-content;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 4px 8px;
+        color: var(--muted);
+        background: var(--subtle);
+        font-size: 11px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+      .pill.warning {
+        color: #8b570a;
+        background: var(--warning-soft);
+        border-color: #f0d198;
+      }
+      .pill.danger {
+        color: #9f2f38;
+        background: var(--danger-soft);
+        border-color: #efbcc1;
+      }
+      .pill.success {
+        color: #0f6947;
+        background: var(--success-soft);
+        border-color: #b9e2d1;
+      }
+      .pill.brand {
+        color: var(--brand-strong);
+        background: var(--brand-soft);
+        border-color: #c8d7ff;
+      }
+      .run-row {
+        grid-template-columns:
+          minmax(0, 1.6fr) minmax(120px, 0.7fr) minmax(110px, 0.55fr)
+          auto;
+      }
+      .progress {
+        height: 7px;
+        border-radius: 999px;
+        background: #e9edf3;
+        overflow: hidden;
+        margin-top: 7px;
+      }
+      .progress > span {
+        display: block;
+        height: 100%;
+        background: var(--brand);
+        border-radius: inherit;
+      }
+      .department-grid {
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+      }
+      .department-card {
+        padding: 13px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--subtle);
+      }
+      .department-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .people {
+        display: flex;
+        align-items: center;
+        margin-top: 12px;
+      }
+      .avatar {
+        width: 28px;
+        height: 28px;
+        margin-right: -5px;
+        display: grid;
+        place-items: center;
+        border: 2px solid white;
+        border-radius: 999px;
+        color: white;
+        background: var(--brand);
+        font-size: 10px;
+        font-weight: 850;
+      }
+      .avatar.purple {
+        background: var(--purple);
+      }
+      .avatar.teal {
+        background: var(--teal);
+      }
+      .avatar.green {
+        background: var(--success);
+      }
+      .artifact-row {
+        grid-template-columns: 34px minmax(0, 1fr) auto;
+      }
+      .artifact-icon {
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        color: var(--brand);
+        background: var(--brand-soft);
+        font-weight: 900;
+      }
+
+      /* Pipeline */
+      .subnav {
+        display: flex;
+        gap: 5px;
+        margin: -6px 0 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .subnav button {
+        border: 0;
+        border-bottom: 2px solid transparent;
+        padding: 10px 12px;
+        color: var(--muted);
+        background: transparent;
+        font-weight: 750;
+      }
+      .subnav button.active {
+        color: var(--brand);
+        border-bottom-color: var(--brand);
+      }
+      .pipeline-shell {
+        height: 680px;
+        display: grid;
+        grid-template-columns: 178px minmax(0, 1fr) 292px;
+        overflow: hidden;
+      }
+      .node-library,
+      .inspector {
+        background: #fbfcfe;
+      }
+      .node-library {
+        border-right: 1px solid var(--border);
+        padding: 14px;
+      }
+      .inspector {
+        border-left: 1px solid var(--border);
+        overflow: auto;
+      }
+      .panel-title {
+        margin-bottom: 12px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .node-kind {
+        margin-bottom: 8px;
+        padding: 9px 10px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: white;
+        font-size: 12px;
+        font-weight: 750;
+      }
+      .node-kind i {
+        width: 9px;
+        height: 9px;
+        border-radius: 3px;
+        background: var(--brand);
+      }
+      .node-kind.approval i {
+        background: var(--warning);
+      }
+      .node-kind.condition i {
+        background: var(--purple);
+        transform: rotate(45deg);
+        border-radius: 2px;
+      }
+      .node-kind.parallel i {
+        background: var(--teal);
+      }
+      .node-kind.complete i {
+        background: var(--success);
+        border-radius: 999px;
+      }
+      .canvas {
+        position: relative;
+        overflow: hidden;
+        background-color: #f7f9fc;
+        background-image: radial-gradient(#d9e0e8 1px, transparent 1px);
+        background-size: 20px 20px;
+      }
+      .canvas-toolbar {
+        position: absolute;
+        z-index: 5;
+        top: 12px;
+        left: 12px;
+        right: 12px;
+        display: flex;
+        justify-content: space-between;
+      }
+      .toolbar-group {
+        display: flex;
+        gap: 6px;
+        padding: 4px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgb(255 255 255 / 0.92);
+        box-shadow: var(--shadow);
+      }
+      .toolbar-group button {
+        min-width: 30px;
+        border: 0;
+        border-radius: 6px;
+        padding: 5px 8px;
+        color: var(--muted);
+        background: transparent;
+        font-weight: 750;
+      }
+      .toolbar-group button.active {
+        color: var(--brand);
+        background: var(--brand-soft);
+      }
+      .pipeline-svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+      .pipeline-node {
+        position: absolute;
+        z-index: 2;
+        width: 178px;
+        padding: 12px;
+        border: 1px solid #b9c8e8;
+        border-left: 4px solid var(--brand);
+        border-radius: 10px;
+        background: white;
+        box-shadow: var(--shadow);
+      }
+      .pipeline-node.selected {
+        outline: 3px solid rgb(35 87 217 / 0.16);
+        border-color: var(--brand);
+      }
+      .pipeline-node.approval {
+        border-left-color: var(--warning);
+      }
+      .pipeline-node.parallel {
+        border-left-color: var(--teal);
+      }
+      .pipeline-node.complete {
+        border-left-color: var(--success);
+      }
+      .node-type {
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 850;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+      .node-name {
+        margin-top: 5px;
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .node-person {
+        margin-top: 9px;
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .node-person .avatar {
+        width: 23px;
+        height: 23px;
+        margin: 0;
+        border: 0;
+      }
+      .node-chip {
+        margin-top: 8px;
+        display: inline-block;
+        padding: 3px 6px;
+        border-radius: 5px;
+        color: var(--brand-strong);
+        background: var(--brand-soft);
+        font-size: 9px;
+        font-weight: 800;
+      }
+      .inspector-head {
+        padding: 15px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .inspector-body {
+        padding: 15px 16px;
+      }
+      .field {
+        margin-bottom: 14px;
+      }
+      .field label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 750;
+      }
+      .field-box {
+        min-height: 36px;
+        padding: 8px 9px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: white;
+        font-size: 12px;
+      }
+      .skill-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+
+      /* Run */
+      .run-layout {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr) 310px;
+        gap: 14px;
+        align-items: start;
+      }
+      .timeline {
+        padding: 12px;
+      }
+      .timeline-item {
+        position: relative;
+        padding: 10px 8px 13px 34px;
+      }
+      .timeline-item::before {
+        content: "";
+        position: absolute;
+        left: 15px;
+        top: 25px;
+        bottom: -11px;
+        width: 1px;
+        background: var(--border);
+      }
+      .timeline-item:last-child::before {
+        display: none;
+      }
+      .timeline-dot {
+        position: absolute;
+        left: 7px;
+        top: 12px;
+        width: 17px;
+        height: 17px;
+        display: grid;
+        place-items: center;
+        border: 2px solid var(--border-strong);
+        border-radius: 999px;
+        color: white;
+        background: white;
+        font-size: 9px;
+        font-weight: 900;
+      }
+      .timeline-item.done .timeline-dot {
+        border-color: var(--success);
+        background: var(--success);
+      }
+      .timeline-item.current .timeline-dot {
+        border-color: var(--warning);
+        background: var(--warning);
+        box-shadow: 0 0 0 4px var(--warning-soft);
+      }
+      .timeline-name {
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .timeline-meta {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .current-node {
+        overflow: hidden;
+      }
+      .approval-banner {
+        padding: 14px 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        border-bottom: 1px solid #f0d198;
+        background: var(--warning-soft);
+      }
+      .approval-symbol {
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        border-radius: 9px;
+        color: white;
+        background: var(--warning);
+        font-weight: 900;
+      }
+      .node-content {
+        padding: 17px;
+      }
+      .summary-box {
+        margin-top: 13px;
+        padding: 13px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--subtle);
+      }
+      .change-list {
+        margin: 10px 0 0;
+        padding-left: 18px;
+        color: #36445c;
+      }
+      .change-list li {
+        margin: 5px 0;
+      }
+      .artifact-preview {
+        margin-top: 14px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        overflow: hidden;
+      }
+      .artifact-preview-head {
+        padding: 10px 12px;
+        display: flex;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+        background: #fbfcfe;
+      }
+      .artifact-preview-body {
+        padding: 13px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .preview-file {
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .review-panel {
+        position: sticky;
+        top: 80px;
+        overflow: hidden;
+      }
+      .review-section {
+        padding: 14px 15px;
+        border-bottom: 1px solid var(--border);
+      }
+      .review-section:last-child {
+        border-bottom: 0;
+      }
+      .kv {
+        margin-top: 9px;
+        display: grid;
+        grid-template-columns: 82px 1fr;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .kv strong {
+        color: var(--text);
+      }
+      .review-actions {
+        display: grid;
+        gap: 8px;
+      }
+      .review-actions .button {
+        width: 100%;
+      }
+
+      /* Agent interaction */
+      .interaction-layout {
+        display: grid;
+        grid-template-columns: 250px minmax(0, 1fr) 300px;
+        gap: 14px;
+        align-items: start;
+      }
+      .session-panel,
+      .context-panel {
+        overflow: hidden;
+      }
+      .employee-profile {
+        padding: 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .employee-line {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .employee-line .avatar {
+        width: 38px;
+        height: 38px;
+        margin: 0;
+        border: 0;
+      }
+      .session-list {
+        padding: 10px;
+      }
+      .session-item {
+        margin-bottom: 7px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--subtle);
+      }
+      .session-item.active {
+        border-color: #b8caff;
+        background: var(--brand-soft);
+      }
+      .connection {
+        padding: 13px 15px;
+        border-top: 1px solid var(--border);
+        background: #fbfcfe;
+      }
+      .conversation {
+        min-height: 690px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .conversation-head {
+        padding: 13px 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+      .conversation-stream {
+        flex: 1;
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        background: #fbfcfe;
+      }
+      .message {
+        max-width: 78%;
+        padding: 11px 13px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: white;
+      }
+      .message.user {
+        margin-left: auto;
+        color: #173a8f;
+        border-color: #c5d4fb;
+        background: var(--brand-soft);
+      }
+      .event-card {
+        padding: 11px 12px;
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--teal);
+        border-radius: 9px;
+        background: white;
+      }
+      .event-card.permission {
+        border-left-color: var(--warning);
+        background: #fffbf2;
+      }
+      .event-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .event-code {
+        margin-top: 8px;
+        padding: 8px 9px;
+        border-radius: 7px;
+        color: #445168;
+        background: #f1f4f8;
+        font:
+          11px/1.45 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      .permission-actions {
+        margin-top: 10px;
+        display: flex;
+        gap: 7px;
+      }
+      .composer {
+        padding: 12px;
+        border-top: 1px solid var(--border);
+        background: white;
+      }
+      .composer-box {
+        min-height: 74px;
+        padding: 10px;
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        color: var(--muted);
+        background: var(--subtle);
+      }
+      .composer-actions {
+        margin-top: 8px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .context-block {
+        padding: 14px 15px;
+        border-bottom: 1px solid var(--border);
+      }
+      .context-block:last-child {
+        border-bottom: 0;
+      }
+      .modal-backdrop {
+        position: fixed;
+        z-index: 40;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgb(15 23 42 / 0.38);
+        backdrop-filter: blur(4px);
+      }
+      .modal {
+        width: min(620px, 100%);
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: white;
+        box-shadow: 0 28px 80px rgb(15 23 42 / 0.28);
+      }
+      .modal-head,
+      .modal-foot {
+        padding: 16px 18px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .modal-foot {
+        justify-content: flex-end;
+        border-top: 1px solid var(--border);
+        border-bottom: 0;
+      }
+      .modal-body {
+        padding: 18px;
+      }
+      .form-grid {
+        display: grid;
+        gap: 14px;
+      }
+      .form-grid input,
+      .form-grid textarea,
+      .form-grid select {
+        width: 100%;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 9px 10px;
+        color: var(--text);
+        background: white;
+      }
+      .form-grid textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+      .toast {
+        position: fixed;
+        z-index: 60;
+        right: 24px;
+        bottom: 24px;
+        max-width: 390px;
+        padding: 12px 14px;
+        border: 1px solid #b9e2d1;
+        border-radius: 10px;
+        color: #0f6947;
+        background: #f0fbf6;
+        box-shadow: var(--shadow-hover);
+        font-weight: 750;
+      }
+      .project-list-page,
+      .artifact-page,
+      .settings-page {
+        display: grid;
+        gap: 14px;
+      }
+      .project-table,
+      .settings-grid {
+        display: grid;
+        gap: 10px;
+      }
+      .project-item {
+        padding: 16px;
+        display: grid;
+        grid-template-columns:
+          minmax(0, 1.4fr) minmax(160px, 0.6fr) minmax(150px, 0.5fr)
+          auto;
+        gap: 14px;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+      .project-item:last-child {
+        border-bottom: 0;
+      }
+
+      @media (max-width: 1100px) {
+        .app {
+          grid-template-columns: 76px minmax(0, 1fr);
+        }
+        .brand-copy,
+        .nav-label,
+        .sidebar-bottom {
+          display: none;
+        }
+        .brand {
+          padding-inline: 6px;
+        }
+        .nav button {
+          justify-content: center;
+        }
+        .pipeline-shell {
+          grid-template-columns: 150px minmax(0, 1fr);
+        }
+        .inspector {
+          display: none;
+        }
+        .run-layout {
+          grid-template-columns: 190px minmax(0, 1fr);
+        }
+        .review-panel {
+          grid-column: 1 / -1;
+          position: static;
+        }
+        .interaction-layout {
+          grid-template-columns: 220px minmax(0, 1fr);
+        }
+        .context-panel {
+          grid-column: 1 / -1;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      const copy = {
+        zh: {
+          company: "星砂软件",
+          local: "本地 AI 软件公司",
+          overview: "公司总览",
+          projects: "项目",
+          departments: "部门",
+          artifacts: "产物",
+          settings: "设置",
+          search: "搜索项目、运行或产物",
+          createProject: "创建项目",
+          startRun: "启动部门运行",
+          overviewEyebrow: "公司运营",
+          overviewTitle: "早上好，公司正在稳定运行",
+          overviewDesc: "2 项工作需要你处理，3 个部门运行正在执行。",
+          attention: "需要处理",
+          seeAll: "查看全部",
+          metricsActive: "运行中",
+          metricsApproval: "等待审批",
+          metricsBlocked: "已阻塞",
+          metricsDone: "今日完成",
+          activeRuns: "进行中的工作",
+          departmentOps: "部门运行状态",
+          recentArtifacts: "最近产物",
+          waitingApproval: "等待架构方案审批",
+          failedTests: "支付模块测试失败，需要恢复",
+          deptSoftware: "软件开发部门",
+          deptResearch: "用户研究部门",
+          activePeople: "名员工工作中",
+          pipelineEyebrow: "软件开发部门",
+          pipelineTitle: "软件开发部门流水线",
+          pipelineDesc: "草稿基于已发布版本 v4 · 修改不会影响正在运行的快照",
+          overviewTab: "概览",
+          positionsTab: "职位",
+          pipelineTab: "流水线",
+          runsTab: "运行",
+          settingsTab: "设置",
+          publish: "发布新版本",
+          validate: "验证流水线",
+          nodeLibrary: "节点库",
+          inspector: "节点设置",
+          start: "开始",
+          aiTask: "AI 任务",
+          approval: "人工审批",
+          condition: "条件分支",
+          parallel: "并行 / 汇合",
+          complete: "完成",
+          productAlign: "产品目标对齐",
+          techPlan: "生成技术方案",
+          approvePlan: "批准执行方案",
+          executeRepos: "并行实现仓库",
+          review: "独立代码审查",
+          verify: "交付验证",
+          finalAccept: "最终验收",
+          selectedNode: "生成技术方案",
+          nodeName: "节点名称",
+          position: "负责职位",
+          skills: "激活技能流",
+          inputs: "输入产物",
+          outputs: "输出产物",
+          execution: "执行策略",
+          architect: "软件架构师 · 林墨",
+          planner: "产品规划 · 安禾",
+          engineer: "软件工程师 · Kai",
+          evaluator: "交付验证 · Vera",
+          runEyebrow: "部门运行",
+          runTitle: "为支付模块增加订阅退款流程",
+          runDesc: "结账体验升级 · 软件开发部门 · 快照 sc-dev-v4.2",
+          pause: "暂停",
+          cancel: "取消运行",
+          currentApproval: "等待你的审批",
+          approvalDesc: "技术方案已完成。批准后将启动 3 个并行仓库实现节点。",
+          planSummary: "方案摘要",
+          generatedArtifacts: "本节点产物",
+          risks: "风险与影响",
+          approve: "批准并继续",
+          changes: "要求修改",
+          reject: "驳回运行",
+          completed: "已完成",
+          running: "运行中",
+          queued: "等待中",
+          duration: "运行时长",
+          cost: "令牌 / 成本",
+          snapshot: "运行快照",
+          downstream: "下游影响",
+          providerHealthy: "执行服务正常",
+          interactionEyebrow: "AI 员工交互",
+          interactionTitle: "与软件架构师协作当前节点",
+          interactionDesc:
+            "正式节点协作 · 结账体验升级 · 生成技术方案 · 快照 sc-dev-v4.2",
+          consultationMode: "正式节点协作",
+          sessionContext: "会话与上下文",
+          liveActivity: "实时交互与 AI 员工活动",
+          acpConnected: "ACP 本地会话已连接",
+          permissionRequest: "需要权限确认",
+          allowOnce: "仅允许一次",
+          allowRun: "本次运行允许",
+          deny: "拒绝",
+          sendFeedback: "发送节点反馈",
+          addArtifact: "引用产物",
+          currentContext: "当前运行上下文",
+          eventStream: "AG-UI 实时事件",
+          projectsTitle: "项目",
+          projectsDesc: "长期目标、部门运行和交付产物。",
+          createProjectTitle: "创建项目",
+          projectName: "项目名称",
+          projectGoal: "目标与背景",
+          cancelAction: "取消",
+          createAction: "创建",
+          startRunTitle: "启动部门运行",
+          chooseDepartment: "选择部门",
+          workGoal: "本次工作目标",
+          inputArtifacts: "输入产物",
+          previewStart: "预览后启动",
+          launchAction: "生成快照并启动",
+          artifactsTitle: "公司产物",
+          artifactsDesc: "跨项目和部门查看版本、生产者与上下游关系。",
+          settingsTitle: "公司设置",
+          settingsDesc: "语言、本地目录、执行服务、安全和协议连接。",
+        },
+        en: {
+          company: "Star Sand Software",
+          local: "Local AI software company",
+          overview: "Company Overview",
+          projects: "Projects",
+          departments: "Departments",
+          artifacts: "Artifacts",
+          settings: "Settings",
+          search: "Search projects, runs, or artifacts",
+          createProject: "Create project",
+          startRun: "Start department run",
+          overviewEyebrow: "COMPANY OPERATIONS",
+          overviewTitle: "Good morning, your company is operating steadily",
+          overviewDesc:
+            "Two items need your attention. Three department runs are active.",
+          attention: "Needs attention",
+          seeAll: "View all",
+          metricsActive: "Active runs",
+          metricsApproval: "Waiting approval",
+          metricsBlocked: "Blocked",
+          metricsDone: "Completed today",
+          activeRuns: "Active work",
+          departmentOps: "Department operations",
+          recentArtifacts: "Recent artifacts",
+          waitingApproval: "Architecture plan is waiting for approval",
+          failedTests: "Payment module tests failed and need recovery",
+          deptSoftware: "Software Development",
+          deptResearch: "User Research",
+          activePeople: "members working",
+          pipelineEyebrow: "SOFTWARE DEVELOPMENT",
+          pipelineTitle: "Software development pipeline",
+          pipelineDesc:
+            "Draft based on published v4 · Changes do not affect active snapshots",
+          overviewTab: "Overview",
+          positionsTab: "Positions",
+          pipelineTab: "Pipeline",
+          runsTab: "Runs",
+          settingsTab: "Settings",
+          publish: "Publish version",
+          validate: "Validate pipeline",
+          nodeLibrary: "Node library",
+          inspector: "Node settings",
+          start: "Start",
+          aiTask: "AI task",
+          approval: "Human approval",
+          condition: "Condition",
+          parallel: "Parallel / join",
+          complete: "Complete",
+          productAlign: "Align product goal",
+          techPlan: "Create technical plan",
+          approvePlan: "Approve execution plan",
+          executeRepos: "Implement repositories",
+          review: "Independent code review",
+          verify: "Verify delivery",
+          finalAccept: "Final acceptance",
+          selectedNode: "Create technical plan",
+          nodeName: "Node name",
+          position: "Responsible position",
+          skills: "Active skill flow",
+          inputs: "Input artifacts",
+          outputs: "Output artifacts",
+          execution: "Execution policy",
+          architect: "Software Architect · Lin",
+          planner: "Product Planner · Anne",
+          engineer: "Software Engineer · Kai",
+          evaluator: "Delivery Evaluator · Vera",
+          runEyebrow: "DEPARTMENT RUN",
+          runTitle: "Add subscription refund flow to payments",
+          runDesc:
+            "Checkout Revamp · Software Development · Snapshot sc-dev-v4.2",
+          pause: "Pause",
+          cancel: "Cancel run",
+          currentApproval: "Waiting for your approval",
+          approvalDesc:
+            "The technical plan is complete. Approval starts three parallel repository nodes.",
+          planSummary: "Plan summary",
+          generatedArtifacts: "Node artifacts",
+          risks: "Risks and impact",
+          approve: "Approve and continue",
+          changes: "Request changes",
+          reject: "Reject run",
+          completed: "Completed",
+          running: "Running",
+          queued: "Queued",
+          duration: "Duration",
+          cost: "Tokens / cost",
+          snapshot: "Run snapshot",
+          downstream: "Downstream impact",
+          providerHealthy: "Providers healthy",
+          interactionEyebrow: "AGENT INTERACTION",
+          interactionTitle: "Collaborate with the software architect",
+          interactionDesc:
+            "Run Collaboration · Checkout Revamp · Create technical plan · Snapshot sc-dev-v4.2",
+          consultationMode: "Run collaboration",
+          sessionContext: "Sessions and context",
+          liveActivity: "Live interaction and agent activity",
+          acpConnected: "Local ACP session connected",
+          permissionRequest: "Permission required",
+          allowOnce: "Allow once",
+          allowRun: "Allow for this run",
+          deny: "Deny",
+          sendFeedback: "Send node feedback",
+          addArtifact: "Reference artifact",
+          currentContext: "Current run context",
+          eventStream: "AG-UI live events",
+          projectsTitle: "Projects",
+          projectsDesc:
+            "Long-lived goals, department runs, and delivery artifacts.",
+          createProjectTitle: "Create project",
+          projectName: "Project name",
+          projectGoal: "Goal and context",
+          cancelAction: "Cancel",
+          createAction: "Create",
+          startRunTitle: "Start department run",
+          chooseDepartment: "Choose department",
+          workGoal: "Work goal",
+          inputArtifacts: "Input artifacts",
+          previewStart: "Preview and start",
+          launchAction: "Create snapshot and start",
+          artifactsTitle: "Company artifacts",
+          artifactsDesc:
+            "Inspect versions, producers, and lineage across projects and departments.",
+          settingsTitle: "Company settings",
+          settingsDesc:
+            "Language, local directory, providers, security, and protocol connections.",
+        },
+      };
+
+      let lang =
+        new URLSearchParams(location.search).get("lang") === "en" ? "en" : "zh";
+      let view = new URLSearchParams(location.search).get("view") || "overview";
+      let overlay = null;
+      let toast = "";
+      const prototypeState = {
+        projects: [
+          {
+            id: "checkout",
+            nameZh: "结账体验升级",
+            nameEn: "Checkout Revamp",
+            goalZh: "提升订阅结账与退款流程的可靠性。",
+            goalEn: "Improve subscription checkout and refund reliability.",
+            activeRuns: 1,
+            status: "waiting-approval",
+          },
+          {
+            id: "release",
+            nameZh: "Sandcastle 0.14 发布",
+            nameEn: "Release 0.14",
+            goalZh: "验证并交付下一个 Sandcastle 版本。",
+            goalEn: "Verify and deliver the next Sandcastle release.",
+            activeRuns: 1,
+            status: "running",
+          },
+        ],
+        runStatus: "waiting-approval",
+        runProgress: 47,
+        permission: "pending",
+        selectedPipelineNode: "technical-plan",
+        interactionMessages: [],
+        pipelineVersion: 4,
+      };
+      const t = () => copy[lang];
+      const l = (zh, en) => (lang === "zh" ? zh : en);
+      const projectName = (project) =>
+        project.name ?? (lang === "zh" ? project.nameZh : project.nameEn);
+      const projectGoal = (project) =>
+        project.goal ?? (lang === "zh" ? project.goalZh : project.goalEn);
+      const statusLabel = (status) =>
+        ({
+          "waiting-approval": l("等待审批", "Waiting approval"),
+          running: l("运行中", "Running"),
+          draft: l("草稿", "Draft"),
+          paused: l("已暂停", "Paused"),
+          cancelled: l("已取消", "Cancelled"),
+          pending: l("待处理", "Pending"),
+          "allowed-once": l("已允许一次", "Allowed once"),
+          "allowed-for-run": l("本次运行允许", "Allowed for run"),
+          denied: l("已拒绝", "Denied"),
+        })[status] ?? status;
+
+      function syncUrl() {
+        const params = new URLSearchParams(location.search);
+        params.set("view", view);
+        params.set("lang", lang);
+        params.delete("variant");
+        history.replaceState(null, "", `${location.pathname}?${params}`);
+      }
+
+      function showToast(message) {
+        toast = message;
+        render();
+        window.setTimeout(() => {
+          if (toast === message) {
+            toast = "";
+            render();
+          }
+        }, 2200);
+      }
+
+      const navItems = () => [
+        ["overview", "⌂", t().overview],
+        ["projects", "◇", t().projects],
+        ["pipeline", "⌘", t().departments],
+        ["artifacts", "▱", t().artifacts],
+        ["settings", "⚙", t().settings],
+      ];
+
+      function shell(content) {
+        return `<div class="app">
+          <aside class="sidebar">
+            <div class="brand"><div class="brand-mark">S</div><div class="brand-copy"><div class="brand-name">Sandcastle</div><div class="company-name">${t().company}</div></div></div>
+            <nav class="nav">${navItems()
+              .map(
+                ([id, icon, label]) =>
+                  `<button data-view="${id}" class="${view === id || (["run", "interaction"].includes(view) && id === "projects") ? "active" : ""}"><span class="nav-icon">${icon}</span><span class="nav-label">${label}</span></button>`,
+              )
+              .join("")}</nav>
+            <div class="sidebar-bottom"><div class="health"><span class="health-dot"></span>${t().providerHealthy}</div><div class="language-switch"><button data-lang="zh" class="${lang === "zh" ? "active" : ""}">${l("中文", "Chinese")}</button><button data-lang="en" class="${lang === "en" ? "active" : ""}">${l("英文", "English")}</button></div></div>
+          </aside>
+          <section class="workspace">
+            <header class="topbar"><div class="crumbs"><span>${t().company}</span><span>/</span><strong>${view === "pipeline" ? t().deptSoftware : ["run", "interaction"].includes(view) ? l("结账体验升级", "Checkout Revamp") : view === "projects" ? t().projects : view === "artifacts" ? t().artifacts : view === "settings" ? t().settings : t().overview}</strong></div><div class="top-actions"><input class="search" name="globalSearch" aria-label="${t().search}" placeholder="${t().search}"/><button class="notification" aria-label="${l("通知", "Notifications")}">◉</button><button class="button" data-action="create-project">${t().createProject}</button><button class="button primary" data-action="start-run">${t().startRun}</button></div></header>
+            <main>${content}</main>
+          </section>
+        </div>`;
+      }
+
+      function overviewPage() {
+        return shell(`<div class="page-header"><div><div class="eyebrow">${t().overviewEyebrow}</div><h1>${t().overviewTitle}</h1><p>${t().overviewDesc}</p></div><div class="header-actions"><button class="button" data-action="create-project">${t().createProject}</button><button class="button primary" data-action="start-run">${t().startRun}</button></div></div>
+          <section class="metrics"><div class="card metric"><span class="metric-label">${t().metricsActive}</span><strong class="metric-value">3</strong><span class="metric-foot">${l("2 个项目 · 6 名 AI 员工", "2 projects · 6 AI members")}</span></div><div class="card metric warning"><span class="metric-label">${t().metricsApproval}</span><strong class="metric-value">2</strong><span class="metric-foot">${l("最久等待：18 分钟", "Oldest: 18 min")}</span></div><div class="card metric danger"><span class="metric-label">${t().metricsBlocked}</span><strong class="metric-value">1</strong><span class="metric-foot">${l("测试失败 · 可恢复", "Tests failed · recoverable")}</span></div><div class="card metric success"><span class="metric-label">${t().metricsDone}</span><strong class="metric-value">7</strong><span class="metric-foot">${l("已生成 12 个产物", "12 artifacts produced")}</span></div></section>
+          <section class="overview-grid"><div class="stack">
+            <div class="card"><div class="section-head"><div><h2>${t().attention}</h2><span>${l("审批与恢复队列", "Approval and recovery queue")}</span></div><button class="button">${t().seeAll}</button></div><div class="attention-list"><div class="attention-item"><span class="attention-bar"></span><div><div class="item-title">${t().waitingApproval}</div><div class="item-meta">${l("结账体验升级", "Checkout Revamp")} · ${t().deptSoftware} · ${l("18 分钟", "18 min")}</div></div><button class="button warning" data-view="run">${t().approve}</button></div><div class="attention-item"><span class="attention-bar danger"></span><div><div class="item-title">${t().failedTests}</div><div class="item-meta">${l("账单可靠性", "Billing Reliability")} · ${l("软件工程师 Kai", "Software Engineer Kai")} · ${l("6 分钟", "6 min")}</div></div><span class="pill danger">${l("恢复", "Recover")}</span></div></div></div>
+            <div class="card"><div class="section-head"><div><h2>${t().activeRuns}</h2><span>${l("实时部门运行", "Live department runs")}</span></div><span>${l("刚刚更新", "Updated now")}</span></div><div class="run-list"><div class="run-row"><div><div class="item-title">${l("订阅退款流程", "Checkout subscription refund")}</div><div class="progress"><span style="width:47%"></span></div></div><span>${t().deptSoftware}</span><span class="pill warning">${t().metricsApproval}</span><span>47%</span></div><div class="run-row"><div><div class="item-title">${l("新用户引导可用性研究", "Onboarding usability study")}</div><div class="progress"><span style="width:72%; background:var(--teal)"></span></div></div><span>${t().deptResearch}</span><span class="pill brand">${t().running}</span><span>72%</span></div><div class="run-row"><div><div class="item-title">${l("0.14 版本交付验证", "Release 0.14 verification")}</div><div class="progress"><span style="width:88%; background:var(--success)"></span></div></div><span>${t().deptSoftware}</span><span class="pill brand">${t().running}</span><span>88%</span></div></div></div>
+          </div><aside class="stack"><div class="card"><div class="section-head"><div><h2>${t().departmentOps}</h2><span>${l("2 个运行中的部门", "2 operational departments")}</span></div></div><div class="department-grid"><div class="department-card"><div class="department-title"><strong>${t().deptSoftware}</strong><span class="pill brand">${l("3 个运行", "3 active")}</span></div><div class="item-meta">${l("流水线 v4 · 完成率 92%", "Pipeline v4 · 92% completion")}</div><div class="people"><span class="avatar">AN</span><span class="avatar purple">LM</span><span class="avatar teal">K</span><span class="avatar green">V</span><span class="item-meta" style="margin-left:12px">4 ${t().activePeople}</span></div></div><div class="department-card"><div class="department-title"><strong>${t().deptResearch}</strong><span class="pill success">${l("1 个运行", "1 active")}</span></div><div class="item-meta">${l("流水线 v2 · 完成率 96%", "Pipeline v2 · 96% completion")}</div><div class="people"><span class="avatar purple">MI</span><span class="avatar teal">NO</span><span class="item-meta" style="margin-left:12px">2 ${t().activePeople}</span></div></div></div></div>
+            <div class="card"><div class="section-head"><div><h2>${t().recentArtifacts}</h2><span>${l("版本化公司交付", "Versioned company delivery")}</span></div></div><div class="artifact-list"><div class="artifact-row"><span class="artifact-icon">MD</span><div><div class="item-title">technical-plan.md <span class="pill">v2</span></div><div class="item-meta">${l("林墨 · 结账体验升级 · 12 分钟", "Lin · Checkout Revamp · 12 min")}</div></div><span>${l("→ 3 个运行", "→ 3 runs")}</span></div><div class="artifact-row"><span class="artifact-icon">合</span><div><div class="item-title">payments/refund-flow <span class="pill">#184</span></div><div class="item-meta">${l("Kai · 账单可靠性 · 34 分钟", "Kai · Billing Reliability · 34 min")}</div></div><span class="pill success">${l("已接受", "Accepted")}</span></div><div class="artifact-row"><span class="artifact-icon">✓</span><div><div class="item-title">verification-report.md <span class="pill">v1</span></div><div class="item-meta">${l("Vera · 0.14 发布 · 51 分钟", "Vera · Release 0.14 · 51 min")}</div></div><span class="pill success">${l("已通过", "Passed")}</span></div></div></div>
+          </aside></section>`);
+      }
+
+      function projectsPage() {
+        return shell(`<div class="page-header"><div><div class="eyebrow">${l("项目组合", "PROJECT PORTFOLIO")}</div><h1>${t().projectsTitle}</h1><p>${t().projectsDesc}</p></div><div class="header-actions"><button class="button primary" data-action="create-project">${t().createProject}</button></div></div>
+          <section class="project-list-page"><div class="metrics"><div class="card metric"><span class="metric-label">${l("项目", "Projects")}</span><strong class="metric-value">${prototypeState.projects.length}</strong><span class="metric-foot">${l("本地公司目录", "Local company directory")}</span></div><div class="card metric warning"><span class="metric-label">${l("等待审批", "Waiting approval")}</span><strong class="metric-value">${prototypeState.projects.filter((project) => project.status === "waiting-approval").length}</strong><span class="metric-foot">${l("需要人工处理", "Needs human action")}</span></div><div class="card metric"><span class="metric-label">${l("运行中的任务", "Active runs")}</span><strong class="metric-value">${prototypeState.projects.reduce((total, project) => total + project.activeRuns, 0)}</strong><span class="metric-foot">${l("跨部门执行", "Across departments")}</span></div><div class="card metric success"><span class="metric-label">${l("产物", "Artifacts")}</span><strong class="metric-value">12</strong><span class="metric-foot">${l("6 个已接受版本", "6 accepted versions")}</span></div></div><div class="card"><div class="section-head"><div><h2>${t().projectsTitle}</h2><span>${l("打开项目或启动新的部门运行", "Open a project or start a new department run")}</span></div></div><div class="project-table">${prototypeState.projects.map((project) => `<div class="project-item"><div><div class="item-title">${projectName(project)}</div><div class="item-meta">${projectGoal(project)}</div></div><div><span class="pill ${project.status === "waiting-approval" ? "warning" : "brand"}">${statusLabel(project.status)}</span></div><div><strong>${project.activeRuns}</strong><div class="item-meta">${l("个运行中任务", "active runs")}</div></div><div><button class="button" data-action="open-project" data-project="${project.id}">${l("打开", "Open")}</button> <button class="button primary" data-action="start-run" data-project="${project.id}">${t().startRun}</button></div></div>`).join("")}</div></div></section>`);
+      }
+
+      function artifactsPage() {
+        return shell(
+          `<div class="page-header"><div><div class="eyebrow">${l("交付链路", "DELIVERY LINEAGE")}</div><h1>${t().artifactsTitle}</h1><p>${t().artifactsDesc}</p></div><div class="header-actions"><button class="button">${l("导出清单", "Export manifest")}</button><button class="button primary" data-action="start-run">${l("作为运行输入", "Use as run input")}</button></div></div><section class="artifact-page"><div class="card"><div class="section-head"><div><h2>${l("产物登记表", "Artifact registry")}</h2><span>${l("点击版本查看上下游关系", "Click a version to inspect lineage")}</span></div><div class="skill-tags"><span class="pill brand">${l("全部类型", "All types")}</span><span class="pill">${l("已接受", "Accepted")}</span><span class="pill">${l("本周", "This week")}</span></div></div><div class="artifact-list"><button class="artifact-row" data-action="artifact-detail" style="border:0;text-align:left;background:white"><span class="artifact-icon">MD</span><div><div class="item-title">technical-plan.md <span class="pill">v2</span></div><div class="item-meta">${l("结账体验升级 · 林墨 · 技术方案节点", "Checkout Revamp · Lin · Technical plan node")}</div></div><span class="pill success">${l("已接受", "Accepted")}</span></button><button class="artifact-row" data-action="artifact-detail" style="border:0;text-align:left;background:white"><span class="artifact-icon">合</span><div><div class="item-title">payments/refund-flow <span class="pill">#184</span></div><div class="item-meta">${l("账单可靠性 · Kai · 仓库执行", "Billing Reliability · Kai · Repository execution")}</div></div><span class="pill brand">${l("审查中", "In review")}</span></button><button class="artifact-row" data-action="artifact-detail" style="border:0;text-align:left;background:white"><span class="artifact-icon">✓</span><div><div class="item-title">verification-report.md <span class="pill">v1</span></div><div class="item-meta">${l("0.14 发布 · Vera · 验证节点", "Release 0.14 · Vera · Verification node")}</div></div><span class="pill success">${l("已通过", "Passed")}</span></button></div></div><div class="card"><div class="section-head"><div><h2>${l("选中产物链路", "Selected lineage")}</h2><span>technical-plan.md v2</span></div></div><div style="padding:24px;display:flex;align-items:center;justify-content:center;gap:18px"><div class="preview-file"><strong>product-brief.md v2</strong><div class="item-meta">${l("输入 · 已接受", "Input · accepted")}</div></div><strong>→</strong><div class="preview-file" style="border-color:#9bb5fb"><strong>technical-plan.md v2</strong><div class="item-meta">${l("林墨 · 当前版本", "Lin · current")}</div></div><strong>→</strong><div class="preview-file"><strong>${l("3 个仓库运行", "3 repository runs")}</strong><div class="item-meta">${l("下游使用方", "Downstream consumers")}</div></div></div></div></section>`,
+        );
+      }
+
+      function settingsPage() {
+        return shell(
+          `<div class="page-header"><div><div class="eyebrow">${l("本地控制面", "LOCAL CONTROL PLANE")}</div><h1>${t().settingsTitle}</h1><p>${t().settingsDesc}</p></div></div><section class="settings-page"><div class="settings-grid"><div class="card"><div class="section-head"><div><h2>${l("通用设置", "General")}</h2><span>${l("公司与界面", "Company and interface")}</span></div></div><div class="node-content"><div class="field"><label>${l("公司目录", "Company directory")}</label><div class="field-box">/Users/demo/Star-Sand-Software</div></div><div class="field"><label>${l("界面语言", "Interface language")}</label><div class="language-switch" style="width:220px"><button data-lang="zh" class="${lang === "zh" ? "active" : ""}">${l("中文", "Chinese")}</button><button data-lang="en" class="${lang === "en" ? "active" : ""}">${l("英文", "English")}</button></div></div></div></div><div class="card"><div class="section-head"><div><h2>${l("AI 员工执行服务", "Agent providers")}</h2><span>${l("员工身份与执行服务保持解耦", "Identity stays independent from execution provider")}</span></div></div><div class="project-item"><div><div class="item-title">Codex</div><div class="item-meta">${l("本地命令行 · 已认证", "Local CLI · authenticated")}</div></div><span class="pill success">${l("正常", "Healthy")}</span><span>GPT-5</span><button class="button" data-action="provider-test">${l("测试", "Test")}</button></div><div class="project-item"><div><div class="item-title">Claude Code</div><div class="item-meta">${l("本地命令行 · 已认证", "Local CLI · authenticated")}</div></div><span class="pill success">${l("正常", "Healthy")}</span><span>Sonnet</span><button class="button" data-action="provider-test">${l("测试", "Test")}</button></div></div><div class="card"><div class="section-head"><div><h2>${l("协议连接", "Protocol connections")}</h2><span>${l("仅限本地的 ACP 与 AG-UI 诊断", "Local-only ACP and AG-UI diagnostics")}</span></div></div><div class="project-item"><div><div class="item-title">ACP Facade</div><div class="item-meta">stdio · ${l("本地进程通信备用通道", "local IPC fallback")}</div></div><span class="pill success">${l("已连接", "Connected")}</span><span>${l("2 个会话", "2 sessions")}</span><button class="button" data-view="interaction">${l("查看", "Inspect")}</button></div><div class="project-item"><div><div class="item-title">AG-UI ${l("事件适配器", "event adapter")}</div><div class="item-meta">RuntimeEvent → ${l("桌面端事件流", "Desktop stream")}</div></div><span class="pill success">${l("传输中", "Streaming")}</span><span>${l("0 个丢失事件", "0 dropped")}</span><button class="button" data-view="interaction">${l("查看", "Inspect")}</button></div></div></div></section>`,
+        );
+      }
+
+      function pipelinePage() {
+        const n = t();
+        const nodeDetails = {
+          "product-align": {
+            name: n.productAlign,
+            position: n.planner,
+            skills: `planning · grill-with-docs`,
+            inputs: l(
+              "项目目标 · 现有产物",
+              "Project goal · Existing artifacts",
+            ),
+            outputs: l("产品目标对齐结果", "Product alignment"),
+          },
+          "technical-plan": {
+            name: n.techPlan,
+            position: n.architect,
+            skills: "codebase-design · domain-modeling",
+            inputs: l("产品简报 · 仓库地图", "Product brief · Repository map"),
+            outputs: l(
+              "技术方案 · 仓库任务",
+              "Technical plan · Repository issues",
+            ),
+          },
+          approval: {
+            name: n.approvePlan,
+            position: l("人工审批人", "Human approver"),
+            skills: l("不使用 AI 员工技能", "No agent skills"),
+            inputs: l(
+              "方案 · 风险 · 仓库任务",
+              "Plan · Risks · Repository issues",
+            ),
+            outputs: l("审批决定", "Approval decision"),
+          },
+          parallel: {
+            name: n.executeRepos,
+            position: n.engineer,
+            skills: "tdd · implementation",
+            inputs: l("已批准的仓库任务", "Approved repository issues"),
+            outputs: l(
+              "分支 · 提交 · 测试证据",
+              "Branches · Commits · Test evidence",
+            ),
+          },
+          complete: {
+            name: n.finalAccept,
+            position: n.evaluator,
+            skills: "verification · code-review",
+            inputs: l("运行证据 · 产物", "Run evidence · Artifacts"),
+            outputs: l("已接受的交付", "Accepted delivery"),
+          },
+        };
+        const selected = nodeDetails[prototypeState.selectedPipelineNode];
+        return shell(`<div class="page-header"><div><div class="eyebrow">${n.pipelineEyebrow}</div><h1>${n.pipelineTitle}</h1><p>${l(`草稿基于已发布版本 v${prototypeState.pipelineVersion} · 修改不会影响正在运行的快照`, `Draft based on published v${prototypeState.pipelineVersion} · Changes do not affect active snapshots`)}</p></div><div class="header-actions"><button class="button" data-action="validate-pipeline">${n.validate}</button><button class="button primary" data-action="publish-pipeline">${n.publish}</button></div></div>
+          <div class="subnav"><button>${n.overviewTab}</button><button>${n.positionsTab}</button><button class="active">${n.pipelineTab}</button><button>${n.runsTab}</button><button>${n.settingsTab}</button></div>
+          <section class="card pipeline-shell"><aside class="node-library"><div class="panel-title">${n.nodeLibrary}</div><div class="node-kind"><i></i>${n.start}</div><div class="node-kind"><i></i>${n.aiTask}</div><div class="node-kind approval"><i></i>${n.approval}</div><div class="node-kind condition"><i></i>${n.condition}</div><div class="node-kind parallel"><i></i>${n.parallel}</div><div class="node-kind complete"><i></i>${n.complete}</div></aside>
+            <div class="canvas"><div class="canvas-toolbar"><div class="toolbar-group"><button class="active">${l("选择", "Select")}</button><button>${l("拖动画布", "Hand")}</button><button>＋</button><button>−</button></div><div class="toolbar-group"><button>${l("自动布局", "Auto layout")}</button><button>100%</button></div></div>
+              <svg class="pipeline-svg" viewBox="0 0 800 680" preserveAspectRatio="none"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9badc1"/></marker></defs><path d="M145 124 C225 124 210 190 285 190" stroke="#9badc1" stroke-width="2" fill="none" marker-end="url(#arrow)"/><path d="M463 190 C545 190 525 270 610 270" stroke="#9badc1" stroke-width="2" fill="none" marker-end="url(#arrow)"/><path d="M610 350 C610 410 335 385 335 445" stroke="#9badc1" stroke-width="2" fill="none" marker-end="url(#arrow)"/><path d="M423 510 C520 510 520 580 625 580" stroke="#9badc1" stroke-width="2" fill="none" marker-end="url(#arrow)"/></svg>
+              <button class="pipeline-node ${prototypeState.selectedPipelineNode === "product-align" ? "selected" : ""}" data-node="product-align" style="left:55px;top:86px;text-align:left"><div class="node-type">${l("开始", "Start")}</div><div class="node-name">${n.productAlign}</div><div class="node-person"><span class="avatar">AN</span>${n.planner}</div><span class="node-chip">planning</span></button>
+              <button class="pipeline-node ${prototypeState.selectedPipelineNode === "technical-plan" ? "selected" : ""}" data-node="technical-plan" style="left:285px;top:148px;text-align:left"><div class="node-type">${l("AI 任务", "AI Task")}</div><div class="node-name">${n.techPlan}</div><div class="node-person"><span class="avatar purple">LM</span>${n.architect}</div><span class="node-chip">codebase-design</span></button>
+              <button class="pipeline-node approval ${prototypeState.selectedPipelineNode === "approval" ? "selected" : ""}" data-node="approval" style="right:34px;top:228px;text-align:left"><div class="node-type">${l("人工审批", "Human approval")}</div><div class="node-name">${n.approvePlan}</div><div class="item-meta" style="margin-top:8px">${l("方案 + 风险 + 仓库", "Plan + risks + repositories")}</div></button>
+              <button class="pipeline-node parallel ${prototypeState.selectedPipelineNode === "parallel" ? "selected" : ""}" data-node="parallel" style="left:247px;top:443px;text-align:left"><div class="node-type">${l("并行执行", "Parallel")}</div><div class="node-name">${n.executeRepos}</div><div class="node-person"><span class="avatar teal">K</span>${n.engineer}</div><span class="node-chip">${l("tdd · 3 个分支", "tdd · 3 branches")}</span></button>
+              <button class="pipeline-node complete ${prototypeState.selectedPipelineNode === "complete" ? "selected" : ""}" data-node="complete" style="right:20px;bottom:58px;text-align:left"><div class="node-type">${l("完成", "Complete")}</div><div class="node-name">${n.finalAccept}</div><div class="node-person"><span class="avatar green">V</span>${n.evaluator}</div><span class="node-chip">${l("交付产物", "delivery artifacts")}</span></button>
+            </div>
+            <aside class="inspector"><div class="inspector-head"><div class="panel-title" style="margin:0">${n.inspector}</div><h2 style="margin-top:4px">${selected.name}</h2></div><div class="inspector-body"><div class="field"><label>${n.nodeName}</label><div class="field-box">${selected.name}</div></div><div class="field"><label>${n.position}</label><div class="field-box">${selected.position}</div></div><div class="field"><label>${n.skills}</label><div class="field-box">${selected.skills}</div></div><div class="field"><label>${n.inputs}</label><div class="field-box">${selected.inputs}</div></div><div class="field"><label>${n.outputs}</label><div class="field-box">${selected.outputs}</div></div><div class="field"><label>${n.execution}</label><div class="field-box">${l("超时 45 分钟", "Timeout 45 min")}<br/>${l("基础设施失败时重试一次", "Retry once on infrastructure failure")}</div></div><button class="button" data-action="advanced-node" style="width:100%">${l("打开高级设置", "Open advanced settings")}</button></div></aside>
+          </section>`);
+      }
+
+      function runPage() {
+        const n = t();
+        const waiting = prototypeState.runStatus === "waiting-approval";
+        const paused = prototypeState.runStatus === "paused";
+        const cancelled = prototypeState.runStatus === "cancelled";
+        const activeLabel = waiting
+          ? n.currentApproval
+          : paused
+            ? l("运行已暂停", "Run paused")
+            : cancelled
+              ? l("运行已取消", "Run cancelled")
+              : l("仓库实现正在执行", "Repository implementation is running");
+        const activeDescription = waiting
+          ? n.approvalDesc
+          : paused
+            ? l(
+                "执行已暂停。恢复后将从当前快照继续。",
+                "Execution is paused. Resume to continue from the current snapshot.",
+              )
+            : cancelled
+              ? l(
+                  "后续节点不会再执行，已有产物和证据仍可查看。",
+                  "No further nodes will run. Existing artifacts remain inspectable.",
+                )
+              : l(
+                  "三个隔离仓库节点正在按照已批准快照执行。",
+                  "Three isolated repository nodes are executing from the approved snapshot.",
+                );
+        return shell(`<div class="page-header"><div><div class="eyebrow">${n.runEyebrow}</div><h1>${n.runTitle}</h1><p>${n.runDesc}</p></div><div class="header-actions"><span class="pill ${waiting ? "warning" : cancelled ? "danger" : paused ? "warning" : "brand"}">${statusLabel(prototypeState.runStatus)}</span><button class="button primary" data-view="interaction">${l("AI 员工交互", "Agent Interaction")}</button><button class="button" data-action="${paused ? "resume-run" : "pause-run"}" ${cancelled ? "disabled" : ""}>${paused ? l("恢复", "Resume") : n.pause}</button><button class="button" data-action="cancel-run" ${cancelled ? "disabled" : ""}>${n.cancel}</button></div></div>
+          <section class="run-layout"><aside class="card timeline"><div class="panel-title">${l("流水线进度", "Pipeline progress")}</div><div class="timeline-item done"><span class="timeline-dot">✓</span><div class="timeline-name">${n.productAlign}</div><div class="timeline-meta">${l("安禾 · 6 分钟", "Anne · 6 min")}</div></div><div class="timeline-item done"><span class="timeline-dot">✓</span><div class="timeline-name">${n.techPlan}</div><div class="timeline-meta">${l("林墨 · 14 分钟", "Lin · 14 min")}</div></div><div class="timeline-item ${waiting ? "current" : "done"}"><span class="timeline-dot">${waiting ? "!" : "✓"}</span><div class="timeline-name">${n.approvePlan}</div><div class="timeline-meta">${waiting ? n.waitingApproval : l("已由你批准", "Approved by you")}</div></div><div class="timeline-item ${!waiting && !cancelled ? "current" : ""}"><span class="timeline-dot">${!waiting && !cancelled ? "●" : ""}</span><div class="timeline-name">${n.executeRepos}</div><div class="timeline-meta">${cancelled ? statusLabel("cancelled") : paused ? statusLabel("paused") : waiting ? l("3 个并行节点", "3 parallel nodes") : l("3 个节点中 2 个运行中", "2 of 3 running")}</div></div><div class="timeline-item"><span class="timeline-dot"></span><div class="timeline-name">${n.review}</div><div class="timeline-meta">${n.queued}</div></div><div class="timeline-item"><span class="timeline-dot"></span><div class="timeline-name">${n.verify}</div><div class="timeline-meta">${n.queued}</div></div><div class="timeline-item"><span class="timeline-dot"></span><div class="timeline-name">${n.finalAccept}</div><div class="timeline-meta">${n.queued}</div></div></aside>
+            <article class="card current-node"><div class="approval-banner" style="background:${waiting ? "var(--warning-soft)" : cancelled ? "var(--danger-soft)" : "var(--brand-soft)"}"><span class="approval-symbol" style="background:${waiting ? "var(--warning)" : cancelled ? "var(--danger)" : "var(--brand)"}">${waiting ? "!" : cancelled ? "×" : "▶"}</span><div><h2>${activeLabel}</h2><p>${activeDescription}</p></div></div><div class="node-content"><div class="pill ${waiting ? "warning" : "brand"}">${waiting ? l("人工审批 · 节点 3/7", "Human approval · Node 3/7") : l("并行执行 · 节点 4/7", "Parallel execution · Node 4/7")}</div><div class="summary-box"><h3>${n.planSummary}</h3><ul class="change-list"><li>${l("为账单领域增加退款资格和按比例计算规则。", "Add refund eligibility and proration rules to the billing domain.")}</li><li>${l("在 payments-service 和 customer-web 中实现接口契约。", "Implement API contract in payments-service and customer-web.")}</li><li>${l("增加事件驱动的退款确认和审计证据。", "Add event-driven refund confirmation and audit evidence.")}</li><li>${l("运行契约、集成和浏览器验收测试。", "Run contract, integration, and browser acceptance tests.")}</li></ul></div><div class="artifact-preview"><div class="artifact-preview-head"><strong>${n.generatedArtifacts}</strong><span class="pill">${l("2 个版本已锁定", "2 versions locked")}</span></div><div class="artifact-preview-body"><div class="preview-file"><strong>technical-plan.md</strong><div class="item-meta">Markdown · v1 · ${l("林墨", "Lin")}</div><div class="item-meta" style="margin-top:8px">${l("8 项决策 · 3 个仓库 · 6 个风险", "8 decisions · 3 repositories · 6 risks")}</div></div><div class="preview-file"><strong>workspace-plan.json</strong><div class="item-meta">${l("结构化方案", "Structured plan")} · v1 · ${l("林墨", "Lin")}</div><div class="item-meta" style="margin-top:8px">${l("3 个任务 · 结构校验有效", "3 issues · schema valid")}</div></div></div></div><div class="summary-box"><h3>${n.risks}</h3><p style="margin-top:7px">${l("退款事件会影响支付对账，需要通过功能开关灰度发布，并保持事件消费者向后兼容。", "Refund events touch payment reconciliation. Rollout requires feature flag and backward-compatible event consumers.")}</p></div></div></article>
+            <aside class="card review-panel"><div class="review-section"><div class="panel-title">${l("运行上下文", "Run context")}</div><div class="kv"><span>${l("状态", "Status")}</span><strong>${statusLabel(prototypeState.runStatus)}</strong><span>${l("进度", "Progress")}</span><strong>${prototypeState.runProgress}%</strong><span>${n.snapshot}</span><strong>sc-dev-v4.2</strong><span>${n.duration}</span><strong>${l("22 分 18 秒", "22m 18s")}</strong><span>${n.cost}</span><strong>84k · $1.72</strong><span>${l("项目", "Project")}</span><strong>${l("结账体验升级", "Checkout Revamp")}</strong></div></div><div class="review-section"><div class="panel-title">${n.downstream}</div><p>${l("批准后将启动 3 个隔离仓库节点，预期生成 3 个分支、1 组合并请求和 1 份验证报告。", "Approval starts 3 repository nodes in isolated worktrees. Expected outputs: 3 branches, 1 PR set, 1 verification report.")}</p></div><div class="review-section"><div class="panel-title">${l("证据", "Evidence")}</div><div class="skill-tags"><span class="pill success">${l("方案有效", "Plan valid")}</span><span class="pill success">${l("仓库干净", "Repos clean")}</span><span class="pill warning">${l("1 个高风险", "1 high risk")}</span></div></div><div class="review-section review-actions">${waiting ? `<button class="button primary" data-action="approve-run">${n.approve}</button><button class="button" data-action="request-changes">${n.changes}</button><button class="button" data-action="reject-run">${n.reject}</button>` : paused ? `<button class="button primary" data-action="resume-run">${l("从快照恢复", "Resume from snapshot")}</button>` : `<button class="button primary" data-view="interaction">${l("与 AI 员工协作", "Collaborate with agent")}</button><button class="button" data-action="pause-run">${l("暂停运行", "Pause run")}</button>`}</div></aside></section>`);
+      }
+
+      function interactionPage() {
+        const n = t();
+        return shell(`<div class="page-header"><div><div class="eyebrow">${n.interactionEyebrow}</div><h1>${n.interactionTitle}</h1><p>${n.interactionDesc}</p></div><div class="header-actions"><span class="pill success">${n.acpConnected}</span><button class="button" data-view="run">${l("打开运行", "Open run")}</button><button class="button" data-action="end-session">${l("结束会话", "End session")}</button></div></div>
+          <section class="interaction-layout">
+            <aside class="card session-panel"><div class="employee-profile"><div class="employee-line"><span class="avatar purple">LM</span><div><h2>林墨</h2><div class="item-meta">${n.architect}</div></div></div><div class="skill-tags" style="margin-top:12px"><span class="pill brand">${n.consultationMode}</span><span class="pill success">${l("工作中", "Working")}</span></div></div><div class="session-list"><div class="panel-title">${n.sessionContext}</div><div class="session-item active"><strong>${l("技术方案协作", "Technical plan collaboration")}</strong><div class="item-meta">ACP · acp_7f32 · ${l("刚刚", "now")}</div></div><div class="session-item"><strong>${l("退款领域咨询", "Refund domain consultation")}</strong><div class="item-meta">${l("咨询 · 昨天", "Consultation · yesterday")}</div></div><div class="session-item"><strong>${l("版本架构审查", "Release architecture review")}</strong><div class="item-meta">${l("运行协作 · 7 月 11 日", "Run collaboration · Jul 11")}</div></div></div><div class="connection"><div class="health"><span class="health-dot"></span>${n.acpConnected}</div><div class="kv"><span>${l("传输", "Transport")}</span><strong>stdio</strong><span>${l("客户端", "Client")}</span><strong>Sandcastle Desktop</strong><span>${l("会话", "Session")}</span><strong>acp_7f32</strong></div></div></aside>
+            <article class="card conversation"><div class="conversation-head"><div><h2>${n.liveActivity}</h2><div class="item-meta">${n.eventStream} · RuntimeEvent → AG-UI</div></div><span class="pill brand">${prototypeState.runStatus === "paused" ? l("已暂停", "Paused") : l("传输中", "Streaming")}</span></div><div class="conversation-stream"><div class="message user"><strong>${l("你", "You")}</strong><div style="margin-top:5px">请重点检查退款事件和现有结算流程的兼容性，并把风险写入技术方案。</div></div><div class="message"><strong>林墨 · ${l("软件架构师", "Software Architect")}</strong><div style="margin-top:5px">我会先检查 billing domain、事件消费者和现有测试，再补充兼容策略。当前只在“生成技术方案”节点内工作。</div></div><div class="event-card"><div class="event-head"><span>STEP_STARTED · ${l("检查仓库", "Inspect repositories")}</span><span class="pill success">${l("运行中", "Running")}</span></div><div class="item-meta">${l("技能流", "Skill Flow")}: codebase-design · ${l("节点", "Node")} technical-plan</div></div><div class="event-card"><div class="event-head"><span>TOOL_CALL · ${l("读取仓库文件", "Read repository files")}</span><span class="pill">Bash</span></div><div class="event-code">rg -n "refund|reconciliation" services/payments packages/events</div><div class="item-meta" style="margin-top:7px">${l("匹配 12 个文件 · 敏感输出已折叠", "12 files matched · sensitive output collapsed")}</div></div>${prototypeState.permission === "pending" ? `<div class="event-card permission"><div class="event-head"><span>${n.permissionRequest}</span><span class="pill warning">${l("文件系统写入", "Filesystem write")}</span></div><p style="margin-top:7px">林墨请求更新运行快照允许的草稿产物：<strong>technical-plan.md</strong>。不会修改代码或已发布流水线。</p><div class="permission-actions"><button class="button warning" data-action="permission-once">${n.allowOnce}</button><button class="button" data-action="permission-run">${n.allowRun}</button><button class="button" data-action="permission-deny">${n.deny}</button></div></div>` : `<div class="event-card"><div class="event-head"><span>PERMISSION_DECISION</span><span class="pill ${prototypeState.permission === "denied" ? "danger" : "success"}">${statusLabel(prototypeState.permission)}</span></div><div class="item-meta">${l("决定已写入运行证据并通过 ACP 同步。", "Decision recorded in run evidence and sent through ACP.")}</div></div>`}<div class="message"><strong>林墨</strong><div style="margin-top:5px">已确认主要风险：旧消费者不能识别 <code>refund.completed.v2</code>。建议先双写兼容事件，并通过功能开关分阶段切换。</div><div class="item-meta" style="margin-top:7px">TEXT_MESSAGE_CONTENT · ${l("传输中", "streaming")}</div></div>${prototypeState.interactionMessages.map((message) => `<div class="message user"><strong>${l("你", "You")}</strong><div style="margin-top:5px">${message}</div><div class="item-meta" style="margin-top:7px">NODE_FEEDBACK · ${l("已记录", "recorded")}</div></div><div class="message"><strong>林墨</strong><div style="margin-top:5px">${l("已收到节点反馈。我会在当前快照和技能流边界内继续处理。", "Feedback received. I will continue within the current snapshot and Skill Flow boundaries.")}</div></div>`).join("")}</div><div class="composer"><textarea id="interaction-input" class="composer-box" aria-label="${l("节点反馈", "Node feedback")}" placeholder="${l("补充节点反馈，或输入 / 引用产物…", "Add node feedback or reference an artifact…")}"></textarea><div class="composer-actions"><button class="button" data-action="reference-artifact">${n.addArtifact}</button><div><button class="button" data-action="pause-run">${prototypeState.runStatus === "paused" ? l("恢复 AI 员工", "Resume agent") : l("暂停 AI 员工", "Pause agent")}</button> <button class="button primary" data-action="send-feedback">${n.sendFeedback}</button></div></div></div></article>
+            <aside class="card context-panel"><div class="context-block"><div class="panel-title">${n.currentContext}</div><div class="kv"><span>${l("项目", "Project")}</span><strong>${l("结账体验升级", "Checkout Revamp")}</strong><span>${l("部门", "Department")}</span><strong>${n.deptSoftware}</strong><span>${l("运行", "Run")}</span><strong>run_84d2</strong><span>${l("快照", "Snapshot")}</span><strong>sc-dev-v4.2</strong><span>${l("节点", "Node")}</span><strong>${n.techPlan}</strong></div></div><div class="context-block"><div class="panel-title">${l("当前技能流", "Active skill flow")}</div><div class="skill-tags"><span class="pill brand">codebase-design</span><span class="pill brand">domain-modeling</span></div></div><div class="context-block"><div class="panel-title">${l("引用的产物", "Referenced artifacts")}</div><div class="preview-file"><strong>product-brief.md</strong><div class="item-meta">${l("输入 · v2 · 已接受", "Input · v2 · accepted")}</div></div><div class="preview-file" style="margin-top:8px"><strong>repository-map.json</strong><div class="item-meta">${l("输入 · v1 · 已锁定", "Input · v1 · locked")}</div></div></div><div class="context-block"><div class="panel-title">${l("会话用量", "Session usage")}</div><div class="kv"><span>Token</span><strong>${18.4 + prototypeState.interactionMessages.length * 1.2}k</strong><span>${l("成本", "Cost")}</span><strong>$${(0.38 + prototypeState.interactionMessages.length * 0.04).toFixed(2)}</strong><span>${l("执行服务", "Provider")}</span><strong>Codex · GPT-5</strong><span>${l("权限", "Permission")}</span><strong>${statusLabel(prototypeState.permission)}</strong></div></div><div class="context-block"><button class="button" data-action="raw-evidence" style="width:100%">${l("查看原始证据", "View raw evidence")}</button></div></aside>
+          </section>`);
+      }
+
+      function overlayHtml() {
+        if (overlay === "create-project") {
+          return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="create-project-title"><div class="modal-head"><div><div class="eyebrow">${l("项目", "PROJECT")}</div><h2 id="create-project-title">${t().createProjectTitle}</h2></div><button class="button" data-action="close-modal">×</button></div><div class="modal-body"><div class="form-grid"><label for="new-project-name">${t().projectName}</label><input id="new-project-name" value="${l("客户门户升级", "Customer Portal Refresh")}" /><label for="new-project-goal">${t().projectGoal}</label><textarea id="new-project-goal">${l("优化客户门户的新用户引导与账户管理体验。", "Improve the customer portal onboarding and account management experience.")}</textarea><label for="new-project-repository">${l("关联仓库", "Linked repository")}</label><input id="new-project-repository" value="/Users/demo/customer-portal" /></div></div><div class="modal-foot"><button class="button" data-action="close-modal">${t().cancelAction}</button><button class="button primary" data-action="confirm-create-project">${t().createAction}</button></div></section></div>`;
+        }
+        if (overlay === "start-run") {
+          return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="start-run-title"><div class="modal-head"><div><div class="eyebrow">${l("部门运行", "DEPARTMENT RUN")}</div><h2 id="start-run-title">${t().startRunTitle}</h2></div><button class="button" data-action="close-modal">×</button></div><div class="modal-body"><div class="form-grid"><label for="run-project">${l("项目", "Project")}</label><select id="run-project">${prototypeState.projects.map((project) => `<option>${projectName(project)}</option>`).join("")}</select><label for="run-department">${t().chooseDepartment}</label><select id="run-department"><option>${t().deptSoftware} · ${l("流水线", "Pipeline")} v${prototypeState.pipelineVersion}</option><option>${t().deptResearch} · ${l("流水线", "Pipeline")} v2</option></select><label for="run-goal">${t().workGoal}</label><textarea id="run-goal">${l("增加安全的订阅退款流程，并保持事件向后兼容。", "Add a safe subscription refund flow with backwards-compatible events.")}</textarea><label for="run-artifact">${t().inputArtifacts}</label><select id="run-artifact"><option>product-brief.md v2 · ${l("已接受", "accepted")}</option><option>technical-plan.md v1 · ${l("草稿", "draft")}</option></select><div class="summary-box"><h3>${l("运行预览", "Run preview")}</h3><div class="kv"><span>${l("参与职位", "Positions")}</span><strong>${l("产品规划、架构师、工程师、审查员、验证员", "Planner, Architect, Engineer, Reviewer, Evaluator")}</strong><span>${l("快照", "Snapshot")}</span><strong>${l("将创建", "Will create")} sc-dev-v${prototypeState.pipelineVersion + 0.2}</strong><span>${l("预期产物", "Expected")}</span><strong>${l("方案、分支、合并请求集合、验证报告", "Plan, branches, PR set, verification report")}</strong></div></div></div></div><div class="modal-foot"><button class="button" data-action="close-modal">${t().cancelAction}</button><button class="button primary" data-action="confirm-start-run">${t().launchAction}</button></div></section></div>`;
+        }
+        if (overlay === "artifact-detail") {
+          return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><div class="eyebrow">${l("产物版本", "ARTIFACT VERSION")}</div><h2>technical-plan.md v2</h2></div><button class="button" data-action="close-modal">×</button></div><div class="modal-body"><div class="kv"><span>${l("生成者", "Producer")}</span><strong>${l("林墨 · 技术方案节点", "Lin · Technical plan node")}</strong><span>${l("运行", "Run")}</span><strong>run_84d2</strong><span>${l("输入", "Inputs")}</span><strong>product-brief.md v2, repository-map.json v1</strong><span>${l("使用方", "Consumers")}</span><strong>${l("3 个仓库执行节点", "3 repository execution nodes")}</strong><span>${l("状态", "Status")}</span><strong>${l("已接受", "Accepted")}</strong></div><div class="summary-box"><h3>${l("链路说明", "Lineage decision")}</h3><p>${l("此版本已被快照 sc-dev-v4.2 锁定。编辑会创建新的产物版本。", "This version is locked by snapshot sc-dev-v4.2. Editing creates a new artifact version.")}</p></div></div><div class="modal-foot"><button class="button" data-action="close-modal">${l("关闭", "Close")}</button><button class="button primary" data-action="start-run">${l("作为运行输入", "Use as run input")}</button></div></section></div>`;
+        }
+        return "";
+      }
+
+      function placeholder() {
+        return overviewPage();
+      }
+      function render() {
+        document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+        const page =
+          view === "pipeline"
+            ? pipelinePage()
+            : view === "projects"
+              ? projectsPage()
+              : view === "artifacts"
+                ? artifactsPage()
+                : view === "settings"
+                  ? settingsPage()
+                  : view === "run"
+                    ? runPage()
+                    : view === "interaction"
+                      ? interactionPage()
+                      : overviewPage();
+        document.getElementById("root").innerHTML =
+          `${page}${overlayHtml()}${toast ? `<div class="toast">${toast}</div>` : ""}`;
+        syncUrl();
+        document.querySelectorAll("[data-view]").forEach((el) =>
+          el.addEventListener("click", () => {
+            view = el.dataset.view;
+            overlay = null;
+            render();
+          }),
+        );
+        document.querySelectorAll("[data-lang]").forEach((el) =>
+          el.addEventListener("click", () => {
+            lang = el.dataset.lang;
+            render();
+          }),
+        );
+        document.querySelectorAll("[data-node]").forEach((el) =>
+          el.addEventListener("click", () => {
+            prototypeState.selectedPipelineNode = el.dataset.node;
+            render();
+          }),
+        );
+        document
+          .querySelectorAll("[data-action]")
+          .forEach((el) =>
+            el.addEventListener("click", () =>
+              handleAction(el.dataset.action, el),
+            ),
+          );
+      }
+
+      function handleAction(action, element) {
+        if (action === "create-project" || action === "start-run") {
+          overlay = action;
+          render();
+          return;
+        }
+        if (action === "close-modal") {
+          overlay = null;
+          render();
+          return;
+        }
+        if (action === "confirm-create-project") {
+          const name = document.getElementById("new-project-name").value.trim();
+          const goal = document.getElementById("new-project-goal").value.trim();
+          prototypeState.projects.push({
+            id: `project-${prototypeState.projects.length + 1}`,
+            name: name || l("未命名项目", "Untitled project"),
+            goal: goal || l("未填写目标", "No goal provided"),
+            activeRuns: 0,
+            status: "draft",
+          });
+          overlay = null;
+          view = "projects";
+          showToast(
+            `${l("项目已创建", "Project created")}: ${name || l("未命名项目", "Untitled project")}`,
+          );
+          return;
+        }
+        if (action === "confirm-start-run") {
+          overlay = null;
+          prototypeState.runStatus = "waiting-approval";
+          prototypeState.runProgress = 47;
+          prototypeState.permission = "pending";
+          view = "run";
+          showToast(
+            l(
+              "运行快照 sc-dev-v4.2 已创建，当前等待审批。",
+              "Run snapshot sc-dev-v4.2 created. Waiting at approval gate.",
+            ),
+          );
+          return;
+        }
+        if (action === "open-project") {
+          showToast(
+            `${l("已选择项目上下文", "Project context selected")}: ${element.dataset.project}`,
+          );
+          return;
+        }
+        if (action === "artifact-detail") {
+          overlay = "artifact-detail";
+          render();
+          return;
+        }
+        if (action === "validate-pipeline") {
+          showToast(
+            l(
+              "流水线验证通过：所有节点可达，产物契约匹配。",
+              "Pipeline valid: all nodes reachable, artifact contracts match.",
+            ),
+          );
+          return;
+        }
+        if (action === "publish-pipeline") {
+          prototypeState.pipelineVersion += 1;
+          showToast(
+            l(
+              `流水线 v${prototypeState.pipelineVersion} 已发布，运行中的快照不受影响。`,
+              `Pipeline v${prototypeState.pipelineVersion} published. Active snapshots unchanged.`,
+            ),
+          );
+          return;
+        }
+        if (action === "advanced-node") {
+          showToast(
+            l(
+              "原型功能：高级超时、重试、执行服务和产物策略。",
+              "Prototype: advanced timeout, retry, provider, and artifact policies.",
+            ),
+          );
+          return;
+        }
+        if (action === "approve-run") {
+          prototypeState.runStatus = "running";
+          prototypeState.runProgress = 55;
+          showToast(
+            l(
+              "方案已批准，三个仓库节点已按照快照启动。",
+              "Plan approved. Three repository nodes started from the snapshot.",
+            ),
+          );
+          return;
+        }
+        if (action === "request-changes") {
+          prototypeState.runStatus = "paused";
+          showToast(
+            l(
+              "已要求修改，架构师节点已携带你的反馈重新打开。",
+              "Changes requested. Architect node reopened with your feedback.",
+            ),
+          );
+          return;
+        }
+        if (action === "reject-run" || action === "cancel-run") {
+          prototypeState.runStatus = "cancelled";
+          showToast(
+            l(
+              "运行已取消，已有产物和证据已保留。",
+              "Run cancelled. Existing artifacts and evidence were preserved.",
+            ),
+          );
+          return;
+        }
+        if (action === "pause-run") {
+          prototypeState.runStatus =
+            prototypeState.runStatus === "paused" ? "running" : "paused";
+          showToast(
+            prototypeState.runStatus === "paused"
+              ? l("运行已在安全边界暂停。", "Run paused at a safe boundary.")
+              : l(
+                  "Agent 已从同一快照恢复。",
+                  "Agent resumed from the same snapshot.",
+                ),
+          );
+          return;
+        }
+        if (action === "resume-run") {
+          prototypeState.runStatus = "running";
+          showToast(
+            l(
+              "运行已从快照 sc-dev-v4.2 恢复。",
+              "Run resumed from snapshot sc-dev-v4.2.",
+            ),
+          );
+          return;
+        }
+        if (
+          ["permission-once", "permission-run", "permission-deny"].includes(
+            action,
+          )
+        ) {
+          prototypeState.permission =
+            action === "permission-deny"
+              ? "denied"
+              : action === "permission-run"
+                ? "allowed-for-run"
+                : "allowed-once";
+          showToast(
+            `${l("权限决定已记录", "Permission decision recorded")}: ${statusLabel(prototypeState.permission)}`,
+          );
+          return;
+        }
+        if (action === "send-feedback") {
+          const input = document.getElementById("interaction-input");
+          const message = input.value.trim();
+          if (!message) {
+            showToast(l("请先输入节点反馈。", "Enter node feedback first."));
+            return;
+          }
+          prototypeState.interactionMessages.push(message);
+          showToast(
+            l(
+              "反馈已记录到当前节点，并通过 ACP 发送。",
+              "Feedback recorded on the current node and sent through ACP.",
+            ),
+          );
+          return;
+        }
+        if (action === "reference-artifact") {
+          const input = document.getElementById("interaction-input");
+          input.value = `${input.value}${input.value ? "\n" : ""}@technical-plan.md:v2 `;
+          input.focus();
+          return;
+        }
+        if (action === "raw-evidence") {
+          showToast(
+            l(
+              "证据抽屉：RuntimeEvent、原始日志、命令输出和 ACP 更新。",
+              "Evidence drawer: RuntimeEvent, raw logs, command output, and ACP updates.",
+            ),
+          );
+          return;
+        }
+        if (action === "end-session") {
+          showToast(
+            l(
+              "ACP 会话已结束，运行和产物仍然保留。",
+              "ACP session ended. Run and artifacts remain available.",
+            ),
+          );
+          return;
+        }
+        if (action === "provider-test") {
+          showToast(
+            l(
+              "执行服务健康检查通过，耗时 420 毫秒。",
+              "Provider health check passed in 420 ms.",
+            ),
+          );
+          return;
+        }
+      }
+      render();
+    </script>
+  </body>
+</html>

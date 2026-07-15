@@ -1,0 +1,778 @@
+export type Language = "en" | "zh";
+
+const LANGUAGE_STORAGE_KEY = "sandcastle.desktop.language";
+
+export const detectLanguage = (
+  languages: readonly string[] | undefined,
+): Language =>
+  languages?.some((language) => language.toLowerCase().startsWith("zh"))
+    ? "zh"
+    : "en";
+
+export const loadPreferredLanguage = (
+  storage: Pick<Storage, "getItem"> | undefined,
+  languages: readonly string[] | undefined,
+): Language => {
+  const saved = storage?.getItem(LANGUAGE_STORAGE_KEY);
+  if (saved === "en" || saved === "zh") return saved;
+  return detectLanguage(languages);
+};
+
+export const savePreferredLanguage = (
+  storage: Pick<Storage, "setItem"> | undefined,
+  language: Language,
+): void => {
+  storage?.setItem(LANGUAGE_STORAGE_KEY, language);
+};
+
+export const messages = {
+  en: {
+    appSubtitle: "Local AI company",
+    appTitle: "Sandcastle Desktop",
+    navOverview: "Company Overview",
+    navProjects: "Projects",
+    navDepartments: "Departments",
+    navArtifacts: "Artifacts",
+    navInteraction: "Agent Interaction",
+    navSettings: "Settings",
+    agentInteraction: "Agent Interaction",
+    agentInteractionBody:
+      "Inspect messages, tools, permissions, and Runtime-owned collaboration.",
+    createConsultation: "New consultation",
+    messages: "Messages",
+    sendMessage: "Send message",
+    closeSession: "Close session",
+    permissions: "Permissions",
+    requestPermission: "Request permission",
+    memoryCandidates: "Memory candidates",
+    createMemoryCandidate: "Create memory candidate",
+    discard: "Discard",
+    runtimeStatus: "Company Runtime:",
+    runtimeConnected: "connected",
+    overviewEyebrow: "Company operations",
+    overviewTitle: "Company Overview",
+    overviewBody:
+      "Active work, approvals, blockers, and recent delivery state from the Company Runtime.",
+    metricActiveRuns: "Active runs",
+    metricWaitingApproval: "Waiting approval",
+    metricBlockedRuns: "Blocked",
+    metricCompletedRuns: "Completed",
+    attentionQueue: "Attention queue",
+    noAttentionNeeded: "Nothing needs attention",
+    noAttentionBody: "Approvals and recoverable failures will appear here.",
+    companyInventory: "Company inventory",
+    metricProjects: "Projects",
+    projectsEyebrow: "Company goals",
+    projectsTitle: "Projects",
+    projectsBody:
+      "Durable goals and shared context for department runs and artifacts.",
+    loadingProjects: "Loading...",
+    noProjectsYet: "No projects yet",
+    noProjectsBody: "Create a project to establish a goal and shared context.",
+    createProject: "Create Project",
+    projectName: "Project name",
+    projectSummary: "Summary / goal",
+    createProjectButton: "Create project",
+    projectDetailEyebrow: "Project configuration",
+    backToProjects: "Back to projects",
+    projectRevision: "Project revision",
+    projectGoal: "Goal",
+    sharedContext: "Shared context",
+    repositoryReferences: "Repository references",
+    repositoryReference: "Repository path",
+    addRepositoryReference: "Add repository reference",
+    removeRepositoryReference: "Remove repository reference",
+    saveProject: "Save project",
+    archiveProject: "Archive project",
+    departmentRuns: "Department runs",
+    noDepartmentRuns: "No Department Runs have started for this Project.",
+    selectRunDepartment: "Department",
+    startDepartmentRun: "Start Department Run",
+    runSnapshot: "Run Snapshot",
+    runRevision: "Run revision",
+    nodeAttempts: "Attempts",
+    approve: "Approve",
+    requestChanges: "Request changes",
+    reject: "Reject",
+    nodeFeedback: "Feedback for the next attempt",
+    retryNode: "Retry node",
+    continueRun: "Continue run",
+    forkRun: "Fork run from here",
+    pauseRun: "Pause run",
+    resumeRun: "Resume run",
+    cancelRun: "Cancel run",
+    recoveryOverride: "Recovery execution settings",
+    recoveryProvider: "Provider",
+    recoveryModel: "Model",
+    recoverySandbox: "Sandbox",
+    recoveryTimeout: "Timeout seconds",
+    recoverRun: "Recover with these settings",
+    attemptHistory: "Attempt history",
+    approvalHistory: "Approval history",
+    retriesRemaining: "Retries remaining",
+    status: "Status",
+    artifacts: "Artifacts",
+    departmentsEyebrow: "AI company configuration",
+    departmentsTitle: "Departments",
+    departmentsBody:
+      "Execution units that own positions, AI members, and department pipelines.",
+    noDepartments: "No departments yet",
+    noDepartmentsBody:
+      "Create a department to define a reusable execution pipeline.",
+    departmentPipeline: "Department pipeline configuration",
+    departmentDetailEyebrow: "Department catalog",
+    backToDepartments: "Back to departments",
+    overviewTab: "Overview",
+    positionsTab: "Positions",
+    pipelineTab: "Pipeline",
+    departmentPurpose: "Purpose",
+    departmentSettings: "Department settings",
+    departmentConfiguration: "Published configuration",
+    departmentActions: "Department actions",
+    builtInDepartment: "Built-in department",
+    customDepartment: "Custom department",
+    publishedPipeline: "Published Pipeline",
+    positionsCountSuffix: "positions",
+    readOnlyPublishedPipeline: "Read-only published Pipeline Version",
+    noPublishedPipelineShort: "No published Pipeline",
+    noPublishedPipeline: "No Pipeline has been published yet",
+    noPublishedPipelineBody:
+      "This Department can be configured now and publish a Pipeline Version later.",
+    draftRevision: "Draft revision",
+    unsavedChanges: "Unsaved changes",
+    saveDraft: "Save Draft",
+    validatePipeline: "Validate",
+    publishPipeline: "Publish",
+    pipelineValid: "Pipeline is valid",
+    pipelineInvalid: "Pipeline needs changes",
+    pipelineNodes: "Nodes",
+    pipelineEdges: "Edges",
+    addNode: "Add node",
+    removeNode: "Remove node",
+    nodeType: "Node type",
+    position: "Position",
+    addEdge: "Add edge",
+    removeEdge: "Remove edge",
+    fromNode: "From node",
+    toNode: "To node",
+    publishedVersion: "Published Version",
+    versionHistory: "Version history",
+    validationStartCountInvalid:
+      "The Pipeline must contain exactly one Start node.",
+    validationCompleteRequired:
+      "The Pipeline must contain at least one Complete node.",
+    validationNodeTypeUnsupported: "The node type is not supported.",
+    validationEdgeSourceNotFound: "The edge source node does not exist.",
+    validationEdgeTargetNotFound: "The edge target node does not exist.",
+    validationNodeUnreachable: "The node cannot be reached from Start.",
+    validationNodeCannotReachComplete: "The node cannot reach a Complete node.",
+    validationCycleNotAllowed: "Pipeline cycles are not allowed in v1.",
+    validationPositionRequired: "This node requires a Position.",
+    validationPositionNotFound: "The referenced Position does not exist.",
+    validationPositionOutsideDepartment:
+      "The Position belongs to another Department.",
+    validationParallelBranchesRequired:
+      "Parallel requires at least one outgoing branch.",
+    validationParallelJoinRequired:
+      "Parallel branches must reach a shared Join.",
+    validationJoinBranchesRequired:
+      "Join requires at least one incoming branch.",
+    validationSkillFlowNotAllowed:
+      "Only AI Task nodes may select a Skill Flow.",
+    validationSkillFlowNotFound: "The referenced Skill Flow does not exist.",
+    validationSkillFlowArchived: "The referenced Skill Flow is archived.",
+    validationSkillFlowOutsideDepartment:
+      "The Skill Flow belongs to another Department.",
+    validationSkillFlowPositionMismatch:
+      "The Skill Flow belongs to another Position.",
+    validationPositionArchived: "The Position is archived.",
+    validationExecutionProfileNotFound: "The Execution Profile does not exist.",
+    validationExecutionProfileOutsideDepartment:
+      "The Execution Profile belongs to another Department.",
+    validationExecutionProfileArchived: "The Execution Profile is archived.",
+    validationInputContractNotFound:
+      "The input Artifact Contract does not exist.",
+    validationOutputContractNotFound:
+      "The output Artifact Contract does not exist.",
+    validationTimeoutInvalid: "Timeout must be greater than zero.",
+    validationRetryPolicyInvalid: "Retry attempts cannot be negative.",
+    validationLimitsInvalid: "Execution limits must be greater than zero.",
+    validationApprovalConfigurationIncomplete:
+      "Approval title, policy, and approver are required together.",
+    validationConditionConfigurationNotAllowed:
+      "Only Condition nodes may define a declarative condition.",
+    validationConditionConfigurationRequired:
+      "Condition nodes require a declarative condition.",
+    validationConditionBranchDuplicate: "Condition branch IDs must be unique.",
+    validationConditionBranchKindDuplicate:
+      "Condition branch kinds must be unique.",
+    validationConditionReferenceInvalid:
+      "The Condition reference must use snapshot.<path> or nodes.<nodeId>.result.<path> and point upstream.",
+    validationConditionDefaultBranchRequired:
+      "A Condition requires a default branch.",
+    validationConditionBranchRequired:
+      "Each Condition edge must select a branch.",
+    validationConditionBranchNotFound:
+      "The Condition edge references an unknown branch.",
+    createDepartment: "Create Department",
+    createDepartmentButton: "Create department",
+    name: "Name",
+    description: "Description",
+    saveDepartment: "Save department",
+    archiveDepartment: "Archive department",
+    copyDepartment: "Copy department",
+    copyName: "Copied Department name",
+    none: "None",
+    aiMember: "AI Member",
+    aiMemberDisplayName: "AI Member display name",
+    responsibility: "Responsibility",
+    aiMemberProfile: "AI Member profile",
+    savePosition: "Save position",
+    createPosition: "Create Position",
+    archivePosition: "Archive Position",
+    activeProfile: "Default Profile",
+    inputArtifactContracts: "Input Artifact Contracts",
+    outputArtifactContracts: "Output Artifact Contracts",
+    addArtifactContract: "Add Artifact Contract",
+    removeArtifactContract: "Remove Artifact Contract",
+    executionProfiles: "Execution Profiles",
+    secretReferences: "Secret References",
+    providerRef: "Provider reference",
+    executionProfileName: "Execution Profile name",
+    model: "Model",
+    sandboxRef: "Sandbox reference",
+    branchStrategy: "Branch strategy",
+    timeoutSeconds: "Timeout (seconds)",
+    maxIterations: "Max iterations",
+    maxTokens: "Max tokens",
+    retryMaxAttempts: "Retry attempts",
+    permissionPolicy: "Permission policy",
+    approvalTitle: "Approval title",
+    approverReference: "Approver reference",
+    saveExecutionProfile: "Save Execution Profile",
+    createExecutionProfile: "Create Execution Profile",
+    secretReferenceName: "Secret Reference name",
+    providerScope: "Provider scope",
+    createSecretReference: "Create Secret Reference",
+    noSecretValueStored:
+      "Only a non-sensitive reference is stored; no secret value is saved.",
+    skillErrorDepartmentNotFound: "The Department no longer exists.",
+    skillErrorSkillNotFound: "The Skill no longer exists.",
+    skillErrorSkillArchived: "The Skill is archived.",
+    skillErrorSkillInUse:
+      "This Skill cannot be archived because a Position or active Skill Flow still uses it.",
+    skillErrorPositionOutsideDepartment:
+      "The Position belongs to another Department.",
+    skillErrorPositionSkillInUse:
+      "This Skill cannot be removed from the Position because an active Skill Flow still uses it.",
+    skillErrorSelectionDuplicate: "Skill selections must be unique.",
+    skillErrorFlowNotFound: "The Skill Flow no longer exists.",
+    skillErrorFlowArchived: "The Skill Flow is archived.",
+    skillErrorFlowOutsideDepartment:
+      "The Skill Flow belongs to another Department.",
+    skillErrorFlowPositionImmutable:
+      "A Skill Flow cannot move to another Position.",
+    skillErrorNotBoundToPosition:
+      "Every selected Skill must be bound to the Position first.",
+    skillErrorFlowInUse:
+      "This Skill Flow cannot be archived because the current Pipeline Draft or active Pipeline Version still uses it.",
+    skillErrorVersionConflict:
+      "The configuration changed in another view. Reload and try again.",
+    skillCatalog: "Skill Catalog",
+    skillCatalogBody:
+      "Company-wide active Skills available for Position configuration.",
+    createSkill: "Create Skill",
+    archiveSkill: "Archive Skill",
+    skillSource: "Source",
+    skillVersion: "Version",
+    skillLocationReference: "Location reference",
+    skillConfigurationRevision: "Skill Configuration revision",
+    positionSkills: "Position Skills",
+    savePositionSkills: "Save Position Skills",
+    skillFlows: "Skill Flows",
+    skillFlow: "Skill Flow",
+    skillFlowName: "Skill Flow name",
+    skillFlowInstructions: "Instructions",
+    saveSkillFlow: "Save Skill Flow",
+    createSkillFlow: "Create Skill Flow",
+    archiveSkillFlow: "Archive Skill Flow",
+    noSkillFlows: "No Skill Flows for this Position.",
+    softwareRnd: "Software R&D",
+    productPlanner: "Product Planner",
+    productPlannerResponsibility:
+      "Aligns product goals and turns requirements into reviewed plan inputs.",
+    softwareArchitect: "Software Architect",
+    softwareArchitectResponsibility:
+      "Produces the technical plan and repository-level delivery shape.",
+    softwareEngineer: "Software Engineer",
+    softwareEngineerResponsibility:
+      "Implements and tests the approved delivery plan.",
+    reviewer: "Reviewer",
+    reviewerResponsibility:
+      "Independently reviews implementation and delivery risk.",
+    evaluator: "Evaluator",
+    evaluatorResponsibility:
+      "Verifies acceptance criteria against recorded evidence.",
+    startNode: "Start",
+    productAlignmentNode: "Product alignment",
+    technicalPlanNode: "Technical plan",
+    planApprovalNode: "Plan approval",
+    repositoryExecutionNode: "Repository execution",
+    implementationNode: "Implementation",
+    joinNode: "Join",
+    reviewNode: "Review",
+    verificationNode: "Verification",
+    humanAcceptanceNode: "Human acceptance",
+    completeNode: "Complete",
+    activeStatus: "Active",
+    archivedStatus: "Archived",
+    availableStatus: "Available",
+    inactiveStatus: "Inactive",
+    publishedStatus: "Published",
+    readyStatus: "Ready",
+    runningStatus: "Running",
+    waitingApprovalStatus: "Waiting approval",
+    failedStatus: "Failed",
+    recoveringStatus: "Recovering",
+    completedStatus: "Completed",
+    queuedStatus: "Queued",
+    succeededStatus: "Succeeded",
+    deliveryArtifacts: "Delivery artifacts",
+    deliveryArtifactsBody:
+      "Project manifests and final delivery files stay under the company directory.",
+    noDeliveryArtifacts: "No delivery artifacts recorded",
+    noDeliveryArtifactsBody:
+      "Final files, screenshots, and delivery notes will appear here when the project records them.",
+    inspectArtifactLineage: "Inspect lineage",
+    acceptArtifact: "Accept artifact",
+    rejectArtifact: "Reject artifact",
+    artifactLineage: "Artifact lineage",
+    artifactProducer: "Producer",
+    artifactInputs: "Input Artifact Versions",
+    noArtifactInputs: "No input Artifact Versions",
+    settingsEyebrow: "Settings",
+    localPreferences: "Local preferences",
+    settingsBody: "Low-frequency configuration and diagnostics.",
+    language: "Language",
+    english: "English",
+    chinese: "Chinese",
+    runtimeDiagnostics: "Runtime diagnostics",
+    runtimeSchema: "Schema",
+    sqliteIntegrity: "SQLite integrity",
+    databaseBytes: "Database bytes",
+    runtimeEvents: "Runtime events",
+    pendingRuntimeEvents: "Pending Runtime events",
+    auditRecords: "Audit records",
+    activeLeases: "Active leases",
+    durableCursors: "Durable cursors",
+    compactRuntimeEvents: "Compact acknowledged events",
+    createRuntimeBackup: "Create database backup",
+    lastRuntimeBackup: "Last backup",
+  },
+  zh: {
+    appSubtitle: "本地 AI 公司",
+    appTitle: "Sandcastle 桌面端",
+    navOverview: "公司总览",
+    navProjects: "项目",
+    navDepartments: "部门",
+    navArtifacts: "产物",
+    navInteraction: "Agent 交互",
+    navSettings: "设置",
+    agentInteraction: "Agent 交互",
+    agentInteractionBody: "查看消息、工具、权限和由 Runtime 管理的协作状态。",
+    createConsultation: "新建咨询",
+    messages: "消息",
+    sendMessage: "发送消息",
+    closeSession: "关闭会话",
+    permissions: "权限",
+    requestPermission: "请求权限",
+    memoryCandidates: "记忆候选",
+    createMemoryCandidate: "创建记忆候选",
+    discard: "丢弃",
+    runtimeStatus: "公司运行时：",
+    runtimeConnected: "已连接",
+    overviewEyebrow: "公司运营",
+    overviewTitle: "公司总览",
+    overviewBody: "由 Company Runtime 提供活跃工作、审批、阻塞和交付状态。",
+    metricActiveRuns: "活跃运行",
+    metricWaitingApproval: "等待审批",
+    metricBlockedRuns: "已阻塞",
+    metricCompletedRuns: "已完成",
+    attentionQueue: "待处理事项",
+    noAttentionNeeded: "当前无需处理",
+    noAttentionBody: "审批和可恢复失败会显示在这里。",
+    companyInventory: "公司资产",
+    metricProjects: "项目",
+    projectsEyebrow: "公司目标",
+    projectsTitle: "项目",
+    projectsBody: "用于聚合部门运行、产物与共享上下文的长期目标。",
+    loadingProjects: "正在加载…",
+    noProjectsYet: "还没有项目",
+    noProjectsBody: "创建项目，建立工作目标与共享上下文。",
+    createProject: "创建项目",
+    projectName: "项目名称",
+    projectSummary: "摘要 / 目标",
+    createProjectButton: "创建项目",
+    projectDetailEyebrow: "项目配置",
+    backToProjects: "返回项目列表",
+    projectRevision: "项目修订版",
+    projectGoal: "目标",
+    sharedContext: "共享上下文",
+    repositoryReferences: "仓库引用",
+    repositoryReference: "仓库路径",
+    addRepositoryReference: "添加仓库引用",
+    removeRepositoryReference: "删除仓库引用",
+    saveProject: "保存项目",
+    archiveProject: "归档项目",
+    departmentRuns: "部门运行",
+    noDepartmentRuns: "该项目尚未启动部门运行。",
+    selectRunDepartment: "部门",
+    startDepartmentRun: "启动部门运行",
+    runSnapshot: "运行快照",
+    runRevision: "运行修订版",
+    nodeAttempts: "尝试次数",
+    approve: "批准",
+    requestChanges: "要求修改",
+    reject: "驳回",
+    nodeFeedback: "给下一次尝试的反馈",
+    retryNode: "重试节点",
+    continueRun: "继续运行",
+    forkRun: "从此节点派生运行",
+    pauseRun: "暂停运行",
+    resumeRun: "恢复运行",
+    cancelRun: "取消运行",
+    recoveryOverride: "恢复执行设置",
+    recoveryProvider: "Provider",
+    recoveryModel: "Model",
+    recoverySandbox: "Sandbox",
+    recoveryTimeout: "超时秒数",
+    recoverRun: "使用这些设置恢复",
+    attemptHistory: "尝试历史",
+    approvalHistory: "审批历史",
+    retriesRemaining: "剩余重试次数",
+    status: "状态",
+    artifacts: "产物",
+    departmentsEyebrow: "AI 公司配置",
+    departmentsTitle: "部门",
+    departmentsBody: "拥有职位、AI 员工与部门流水线的执行单元。",
+    noDepartments: "还没有部门",
+    noDepartmentsBody: "创建部门，定义可复用的执行流水线。",
+    departmentPipeline: "部门流水线配置",
+    departmentDetailEyebrow: "部门目录",
+    backToDepartments: "返回部门列表",
+    overviewTab: "总览",
+    positionsTab: "职位",
+    pipelineTab: "流水线",
+    departmentPurpose: "部门职责",
+    departmentSettings: "部门设置",
+    departmentConfiguration: "已发布配置",
+    departmentActions: "部门操作",
+    builtInDepartment: "内置部门",
+    customDepartment: "自定义部门",
+    publishedPipeline: "已发布流水线",
+    positionsCountSuffix: "个职位",
+    readOnlyPublishedPipeline: "只读的已发布流水线版本",
+    noPublishedPipelineShort: "尚未发布流水线",
+    noPublishedPipeline: "尚未发布 Pipeline",
+    noPublishedPipelineBody: "可先配置该部门，稍后再发布 Pipeline Version。",
+    draftRevision: "草稿修订版",
+    unsavedChanges: "有未保存修改",
+    saveDraft: "保存草稿",
+    validatePipeline: "校验",
+    publishPipeline: "发布",
+    pipelineValid: "流水线有效",
+    pipelineInvalid: "流水线需要修改",
+    pipelineNodes: "节点",
+    pipelineEdges: "边",
+    addNode: "添加节点",
+    removeNode: "删除节点",
+    nodeType: "节点类型",
+    position: "职位",
+    addEdge: "添加边",
+    removeEdge: "删除边",
+    fromNode: "起点节点",
+    toNode: "终点节点",
+    publishedVersion: "已发布版本",
+    versionHistory: "版本历史",
+    validationStartCountInvalid: "流水线必须且只能包含一个 Start 节点。",
+    validationCompleteRequired: "流水线至少需要一个 Complete 节点。",
+    validationNodeTypeUnsupported: "不支持该节点类型。",
+    validationEdgeSourceNotFound: "边的起点节点不存在。",
+    validationEdgeTargetNotFound: "边的终点节点不存在。",
+    validationNodeUnreachable: "该节点无法从 Start 到达。",
+    validationNodeCannotReachComplete: "该节点无法到达 Complete。",
+    validationCycleNotAllowed: "v1 不允许流水线循环。",
+    validationPositionRequired: "该节点必须指定职位。",
+    validationPositionNotFound: "引用的职位不存在。",
+    validationPositionOutsideDepartment: "引用的职位属于其他部门。",
+    validationParallelBranchesRequired: "Parallel 至少需要一个下游分支。",
+    validationParallelJoinRequired: "Parallel 分支必须汇入同一个 Join。",
+    validationJoinBranchesRequired: "Join 至少需要一个上游分支。",
+    validationSkillFlowNotAllowed: "只有 AI Task 节点可以选择 Skill Flow。",
+    validationSkillFlowNotFound: "引用的 Skill Flow 不存在。",
+    validationSkillFlowArchived: "引用的 Skill Flow 已归档。",
+    validationSkillFlowOutsideDepartment: "引用的 Skill Flow 属于其他部门。",
+    validationSkillFlowPositionMismatch: "引用的 Skill Flow 属于其他职位。",
+    validationPositionArchived: "引用的职位已归档。",
+    validationExecutionProfileNotFound: "引用的 Execution Profile 不存在。",
+    validationExecutionProfileOutsideDepartment:
+      "引用的 Execution Profile 属于其他部门。",
+    validationExecutionProfileArchived: "引用的 Execution Profile 已归档。",
+    validationInputContractNotFound: "输入 Artifact Contract 不存在。",
+    validationOutputContractNotFound: "输出 Artifact Contract 不存在。",
+    validationTimeoutInvalid: "Timeout 必须大于零。",
+    validationRetryPolicyInvalid: "Retry 次数不能为负数。",
+    validationLimitsInvalid: "执行限制必须大于零。",
+    validationApprovalConfigurationIncomplete:
+      "审批标题、策略和审批人引用必须一起配置。",
+    validationConditionConfigurationNotAllowed:
+      "只有 Condition 节点可以定义声明式条件。",
+    validationConditionConfigurationRequired:
+      "Condition 节点必须配置声明式条件。",
+    validationConditionBranchDuplicate: "Condition 分支 ID 必须唯一。",
+    validationConditionBranchKindDuplicate: "Condition 分支类型必须唯一。",
+    validationConditionReferenceInvalid:
+      "Condition 引用必须使用 snapshot.<path> 或 nodes.<nodeId>.result.<path>，并指向上游节点。",
+    validationConditionDefaultBranchRequired: "Condition 必须包含默认分支。",
+    validationConditionBranchRequired: "每条 Condition 边都必须选择分支。",
+    validationConditionBranchNotFound: "Condition 边引用了未知分支。",
+    createDepartment: "创建部门",
+    createDepartmentButton: "创建部门",
+    name: "名称",
+    description: "说明",
+    saveDepartment: "保存部门",
+    archiveDepartment: "归档部门",
+    copyDepartment: "复制部门",
+    copyName: "新部门名称",
+    none: "无",
+    aiMember: "AI 员工",
+    aiMemberDisplayName: "AI 员工显示名称",
+    responsibility: "职责",
+    aiMemberProfile: "AI Member 配置",
+    savePosition: "保存职位",
+    createPosition: "创建 Position",
+    archivePosition: "归档 Position",
+    activeProfile: "默认 Profile",
+    inputArtifactContracts: "输入 Artifact Contract",
+    outputArtifactContracts: "输出 Artifact Contract",
+    addArtifactContract: "添加 Artifact Contract",
+    removeArtifactContract: "移除 Artifact Contract",
+    executionProfiles: "Execution Profiles",
+    secretReferences: "Secret References",
+    providerRef: "Provider 引用",
+    executionProfileName: "Execution Profile 名称",
+    model: "模型",
+    sandboxRef: "Sandbox 引用",
+    branchStrategy: "Branch Strategy",
+    timeoutSeconds: "Timeout（秒）",
+    maxIterations: "最大迭代次数",
+    maxTokens: "最大 Token 数",
+    retryMaxAttempts: "Retry 次数",
+    permissionPolicy: "权限策略",
+    approvalTitle: "审批标题",
+    approverReference: "审批人引用",
+    saveExecutionProfile: "保存 Execution Profile",
+    createExecutionProfile: "创建 Execution Profile",
+    secretReferenceName: "Secret Reference 名称",
+    providerScope: "Provider Scope",
+    createSecretReference: "创建 Secret Reference",
+    noSecretValueStored: "这里只保存非敏感引用，不保存 Secret Value。",
+    skillErrorDepartmentNotFound: "该部门已不存在。",
+    skillErrorSkillNotFound: "该 Skill 已不存在。",
+    skillErrorSkillArchived: "该 Skill 已归档。",
+    skillErrorSkillInUse:
+      "无法归档该 Skill：仍有 Position 或活跃 Skill Flow 正在使用它。",
+    skillErrorPositionOutsideDepartment: "该 Position 属于其他部门。",
+    skillErrorPositionSkillInUse:
+      "无法从 Position 移除该 Skill：活跃 Skill Flow 仍在使用它。",
+    skillErrorSelectionDuplicate: "Skill 选择不能重复。",
+    skillErrorFlowNotFound: "该 Skill Flow 已不存在。",
+    skillErrorFlowArchived: "该 Skill Flow 已归档。",
+    skillErrorFlowOutsideDepartment: "该 Skill Flow 属于其他部门。",
+    skillErrorFlowPositionImmutable: "Skill Flow 不能移动到其他 Position。",
+    skillErrorNotBoundToPosition:
+      "选择的每个 Skill 都必须先绑定到该 Position。",
+    skillErrorFlowInUse:
+      "无法归档该 Skill Flow：当前 Pipeline Draft 或活跃 Pipeline Version 仍在使用它。",
+    skillErrorVersionConflict: "配置已在其他视图中变更，请重新加载后重试。",
+    skillCatalog: "Skill 目录",
+    skillCatalogBody: "公司级 active Skills，可供职位配置选择。",
+    createSkill: "创建 Skill",
+    archiveSkill: "归档 Skill",
+    skillSource: "来源",
+    skillVersion: "版本",
+    skillLocationReference: "位置引用",
+    skillConfigurationRevision: "Skill 配置修订版",
+    positionSkills: "职位 Skills",
+    savePositionSkills: "保存职位 Skills",
+    skillFlows: "Skill Flows",
+    skillFlow: "Skill Flow",
+    skillFlowName: "Skill Flow 名称",
+    skillFlowInstructions: "操作说明",
+    saveSkillFlow: "保存 Skill Flow",
+    createSkillFlow: "创建 Skill Flow",
+    archiveSkillFlow: "归档 Skill Flow",
+    noSkillFlows: "该职位暂无 Skill Flow。",
+    softwareRnd: "软件研发",
+    productPlanner: "产品规划师",
+    productPlannerResponsibility:
+      "对齐产品目标，并将需求整理为经过评审的计划输入。",
+    softwareArchitect: "软件架构师",
+    softwareArchitectResponsibility: "形成技术方案和仓库级交付结构。",
+    softwareEngineer: "软件工程师",
+    softwareEngineerResponsibility: "按批准的交付方案实现并测试。",
+    reviewer: "代码审查员",
+    reviewerResponsibility: "独立审查实现质量与交付风险。",
+    evaluator: "交付验证员",
+    evaluatorResponsibility: "根据记录的证据验证验收标准。",
+    startNode: "开始",
+    productAlignmentNode: "产品目标对齐",
+    technicalPlanNode: "技术方案",
+    planApprovalNode: "方案审批",
+    repositoryExecutionNode: "仓库并行执行",
+    implementationNode: "实现",
+    joinNode: "汇合",
+    reviewNode: "代码审查",
+    verificationNode: "交付验证",
+    humanAcceptanceNode: "人工验收",
+    completeNode: "完成",
+    activeStatus: "活跃",
+    archivedStatus: "已归档",
+    availableStatus: "可用",
+    inactiveStatus: "已停用",
+    publishedStatus: "已发布",
+    readyStatus: "就绪",
+    runningStatus: "运行中",
+    waitingApprovalStatus: "等待审批",
+    failedStatus: "失败",
+    recoveringStatus: "恢复中",
+    completedStatus: "已完成",
+    queuedStatus: "排队中",
+    succeededStatus: "成功",
+    deliveryArtifacts: "交付产物",
+    deliveryArtifactsBody: "项目清单和最终交付文件保存在公司目录下。",
+    noDeliveryArtifacts: "暂无交付产物",
+    noDeliveryArtifactsBody: "项目记录最终文件、截图和交付说明后会显示在这里。",
+    inspectArtifactLineage: "查看血缘",
+    acceptArtifact: "验收产物",
+    rejectArtifact: "拒绝产物",
+    artifactLineage: "产物血缘",
+    artifactProducer: "生产者",
+    artifactInputs: "输入 Artifact Version",
+    noArtifactInputs: "没有输入 Artifact Version",
+    settingsEyebrow: "设置",
+    localPreferences: "本地偏好",
+    settingsBody: "低频配置和诊断信息。",
+    language: "语言",
+    english: "英文",
+    chinese: "中文",
+    runtimeDiagnostics: "Runtime 诊断",
+    runtimeSchema: "Schema",
+    sqliteIntegrity: "SQLite 完整性",
+    databaseBytes: "数据库字节数",
+    runtimeEvents: "Runtime event",
+    pendingRuntimeEvents: "待投递 Runtime event",
+    auditRecords: "审计记录",
+    activeLeases: "活跃 Lease",
+    durableCursors: "持久 Cursor",
+    compactRuntimeEvents: "压缩已确认事件",
+    createRuntimeBackup: "创建数据库备份",
+    lastRuntimeBackup: "最近备份",
+  },
+} as const;
+
+export type Messages = {
+  readonly [Key in keyof (typeof messages)["en"]]: string;
+};
+
+export const departmentName = (
+  t: Messages,
+  department: { readonly id: string; readonly name: string },
+): string =>
+  department.id === "software-rnd" && department.name === "Software R&D"
+    ? t.softwareRnd
+    : department.name;
+
+export const positionName = (
+  t: Messages,
+  position: { readonly id: string; readonly name: string },
+): string => {
+  if (position.id === "product-planner") return t.productPlanner;
+  if (position.id === "software-architect") return t.softwareArchitect;
+  if (position.id === "software-engineer") return t.softwareEngineer;
+  if (position.id === "reviewer") return t.reviewer;
+  if (position.id === "evaluator") return t.evaluator;
+  return position.name;
+};
+
+export const positionResponsibility = (
+  t: Messages,
+  position: { readonly id: string; readonly responsibility: string },
+): string => {
+  if (
+    position.id === "product-planner" &&
+    position.responsibility ===
+      "Aligns product goals and turns requirements into reviewed plan inputs."
+  )
+    return t.productPlannerResponsibility;
+  if (
+    position.id === "software-architect" &&
+    position.responsibility ===
+      "Produces the technical plan and repository-level delivery shape."
+  )
+    return t.softwareArchitectResponsibility;
+  if (
+    position.id === "software-engineer" &&
+    position.responsibility ===
+      "Implements and tests the approved delivery plan."
+  )
+    return t.softwareEngineerResponsibility;
+  if (
+    position.id === "reviewer" &&
+    position.responsibility ===
+      "Independently reviews implementation and delivery risk."
+  )
+    return t.reviewerResponsibility;
+  if (
+    position.id === "evaluator" &&
+    position.responsibility ===
+      "Verifies acceptance criteria against recorded evidence."
+  )
+    return t.evaluatorResponsibility;
+  return position.responsibility;
+};
+
+export const pipelineNodeName = (
+  t: Messages,
+  node: { readonly id: string; readonly name: string },
+): string => {
+  if (node.id === "start") return t.startNode;
+  if (node.id === "product-alignment") return t.productAlignmentNode;
+  if (node.id === "technical-plan") return t.technicalPlanNode;
+  if (node.id === "plan-approval") return t.planApprovalNode;
+  if (node.id === "repository-execution") return t.repositoryExecutionNode;
+  if (node.id === "implementation") return t.implementationNode;
+  if (node.id === "join") return t.joinNode;
+  if (node.id === "review") return t.reviewNode;
+  if (node.id === "verification") return t.verificationNode;
+  if (node.id === "human-acceptance") return t.humanAcceptanceNode;
+  if (node.id === "complete") return t.completeNode;
+  return node.name;
+};
+
+export const statusName = (t: Messages, status: string): string => {
+  if (status === "active") return t.activeStatus;
+  if (status === "archived") return t.archivedStatus;
+  if (status === "available") return t.availableStatus;
+  if (status === "inactive") return t.inactiveStatus;
+  if (status === "published") return t.publishedStatus;
+  if (status === "ready") return t.readyStatus;
+  if (status === "running") return t.runningStatus;
+  if (status === "waiting-approval") return t.waitingApprovalStatus;
+  if (status === "failed") return t.failedStatus;
+  if (status === "recovering") return t.recoveringStatus;
+  if (status === "completed") return t.completedStatus;
+  if (status === "queued") return t.queuedStatus;
+  if (status === "succeeded") return t.succeededStatus;
+  return status;
+};

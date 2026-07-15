@@ -1,0 +1,753 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  scriptedSoftwareRndDepartment,
+  scriptedSoftwareRndPipelineEditor,
+} from "../runtime/testing/departmentInspectContract.js";
+import {
+  ArtifactLineagePanel,
+  DepartmentDetailView,
+  DepartmentRunDetail,
+  ProjectDetailView,
+  RuntimeDiagnosticsPanel,
+} from "./companyPages.js";
+import { messages } from "./i18n.js";
+import type { DepartmentRunView } from "../runtime/interface.js";
+import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
+import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
+
+describe("Artifact lineage", () => {
+  it("renders exact producer and input Artifact Version identities", () => {
+    const markup = renderToStaticMarkup(
+      <ArtifactLineagePanel
+        lineage={{
+          version: {
+            id: "artifact-version-2",
+            artifactId: "artifact-1",
+            projectId: "project-1",
+            type: "verification-report",
+            schemaVersion: "1",
+            logicalName: "checkout-verification",
+            version: 2,
+            contentRef: ".sandcastle/artifacts/artifact-version-2.json",
+            contentHash: "a".repeat(64),
+            byteSize: 128,
+            status: "accepted",
+            producer: {
+              runId: "run-2",
+              nodeRunId: "node-verification",
+              nodeAttemptId: "attempt-3",
+              snapshotRevisionId: "snapshot-r2",
+              aiMemberId: "evaluator-member",
+            },
+            createdAt: "2026-07-15T00:00:00.000Z",
+          },
+          inputs: [{ versionId: "artifact-version-1", relation: "input" }],
+        }}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-artifact-lineage="artifact-version-2"/);
+    assert.match(markup, /run-2/);
+    assert.match(markup, /attempt-3/);
+    assert.match(markup, /snapshot-r2/);
+    assert.match(markup, /evaluator-member/);
+    assert.match(markup, /artifact-version-1/);
+  });
+});
+
+describe("Runtime diagnostics", () => {
+  it("renders storage, lease, outbox, audit, and cursor diagnostics", () => {
+    const markup = renderToStaticMarkup(
+      <RuntimeDiagnosticsPanel
+        busy={false}
+        diagnostics={{
+          schemaVersion: 20,
+          sqliteIntegrity: "ok",
+          databaseBytes: 4096,
+          runtimeEventCount: 100,
+          pendingRuntimeEventCount: 4,
+          auditRecordCount: 80,
+          activeLeaseCount: 2,
+          cursorCount: 3,
+        }}
+        lastBackup={null}
+        onBackup={async () => undefined}
+        onCompact={async () => undefined}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-runtime-diagnostics/);
+    assert.match(markup, /Schema v20/);
+    assert.match(markup, /SQLite integrity.*ok/);
+    assert.match(markup, /Active leases.*2/);
+    assert.match(markup, /Pending Runtime events.*4/);
+    assert.match(markup, /Audit records.*80/);
+    assert.match(markup, /Durable cursors.*3/);
+    assert.match(markup, /Compact acknowledged events/);
+    assert.match(markup, /Create database backup/);
+  });
+});
+
+describe("Department detail", () => {
+  const pipelineProps = {
+    pipelineEditor: scriptedSoftwareRndPipelineEditor,
+    onSavePipelineDraft: async () => scriptedSoftwareRndPipelineEditor,
+    onValidatePipeline: async () =>
+      scriptedSoftwareRndPipelineEditor.validation,
+    onPublishPipeline: async () => scriptedSoftwareRndPipelineEditor,
+  };
+  const skillProps = {
+    skillConfiguration: scriptedSkillConfiguration,
+    onSaveSkill: async () => scriptedSkillConfiguration,
+    onArchiveSkill: async () => scriptedSkillConfiguration,
+    onSetPositionSkills: async () => scriptedSkillConfiguration,
+    onSaveSkillFlow: async () => scriptedSkillConfiguration,
+    onArchiveSkillFlow: async () => scriptedSkillConfiguration,
+    onCreatePosition: async () => undefined,
+    onArchivePosition: async () => undefined,
+    onCreateSecretReference: async () => undefined,
+    onArchiveSecretReference: async () => undefined,
+    onSaveExecutionProfile: async () => undefined,
+    onArchiveExecutionProfile: async () => undefined,
+  };
+
+  it("renders Runtime-backed Overview, Positions, and editable Pipeline panels", () => {
+    const overview = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="overview"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const positions = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const pipeline = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="pipeline"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(overview, /data-page="department-detail"/);
+    assert.match(overview, /Software R&amp;D/);
+    assert.match(overview, /Built-in department/);
+    assert.match(overview, /Published Pipeline v2/);
+    assert.match(overview, /5 positions/);
+    assert.match(positions, /Product Planner/);
+    assert.match(positions, /Software Architect/);
+    assert.match(positions, /Software Engineer/);
+    assert.match(positions, /Reviewer/);
+    assert.match(positions, /Evaluator/);
+    assert.match(pipeline, /data-pipeline-draft-revision="0"/);
+    assert.match(pipeline, /data-pipeline-published-version="2"/);
+    assert.match(pipeline, /Product alignment/);
+    assert.match(pipeline, /Technical plan/);
+    assert.match(pipeline, /Human acceptance/);
+    assert.match(pipeline, /Save Draft/);
+    assert.match(pipeline, /Validate/);
+    assert.match(pipeline, /Publish/);
+    assert.match(pipeline, /data-pipeline-node-editor="technical-plan"/);
+    assert.match(
+      pipeline,
+      /data-pipeline-edge-editor="start:product-alignment"/,
+    );
+    assert.match(pipeline, /data-pipeline-history-version="1"/);
+  });
+
+  it("renders Department and Position edit controls from the deep Runtime read model", () => {
+    const detail = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="overview"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const positions = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(detail, /data-department-settings/);
+    assert.match(detail, /Save department/);
+    assert.match(detail, /Archive department/);
+    assert.match(detail, /Copy department/);
+    assert.match(positions, /data-position-editor="software-engineer"/);
+    assert.match(positions, /AI Member display name/);
+    assert.match(positions, /Save position/);
+  });
+
+  it("renders a stable unpublished Pipeline state for a custom Department", () => {
+    const customDepartment = {
+      ...scriptedSoftwareRndDepartment,
+      id: "custom-department",
+      name: "Design",
+      builtIn: false,
+      positions: [],
+      pipeline: null,
+    };
+    const customPipelineEditor = {
+      ...scriptedSoftwareRndPipelineEditor,
+      department: { id: "custom-department", name: "Design" },
+      positions: [],
+      draft: {
+        revision: 0,
+        updatedAt: null,
+        graph: {
+          nodes: [
+            { id: "start", type: "start", name: "Start" },
+            { id: "complete", type: "complete", name: "Complete" },
+          ],
+          edges: [{ from: "start", to: "complete" }],
+        },
+      },
+      validation: { valid: true, issues: [] },
+      published: null,
+      history: [],
+    };
+    const pipeline = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={customDepartment}
+        t={messages.en}
+        activeTab="pipeline"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        pipelineEditor={customPipelineEditor}
+        onSavePipelineDraft={async () => customPipelineEditor}
+        onValidatePipeline={async () => customPipelineEditor.validation}
+        onPublishPipeline={async () => customPipelineEditor}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(pipeline, /data-pipeline-state="draft-only"/);
+    assert.match(pipeline, /No Pipeline has been published yet/);
+    assert.match(pipeline, /Save Draft/);
+  });
+
+  it("localizes stable Runtime validation codes in the Pipeline editor", () => {
+    const invalidEditor = {
+      ...scriptedSoftwareRndPipelineEditor,
+      validation: {
+        valid: false,
+        issues: [
+          {
+            code: "START_COUNT_INVALID",
+            messageKey: "pipeline.validation.startCount",
+          },
+        ],
+      },
+    };
+    const pipeline = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="pipeline"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        pipelineEditor={invalidEditor}
+        onSavePipelineDraft={async () => invalidEditor}
+        onValidatePipeline={async () => invalidEditor.validation}
+        onPublishPipeline={async () => invalidEditor}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(pipeline, /data-pipeline-validation="invalid"/);
+    assert.match(pipeline, /data-validation-code="START_COUNT_INVALID"/);
+    assert.match(
+      pipeline,
+      /The Pipeline must contain exactly one Start node\./,
+    );
+  });
+
+  it("renders Runtime-backed Skill bindings, Skill Flows, and AI Task Flow selection", () => {
+    const positions = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const pipeline = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="pipeline"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(positions, /data-skill-configuration/);
+    assert.match(positions, /data-skill-catalog/);
+    assert.match(positions, /Test-Driven Development/);
+    assert.match(positions, /data-position-skill-binding="software-engineer"/);
+    assert.match(positions, /data-skill-flow-editor="implementation-flow"/);
+    assert.match(positions, /Implement one tested vertical slice at a time./);
+    assert.match(positions, /Archive Skill Flow/);
+    assert.match(pipeline, /data-pipeline-node-skill-flow="implementation"/);
+    assert.match(pipeline, /Implementation/);
+  });
+
+  it("renders stable Skill Configuration error codes for conflict guidance", () => {
+    const markup = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        error="Skill Flow revision is stale. Reload and try again."
+        skillErrorCode="VERSION_CONFLICT"
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(markup, /data-skill-error-code="VERSION_CONFLICT"/);
+    assert.match(markup, /configuration changed in another view/);
+  });
+
+  it("explains blocked Skill and Skill Flow archive errors in English and Chinese", () => {
+    const english = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        error="fallback"
+        skillErrorCode="SKILL_FLOW_IN_USE"
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const chinese = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.zh}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        error="fallback"
+        skillErrorCode="SKILL_IN_USE"
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(english, /current Pipeline Draft or active Pipeline Version/);
+    assert.match(chinese, /仍有 Position 或活跃 Skill Flow 正在使用它/);
+  });
+
+  it("renders Department contracts, Execution Profiles, Secret References, and Position lifecycle controls", () => {
+    const overview = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="overview"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+    const positions = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="positions"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+      />,
+    );
+
+    assert.match(overview, /data-artifact-contracts="input"/);
+    assert.match(overview, /data-artifact-contracts="output"/);
+    assert.match(overview, /data-execution-profiles/);
+    assert.match(
+      overview,
+      /data-execution-profile-editor="software-rnd-default"/,
+    );
+    assert.match(overview, /data-secret-references/);
+    assert.match(overview, /no secret value is saved/);
+    assert.match(positions, /data-new-position/);
+    assert.match(positions, /data-archive-position="software-engineer"/);
+    assert.match(positions, /data-archive-skill="tdd"/);
+  });
+});
+
+describe("Project detail", () => {
+  it("renders Approve and Reject actions for a waiting Human Approval", () => {
+    const waitingRun = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        status: "waiting-approval" as const,
+        revision: 2,
+      },
+      snapshot: {
+        ...scriptedDepartmentRun.snapshot,
+        payload: {
+          ...scriptedDepartmentRun.snapshot.payload,
+          pipelineVersion: {
+            ...scriptedDepartmentRun.snapshot.payload.pipelineVersion,
+            graph: {
+              nodes: [
+                { id: "start", type: "start" as const, name: "Start" },
+                {
+                  id: "approval",
+                  type: "human-approval" as const,
+                  name: "Approval",
+                },
+                { id: "complete", type: "complete" as const, name: "Complete" },
+              ],
+              edges: [
+                { from: "start", to: "approval" },
+                { from: "approval", to: "complete" },
+              ],
+            },
+          },
+        },
+      },
+      nodes: [
+        { ...scriptedDepartmentRun.nodes[0]!, status: "succeeded" as const },
+        {
+          id: "node-run-approval",
+          runId: "run-1",
+          pipelineNodeId: "approval",
+          nodeType: "human-approval" as const,
+          status: "waiting-approval" as const,
+          attemptCount: 0,
+          attempts: [],
+          approvals: [
+            {
+              id: "approval-cycle-1",
+              cycle: 1,
+              status: "pending" as const,
+              decision: null,
+              createdAt: "2026-07-15T00:00:00.000Z",
+              decidedAt: null,
+            },
+          ],
+          requiredDependencyIds: ["start"],
+          result: null,
+          failure: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          updatedAt: "2026-07-15T00:00:00.000Z",
+        },
+        {
+          ...scriptedDepartmentRun.nodes[1]!,
+          requiredDependencyIds: ["approval"],
+        },
+      ],
+    };
+
+    const markup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onDecision={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onFork={() => undefined}
+        run={waitingRun}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-run-approval-decision="approve"/);
+    assert.match(markup, /data-run-approval-decision="request-changes"/);
+    assert.match(markup, /data-run-approval-decision="reject"/);
+    assert.match(markup, /data-run-approval-feedback/);
+    assert.match(markup, /data-run-approval-cycle="1"/);
+    assert.match(markup, /data-run-control="pause"/);
+    assert.match(markup, /data-run-control="cancel"/);
+    assert.match(markup, /data-run-fork-node=/);
+    assert.match(markup, />Approve</);
+    assert.match(markup, />Request changes</);
+    assert.match(markup, />Reject</);
+  });
+
+  it("renders failed AI Task recovery and persisted Continue Run actions", () => {
+    const failedRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        status: "failed",
+        revision: 2,
+      },
+      snapshot: {
+        ...scriptedDepartmentRun.snapshot,
+        payload: {
+          ...scriptedDepartmentRun.snapshot.payload,
+          pipelineVersion: {
+            ...scriptedDepartmentRun.snapshot.payload.pipelineVersion,
+            graph: {
+              nodes: [
+                { id: "start", type: "start", name: "Start" },
+                {
+                  id: "implement",
+                  type: "ai-task",
+                  name: "Implement",
+                  positionId: "engineer",
+                },
+                { id: "complete", type: "complete", name: "Complete" },
+              ],
+              edges: [
+                { from: "start", to: "implement" },
+                { from: "implement", to: "complete" },
+              ],
+            },
+          },
+          executionProfiles:
+            scriptedDepartmentRun.snapshot.payload.executionProfiles.map(
+              (profile) => ({
+                ...profile,
+                retryPolicy: { maxAttempts: 1 },
+              }),
+            ),
+        },
+      },
+      nodes: [
+        { ...scriptedDepartmentRun.nodes[0]!, status: "succeeded" },
+        {
+          id: "node-run-implement",
+          runId: "run-1",
+          pipelineNodeId: "implement",
+          nodeType: "ai-task",
+          status: "failed",
+          attemptCount: 1,
+          attempts: [
+            {
+              id: "attempt-1",
+              attemptNumber: 1,
+              snapshotRevisionId: "snapshot-1",
+              reason: "initial",
+              recoverable: false,
+              status: "failed",
+              result: null,
+              failure: {
+                code: "SCRIPTED_AGENT_FAILED",
+                message: "The first attempt failed.",
+              },
+              feedback: [],
+              createdAt: "2026-07-15T00:00:00.000Z",
+              startedAt: "2026-07-15T00:00:00.000Z",
+              completedAt: "2026-07-15T00:01:00.000Z",
+            },
+          ],
+          approvals: [],
+          requiredDependencyIds: ["start"],
+          result: null,
+          failure: {
+            code: "SCRIPTED_AGENT_FAILED",
+            message: "The first attempt failed.",
+          },
+          createdAt: "2026-07-15T00:00:00.000Z",
+          updatedAt: "2026-07-15T00:01:00.000Z",
+        },
+        {
+          ...scriptedDepartmentRun.nodes[1]!,
+          requiredDependencyIds: ["implement"],
+        },
+      ],
+    };
+    const failedMarkup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onDecision={() => undefined}
+        onRetry={() => undefined}
+        run={failedRun}
+        t={messages.en}
+      />,
+    );
+    assert.match(failedMarkup, /data-run-node-retry="node-run-implement"/);
+    assert.match(failedMarkup, /data-run-retry-feedback/);
+    assert.match(failedMarkup, /Retries remaining: 1/);
+    assert.match(failedMarkup, /SCRIPTED_AGENT_FAILED/);
+    assert.match(failedMarkup, /data-run-recovery/);
+    assert.match(failedMarkup, /data-run-recovery-provider/);
+    assert.match(failedMarkup, /data-run-recovery-model/);
+    assert.match(failedMarkup, /data-run-recover/);
+
+    const readyAttempt = {
+      ...failedRun.nodes[1]!.attempts[0]!,
+      id: "attempt-2",
+      attemptNumber: 2,
+      reason: "retry" as const,
+      status: "ready" as const,
+      failure: null,
+      startedAt: null,
+      completedAt: null,
+    };
+    const recoveringRun: DepartmentRunView = {
+      ...failedRun,
+      run: { ...failedRun.run, status: "recovering", revision: 3 },
+      nodes: failedRun.nodes.map((node) =>
+        node.id === "node-run-implement"
+          ? {
+              ...node,
+              status: "ready",
+              attemptCount: 2,
+              attempts: [...node.attempts, readyAttempt],
+              failure: null,
+            }
+          : node,
+      ),
+    };
+    const recoveringMarkup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onDecision={() => undefined}
+        onRetry={() => undefined}
+        run={recoveringRun}
+        t={messages.en}
+      />,
+    );
+    assert.match(recoveringMarkup, /data-run-continue/);
+    assert.match(recoveringMarkup, /data-run-control="pause"/);
+    assert.match(recoveringMarkup, /data-run-control="cancel"/);
+    assert.match(recoveringMarkup, />Continue run</);
+  });
+
+  it("renders the Runtime-backed Project configuration editor", () => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web", "/work/checkout-api"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const markup = renderToStaticMarkup(
+      <ProjectDetailView
+        project={project}
+        t={messages.en}
+        onBack={() => undefined}
+        onSave={async () => project}
+        onArchive={async () => project}
+      />,
+    );
+
+    assert.match(markup, /data-page="project-detail"/);
+    assert.match(markup, /data-runtime-project-id="project-1"/);
+    assert.match(markup, /Project revision 1/);
+    assert.match(markup, /Preserve the payment-provider contract\./);
+    assert.match(markup, /data-project-repository="\/work\/checkout-web"/);
+    assert.match(markup, /data-project-repository="\/work\/checkout-api"/);
+    assert.match(markup, /Add repository reference/);
+    assert.match(markup, /Save project/);
+    assert.match(markup, /Archive project/);
+    assert.match(markup, /data-project-runs/);
+    assert.match(markup, /data-start-department-run/);
+    assert.match(markup, /Start Department Run/);
+  });
+});

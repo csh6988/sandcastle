@@ -1,3 +1,4 @@
+---
 "@chenshaohui6988/sandcastle": minor
 ---
 

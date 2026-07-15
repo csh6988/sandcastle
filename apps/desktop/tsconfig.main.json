@@ -14,5 +14,5 @@
     "noUncheckedIndexedAccess": true,
     "sourceMap": true
   },
-  "include": ["main", "server"]
+  "include": ["main", "preload", "runtime", "server"]
 }
