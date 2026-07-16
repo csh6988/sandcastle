@@ -10,9 +10,9 @@ import {
   DepartmentDetailView,
   DepartmentRunDetail,
   AgentsPage,
+  SkillCatalogResults,
   SkillsPage,
   PositionDrawerEditor,
-  fuzzyMatch,
   ProjectDetailView,
   RuntimeDiagnosticsPanel,
 } from "./companyPages.js";
@@ -112,6 +112,7 @@ describe("Company Agent and Skill catalog pages", () => {
                 version: "sha256:abc",
                 locationReference:
                   "/Users/test/.codex/skills/local-review/SKILL.md",
+                requiredCapabilities: ["structured-output"],
                 status: "discovered",
               },
             ],
@@ -126,11 +127,41 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /data-enable-skill="local-review"/);
     assert.match(markup, /data-skill-directory/);
     assert.match(markup, /Add Skill Directory/);
+    assert.match(markup, /data-view-skill-source="local-review"/);
+    assert.match(markup, /Requires Agent capabilities.*structured-output/);
   });
 
-  it("matches Skills by ordered fuzzy characters", () => {
-    assert.equal(fuzzyMatch("lrv", "Local Review"), true);
-    assert.equal(fuzzyMatch("xyz", "Local Review"), false);
+  it("filters the rendered Skill catalog with ordered fuzzy characters", () => {
+    const markup = renderToStaticMarkup(
+      <SkillCatalogResults
+        onArchive={() => undefined}
+        onEnable={() => undefined}
+        search="lrv"
+        skills={[
+          {
+            id: "local-review",
+            name: "Local Review",
+            description: "Reviews changes.",
+            sourceDirectory: "/skills",
+            version: "sha256:abc",
+            locationReference: "/skills/local-review/SKILL.md",
+            status: "enabled",
+          },
+          {
+            id: "release-notes",
+            name: "Release Notes",
+            description: "Writes release notes.",
+            sourceDirectory: "/skills",
+            version: "sha256:def",
+            locationReference: "/skills/release-notes/SKILL.md",
+            status: "enabled",
+          },
+        ]}
+        t={messages.en}
+      />,
+    );
+    assert.match(markup, /Local Review/);
+    assert.doesNotMatch(markup, /Release Notes/);
   });
 });
 
@@ -387,6 +418,8 @@ describe("Department detail", () => {
     assert.match(settings, /data-department-settings/);
     assert.match(settings, /data-artifact-contract-settings/);
     assert.match(settings, /data-department-advanced-settings/);
+    assert.match(settings, /data-run-environment-toggle/);
+    assert.match(settings, /Edit advanced run environment/);
     assert.match(settings, /data-save-department-settings/);
     assert.match(settings, /Run environments/);
     assert.match(settings, /Agent provider/);

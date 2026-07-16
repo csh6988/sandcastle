@@ -386,6 +386,7 @@ export const SkillCatalogEntrySchema = z.object({
   sourceDirectory: z.string(),
   version: z.string(),
   locationReference: z.string(),
+  requiredCapabilities: z.string().array().optional(),
   status: z.enum(["discovered", "enabled", "unavailable", "archived"]),
 });
 

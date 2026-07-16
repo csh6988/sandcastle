@@ -43,11 +43,16 @@ Responsibilities (and nothing more):
   Profile, Secret Reference IDs, Artifact Contracts, limits, and node
   configuration. Agents are discovered through registered local Company Agent
   Adapters and
-  can be tested with a safe capability probe that never creates a Run
+  can be tested with a safe adapter-specific probe that never creates a Run
+  (Claude Code, Codex, and Pi use ephemeral/non-persistent non-interactive
+  prompts; adapters without a verified prompt contract use a capability probe)
   or persists command output. Skills have an independent `SKILL.md` discovery
   catalog with ordered fuzzy search, configurable source directories,
   source references, fingerprints, enable/archive/unavailable lifecycle, and
-  no copied source contents. Position cards are compact and open a drawer that
+  no copied source contents. A Skill may declare comma-separated
+  `required-capabilities` in `SKILL.md` frontmatter; Desktop shows that as a
+  warning without enforcing an Agent/Skill matrix. The source reference is
+  available behind an explicit View source action. Position cards are compact and open a drawer that
   saves identity, default Agent, and Position Skill bindings together; Skill
   Flows remain separate editors. Department Overview is read-only while
   Settings uses one bottom save action for basic, run environment, artifact

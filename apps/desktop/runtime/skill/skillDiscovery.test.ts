@@ -16,7 +16,7 @@ describe("Skill Discovery", () => {
     );
     const skillDirectory = join(sourceDirectory, "local-review");
     mkdirSync(skillDirectory);
-    const content = `---\nname: Local Review\ndescription: Reviews a change without modifying the repository.\n---\n\nDo not persist this body.\n`;
+    const content = `---\nname: Local Review\ndescription: Reviews a change without modifying the repository.\nrequired-capabilities: structured-output, session-resume\n---\n\nDo not persist this body.\n`;
     const skillPath = join(skillDirectory, "SKILL.md");
     writeFileSync(skillPath, content);
     const database = openCompanyDatabase(tempCompanyDir());
@@ -41,6 +41,10 @@ describe("Skill Discovery", () => {
         `sha256:${createHash("sha256").update(content).digest("hex")}`,
       );
       assert.equal(discovered.status, "discovered");
+      assert.deepEqual(discovered.requiredCapabilities, [
+        "structured-output",
+        "session-resume",
+      ]);
       assert.equal("content" in discovered, false);
 
       const enabled = await database.skillCatalog.enable(discovered.id);

@@ -364,7 +364,8 @@ _Avoid_: "chat agent", "persona", "bot", a provider/model name, conflating the m
 
 **Execution Profile**:
 A reusable **department** configuration that selects an agent provider reference, model, Sandbox reference, branch strategy, limits, retry policy, permission policy, and non-sensitive **Secret References** for future execution. It is independent of **AI member** identity.
-_Avoid_: "AI member profile" (identity metadata), "provider credentials", "agent identity"
+Desktop may present an Execution Profile to ordinary users as a **run environment**; that is a UI label, not a second domain concept. Advanced editing still uses the canonical fields above.
+_Avoid_: "AI member profile" (identity metadata), "provider credentials", "agent identity" as domain synonyms
 
 **Secret Reference**:
 A non-sensitive company-owned identifier and provider scope that points to credentials held outside Company Runtime state. It never contains a token, API key, private key, environment dump, or secret value.
@@ -409,6 +410,10 @@ _Avoid_: "prompt" (too narrow), "skill flow" (a flow selects and instructs multi
 **Skill Snapshot**:
 A Run Snapshot record containing a bound Skill's stable identifier and source fingerprint/version at Run start. It preserves the exact local capability reference used by historical execution even when the external `SKILL.md` changes or disappears.
 _Avoid_: copying Skill source content into Runtime state, resolving a historical Run from the current Skill Catalog
+
+**Skill Capability Requirement**:
+A non-sensitive declaration in a Skill source frontmatter that names an Agent capability the Skill expects. Runtime preserves the declaration as discovery metadata and Desktop shows it as a warning; it does not create an Agent/Skill compatibility matrix.
+_Avoid_: silently hiding a Skill for an Agent, copying credentials into Skill metadata, treating a warning as a hard binding constraint
 
 **Skill Discovery**:
 The process of finding formally readable `SKILL.md` sources in configured host directories and projecting their stable references, descriptions, and fingerprints into the company-wide Skill Catalog without copying their contents into Company Runtime state.

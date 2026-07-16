@@ -62,11 +62,22 @@ describe("Agent Catalog", () => {
       agentHost: {
         resolveExecutable: async (names: readonly string[]) =>
           names.includes("codex") ? "/opt/sandcastle/bin/codex" : null,
-        run: async ({ args }) => {
-          assert.deepEqual(args, ["--help"]);
+        run: async ({ args, stdin }) => {
+          assert.deepEqual(args, [
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--json",
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "-",
+          ]);
+          assert.equal(stdin, "Reply with OK only.");
           return {
             exitCode: 0,
-            stdout: "Usage: codex [options]\nTOKEN=must-not-leak",
+            stdout:
+              '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\nTOKEN=must-not-leak',
             stderr: "",
           };
         },
@@ -80,7 +91,7 @@ describe("Agent Catalog", () => {
         agentId: "codex",
         status: "passed",
         testedAt: "2026-07-16T08:01:00.000Z",
-        summary: "Agent executable accepted a safe capability probe.",
+        summary: "Agent executable completed a safe non-interactive probe.",
       });
       assert.equal("TOKEN=must-not-leak" in result, false);
       assert.equal(database.pipelineRuntime.listRuns().length, 0);

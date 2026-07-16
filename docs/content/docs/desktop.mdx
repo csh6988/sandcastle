@@ -9,11 +9,11 @@ Sandcastle Desktop opens a persistent Company Runtime workspace. The Runtime own
 
 ## Agents
 
-The Agents page lists formally registered local coding Agents by stable ID. Detection records installation status, version, executable path, capabilities, and detection time. The **Test Agent** action performs a safe capability probe without creating a Run, changing Git, writing project files, or persisting raw command output.
+The Agents page lists formally registered local coding Agents by stable ID. Detection records installation status, version, executable path, capabilities, and detection time. The **Test Agent** action performs a safe adapter-specific probe without creating a Run, changing Git, writing project files, or persisting raw command output. Claude Code, Codex, and Pi use ephemeral or non-persistent non-interactive prompts; adapters without a verified prompt contract use a capability probe.
 
 ## Skills
 
-The Skills page discovers `SKILL.md` files from the default local roots and any directories you add. Only stable references, source paths, and SHA-256 fingerprints are stored; Skill bodies are not copied into the Company database. Skills can be searched with ordered fuzzy matching and move through discovered, enabled, unavailable, and archived states.
+The Skills page discovers `SKILL.md` files from the default local roots and any directories you add. Only stable references, source paths, and SHA-256 fingerprints are stored; Skill bodies are not copied into the Company database. A Skill can declare comma-separated `required-capabilities` in its frontmatter; Desktop displays those declarations as warnings without enforcing an Agent/Skill matrix. Skills can be searched with ordered fuzzy matching, reveal their source reference on demand, and move through discovered, enabled, unavailable, and archived states.
 
 ## Positions and Departments
 

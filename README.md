@@ -1258,7 +1258,7 @@ The board frontend is the v1 **company control plane** shell (ADR 0026): a compa
 
 ### Desktop Company Runtime
 
-The Desktop Company Runtime provides the persistent local company workspace. Its **Agents** page detects formally registered local coding Agents and runs a safe capability probe without creating a Run. Its independent **Skills** page discovers `SKILL.md` files from the default or configured directories, supports ordered fuzzy search, and tracks discovered, enabled, unavailable, and archived sources without copying Skill bodies.
+The Desktop Company Runtime provides the persistent local company workspace. Its **Agents** page detects formally registered local coding Agents and runs a safe adapter-specific probe without creating a Run; adapters with verified non-interactive contracts use ephemeral or non-persistent prompts. Its independent **Skills** page discovers `SKILL.md` files from the default or configured directories, supports ordered fuzzy search, reveals source references on demand, warns about declared `required-capabilities`, and tracks discovered, enabled, unavailable, and archived sources without copying Skill bodies.
 
 Departments use compact Position cards and a right-side editor. A Position keeps its AI Member identity separate from its default Agent and enabled Skills. Department Settings presents one bottom **Save department** action for basic settings, run environments, artifact contracts, and non-sensitive Secret References; destructive archive actions remain in the danger area. Every Run Snapshot freezes the selected Agent, override source, Skill references, and Skill fingerprints so later local changes cannot rewrite historical execution context.
 

@@ -63,6 +63,7 @@ export interface LocalAgentHost {
     readonly executablePath: string;
     readonly args: readonly string[];
     readonly timeoutMs: number;
+    readonly stdin?: string;
   }) => Promise<AgentHostResult>;
 }
 
@@ -73,7 +74,10 @@ interface CompanyAgentAdapter {
   readonly capabilities: readonly AgentCapability[];
   readonly versionArgs: readonly string[];
   readonly testArgs: readonly string[];
+  readonly testStdin?: string;
 }
+
+const SAFE_PROBE_PROMPT = "Reply with OK only.";
 
 const registeredAdapters: readonly CompanyAgentAdapter[] = [
   {
@@ -82,7 +86,15 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["claude"],
     capabilities: ["non-interactive", "structured-output", "session-resume"],
     versionArgs: ["--version"],
-    testArgs: ["--help"],
+    testArgs: [
+      "--print",
+      "--output-format",
+      "text",
+      "--no-session-persistence",
+      "-p",
+      "-",
+    ],
+    testStdin: SAFE_PROBE_PROMPT,
   },
   {
     id: "codex",
@@ -90,7 +102,17 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["codex"],
     capabilities: ["non-interactive", "structured-output", "session-resume"],
     versionArgs: ["--version"],
-    testArgs: ["--help"],
+    testArgs: [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--ephemeral",
+      "-",
+    ],
+    testStdin: SAFE_PROBE_PROMPT,
   },
   {
     id: "pi-agent",
@@ -98,7 +120,8 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["pi"],
     capabilities: ["non-interactive", "session-resume"],
     versionArgs: ["--version"],
-    testArgs: ["--help"],
+    testArgs: ["-p", "--mode", "json", "--no-session"],
+    testStdin: SAFE_PROBE_PROMPT,
   },
   {
     id: "codem",
@@ -146,9 +169,9 @@ export const createLocalAgentHost = (): LocalAgentHost => ({
     }
     return null;
   },
-  run: ({ executablePath, args, timeoutMs }) =>
+  run: ({ executablePath, args, timeoutMs, stdin }) =>
     new Promise((resolve, reject) => {
-      execFile(
+      const child = execFile(
         executablePath,
         [...args],
         { timeout: timeoutMs, maxBuffer: 64 * 1024 },
@@ -164,6 +187,7 @@ export const createLocalAgentHost = (): LocalAgentHost => ({
           });
         },
       );
+      if (stdin !== undefined) child.stdin?.end(stdin);
     }),
 });
 
@@ -244,9 +268,13 @@ export const openAgentCatalog = (
       const result = await host.run({
         executablePath,
         args: adapter.testArgs,
-        timeoutMs: 5_000,
+        timeoutMs: adapter.testStdin ? 30_000 : 5_000,
+        stdin: adapter.testStdin,
       });
-      if (result.exitCode !== 0) {
+      if (
+        result.exitCode !== 0 ||
+        (result.stdout.trim() === "" && result.stderr.trim() === "")
+      ) {
         throw new AgentCatalogError(
           "AGENT_TEST_FAILED",
           `${adapter.name} did not pass its non-destructive test.`,
@@ -256,7 +284,9 @@ export const openAgentCatalog = (
         agentId: adapter.id,
         status: "passed",
         testedAt: clock().toISOString(),
-        summary: "Agent executable accepted a safe capability probe.",
+        summary: adapter.testStdin
+          ? "Agent executable completed a safe non-interactive probe."
+          : "Agent executable accepted a safe capability probe.",
       };
     },
     discover: async () => {

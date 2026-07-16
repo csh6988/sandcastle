@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ArtifactContract,
   ArtifactVersionView,
@@ -29,6 +29,10 @@ import {
   type Language,
   type Messages,
 } from "./i18n.js";
+import {
+  saveDepartmentSettings,
+  type DepartmentSettingsSaveOperation,
+} from "./departmentSettingsSave.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -40,7 +44,7 @@ const errorMessage = (error: unknown): string =>
       ? error.message
       : String(error);
 
-export const fuzzyMatch = (query: string, text: string): boolean => {
+const fuzzyMatch = (query: string, text: string): boolean => {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return true;
   let queryIndex = 0;
@@ -202,13 +206,6 @@ export function SkillsPage({
       .then(setCatalog)
       .catch((nextError: unknown) => setError(errorMessage(nextError)));
   }, []);
-  const skills =
-    catalog?.skills.filter((skill) =>
-      fuzzyMatch(
-        search,
-        `${skill.name} ${skill.description} ${skill.locationReference}`,
-      ),
-    ) ?? [];
   const mutate = (operation: Promise<SkillCatalogView>) =>
     void operation
       .then(setCatalog)
@@ -270,47 +267,86 @@ export function SkillsPage({
           ))}
         </ul>
       </section>
-      <section className="catalog-grid" aria-label={t.skillsTitle}>
-        {skills.map((skill) => (
-          <article
-            className="catalog-card"
-            data-skill-catalog-id={skill.id}
-            key={skill.id}
-          >
-            <div className="project-card-top">
-              <strong>{skill.name}</strong>
-              <span className="pill">{skill.status}</span>
-            </div>
-            <p>{skill.description}</p>
+      <SkillCatalogResults
+        onArchive={(skillId) =>
+          mutate(window.sandcastle.runtime.archiveDiscoveredSkill(skillId))
+        }
+        onEnable={(skillId) =>
+          mutate(window.sandcastle.runtime.enableSkill(skillId))
+        }
+        search={search}
+        skills={catalog?.skills ?? []}
+        t={t}
+      />
+    </section>
+  );
+}
+
+export function SkillCatalogResults({
+  skills,
+  search,
+  t,
+  onEnable,
+  onArchive,
+}: {
+  readonly skills: SkillCatalogView["skills"];
+  readonly search: string;
+  readonly t: Messages;
+  readonly onEnable: (skillId: string) => void;
+  readonly onArchive: (skillId: string) => void;
+}) {
+  const visibleSkills = skills.filter((skill) =>
+    fuzzyMatch(
+      search,
+      `${skill.name} ${skill.description} ${skill.locationReference}`,
+    ),
+  );
+  return (
+    <section className="catalog-grid" aria-label={t.skillsTitle}>
+      {visibleSkills.map((skill) => (
+        <article
+          className="catalog-card"
+          data-skill-catalog-id={skill.id}
+          key={skill.id}
+        >
+          <div className="project-card-top">
+            <strong>{skill.name}</strong>
+            <span className="pill">{skill.status}</span>
+          </div>
+          <p>{skill.description}</p>
+          {skill.requiredCapabilities?.length ? (
+            <p className="warn" data-skill-capability-warning>
+              {t.requiredAgentCapabilities}:{" "}
+              {skill.requiredCapabilities.join(", ")}
+            </p>
+          ) : null}
+          <details data-skill-source={skill.id}>
+            <summary data-view-skill-source={skill.id}>
+              {t.viewSkillSource}
+            </summary>
             <code>{skill.locationReference}</code>
-            <small>{skill.version}</small>
-            {skill.status === "discovered" || skill.status === "unavailable" ? (
-              <button
-                type="button"
-                data-enable-skill={skill.id}
-                onClick={() =>
-                  mutate(window.sandcastle.runtime.enableSkill(skill.id))
-                }
-              >
-                {t.enableSkill}
-              </button>
-            ) : skill.status === "enabled" ? (
-              <button
-                className="danger-button"
-                type="button"
-                data-archive-discovered-skill={skill.id}
-                onClick={() =>
-                  mutate(
-                    window.sandcastle.runtime.archiveDiscoveredSkill(skill.id),
-                  )
-                }
-              >
-                {t.archiveSkill}
-              </button>
-            ) : null}
-          </article>
-        ))}
-      </section>
+          </details>
+          <small>{skill.version}</small>
+          {skill.status === "discovered" || skill.status === "unavailable" ? (
+            <button
+              type="button"
+              data-enable-skill={skill.id}
+              onClick={() => onEnable(skill.id)}
+            >
+              {t.enableSkill}
+            </button>
+          ) : skill.status === "enabled" ? (
+            <button
+              className="danger-button"
+              type="button"
+              data-archive-discovered-skill={skill.id}
+              onClick={() => onArchive(skill.id)}
+            >
+              {t.archiveSkill}
+            </button>
+          ) : null}
+        </article>
+      ))}
     </section>
   );
 }
@@ -2113,6 +2149,10 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
 
 export type DepartmentTab = "overview" | "positions" | "settings" | "pipeline";
 
+type RegisterDepartmentSettingsSave = (
+  operation: DepartmentSettingsSaveOperation,
+) => () => void;
+
 export function DepartmentDetailView({
   department,
   t,
@@ -2279,6 +2319,12 @@ export function DepartmentDetailView({
   const [selectedPositionId, setSelectedPositionId] = useState<string | null>(
     null,
   );
+  const [settingsSaveError, setSettingsSaveError] = useState<string | null>(
+    null,
+  );
+  const settingsSaveOperations = useRef(
+    new Map<string, DepartmentSettingsSaveOperation>(),
+  );
   useEffect(() => {
     setName(department.name);
     setDescription(department.description);
@@ -2288,14 +2334,38 @@ export function DepartmentDetailView({
     setCopyName(`${department.name} Copy`);
   }, [department]);
   const modernConfiguration = Boolean(agentCatalog && onConfigurePosition);
-  const saveAllSettings = () => {
-    document
-      .querySelectorAll<HTMLFormElement>(
-        "[data-department-settings], [data-execution-profile-editor], [data-new-secret-reference]",
-      )
-      .forEach((form) => {
-        if (form.checkValidity()) form.requestSubmit();
-      });
+  const registerSettingsSave: RegisterDepartmentSettingsSave = (operation) => {
+    settingsSaveOperations.current.set(operation.id, operation);
+    return () => {
+      if (settingsSaveOperations.current.get(operation.id) === operation) {
+        settingsSaveOperations.current.delete(operation.id);
+      }
+    };
+  };
+  const saveAllSettings = async () => {
+    setSettingsSaveError(null);
+    try {
+      await saveDepartmentSettings([
+        {
+          id: "department",
+          label: t.departmentSettings,
+          save: async () => {
+            await onUpdateDepartment({
+              departmentId: department.id,
+              expectedRevision: department.revision,
+              name: name.trim(),
+              description: description.trim(),
+              inputArtifactContracts,
+              outputArtifactContracts,
+              defaultExecutionProfileId,
+            });
+          },
+        },
+        ...settingsSaveOperations.current.values(),
+      ]);
+    } catch (nextError) {
+      setSettingsSaveError(errorMessage(nextError));
+    }
   };
   return (
     <section
@@ -2330,6 +2400,11 @@ export function DepartmentDetailView({
           data-skill-error-code={skillErrorCode ?? undefined}
         >
           {skillRuntimeErrorMessage(t, skillErrorCode, error)}
+        </div>
+      ) : null}
+      {settingsSaveError ? (
+        <div className="warn" data-department-settings-error>
+          {settingsSaveError}
         </div>
       ) : null}
       <div className="department-tabs" role="tablist">
@@ -2426,15 +2501,7 @@ export function DepartmentDetailView({
               data-department-settings
               onSubmit={(event) => {
                 event.preventDefault();
-                void onUpdateDepartment({
-                  departmentId: department.id,
-                  expectedRevision: department.revision,
-                  name: name.trim(),
-                  description: description.trim(),
-                  inputArtifactContracts,
-                  outputArtifactContracts,
-                  defaultExecutionProfileId,
-                });
+                void saveAllSettings();
               }}
             >
               <label htmlFor="department-detail-name">{t.name}</label>
@@ -2537,6 +2604,7 @@ export function DepartmentDetailView({
               busy={busy}
               department={department}
               onArchive={onArchiveExecutionProfile}
+              registerSave={registerSettingsSave}
               onSave={onSaveExecutionProfile}
               t={t}
             />
@@ -2545,6 +2613,7 @@ export function DepartmentDetailView({
               department={department}
               onArchive={onArchiveSecretReference}
               onCreate={onCreateSecretReference}
+              registerSave={registerSettingsSave}
               t={t}
             />
           </details>
@@ -2553,7 +2622,7 @@ export function DepartmentDetailView({
             <button
               data-save-department-settings
               disabled={busy}
-              onClick={saveAllSettings}
+              onClick={() => void saveAllSettings()}
               type="button"
             >
               {t.saveDepartment}
@@ -2870,11 +2939,13 @@ function ExecutionProfileConfiguration({
   busy,
   onSave,
   onArchive,
+  registerSave,
 }: {
   readonly department: DepartmentInspect;
   readonly t: Messages;
   readonly busy: boolean;
   readonly onSave: SandcastleBridgeRuntimeSaveExecutionProfile;
+  readonly registerSave: RegisterDepartmentSettingsSave;
   readonly onArchive: (input: {
     readonly departmentId: string;
     readonly executionProfileId: string;
@@ -2890,6 +2961,7 @@ function ExecutionProfileConfiguration({
           department={department}
           key={profile.id}
           onArchive={onArchive}
+          registerSave={registerSave}
           onSave={onSave}
           profile={profile}
           t={t}
@@ -2899,6 +2971,7 @@ function ExecutionProfileConfiguration({
         busy={busy}
         department={department}
         onArchive={onArchive}
+        registerSave={registerSave}
         onSave={onSave}
         t={t}
       />
@@ -2913,12 +2986,14 @@ function ExecutionProfileEditor({
   busy,
   onSave,
   onArchive,
+  registerSave,
 }: {
   readonly department: DepartmentInspect;
   readonly profile?: DepartmentInspect["executionProfiles"][number];
   readonly t: Messages;
   readonly busy: boolean;
   readonly onSave: SandcastleBridgeRuntimeSaveExecutionProfile;
+  readonly registerSave: RegisterDepartmentSettingsSave;
   readonly onArchive: (input: {
     readonly departmentId: string;
     readonly executionProfileId: string;
@@ -2950,20 +3025,42 @@ function ExecutionProfileEditor({
   const [secretReferenceIds, setSecretReferenceIds] = useState([
     ...(profile?.secretReferenceIds ?? []),
   ]);
-  return (
-    <form
-      className="form skill-flow-card"
-      data-execution-profile-editor={profile?.id ?? "new"}
-      onSubmit={(event) => {
-        event.preventDefault();
-        void onSave({
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  useEffect(() => {
+    const fields = {
+      name: name.trim(),
+      providerRef: providerRef.trim(),
+      model: model.trim(),
+      sandboxRef: sandboxRef.trim(),
+    };
+    const blankNewProfile =
+      !profile && Object.values(fields).every((value) => value === "");
+    const dirty = profile
+      ? fields.name !== profile.name ||
+        fields.providerRef !== profile.providerRef ||
+        fields.model !== profile.model ||
+        fields.sandboxRef !== profile.sandboxRef ||
+        branchStrategy !== profile.branchStrategy ||
+        timeoutSeconds !== profile.limits.timeoutSeconds ||
+        maxIterations !== profile.limits.maxIterations ||
+        maxTokens !== (profile.limits.maxTokens?.toString() ?? "") ||
+        retryMaxAttempts !== profile.retryPolicy.maxAttempts ||
+        permissionPolicy !== profile.permissionPolicy ||
+        secretReferenceIds.join("\0") !== profile.secretReferenceIds.join("\0")
+      : !blankNewProfile;
+    return registerSave({
+      id: `run-environment:${profile?.id ?? "new"}`,
+      label: profile?.name ?? t.createExecutionProfile,
+      save: async () => {
+        if (!dirty) return;
+        if (Object.values(fields).some((value) => value === "")) {
+          throw new Error(t.completeRequiredFields);
+        }
+        await onSave({
           departmentId: department.id,
           ...(profile ? { executionProfileId: profile.id } : {}),
           expectedRevision: profile?.revision ?? 0,
-          name: name.trim(),
-          providerRef: providerRef.trim(),
-          model: model.trim(),
-          sandboxRef: sandboxRef.trim(),
+          ...fields,
           branchStrategy,
           timeoutSeconds,
           maxIterations,
@@ -2971,10 +3068,45 @@ function ExecutionProfileEditor({
           retryMaxAttempts,
           permissionPolicy,
           secretReferenceIds,
-        }).catch(() => undefined);
+        });
+      },
+    });
+  }, [
+    branchStrategy,
+    department.id,
+    maxIterations,
+    maxTokens,
+    model,
+    name,
+    onSave,
+    permissionPolicy,
+    profile,
+    providerRef,
+    registerSave,
+    retryMaxAttempts,
+    sandboxRef,
+    secretReferenceIds,
+    t.completeRequiredFields,
+    t.createExecutionProfile,
+    timeoutSeconds,
+  ]);
+  return (
+    <form
+      className={`form skill-flow-card${advancedOpen ? " run-environment-open" : ""}`}
+      data-execution-profile-editor={profile?.id ?? "new"}
+      onSubmit={(event) => {
+        event.preventDefault();
       }}
     >
       <h3>{profile ? profile.name : t.createExecutionProfile}</h3>
+      <button
+        aria-expanded={advancedOpen}
+        data-run-environment-toggle={profile?.id ?? "new"}
+        onClick={() => setAdvancedOpen((current) => !current)}
+        type="button"
+      >
+        {t.editAdvancedRunEnvironment}
+      </button>
       <label>{t.executionProfileName}</label>
       <input
         onChange={(event) => setName(event.target.value)}
@@ -3103,6 +3235,7 @@ function SecretReferenceConfiguration({
   busy,
   onCreate,
   onArchive,
+  registerSave,
 }: {
   readonly department: DepartmentInspect;
   readonly t: Messages;
@@ -3112,6 +3245,7 @@ function SecretReferenceConfiguration({
     readonly name: string;
     readonly providerScope: string;
   }) => Promise<void>;
+  readonly registerSave: RegisterDepartmentSettingsSave;
   readonly onArchive: (input: {
     readonly departmentId: string;
     readonly secretReferenceId: string;
@@ -3119,6 +3253,37 @@ function SecretReferenceConfiguration({
 }) {
   const [name, setName] = useState("");
   const [providerScope, setProviderScope] = useState("");
+  useEffect(
+    () =>
+      registerSave({
+        id: "secret-reference:new",
+        label: t.secretReferences,
+        save: async () => {
+          const nextName = name.trim();
+          const nextProviderScope = providerScope.trim();
+          if (!nextName && !nextProviderScope) return;
+          if (!nextName || !nextProviderScope) {
+            throw new Error(t.completeRequiredFields);
+          }
+          await onCreate({
+            departmentId: department.id,
+            name: nextName,
+            providerScope: nextProviderScope,
+          });
+          setName("");
+          setProviderScope("");
+        },
+      }),
+    [
+      department.id,
+      name,
+      onCreate,
+      providerScope,
+      registerSave,
+      t.completeRequiredFields,
+      t.secretReferences,
+    ],
+  );
   return (
     <article className="create-panel" data-secret-references>
       <h2>{t.secretReferences}</h2>
@@ -3151,16 +3316,6 @@ function SecretReferenceConfiguration({
         data-new-secret-reference
         onSubmit={(event) => {
           event.preventDefault();
-          void onCreate({
-            departmentId: department.id,
-            name: name.trim(),
-            providerScope: providerScope.trim(),
-          })
-            .then(() => {
-              setName("");
-              setProviderScope("");
-            })
-            .catch(() => undefined);
         }}
       >
         <label>{t.secretReferenceName}</label>

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -16,6 +17,7 @@ export interface SkillCatalogEntry {
   readonly sourceDirectory: string;
   readonly version: string;
   readonly locationReference: string;
+  readonly requiredCapabilities: readonly string[];
   readonly status: SkillDiscoveryStatus;
 }
 
@@ -86,6 +88,20 @@ const frontmatterValue = (content: string, key: string): string | null => {
   );
 };
 
+const requiredCapabilitiesFrom = (content: string): readonly string[] =>
+  (frontmatterValue(content, "required-capabilities") ?? "")
+    .split(",")
+    .map((capability) => capability.trim())
+    .filter(Boolean);
+
+const requiredCapabilitiesAt = (path: string): readonly string[] => {
+  try {
+    return requiredCapabilitiesFrom(readFileSync(path, "utf8"));
+  } catch {
+    return [];
+  }
+};
+
 const stableSkillId = (path: string): string =>
   `local-${createHash("sha256").update(resolve(path)).digest("hex").slice(0, 16)}`;
 
@@ -103,7 +119,7 @@ export const openSkillCatalog = (
       .prepare("SELECT path FROM skill_source_directories ORDER BY path")
       .all()
       .map((row) => (row as { readonly path: string }).path);
-    const discovered = database
+    const discoveredRows = database
       .prepare(
         `SELECT id, name, description, source_directory AS sourceDirectory,
                 location_ref AS locationReference, fingerprint AS version,
@@ -111,7 +127,13 @@ export const openSkillCatalog = (
            FROM skill_discovery_entries
           ORDER BY name, id`,
       )
-      .all() as unknown as SkillCatalogEntry[];
+      .all() as Array<Omit<SkillCatalogEntry, "requiredCapabilities">>;
+    const discovered = discoveredRows.map(
+      (skill): SkillCatalogEntry => ({
+        ...skill,
+        requiredCapabilities: requiredCapabilitiesAt(skill.locationReference),
+      }),
+    );
     const discoveredIds = new Set(discovered.map((skill) => skill.id));
     const configured = (
       database
@@ -140,6 +162,7 @@ export const openSkillCatalog = (
           sourceDirectory: skill.source,
           version: skill.version,
           locationReference: skill.locationReference,
+          requiredCapabilities: [],
           status: skill.status === "active" ? "enabled" : "archived",
         }),
       );

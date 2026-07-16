@@ -453,6 +453,11 @@ p {
   opacity: 0.72;
 }
 
+[data-execution-profile-editor]:not(.run-environment-open)
+  > :not(h3):not([data-run-environment-toggle]) {
+  display: none;
+}
+
 .position-card {
   border: 1px solid var(--border);
   border-radius: 10px;
