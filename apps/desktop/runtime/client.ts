@@ -77,9 +77,14 @@ const sendRequest = async (
 
     const longRunningCommand =
       request.kind === "command" &&
-      ["run.execute-ready", "run.pause", "run.resume", "run.cancel"].includes(
-        request.command.type,
-      );
+      [
+        "run.execute-ready",
+        "run.pause",
+        "run.resume",
+        "run.cancel",
+        "agent.catalog.discover",
+        "agent.test",
+      ].includes(request.command.type);
     socket.setTimeout(
       longRunningCommand ? 0 : (connection.timeoutMs ?? 5_000),
       () => {
