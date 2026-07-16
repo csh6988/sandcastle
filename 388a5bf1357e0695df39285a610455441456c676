@@ -1,0 +1,206 @@
+apps/desktop/main/runtimeBrowserWindowSmoke.ts
+  fa087aafc721337b 596,626,657,696,774,790,1726,1730,1738,1743-1759
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "388a5bf1357e0695df39285a610455441456c676",
+  "prompts": {
+    "060d9b2b15d0e1bd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f42-f512-7460-804d-3d14679561d6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2178,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0717523dae00b1cc85542dd0910d6009d1eb3d46afeb8227b8d0d445b030c961"
+    },
+    "2f216cc364d192a6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f64c4-0d0a-7af1-a93d-3c7cc4285d46",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 8044,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/575c1de6367b98ef15b9a57f6148deb348de5ef8f70c49e94f07c6a5197d34ee"
+    },
+    "79963d9b40328cb4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5ebb-448e-70b2-b163-9d463a65f6e6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 693,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a75314f4e1df1a2578a75e7caf385e7e4bc0eabfe13ef50266da5293fd4a7f8d"
+    },
+    "88775a0d3c079fb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f600e-6c1a-7533-b6fb-b57c49e689c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3152,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/6d95a5639de9cbffbea9c9ff28aeed12dbe991fd8b9043295b39f2196221c226"
+    },
+    "8a212f450d89d609": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a93-68a9-79b1-939d-b2957afe7c81",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 213,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/f87cb6672125133be6b4310f3680ff2ec163d0637d243fcc12863bc1896a93af"
+    },
+    "ac4a74c4aa6a79d9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6382-4929-77d0-accf-1ba7e413a375",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1998,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/7ddaf15e1eaace93e2b850c88d8c7e716be77f93af419f32c6b6ea8366e2cb34"
+    },
+    "b87914d610c1ce70": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f407d-7899-7963-81ae-a02c5a839144",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 234,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/229effee2547afe24033b65bc0d8e3c950a0b75b8ddccc43852f719c66c862cb"
+    },
+    "bbb62571d08f96c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f45fb-d631-7fb2-907c-2f0239a5ae7c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 83,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a8add38c40e063dd7def8a5baf99bcca9d603358781b0694749f03f144512edc"
+    },
+    "c711e4c34d08d863": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5faf-b80b-74b3-b198-38dea949a7f3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3198,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ba0dd600c95033e355a5d2b9d47a7fee1732fe529121a38ab238690aac093ca5"
+    },
+    "ca73052e0401f67e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f29-174c-7460-8361-39f77918f40a",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 717,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2982a74b6f840de7aecbed4f892eee0d23253ae9249f392aa4ab6bd24f0f22ec"
+    },
+    "d4d36a89d5d281c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e57-d121-7b00-8de4-c4a99c99607f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 599,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/02fde493b2dcb79b593cc005f21c71ad732aa6dd5d4679109b307f35ed35f827"
+    },
+    "dce84874ab6fd00c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f7a-d3d9-7e83-9fb7-f7e4dc251c23",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 500,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a236692bd82c4158b7b26a2ab23a92daf15fd672b02cac152ecf49b26a23d025"
+    },
+    "ea1bab22598a95f9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f63be-2293-7ca2-a773-e7dba19e70cd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3130,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ed89462e6099cb05d092e401e56fe0d6172af25a25e4c5b004d415d524fcea0f"
+    },
+    "fa087aafc721337b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f68dd-e025-7bc0-b939-bcb81215d240",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 52,
+      "total_deletions": 2,
+      "accepted_lines": 3504,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/b06c8b30e73e1c1c820f7527eaf8bca1f0a318da44d9e8104a2d83ecfa9be885"
+    }
+  }
+}
