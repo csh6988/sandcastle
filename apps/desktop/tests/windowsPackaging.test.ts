@@ -43,6 +43,7 @@ describe("Windows Desktop packaging contract", () => {
   });
 
   it("keeps Windows artifact verification in the CI contract", () => {
+    assert.match(workflow, /- "release\/\*\*"/);
     assert.match(workflow, /name: Package Windows NSIS/);
     assert.match(workflow, /npm run dist:windows/);
     assert.match(workflow, /npm run verify:windows-package/);
