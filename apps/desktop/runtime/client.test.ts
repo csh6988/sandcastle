@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { companyRuntimeAddress } from "./address.js";
 import { createLocalRuntimeTransport } from "./client.js";
@@ -12,6 +12,9 @@ describe("Company Runtime client", () => {
   it("lets Pipeline Runtime own the timeout for long-running execution commands", async () => {
     const directory = mkdtempSync(join(tmpdir(), "sandcastle-runtime-client-"));
     const address = companyRuntimeAddress(directory);
+    if (process.platform !== "win32") {
+      mkdirSync(dirname(address), { recursive: true });
+    }
     let activeSocket: import("node:net").Socket | undefined;
     const server = createServer({ allowHalfOpen: true }, (socket) => {
       activeSocket = socket;
