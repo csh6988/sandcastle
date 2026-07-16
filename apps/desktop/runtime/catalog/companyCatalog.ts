@@ -11,12 +11,14 @@ import {
   type CompanyOverview,
   type CompanyProject,
   type DepartmentInspect,
+  type SkillConfigurationView,
 } from "../interface.js";
 import {
   canonicalPipelineJson,
   pipelineHash,
 } from "../pipeline/canonicalPipeline.js";
 import type { SkillConfiguration } from "../skill/skillConfiguration.js";
+import { isRegisteredCompanyAgentId } from "../agent/agentCatalog.js";
 
 export interface CompanyCatalog {
   readonly overview: () => CompanyOverview;
@@ -49,6 +51,7 @@ export interface CompanyCatalog {
     readonly aiMemberDisplayName: string;
     readonly aiMemberProfile: string;
     readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+    readonly defaultAgentId?: string;
   }) => DepartmentInspect;
   readonly updatePosition: (input: {
     readonly departmentId: string;
@@ -60,7 +63,25 @@ export interface CompanyCatalog {
     readonly aiMemberProfile: string;
     readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
     readonly aiMemberStatus: "active" | "inactive";
+    readonly defaultAgentId?: string;
   }) => DepartmentInspect;
+  readonly configurePosition: (input: {
+    readonly departmentId: string;
+    readonly positionId: string;
+    readonly expectedRevision: number;
+    readonly expectedSkillRevision: number;
+    readonly name: string;
+    readonly responsibility: string;
+    readonly aiMemberDisplayName: string;
+    readonly aiMemberProfile: string;
+    readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+    readonly aiMemberStatus: "active" | "inactive";
+    readonly defaultAgentId?: string;
+    readonly skillIds: readonly string[];
+  }) => {
+    readonly department: DepartmentInspect;
+    readonly skills: SkillConfigurationView;
+  };
   readonly archivePosition: (input: {
     readonly departmentId: string;
     readonly positionId: string;
@@ -241,6 +262,7 @@ export const openCompanyCatalog = (
           `SELECT positions.id,
                   positions.name,
                   positions.responsibility,
+                  positions.default_agent_id AS defaultAgentId,
                   positions.revision,
                   positions.status,
                   ai_members.id AS aiMemberId,
@@ -257,6 +279,7 @@ export const openCompanyCatalog = (
         readonly id: string;
         readonly name: string;
         readonly responsibility: string;
+        readonly defaultAgentId: string;
         readonly revision: number;
         readonly status: "active" | "archived";
         readonly aiMemberId: string;
@@ -269,6 +292,7 @@ export const openCompanyCatalog = (
       id: position.id,
       name: position.name,
       responsibility: position.responsibility,
+      defaultAgentId: position.defaultAgentId,
       revision: Number(position.revision),
       status: position.status,
       aiMember: {
@@ -604,6 +628,7 @@ export const openCompanyCatalog = (
       aiMemberDisplayName,
       aiMemberProfile,
       aiMemberResponsibilityMetadata,
+      defaultAgentId = "codex",
     }) => {
       const department = database
         .prepare(
@@ -614,6 +639,12 @@ export const openCompanyCatalog = (
         throw new CompanyCatalogError(
           "DEPARTMENT_NOT_FOUND",
           `Active Department ${departmentId} was not found.`,
+        );
+      }
+      if (!isRegisteredCompanyAgentId(defaultAgentId)) {
+        throw new CompanyCatalogError(
+          "AGENT_NOT_REGISTERED",
+          `Company Agent Adapter ${defaultAgentId} is not registered.`,
         );
       }
       const positionId = randomUUID();
@@ -650,8 +681,8 @@ export const openCompanyCatalog = (
           .prepare(
             `INSERT INTO positions(
                id, department_id, name, responsibility, ai_member_id, sort_order,
-               created_at, revision, status
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active')`,
+               created_at, revision, status, default_agent_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?)`,
           )
           .run(
             positionId,
@@ -661,6 +692,7 @@ export const openCompanyCatalog = (
             memberId,
             sortOrder,
             createdAt,
+            defaultAgentId,
           );
         database.exec("COMMIT");
       } catch (error) {
@@ -679,6 +711,7 @@ export const openCompanyCatalog = (
       aiMemberProfile,
       aiMemberResponsibilityMetadata,
       aiMemberStatus,
+      defaultAgentId,
     }) => {
       const position = database
         .prepare(
@@ -711,18 +744,30 @@ export const openCompanyCatalog = (
           `Position revision ${expectedRevision} does not match current revision ${position.revision}.`,
         );
       }
+      if (
+        defaultAgentId !== undefined &&
+        !isRegisteredCompanyAgentId(defaultAgentId)
+      ) {
+        throw new CompanyCatalogError(
+          "AGENT_NOT_REGISTERED",
+          `Company Agent Adapter ${defaultAgentId} is not registered.`,
+        );
+      }
 
       database.exec("BEGIN IMMEDIATE");
       try {
         const result = database
           .prepare(
             `UPDATE positions
-                SET name = ?, responsibility = ?, revision = revision + 1
+                SET name = ?, responsibility = ?,
+                    default_agent_id = COALESCE(?, default_agent_id),
+                    revision = revision + 1
               WHERE id = ? AND department_id = ? AND revision = ? AND status = 'active'`,
           )
           .run(
             name,
             responsibility,
+            defaultAgentId ?? null,
             positionId,
             departmentId,
             expectedRevision,
@@ -753,6 +798,176 @@ export const openCompanyCatalog = (
         throw error;
       }
       return inspectDepartment(departmentId);
+    },
+    configurePosition: (input) => {
+      if (new Set(input.skillIds).size !== input.skillIds.length) {
+        throw new CompanyCatalogError(
+          "SKILL_SELECTION_DUPLICATE",
+          "Position Skill selections must be unique.",
+        );
+      }
+      const position = database
+        .prepare(
+          `SELECT ai_member_id AS aiMemberId, revision, status,
+                  default_agent_id AS defaultAgentId
+             FROM positions
+            WHERE id = ? AND department_id = ?`,
+        )
+        .get(input.positionId, input.departmentId) as
+        | {
+            readonly aiMemberId: string;
+            readonly revision: number;
+            readonly status: "active" | "archived";
+            readonly defaultAgentId: string;
+          }
+        | undefined;
+      if (!position) {
+        throw new CompanyCatalogError(
+          "POSITION_OUTSIDE_DEPARTMENT",
+          `Position ${input.positionId} does not belong to Department ${input.departmentId}.`,
+        );
+      }
+      if (position.status !== "active") {
+        throw new CompanyCatalogError(
+          "POSITION_ARCHIVED",
+          `Position ${input.positionId} is archived.`,
+        );
+      }
+      if (Number(position.revision) !== input.expectedRevision) {
+        throw new CompanyCatalogError(
+          "VERSION_CONFLICT",
+          `Position revision ${input.expectedRevision} does not match current revision ${position.revision}.`,
+        );
+      }
+      const defaultAgentId = input.defaultAgentId ?? position.defaultAgentId;
+      if (!isRegisteredCompanyAgentId(defaultAgentId)) {
+        throw new CompanyCatalogError(
+          "AGENT_NOT_REGISTERED",
+          `Company Agent Adapter ${defaultAgentId} is not registered.`,
+        );
+      }
+      const skillRevision = Number(
+        (
+          database
+            .prepare(
+              "SELECT revision FROM skill_configuration_metadata WHERE id = 'company'",
+            )
+            .get() as { readonly revision: number }
+        ).revision,
+      );
+      if (skillRevision !== input.expectedSkillRevision) {
+        throw new CompanyCatalogError(
+          "VERSION_CONFLICT",
+          `Skill Configuration revision ${input.expectedSkillRevision} does not match current revision ${skillRevision}.`,
+        );
+      }
+      for (const skillId of input.skillIds) {
+        const skill = database
+          .prepare("SELECT status FROM skills WHERE id = ?")
+          .get(skillId) as
+          | { readonly status: "active" | "archived" }
+          | undefined;
+        if (!skill || skill.status !== "active") {
+          throw new CompanyCatalogError(
+            "SKILL_NOT_FOUND",
+            `Active Skill ${skillId} was not found.`,
+          );
+        }
+      }
+      const currentSkillIds = (
+        database
+          .prepare(
+            "SELECT skill_id AS skillId FROM position_skill_bindings WHERE position_id = ?",
+          )
+          .all(input.positionId) as Array<{ readonly skillId: string }>
+      ).map((binding) => binding.skillId);
+      const requested = new Set(input.skillIds);
+      for (const removedSkillId of currentSkillIds.filter(
+        (skillId) => !requested.has(skillId),
+      )) {
+        const activeFlow = database
+          .prepare(
+            `SELECT 1 AS present
+               FROM skill_flows
+               JOIN skill_flow_skills ON skill_flow_skills.skill_flow_id = skill_flows.id
+              WHERE skill_flows.position_id = ?
+                AND skill_flows.status = 'active'
+                AND skill_flow_skills.skill_id = ?
+              LIMIT 1`,
+          )
+          .get(input.positionId, removedSkillId);
+        if (activeFlow) {
+          throw new CompanyCatalogError(
+            "POSITION_SKILL_IN_USE",
+            `Skill ${removedSkillId} must be removed from active Skill Flows before it can be removed from Position ${input.positionId}.`,
+          );
+        }
+      }
+
+      const now = new Date().toISOString();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const updated = database
+          .prepare(
+            `UPDATE positions
+                SET name = ?, responsibility = ?, default_agent_id = ?,
+                    revision = revision + 1
+              WHERE id = ? AND department_id = ? AND revision = ? AND status = 'active'`,
+          )
+          .run(
+            input.name,
+            input.responsibility,
+            defaultAgentId,
+            input.positionId,
+            input.departmentId,
+            input.expectedRevision,
+          );
+        if (updated.changes === 0) {
+          throw new CompanyCatalogError(
+            "VERSION_CONFLICT",
+            `Position revision ${input.expectedRevision} changed before save.`,
+          );
+        }
+        database
+          .prepare(
+            `UPDATE ai_members
+                SET display_name = ?, profile = ?, responsibility_metadata_json = ?, status = ?
+              WHERE id = ? AND department_id = ?`,
+          )
+          .run(
+            input.aiMemberDisplayName,
+            input.aiMemberProfile,
+            JSON.stringify(input.aiMemberResponsibilityMetadata),
+            input.aiMemberStatus,
+            position.aiMemberId,
+            input.departmentId,
+          );
+        database
+          .prepare("DELETE FROM position_skill_bindings WHERE position_id = ?")
+          .run(input.positionId);
+        const bind = database.prepare(
+          `INSERT INTO position_skill_bindings(position_id, skill_id, bound_at)
+           VALUES (?, ?, ?)`,
+        );
+        for (const skillId of input.skillIds) {
+          bind.run(input.positionId, skillId, now);
+        }
+        database
+          .prepare(
+            `UPDATE skill_configuration_metadata
+                SET revision = revision + 1, updated_at = ?
+              WHERE id = 'company' AND revision = ?`,
+          )
+          .run(now, input.expectedSkillRevision);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return {
+        department: inspectDepartment(input.departmentId),
+        skills: skillConfiguration.inspect(input.departmentId),
+      };
     },
     archivePosition: ({ departmentId, positionId, expectedRevision }) => {
       const position = database
@@ -1199,8 +1414,8 @@ export const openCompanyCatalog = (
         const insertPosition = database.prepare(
           `INSERT INTO positions(
              id, department_id, name, responsibility, ai_member_id, sort_order,
-             created_at, revision, status
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+             created_at, revision, status, default_agent_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         );
         source.positions.forEach((position, index) => {
           const memberId = memberIds.get(position.aiMember.id);
@@ -1226,6 +1441,7 @@ export const openCompanyCatalog = (
             index,
             copiedAt,
             position.status,
+            position.defaultAgentId,
           );
         });
 

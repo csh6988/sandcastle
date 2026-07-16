@@ -17,6 +17,7 @@ import {
   POSITION_ARCHIVE_CHANNEL,
   POSITION_CREATE_CHANNEL,
   POSITION_UPDATE_CHANNEL,
+  POSITION_CONFIGURE_CHANNEL,
   PROJECT_ARCHIVE_CHANNEL,
   PROJECT_CREATE_CHANNEL,
   PROJECT_INSPECT_CHANNEL,
@@ -47,12 +48,105 @@ import {
   SKILL_FLOW_ARCHIVE_CHANNEL,
   SKILL_FLOW_SAVE_CHANNEL,
   POSITION_SKILLS_SET_CHANNEL,
+  AGENT_CATALOG_INSPECT_CHANNEL,
+  AGENT_CATALOG_DISCOVER_CHANNEL,
+  AGENT_TEST_CHANNEL,
+  SKILL_DISCOVERY_INSPECT_CHANNEL,
+  SKILL_DISCOVERY_REFRESH_CHANNEL,
+  SKILL_DISCOVERY_ENABLE_CHANNEL,
+  SKILL_DISCOVERY_ARCHIVE_CHANNEL,
 } from "./bridge.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
 describe("Sandcastle preload bridge", () => {
+  it("exposes Agent and independent Skill Catalog commands through preload", async () => {
+    const calls: Array<{ channel: string; payload?: unknown }> = [];
+    const agentCatalog = {
+      agents: [
+        {
+          id: "codex",
+          name: "Codex",
+          status: "installed" as const,
+          version: "1.2.3",
+          executablePath: "/opt/codex",
+          lastDetectedAt: "2026-07-16T08:00:00.000Z",
+          capabilities: ["non-interactive" as const],
+          errorCode: null,
+        },
+      ],
+    };
+    const skillCatalog = { directories: [], skills: [] };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      calls.push({ channel, payload });
+      if (
+        channel === AGENT_CATALOG_INSPECT_CHANNEL ||
+        channel === AGENT_CATALOG_DISCOVER_CHANNEL
+      )
+        return agentCatalog;
+      if (channel === AGENT_TEST_CHANNEL)
+        return {
+          agentId: "codex",
+          status: "passed" as const,
+          testedAt: "2026-07-16T08:00:00.000Z",
+          summary: "ok",
+        };
+      if (
+        channel === SKILL_DISCOVERY_INSPECT_CHANNEL ||
+        channel === SKILL_DISCOVERY_REFRESH_CHANNEL ||
+        channel === SKILL_DISCOVERY_ENABLE_CHANNEL ||
+        channel === SKILL_DISCOVERY_ARCHIVE_CHANNEL
+      )
+        return skillCatalog;
+      if (channel === POSITION_CONFIGURE_CHANNEL)
+        return {
+          department: scriptedSoftwareRndDepartment,
+          skills: scriptedSkillConfiguration,
+        };
+      throw new Error(`Unexpected channel ${channel}`);
+    });
+    assert.equal(
+      (await bridge.runtime.inspectAgentCatalog()).agents[0]?.id,
+      "codex",
+    );
+    assert.equal(
+      (await bridge.runtime.discoverAgents()).agents[0]?.status,
+      "installed",
+    );
+    assert.equal((await bridge.runtime.testAgent("codex")).status, "passed");
+    assert.deepEqual(await bridge.runtime.inspectSkillCatalog(), skillCatalog);
+    await bridge.runtime.discoverSkills(["/tmp/skills"]);
+    await bridge.runtime.enableSkill("local-review");
+    await bridge.runtime.archiveDiscoveredSkill("local-review");
+    await bridge.runtime.configurePosition({
+      departmentId: "software-rnd",
+      positionId: "software-engineer",
+      expectedRevision: 0,
+      expectedSkillRevision: 0,
+      name: "Software Engineer",
+      responsibility: "Ships tested slices.",
+      aiMemberDisplayName: "Engineer",
+      aiMemberProfile: "",
+      aiMemberResponsibilityMetadata: {},
+      aiMemberStatus: "active",
+      defaultAgentId: "codex",
+      skillIds: ["tdd"],
+    });
+    assert.deepEqual(
+      calls.map((call) => call.channel),
+      [
+        AGENT_CATALOG_INSPECT_CHANNEL,
+        AGENT_CATALOG_DISCOVER_CHANNEL,
+        AGENT_TEST_CHANNEL,
+        SKILL_DISCOVERY_INSPECT_CHANNEL,
+        SKILL_DISCOVERY_REFRESH_CHANNEL,
+        SKILL_DISCOVERY_ENABLE_CHANNEL,
+        SKILL_DISCOVERY_ARCHIVE_CHANNEL,
+        POSITION_CONFIGURE_CHANNEL,
+      ],
+    );
+  });
   it("exposes typed Runtime read models through one narrow namespace", async () => {
     const calls: string[] = [];
     const bridge = createSandcastleBridge(async (channel) => {
@@ -93,6 +187,13 @@ describe("Sandcastle preload bridge", () => {
     assert.equal(overview.company.name, "Acme");
     assert.deepEqual(Object.keys(bridge.runtime), [
       "health",
+      "inspectAgentCatalog",
+      "discoverAgents",
+      "testAgent",
+      "inspectSkillCatalog",
+      "discoverSkills",
+      "enableSkill",
+      "archiveDiscoveredSkill",
       "overview",
       "projects",
       "createProject",
@@ -108,6 +209,7 @@ describe("Sandcastle preload bridge", () => {
       "createPosition",
       "updatePosition",
       "archivePosition",
+      "configurePosition",
       "createSecretReference",
       "archiveSecretReference",
       "saveExecutionProfile",

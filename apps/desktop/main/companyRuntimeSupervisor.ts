@@ -36,11 +36,22 @@ import type {
   RuntimeAuditRecord,
   RuntimeEventRecord,
   SkillConfigurationView,
+  AgentCatalogView,
+  AgentTestResult,
+  SkillCatalogView,
+  PositionConfigurationResult,
 } from "../runtime/interface.js";
 
 export interface CompanyRuntimeSupervisor {
   start(companyDir: string): Promise<RuntimeHealth>;
   health(): Promise<RuntimeHealth>;
+  inspectAgentCatalog(): Promise<AgentCatalogView>;
+  discoverAgents(): Promise<AgentCatalogView>;
+  testAgent(agentId: string): Promise<AgentTestResult>;
+  inspectSkillCatalog(): Promise<SkillCatalogView>;
+  discoverSkills(directories?: readonly string[]): Promise<SkillCatalogView>;
+  enableSkill(skillId: string): Promise<SkillCatalogView>;
+  archiveDiscoveredSkill(skillId: string): Promise<SkillCatalogView>;
   overview(): Promise<CompanyOverview>;
   projects(): Promise<readonly CompanyProject[]>;
   createProject(input: {
@@ -89,6 +100,7 @@ export interface CompanyRuntimeSupervisor {
     readonly aiMemberDisplayName: string;
     readonly aiMemberProfile: string;
     readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+    readonly defaultAgentId?: string;
   }): Promise<DepartmentInspect>;
   updatePosition(input: {
     readonly departmentId: string;
@@ -100,12 +112,27 @@ export interface CompanyRuntimeSupervisor {
     readonly aiMemberProfile: string;
     readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
     readonly aiMemberStatus: "active" | "inactive";
+    readonly defaultAgentId?: string;
   }): Promise<DepartmentInspect>;
   archivePosition(input: {
     readonly departmentId: string;
     readonly positionId: string;
     readonly expectedRevision: number;
   }): Promise<DepartmentInspect>;
+  configurePosition(input: {
+    readonly departmentId: string;
+    readonly positionId: string;
+    readonly expectedRevision: number;
+    readonly expectedSkillRevision: number;
+    readonly name: string;
+    readonly responsibility: string;
+    readonly aiMemberDisplayName: string;
+    readonly aiMemberProfile: string;
+    readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+    readonly aiMemberStatus: "active" | "inactive";
+    readonly defaultAgentId: string;
+    readonly skillIds: readonly string[];
+  }): Promise<PositionConfigurationResult>;
   createSecretReference(input: {
     readonly departmentId: string;
     readonly name: string;
@@ -234,6 +261,7 @@ export interface CompanyRuntimeSupervisor {
   startRun(input: {
     readonly projectId: string;
     readonly departmentId: string;
+    readonly agentOverrideId?: string;
   }): Promise<DepartmentRunView>;
   forkRun(input: {
     readonly runId: string;
@@ -640,6 +668,19 @@ export const createCompanyRuntimeSupervisor = (
   return {
     start,
     health,
+    inspectAgentCatalog: () => query({ type: "agent.catalog.inspect" }),
+    discoverAgents: () => execute({ type: "agent.catalog.discover" }),
+    testAgent: (agentId) => execute({ type: "agent.test", agentId }),
+    inspectSkillCatalog: () => query({ type: "skill.discovery.inspect" }),
+    discoverSkills: (directories = []) =>
+      execute({
+        type: "skill.discovery.refresh",
+        directories: [...directories],
+      }),
+    enableSkill: (skillId) =>
+      execute({ type: "skill.discovery.enable", skillId }),
+    archiveDiscoveredSkill: (skillId) =>
+      execute({ type: "skill.discovery.archive", skillId }),
     overview,
     projects: () => query({ type: "projects.list" }),
     createProject: (input) => execute({ type: "project.create", ...input }),
@@ -670,6 +711,12 @@ export const createCompanyRuntimeSupervisor = (
     createPosition: (input) => execute({ type: "position.create", ...input }),
     updatePosition: (input) => execute({ type: "position.update", ...input }),
     archivePosition: (input) => execute({ type: "position.archive", ...input }),
+    configurePosition: (input) =>
+      execute({
+        type: "position.configure",
+        ...input,
+        skillIds: [...input.skillIds],
+      }),
     createSecretReference: (input) =>
       execute({ type: "secret-reference.create", ...input }),
     archiveSecretReference: (input) =>

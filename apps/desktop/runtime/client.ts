@@ -23,6 +23,10 @@ import {
   PipelineValidationResultSchema,
   ProjectEditorViewSchema,
   RuntimeHealthSchema,
+  AgentCatalogViewSchema,
+  AgentTestResultSchema,
+  SkillCatalogViewSchema,
+  PositionConfigurationResultSchema,
   RuntimeAuditRecordSchema,
   RuntimeEventRecordSchema,
   RuntimeResponseSchema,
@@ -159,6 +163,14 @@ export const createCompanyRuntimeClientFromTransport = (
     switch (query.type) {
       case "runtime.health":
         return RuntimeHealthSchema.parse(result) as CompanyQueryResult<Query>;
+      case "agent.catalog.inspect":
+        return AgentCatalogViewSchema.parse(
+          result,
+        ) as CompanyQueryResult<Query>;
+      case "skill.discovery.inspect":
+        return SkillCatalogViewSchema.parse(
+          result,
+        ) as CompanyQueryResult<Query>;
       case "company.overview":
         return CompanyOverviewSchema.parse(result) as CompanyQueryResult<Query>;
       case "projects.list":
@@ -247,6 +259,30 @@ export const createCompanyRuntimeClientFromTransport = (
     });
     if (command.type === "project.create") {
       return CompanyProjectSchema.parse(
+        result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (command.type === "position.configure") {
+      return PositionConfigurationResultSchema.parse(
+        result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (command.type === "agent.catalog.discover") {
+      return AgentCatalogViewSchema.parse(
+        result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (command.type === "agent.test") {
+      return AgentTestResultSchema.parse(
+        result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (
+      command.type === "skill.discovery.refresh" ||
+      command.type === "skill.discovery.enable" ||
+      command.type === "skill.discovery.archive"
+    ) {
+      return SkillCatalogViewSchema.parse(
         result,
       ) as CompanyCommandResult<Command>;
     }

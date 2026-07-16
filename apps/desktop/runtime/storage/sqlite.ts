@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
+import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import {
   openCompanyCatalog,
@@ -44,6 +45,15 @@ import {
   openRuntimeDiagnostics,
   type RuntimeDiagnostics,
 } from "../diagnostics.js";
+import {
+  openAgentCatalog,
+  type AgentCatalog,
+  type LocalAgentHost,
+} from "../agent/agentCatalog.js";
+import {
+  openSkillCatalog,
+  type SkillCatalog,
+} from "../skill/skillDiscovery.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -56,6 +66,8 @@ export interface CompanyDatabase {
   readonly interaction: RuntimeInteraction;
   readonly memory: RuntimeMemory;
   readonly diagnostics: RuntimeDiagnostics;
+  readonly agentCatalog: AgentCatalog;
+  readonly skillCatalog: SkillCatalog;
   readonly schemaVersion: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
   readonly close: () => void;
@@ -68,6 +80,7 @@ export const openCompanyDatabase = (
   options: {
     readonly executionAdapter?: ExecutionAdapter;
     readonly clock?: () => Date;
+    readonly agentHost?: LocalAgentHost;
   } = {},
 ): CompanyDatabase => {
   const sandcastleDir = join(companyDir, ".sandcastle");
@@ -106,6 +119,18 @@ export const openCompanyDatabase = (
   const interaction = openRuntimeInteraction(database);
   const memory = openRuntimeMemory(database);
   const diagnostics = openRuntimeDiagnostics(database, path);
+  const agentCatalog = openAgentCatalog(database, {
+    ...(options.agentHost ? { host: options.agentHost } : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
+  const skillCatalog = openSkillCatalog(database, {
+    ...(options.clock ? { clock: options.clock } : {}),
+    defaultDirectories: [
+      join(homedir(), ".codex", "skills"),
+      join(homedir(), ".agents", "skills"),
+      join(companyDir, ".agents", "skills"),
+    ],
+  });
   const pipelineRuntime = openPipelineRuntime(
     database,
     options.executionAdapter ?? createScriptedExecutionAdapter(),
@@ -127,6 +152,8 @@ export const openCompanyDatabase = (
     interaction,
     memory,
     diagnostics,
+    agentCatalog,
+    skillCatalog,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

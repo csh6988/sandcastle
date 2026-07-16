@@ -48,6 +48,7 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
       name: "Product Planner",
       responsibility:
         "Aligns product goals and turns requirements into reviewed plan inputs.",
+      defaultAgentId: "codex",
       revision: 0,
       status: "active",
       aiMember: {
@@ -64,6 +65,7 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
       name: "Software Architect",
       responsibility:
         "Produces the technical plan and repository-level delivery shape.",
+      defaultAgentId: "codex",
       revision: 0,
       status: "active",
       aiMember: {
@@ -79,6 +81,7 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
       id: "software-engineer",
       name: "Software Engineer",
       responsibility: "Implements and tests the approved delivery plan.",
+      defaultAgentId: "codex",
       revision: 0,
       status: "active",
       aiMember: {
@@ -94,6 +97,7 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
       id: "reviewer",
       name: "Reviewer",
       responsibility: "Independently reviews implementation and delivery risk.",
+      defaultAgentId: "codex",
       revision: 0,
       status: "active",
       aiMember: {
@@ -109,6 +113,7 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
       id: "evaluator",
       name: "Evaluator",
       responsibility: "Verifies acceptance criteria against recorded evidence.",
+      defaultAgentId: "codex",
       revision: 0,
       status: "active",
       aiMember: {

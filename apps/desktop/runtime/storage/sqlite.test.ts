@@ -207,7 +207,7 @@ describe("Company database migrations", () => {
     const database = openCompanyDatabase(companyDir);
 
     try {
-      assert.equal(database.schemaVersion(), 20);
+      assert.equal(database.schemaVersion(), 23);
       const inspected = new DatabaseSync(database.path);
       try {
         assert.deepEqual(
@@ -241,6 +241,9 @@ describe("Company database migrations", () => {
               version: 20,
               name: "software_rnd_production_skill_flows",
             },
+            { version: 21, name: "local_agent_detection_results" },
+            { version: 22, name: "position_default_agent_bindings" },
+            { version: 23, name: "local_skill_discovery_catalog" },
           ],
         );
         assert.equal(
@@ -249,7 +252,7 @@ describe("Company database migrations", () => {
               user_version: number;
             }
           ).user_version,
-          20,
+          23,
         );
         assert.deepEqual(
           inspected
@@ -353,7 +356,7 @@ describe("Company database migrations", () => {
 
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(database.schemaVersion(), 20);
+      assert.equal(database.schemaVersion(), 23);
       assert.equal(
         database.catalog.inspectDepartment("existing-department").name,
         "Existing",
@@ -415,7 +418,7 @@ describe("Company database migrations", () => {
     try {
       const pipeline =
         migrated.pipelineConfiguration.inspect("software-rnd").published;
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       assert.equal(
         pipeline?.hash,
         "bceeae6c19bab660551f35f602d07bab10c6a93388556346cc19f6fbb748acdb",
@@ -459,7 +462,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       assert.deepEqual(migrated.projectConfiguration.inspect(project.id), {
         id: project.id,
         name: "Existing Project",
@@ -498,7 +501,7 @@ describe("Company database migrations", () => {
     const migrated = openCompanyDatabase(companyDir);
     try {
       const configuration = migrated.skillConfiguration.inspect("software-rnd");
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       assert.equal(configuration.revision, 0);
       assert.equal(configuration.activeSkills.length, 7);
       assert.equal(configuration.skillFlows.length, 5);
@@ -534,7 +537,7 @@ describe("Company database migrations", () => {
         (position) => position.id === "software-engineer",
       );
 
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       assert.equal(department.revision, 0);
       assert.deepEqual(department.inputArtifactContracts, []);
       assert.deepEqual(department.outputArtifactContracts, []);
@@ -575,7 +578,7 @@ describe("Company database migrations", () => {
       const departmentAfter =
         migrated.catalog.inspectDepartment("software-rnd");
 
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       assert.deepEqual(after.published, before.published);
       assert.deepEqual(after.history, before.history);
       assert.deepEqual(
@@ -623,7 +626,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -703,7 +706,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -754,7 +757,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.equal(
@@ -791,7 +794,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 20);
+      assert.equal(migrated.schemaVersion(), 23);
       const inspected = new DatabaseSync(migrated.path);
       try {
         const table = inspected
@@ -822,14 +825,14 @@ describe("Company database migrations", () => {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '21');
-      PRAGMA user_version = 21;
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '24');
+      PRAGMA user_version = 24;
     `);
     future.close();
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Unsupported company database schema version 21/,
+      /Unsupported company database schema version 24/,
     );
 
     const inspected = new DatabaseSync(databasePath);
@@ -842,7 +845,7 @@ describe("Company database migrations", () => {
             )
             .get() as { value: string }
         ).value,
-        "21",
+        "24",
       );
       assert.equal(
         (
@@ -850,7 +853,7 @@ describe("Company database migrations", () => {
             user_version: number;
           }
         ).user_version,
-        21,
+        24,
       );
       assert.equal(
         inspected
@@ -874,7 +877,7 @@ describe("Company database backups", () => {
     const backup = await database.backup();
     database.close();
 
-    assert.equal(backup.schemaVersion, 20);
+    assert.equal(backup.schemaVersion, 23);
     assert.equal(existsSync(backup.path), true);
     if (process.platform !== "win32") {
       assert.equal(statSync(backup.path).mode & 0o777, 0o600);
@@ -885,7 +888,7 @@ describe("Company database backups", () => {
 
     const restored = openCompanyDatabase(companyDir);
     try {
-      assert.equal(restored.schemaVersion(), 20);
+      assert.equal(restored.schemaVersion(), 23);
     } finally {
       restored.close();
     }

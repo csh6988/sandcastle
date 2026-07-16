@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { isRegisteredCompanyAgentId } from "../agent/agentCatalog.js";
 import type { ExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
 import type { ArtifactRegistry } from "../artifactRegistry.js";
 import {
@@ -73,6 +74,7 @@ export interface PipelineRuntime {
   readonly startRun: (input: {
     readonly projectId: string;
     readonly departmentId: string;
+    readonly agentOverrideId?: string;
   }) => DepartmentRunView;
   readonly forkRun: (input: {
     readonly runId: string;
@@ -777,7 +779,17 @@ export const openPipelineRuntime = (
   const buildSnapshot = (input: {
     readonly projectId: string;
     readonly departmentId: string;
+    readonly agentOverrideId?: string;
   }): RunSnapshotPayload => {
+    if (
+      input.agentOverrideId !== undefined &&
+      !isRegisteredCompanyAgentId(input.agentOverrideId)
+    ) {
+      throw new PipelineRuntimeError(
+        "AGENT_NOT_REGISTERED",
+        `Company Agent Adapter ${input.agentOverrideId} is not registered.`,
+      );
+    }
     const project = database
       .prepare(
         `SELECT id, name, goal, status, revision, shared_context AS sharedContext
@@ -912,6 +924,7 @@ export const openPipelineRuntime = (
                   positions.department_id AS departmentId,
                   positions.name,
                   positions.responsibility,
+                  positions.default_agent_id AS defaultAgentId,
                   positions.revision,
                   positions.status,
                   ai_members.id AS aiMemberId,
@@ -930,6 +943,7 @@ export const openPipelineRuntime = (
             readonly departmentId: string;
             readonly name: string;
             readonly responsibility: string;
+            readonly defaultAgentId: string;
             readonly revision: number;
             readonly status: "active" | "archived";
             readonly aiMemberId: string;
@@ -957,6 +971,21 @@ export const openPipelineRuntime = (
         revision: Number(position.revision),
         name: position.name,
         responsibility: position.responsibility,
+        defaultAgentId: position.defaultAgentId,
+        resolvedAgentId: input.agentOverrideId ?? position.defaultAgentId,
+        agentSource: input.agentOverrideId
+          ? ("run-override" as const)
+          : ("position-default" as const),
+        skillIds: (
+          database
+            .prepare(
+              `SELECT skill_id AS skillId
+                 FROM position_skill_bindings
+                WHERE position_id = ?
+             ORDER BY skill_id`,
+            )
+            .all(position.id) as Array<{ readonly skillId: string }>
+        ).map((binding) => binding.skillId),
         aiMember: {
           id: position.aiMemberId,
           displayName: position.aiMemberDisplayName,
@@ -1154,6 +1183,7 @@ export const openPipelineRuntime = (
   const startRun = (input: {
     readonly projectId: string;
     readonly departmentId: string;
+    readonly agentOverrideId?: string;
   }): DepartmentRunView => {
     const payload = buildSnapshot(input);
     const canonicalJson = canonicalPipelineJson(payload);
@@ -1221,7 +1251,14 @@ export const openPipelineRuntime = (
         entityId: runId,
         eventType: "run.created",
         runId,
-        after: { status: "ready", revision: 0 },
+        after: {
+          status: "ready",
+          revision: 0,
+          agentOverrideId: input.agentOverrideId ?? null,
+          agentSource: input.agentOverrideId
+            ? "run-override"
+            : "position-default",
+        },
         createdAt: now,
       });
       database.exec("COMMIT");

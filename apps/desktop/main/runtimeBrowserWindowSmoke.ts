@@ -59,6 +59,8 @@ export interface RuntimeBrowserWindowSmokeReport {
   readonly runRuntimeId: string;
   readonly runStatus: string;
   readonly runSnapshotHash: string;
+  readonly runResolvedAgentId: string;
+  readonly runAgentSource: string;
   readonly runAttemptCount: number;
   readonly runApprovalCycles: number;
   readonly reloadRunStatus: string;
@@ -82,6 +84,33 @@ const waitForSelector = async (
             resolve(true);
             return;
           }
+          if (Date.now() >= deadline) {
+            resolve(false);
+            return;
+          }
+          setTimeout(poll, 25);
+        };
+        poll();
+      })`,
+      true,
+    ),
+  );
+
+const clickUntilSelector = async (
+  window: BrowserWindow,
+  triggerSelector: string,
+  targetSelector: string,
+): Promise<boolean> =>
+  Boolean(
+    await window.webContents.executeJavaScript(
+      `new Promise((resolve) => {
+        const deadline = Date.now() + 5000;
+        const poll = () => {
+          if (document.querySelector(${JSON.stringify(targetSelector)})) {
+            resolve(true);
+            return;
+          }
+          document.querySelector(${JSON.stringify(triggerSelector)})?.click();
           if (Date.now() >= deadline) {
             resolve(false);
             return;
@@ -356,6 +385,14 @@ export const runRuntimeBrowserWindowSmoke = async (
   );
   if (departmentRuntimeId !== runtimeDepartment.id) {
     throw new Error("Department detail did not match the Runtime read model.");
+  }
+
+  await window.webContents.executeJavaScript(
+    `document.querySelector('[data-department-tab=settings]')?.click()`,
+    true,
+  );
+  if (!(await waitForSelector(window, "[data-department-settings]"))) {
+    throw new Error("Department Settings panel was not reachable.");
   }
 
   await window.webContents.executeJavaScript(
@@ -924,10 +961,10 @@ export const runRuntimeBrowserWindowSmoke = async (
   }
 
   await window.webContents.executeJavaScript(
-    `document.querySelector('[data-department-tab=overview]')?.click()`,
+    `document.querySelector('[data-department-tab=settings]')?.click()`,
     true,
   );
-  await waitForSelector(window, "[data-department-panel=overview]");
+  await waitForSelector(window, "[data-department-panel=settings]");
   await window.webContents.executeJavaScript(
     `(() => {
       const form = document.querySelector('[data-department-copy-form]');
@@ -948,6 +985,14 @@ export const runRuntimeBrowserWindowSmoke = async (
     window,
     "Product Delivery",
   );
+  if (
+    !(await waitForSelector(
+      window,
+      `[data-runtime-department-id=${JSON.stringify(copiedDepartment.id)}][aria-busy="false"]`,
+    ))
+  ) {
+    throw new Error("Copied Department detail did not become current.");
+  }
   if (copiedDepartment.id === "software-rnd") {
     throw new Error("Department copy did not create a new Runtime record.");
   }
@@ -965,9 +1010,30 @@ export const runRuntimeBrowserWindowSmoke = async (
   const copiedDepartmentId = copiedDepartment.id;
 
   if (
+    !(await clickUntilSelector(
+      window,
+      "[data-department-tab=settings]",
+      "[data-department-panel=settings]",
+    ))
+  ) {
+    throw new Error("Copied Department Settings did not open.");
+  }
+
+  if (
     !(await waitForSelector(window, "[data-department-archive]:not(:disabled)"))
   ) {
-    throw new Error("Copied Department archive action did not become ready.");
+    const archiveDiagnostics = await window.webContents.executeJavaScript(
+      `JSON.stringify({
+        settingsTab: Boolean(document.querySelector('[data-department-tab=settings]')),
+        settingsPanel: Boolean(document.querySelector('[data-department-panel=settings]')),
+        archive: document.querySelector('[data-department-archive]')?.outerHTML ?? null,
+        busy: document.querySelector('[data-department-archive]')?.hasAttribute('disabled') ?? null,
+      })`,
+      true,
+    );
+    throw new Error(
+      `Copied Department archive action did not become ready: ${archiveDiagnostics}`,
+    );
   }
   await window.webContents.executeJavaScript(
     `document.querySelector('[data-department-archive]')?.click()`,
@@ -1259,6 +1325,17 @@ export const runRuntimeBrowserWindowSmoke = async (
   ) {
     throw new Error("Run start action did not become available.");
   }
+  await window.webContents.executeJavaScript(
+    `(() => {
+      const select = document.querySelector('#project-run-agent-override');
+      if (!(select instanceof HTMLSelectElement)) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+      setter?.call(select, 'claude-code');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`,
+    true,
+  );
   await window.webContents.executeJavaScript(
     `document.querySelector('[data-start-department-run]')?.click()`,
     true,
@@ -1558,6 +1635,9 @@ export const runRuntimeBrowserWindowSmoke = async (
     runRuntimeId,
     runStatus: runView.run.status,
     runSnapshotHash: runView.snapshot.hash,
+    runResolvedAgentId:
+      runView.snapshot.payload.positions[0]?.resolvedAgentId ?? "",
+    runAgentSource: runView.snapshot.payload.positions[0]?.agentSource ?? "",
     runAttemptCount:
       runView.nodes.find((node) => node.pipelineNodeId === "scripted-task")
         ?.attempts.length ?? 0,

@@ -32,6 +32,7 @@ import {
   POSITION_UPDATE_CHANNEL,
   POSITION_CREATE_CHANNEL,
   POSITION_ARCHIVE_CHANNEL,
+  POSITION_CONFIGURE_CHANNEL,
   SECRET_REFERENCE_CREATE_CHANNEL,
   SECRET_REFERENCE_ARCHIVE_CHANNEL,
   EXECUTION_PROFILE_SAVE_CHANNEL,
@@ -42,6 +43,13 @@ import {
   PROJECT_UPDATE_CHANNEL,
   PROJECTS_LIST_CHANNEL,
   RUNTIME_HEALTH_CHANNEL,
+  AGENT_CATALOG_INSPECT_CHANNEL,
+  AGENT_CATALOG_DISCOVER_CHANNEL,
+  AGENT_TEST_CHANNEL,
+  SKILL_DISCOVERY_INSPECT_CHANNEL,
+  SKILL_DISCOVERY_REFRESH_CHANNEL,
+  SKILL_DISCOVERY_ENABLE_CHANNEL,
+  SKILL_DISCOVERY_ARCHIVE_CHANNEL,
   RUNTIME_AUDIT_CHANNEL,
   RUNTIME_EVENTS_CHANNEL,
   RUNTIME_EVENTS_CONSUMER_CHANNEL,
@@ -72,6 +80,13 @@ import {
 
 interface RuntimeHealthSource {
   health(): ReturnType<SandcastleBridge["runtime"]["health"]>;
+  inspectAgentCatalog: SandcastleBridge["runtime"]["inspectAgentCatalog"];
+  discoverAgents: SandcastleBridge["runtime"]["discoverAgents"];
+  testAgent: SandcastleBridge["runtime"]["testAgent"];
+  inspectSkillCatalog: SandcastleBridge["runtime"]["inspectSkillCatalog"];
+  discoverSkills: SandcastleBridge["runtime"]["discoverSkills"];
+  enableSkill: SandcastleBridge["runtime"]["enableSkill"];
+  archiveDiscoveredSkill: SandcastleBridge["runtime"]["archiveDiscoveredSkill"];
   overview(): ReturnType<SandcastleBridge["runtime"]["overview"]>;
   projects(): ReturnType<SandcastleBridge["runtime"]["projects"]>;
   createProject: SandcastleBridge["runtime"]["createProject"];
@@ -87,6 +102,7 @@ interface RuntimeHealthSource {
   createPosition: SandcastleBridge["runtime"]["createPosition"];
   updatePosition: SandcastleBridge["runtime"]["updatePosition"];
   archivePosition: SandcastleBridge["runtime"]["archivePosition"];
+  configurePosition: SandcastleBridge["runtime"]["configurePosition"];
   createSecretReference: SandcastleBridge["runtime"]["createSecretReference"];
   archiveSecretReference: SandcastleBridge["runtime"]["archiveSecretReference"];
   saveExecutionProfile: SandcastleBridge["runtime"]["saveExecutionProfile"];
@@ -187,6 +203,63 @@ export const registerRuntimeIpc = (
   runtime: () => RuntimeHealthSource,
 ): void => {
   ipcMain.handle(RUNTIME_HEALTH_CHANNEL, () => runtime().health());
+  ipcMain.handle(AGENT_CATALOG_INSPECT_CHANNEL, () =>
+    runtime().inspectAgentCatalog(),
+  );
+  ipcMain.handle(AGENT_CATALOG_DISCOVER_CHANNEL, () =>
+    exposeRuntimeErrorCode(() => runtime().discoverAgents()),
+  );
+  ipcMain.handle(AGENT_TEST_CHANNEL, (_event, input: unknown) => {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      typeof (input as { agentId?: unknown }).agentId !== "string"
+    ) {
+      throw new Error("Invalid agent.test payload.");
+    }
+    return exposeRuntimeErrorCode(() =>
+      runtime().testAgent((input as { agentId: string }).agentId),
+    );
+  });
+  ipcMain.handle(SKILL_DISCOVERY_INSPECT_CHANNEL, () =>
+    runtime().inspectSkillCatalog(),
+  );
+  ipcMain.handle(SKILL_DISCOVERY_REFRESH_CHANNEL, (_event, input: unknown) => {
+    const directories =
+      typeof input === "object" && input !== null && "directories" in input
+        ? (input as { directories?: unknown }).directories
+        : [];
+    if (
+      !Array.isArray(directories) ||
+      directories.some((directory) => typeof directory !== "string")
+    ) {
+      throw new Error("Invalid skill.discovery.refresh payload.");
+    }
+    return exposeRuntimeErrorCode(() => runtime().discoverSkills(directories));
+  });
+  const registerSkillDiscoveryMutation = (
+    channel: string,
+    execute: (skillId: string) => Promise<unknown>,
+  ): void => {
+    ipcMain.handle(channel, (_event, input: unknown) => {
+      if (
+        typeof input !== "object" ||
+        input === null ||
+        typeof (input as { skillId?: unknown }).skillId !== "string"
+      ) {
+        throw new Error("Invalid Skill discovery mutation payload.");
+      }
+      return exposeRuntimeErrorCode(() =>
+        execute((input as { skillId: string }).skillId),
+      );
+    });
+  };
+  registerSkillDiscoveryMutation(SKILL_DISCOVERY_ENABLE_CHANNEL, (skillId) =>
+    runtime().enableSkill(skillId),
+  );
+  registerSkillDiscoveryMutation(SKILL_DISCOVERY_ARCHIVE_CHANNEL, (skillId) =>
+    runtime().archiveDiscoveredSkill(skillId),
+  );
   ipcMain.handle(COMPANY_OVERVIEW_CHANNEL, () => runtime().overview());
   ipcMain.handle(PROJECTS_LIST_CHANNEL, () => runtime().projects());
   ipcMain.handle(PROJECT_CREATE_CHANNEL, (_event, input: unknown) => {
@@ -336,6 +409,19 @@ export const registerRuntimeIpc = (
     "position.archive",
     (command) => runtime().archivePosition(command),
   );
+  ipcMain.handle(POSITION_CONFIGURE_CHANNEL, (_event, input: unknown) => {
+    const command = CompanyCommandSchema.parse({
+      ...(typeof input === "object" && input !== null ? input : {}),
+      type: "position.configure",
+    });
+    if (command.type !== "position.configure") {
+      throw new Error("Invalid position.configure payload.");
+    }
+    const { type: _type, ...positionConfiguration } = command;
+    return exposeRuntimeErrorCode(() =>
+      runtime().configurePosition(positionConfiguration),
+    );
+  });
   registerCatalogCommand(
     SECRET_REFERENCE_CREATE_CHANNEL,
     "secret-reference.create",

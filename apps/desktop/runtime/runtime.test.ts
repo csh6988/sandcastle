@@ -34,10 +34,140 @@ describe("Company Runtime", () => {
       const health = await client.query({ type: "runtime.health" });
 
       assert.equal(health.status, "ok");
-      assert.equal(health.schemaVersion, 20);
+      assert.equal(health.schemaVersion, 23);
       assert.equal(health.pid, process.pid);
       assert.equal(
         existsSync(join(companyDir, ".sandcastle", "company.sqlite")),
+        true,
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("serves Agent discovery and testing through the authenticated Runtime contract", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+      agentHost: {
+        resolveExecutable: async (names) =>
+          names.includes("codex") ? "/opt/codex" : null,
+        run: async () => ({
+          exitCode: 0,
+          stdout: "codex-cli 1.2.3",
+          stderr: "",
+        }),
+      },
+    });
+
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const discovered = await client.execute({
+        type: "agent.catalog.discover",
+      });
+      assert.equal(
+        discovered.agents.find((agent) => agent.id === "codex")?.version,
+        "1.2.3",
+      );
+      const inspected = await client.query({ type: "agent.catalog.inspect" });
+      assert.equal(
+        inspected.agents.find((agent) => agent.id === "codex")?.status,
+        "installed",
+      );
+      const tested = await client.execute({
+        type: "agent.test",
+        agentId: "codex",
+      });
+      assert.equal(tested.status, "passed");
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("serves Skill discovery and unified Position configuration through the Runtime", async () => {
+    const companyDir = tempCompanyDir();
+    const sourceDirectory = join(companyDir, "extra-skills");
+    const skillDirectory = join(sourceDirectory, "local-review");
+    mkdirSync(skillDirectory, { recursive: true });
+    writeFileSync(
+      join(skillDirectory, "SKILL.md"),
+      "---\nname: Local Review\ndescription: Reviews changes.\n---\n",
+    );
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const discovered = await client.execute({
+        type: "skill.discovery.refresh",
+        directories: [sourceDirectory],
+      });
+      const localSkill = discovered.skills.find(
+        (skill) => skill.name === "Local Review",
+      );
+      assert.ok(localSkill);
+      const enabled = await client.execute({
+        type: "skill.discovery.enable",
+        skillId: localSkill.id,
+      });
+      assert.equal(
+        enabled.skills.find((skill) => skill.id === localSkill.id)?.status,
+        "enabled",
+      );
+      const department = await client.query({
+        type: "department.inspect",
+        departmentId: "software-rnd",
+      });
+      const skills = await client.query({
+        type: "department.skill-configuration.inspect",
+        departmentId: "software-rnd",
+      });
+      const engineer = department.positions.find(
+        (position) => position.id === "software-engineer",
+      );
+      assert.ok(engineer);
+      const configured = await client.execute({
+        type: "position.configure",
+        departmentId: "software-rnd",
+        positionId: engineer.id,
+        expectedRevision: engineer.revision,
+        expectedSkillRevision: skills.revision,
+        name: engineer.name,
+        responsibility: engineer.responsibility,
+        aiMemberDisplayName: engineer.aiMember.displayName,
+        aiMemberProfile: engineer.aiMember.profile,
+        aiMemberResponsibilityMetadata:
+          engineer.aiMember.responsibilityMetadata,
+        aiMemberStatus: engineer.aiMember.status,
+        defaultAgentId: "claude-code",
+        skillIds: [
+          ...(skills.positions.find((position) => position.id === engineer.id)
+            ?.skillIds ?? []),
+          localSkill.id,
+        ],
+      });
+      assert.equal(
+        configured.department.positions.find(
+          (position) => position.id === engineer.id,
+        )?.defaultAgentId,
+        "claude-code",
+      );
+      assert.equal(
+        configured.skills.positions
+          .find((position) => position.id === engineer.id)
+          ?.skillIds.includes(localSkill.id),
         true,
       );
     } finally {
@@ -123,7 +253,7 @@ describe("Company Runtime", () => {
         type: "runtime.backup",
       });
 
-      assert.equal(created.schemaVersion, 20);
+      assert.equal(created.schemaVersion, 23);
       assert.equal(existsSync(created.path), true);
       assert.equal(
         created.path.startsWith(join(companyDir, ".sandcastle", "backups")),
@@ -1319,7 +1449,7 @@ describe("Company Runtime", () => {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '21');
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '24');
     `);
     database.close();
 
@@ -1330,7 +1460,7 @@ describe("Company Runtime", () => {
           companyDir,
           token: "valid-token",
         }),
-      /Unsupported company database schema version 21/,
+      /Unsupported company database schema version 24/,
     );
 
     assert.equal(

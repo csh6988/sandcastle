@@ -36,7 +36,7 @@ describe("Runtime Diagnostics", () => {
       const after = database.diagnostics.inspect();
 
       assert.equal(before.sqliteIntegrity, "ok");
-      assert.equal(before.schemaVersion, 20);
+      assert.equal(before.schemaVersion, 23);
       assert.ok(compacted.deleted >= 1);
       assert.equal(after.runtimeEventCount, 0);
       assert.ok(after.auditRecordCount >= 1);

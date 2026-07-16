@@ -76,6 +76,18 @@ _Avoid_: "base branch", "destination branch", "merge target"
 A pluggable implementation that builds commands and parses output for a specific **agent**, injected into `run()` via the `agent` option.
 _Avoid_: "agent adapter", "agent driver"
 
+**Company Agent Adapter**:
+A formally registered adapter for one locally installed **agent** that exposes a stable identifier, human-readable metadata, availability detection, and a minimal non-destructive test. It is the Company Runtime's integration record, not an AI member identity or a model selection.
+_Avoid_: "agent provider" (the published Sandcastle library seam), display name as a persistent ID, custom command entry
+
+**Agent Catalog**:
+The Company Runtime read model of registered **Company Agent Adapters** and their latest local detection results. It describes what the host can use without owning a Department Run or silently selecting a fallback agent.
+_Avoid_: "model catalog", "agent list" (too narrow), treating detection as execution
+
+**Position Agent Binding**:
+The default **Company Agent Adapter** reference owned by a **Position**. A **Department Run** snapshots this binding and may use an explicit temporary override, while the **AI member** identity remains unchanged.
+_Avoid_: department-level agent, AI member provider, implicit fallback
+
 ### Execution
 
 **Agent invoker**:
@@ -393,6 +405,10 @@ _Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too na
 **Skill**:
 A stable, versioned capability reference in the **company**-wide Skill Catalog that a **position** may bind for use by its **skill flows**. A Skill is reusable across departments, while each position explicitly owns the subset available to its flows.
 _Avoid_: "prompt" (too narrow), "skill flow" (a flow selects and instructs multiple skills), department-owned skill copies
+
+**Skill Discovery**:
+The process of finding formally readable `SKILL.md` sources in configured host directories and projecting their stable references, descriptions, and fingerprints into the company-wide Skill Catalog without copying their contents into Company Runtime state.
+_Avoid_: manual skill registration, skill import (the source remains external), agent-specific skill list
 
 **Skill flow**:
 A selected subset of a **position**'s skills and operating instructions activated by a **department pipeline** node for a specific kind of work, such as planning, implementation, review, debugging, or merge-conflict resolution. The **AI member** keeps its identity and memory across nodes, but each execution loads only the current node's selected flow instead of the member's complete skill catalog.

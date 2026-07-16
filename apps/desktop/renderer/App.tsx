@@ -3,6 +3,8 @@ import {
   CompanyOverviewPage,
   CompanyArtifactsPage,
   CompanyInteractionPage,
+  AgentsPage,
+  SkillsPage,
   DepartmentsPage,
   ProjectsPage,
   SettingsPage,
@@ -18,6 +20,8 @@ type CompanyNav =
   | "overview"
   | "projects"
   | "departments"
+  | "agents"
+  | "skills"
   | "artifacts"
   | "interaction"
   | "settings";
@@ -29,6 +33,8 @@ const NAV_ITEMS: ReadonlyArray<{
   { id: "overview", labelKey: "navOverview" },
   { id: "projects", labelKey: "navProjects" },
   { id: "departments", labelKey: "navDepartments" },
+  { id: "agents", labelKey: "navAgents" },
+  { id: "skills", labelKey: "navSkills" },
   { id: "artifacts", labelKey: "navArtifacts" },
   { id: "interaction", labelKey: "navInteraction" },
   { id: "settings", labelKey: "navSettings" },
@@ -81,6 +87,8 @@ export function App() {
           {nav === "overview" && <CompanyOverviewPage t={t} />}
           {nav === "projects" && <ProjectsPage t={t} />}
           {nav === "departments" && <DepartmentsPage t={t} />}
+          {nav === "agents" && <AgentsPage t={t} />}
+          {nav === "skills" && <SkillsPage t={t} />}
           {nav === "artifacts" && <CompanyArtifactsPage t={t} />}
           {nav === "interaction" && <CompanyInteractionPage t={t} />}
           {nav === "settings" && (

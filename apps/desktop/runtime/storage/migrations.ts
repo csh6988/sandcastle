@@ -4,7 +4,7 @@ import {
   pipelineHash,
 } from "../pipeline/canonicalPipeline.js";
 
-export const CURRENT_SCHEMA_VERSION = 20;
+export const CURRENT_SCHEMA_VERSION = 23;
 
 interface CompanyMigration {
   readonly version: number;
@@ -1249,6 +1249,70 @@ const migrations: readonly CompanyMigration[] = [
           "UPDATE departments SET active_pipeline_version_id = ? WHERE id = 'software-rnd' AND active_pipeline_version_id = ?",
         )
         .run(correctedId, version.id);
+    },
+  },
+  {
+    version: 21,
+    name: "local_agent_detection_results",
+    migrate: (database) => {
+      database.exec(`
+      CREATE TABLE IF NOT EXISTS agent_detection_results (
+          adapter_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK (
+            status IN ('installed', 'not-installed', 'detection-failed')
+          ),
+          version TEXT,
+          executable_path TEXT,
+          last_detected_at TEXT NOT NULL,
+          error_code TEXT
+        ) STRICT;
+      `);
+    },
+  },
+  {
+    version: 22,
+    name: "position_default_agent_bindings",
+    migrate: (database) => {
+      const hasDefaultAgent = database
+        .prepare("PRAGMA table_info(positions)")
+        .all()
+        .some(
+          (column) =>
+            typeof column === "object" &&
+            column !== null &&
+            "name" in column &&
+            column.name === "default_agent_id",
+        );
+      if (!hasDefaultAgent) {
+        database.exec(
+          "ALTER TABLE positions ADD COLUMN default_agent_id TEXT NOT NULL DEFAULT 'codex'",
+        );
+      }
+    },
+  },
+  {
+    version: 23,
+    name: "local_skill_discovery_catalog",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS skill_source_directories (
+          path TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS skill_discovery_entries (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          source_directory TEXT NOT NULL,
+          location_ref TEXT NOT NULL UNIQUE,
+          fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (
+            status IN ('discovered', 'enabled', 'unavailable', 'archived')
+          ),
+          discovered_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL
+        ) STRICT;
+      `);
     },
   },
 ];

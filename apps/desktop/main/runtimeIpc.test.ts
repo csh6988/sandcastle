@@ -36,6 +36,14 @@ import {
   SKILL_FLOW_ARCHIVE_CHANNEL,
   SKILL_FLOW_SAVE_CHANNEL,
   POSITION_SKILLS_SET_CHANNEL,
+  POSITION_CONFIGURE_CHANNEL,
+  AGENT_CATALOG_INSPECT_CHANNEL,
+  AGENT_CATALOG_DISCOVER_CHANNEL,
+  AGENT_TEST_CHANNEL,
+  SKILL_DISCOVERY_INSPECT_CHANNEL,
+  SKILL_DISCOVERY_REFRESH_CHANNEL,
+  SKILL_DISCOVERY_ENABLE_CHANNEL,
+  SKILL_DISCOVERY_ARCHIVE_CHANNEL,
 } from "../preload/bridge.js";
 import { registerRuntimeIpc } from "./runtimeIpc.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
@@ -60,6 +68,21 @@ describe("Runtime Electron IPC", () => {
           schemaVersion: 1,
           pid: 42,
           startedAt: "2026-07-13T00:00:00.000Z",
+        }),
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        discoverAgents: async () => ({ agents: [] }),
+        testAgent: async (agentId) => ({
+          agentId,
+          status: "passed" as const,
+          testedAt: "2026-07-13T00:00:00.000Z",
+          summary: "ok",
+        }),
+        inspectSkillCatalog: async () => ({ directories: [], skills: [] }),
+        discoverSkills: async () => ({ directories: [], skills: [] }),
+        enableSkill: async () => ({ directories: [], skills: [] }),
+        archiveDiscoveredSkill: async () => ({
+          directories: [],
+          skills: [],
         }),
         overview: async () => ({
           company: { id: "company", name: "Acme" },
@@ -149,6 +172,10 @@ describe("Runtime Electron IPC", () => {
         createPosition: async () => scriptedSoftwareRndDepartment,
         updatePosition: async () => scriptedSoftwareRndDepartment,
         archivePosition: async () => scriptedSoftwareRndDepartment,
+        configurePosition: async () => ({
+          department: scriptedSoftwareRndDepartment,
+          skills: scriptedSkillConfiguration,
+        }),
         createSecretReference: async () => scriptedSoftwareRndDepartment,
         archiveSecretReference: async () => scriptedSoftwareRndDepartment,
         saveExecutionProfile: async () => scriptedSoftwareRndDepartment,
@@ -567,6 +594,14 @@ describe("Runtime Electron IPC", () => {
     assert.equal(handlers.has(SKILL_CATALOG_ARCHIVE_CHANNEL), true);
     assert.equal(handlers.has(SKILL_FLOW_SAVE_CHANNEL), true);
     assert.equal(handlers.has(SKILL_FLOW_ARCHIVE_CHANNEL), true);
+    assert.equal(handlers.has(AGENT_CATALOG_INSPECT_CHANNEL), true);
+    assert.equal(handlers.has(AGENT_CATALOG_DISCOVER_CHANNEL), true);
+    assert.equal(handlers.has(AGENT_TEST_CHANNEL), true);
+    assert.equal(handlers.has(SKILL_DISCOVERY_INSPECT_CHANNEL), true);
+    assert.equal(handlers.has(SKILL_DISCOVERY_REFRESH_CHANNEL), true);
+    assert.equal(handlers.has(SKILL_DISCOVERY_ENABLE_CHANNEL), true);
+    assert.equal(handlers.has(SKILL_DISCOVERY_ARCHIVE_CHANNEL), true);
+    assert.equal(handlers.has(POSITION_CONFIGURE_CHANNEL), true);
     assert.deepEqual(
       await handlers.get(RUNS_LIST_CHANNEL)?.({}, { projectId: "project-1" }),
       [scriptedDepartmentRun],

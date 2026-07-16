@@ -16,6 +16,10 @@ import {
   PipelineValidationResultSchema,
   ProjectEditorViewSchema,
   RuntimeHealthSchema,
+  AgentCatalogViewSchema,
+  AgentTestResultSchema,
+  SkillCatalogViewSchema,
+  PositionConfigurationResultSchema,
   RuntimeAuditRecordSchema,
   RuntimeEventRecordSchema,
   SkillConfigurationViewSchema,
@@ -49,12 +53,28 @@ import {
   type PipelineValidationResult,
   type ProjectEditorView,
   type RuntimeHealth,
+  type AgentCatalogView,
+  type AgentTestResult,
+  type SkillCatalogView,
+  type PositionConfigurationResult,
   type RuntimeAuditRecord,
   type RuntimeEventRecord,
   type SkillConfigurationView,
 } from "../runtime/interface.js";
 
 export const RUNTIME_HEALTH_CHANNEL = "sandcastle:runtime.health";
+export const AGENT_CATALOG_INSPECT_CHANNEL = "sandcastle:agent.catalog.inspect";
+export const AGENT_CATALOG_DISCOVER_CHANNEL =
+  "sandcastle:agent.catalog.discover";
+export const AGENT_TEST_CHANNEL = "sandcastle:agent.test";
+export const SKILL_DISCOVERY_INSPECT_CHANNEL =
+  "sandcastle:skill.discovery.inspect";
+export const SKILL_DISCOVERY_REFRESH_CHANNEL =
+  "sandcastle:skill.discovery.refresh";
+export const SKILL_DISCOVERY_ENABLE_CHANNEL =
+  "sandcastle:skill.discovery.enable";
+export const SKILL_DISCOVERY_ARCHIVE_CHANNEL =
+  "sandcastle:skill.discovery.archive";
 export const COMPANY_OVERVIEW_CHANNEL = "sandcastle:company.overview";
 export const PROJECTS_LIST_CHANNEL = "sandcastle:projects.list";
 export const PROJECT_CREATE_CHANNEL = "sandcastle:project.create";
@@ -70,6 +90,7 @@ export const DEPARTMENT_COPY_CHANNEL = "sandcastle:department.copy";
 export const POSITION_UPDATE_CHANNEL = "sandcastle:position.update";
 export const POSITION_CREATE_CHANNEL = "sandcastle:position.create";
 export const POSITION_ARCHIVE_CHANNEL = "sandcastle:position.archive";
+export const POSITION_CONFIGURE_CHANNEL = "sandcastle:position.configure";
 export const SECRET_REFERENCE_CREATE_CHANNEL =
   "sandcastle:secret-reference.create";
 export const SECRET_REFERENCE_ARCHIVE_CHANNEL =
@@ -197,6 +218,17 @@ const invokeRuntimeCommand = async (
 export interface SandcastleBridge {
   readonly runtime: {
     readonly health: () => Promise<RuntimeHealth>;
+    readonly inspectAgentCatalog: () => Promise<AgentCatalogView>;
+    readonly discoverAgents: () => Promise<AgentCatalogView>;
+    readonly testAgent: (agentId: string) => Promise<AgentTestResult>;
+    readonly inspectSkillCatalog: () => Promise<SkillCatalogView>;
+    readonly discoverSkills: (
+      directories?: readonly string[],
+    ) => Promise<SkillCatalogView>;
+    readonly enableSkill: (skillId: string) => Promise<SkillCatalogView>;
+    readonly archiveDiscoveredSkill: (
+      skillId: string,
+    ) => Promise<SkillCatalogView>;
     readonly overview: () => Promise<CompanyOverview>;
     readonly projects: () => Promise<readonly CompanyProject[]>;
     readonly createProject: (input: {
@@ -247,6 +279,7 @@ export interface SandcastleBridge {
       readonly aiMemberDisplayName: string;
       readonly aiMemberProfile: string;
       readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+      readonly defaultAgentId?: string;
     }) => Promise<DepartmentInspect>;
     readonly updatePosition: (input: {
       readonly departmentId: string;
@@ -258,12 +291,27 @@ export interface SandcastleBridge {
       readonly aiMemberProfile: string;
       readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
       readonly aiMemberStatus: "active" | "inactive";
+      readonly defaultAgentId?: string;
     }) => Promise<DepartmentInspect>;
     readonly archivePosition: (input: {
       readonly departmentId: string;
       readonly positionId: string;
       readonly expectedRevision: number;
     }) => Promise<DepartmentInspect>;
+    readonly configurePosition: (input: {
+      readonly departmentId: string;
+      readonly positionId: string;
+      readonly expectedRevision: number;
+      readonly expectedSkillRevision: number;
+      readonly name: string;
+      readonly responsibility: string;
+      readonly aiMemberDisplayName: string;
+      readonly aiMemberProfile: string;
+      readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+      readonly aiMemberStatus: "active" | "inactive";
+      readonly defaultAgentId: string;
+      readonly skillIds: readonly string[];
+    }) => Promise<PositionConfigurationResult>;
     readonly createSecretReference: (input: {
       readonly departmentId: string;
       readonly name: string;
@@ -448,6 +496,7 @@ export interface SandcastleBridge {
     readonly startRun: (input: {
       readonly projectId: string;
       readonly departmentId: string;
+      readonly agentOverrideId?: string;
     }) => Promise<DepartmentRunView>;
     readonly forkRun: (input: {
       readonly runId: string;
@@ -506,6 +555,38 @@ export const createSandcastleBridge = (
   runtime: {
     health: async () =>
       RuntimeHealthSchema.parse(await invoke(RUNTIME_HEALTH_CHANNEL)),
+    inspectAgentCatalog: async () =>
+      AgentCatalogViewSchema.parse(await invoke(AGENT_CATALOG_INSPECT_CHANNEL)),
+    discoverAgents: async () =>
+      AgentCatalogViewSchema.parse(
+        await invokeRuntimeCommand(invoke, AGENT_CATALOG_DISCOVER_CHANNEL),
+      ),
+    testAgent: async (agentId) =>
+      AgentTestResultSchema.parse(
+        await invokeRuntimeCommand(invoke, AGENT_TEST_CHANNEL, { agentId }),
+      ),
+    inspectSkillCatalog: async () =>
+      SkillCatalogViewSchema.parse(
+        await invoke(SKILL_DISCOVERY_INSPECT_CHANNEL),
+      ),
+    discoverSkills: async (directories = []) =>
+      SkillCatalogViewSchema.parse(
+        await invokeRuntimeCommand(invoke, SKILL_DISCOVERY_REFRESH_CHANNEL, {
+          directories: [...directories],
+        }),
+      ),
+    enableSkill: async (skillId) =>
+      SkillCatalogViewSchema.parse(
+        await invokeRuntimeCommand(invoke, SKILL_DISCOVERY_ENABLE_CHANNEL, {
+          skillId,
+        }),
+      ),
+    archiveDiscoveredSkill: async (skillId) =>
+      SkillCatalogViewSchema.parse(
+        await invokeRuntimeCommand(invoke, SKILL_DISCOVERY_ARCHIVE_CHANNEL, {
+          skillId,
+        }),
+      ),
     overview: async () =>
       CompanyOverviewSchema.parse(await invoke(COMPANY_OVERVIEW_CHANNEL)),
     projects: async () =>
@@ -561,6 +642,10 @@ export const createSandcastleBridge = (
     archivePosition: async (input) =>
       DepartmentInspectSchema.parse(
         await invokeRuntimeCommand(invoke, POSITION_ARCHIVE_CHANNEL, input),
+      ),
+    configurePosition: async (input) =>
+      PositionConfigurationResultSchema.parse(
+        await invokeRuntimeCommand(invoke, POSITION_CONFIGURE_CHANNEL, input),
       ),
     createSecretReference: async (input) =>
       DepartmentInspectSchema.parse(

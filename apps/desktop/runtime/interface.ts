@@ -156,6 +156,39 @@ export const ExecutionProfileSchema = z.object({
 
 export type ExecutionProfile = z.infer<typeof ExecutionProfileSchema>;
 
+export const AgentCapabilitySchema = z.enum([
+  "non-interactive",
+  "structured-output",
+  "session-resume",
+]);
+
+export const AgentCatalogEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  status: z.enum(["installed", "not-installed", "detection-failed"]),
+  version: z.string().nullable(),
+  executablePath: z.string().nullable(),
+  lastDetectedAt: z.string().datetime(),
+  capabilities: AgentCapabilitySchema.array(),
+  errorCode: z.string().nullable(),
+});
+
+export const AgentCatalogViewSchema = z.object({
+  agents: AgentCatalogEntrySchema.array(),
+});
+
+export type AgentCatalogEntry = z.infer<typeof AgentCatalogEntrySchema>;
+export type AgentCatalogView = z.infer<typeof AgentCatalogViewSchema>;
+
+export const AgentTestResultSchema = z.object({
+  agentId: z.string(),
+  status: z.enum(["passed", "failed"]),
+  testedAt: z.string().datetime(),
+  summary: z.string(),
+});
+
+export type AgentTestResult = z.infer<typeof AgentTestResultSchema>;
+
 export const SkillFlowSnapshotSchema = z.object({
   id: z.string(),
   revision: z.number().int().nonnegative(),
@@ -305,6 +338,7 @@ export const DepartmentInspectSchema = CompanyDepartmentSchema.omit({
       id: z.string(),
       name: z.string(),
       responsibility: z.string(),
+      defaultAgentId: z.string(),
       revision: z.number().int().nonnegative(),
       status: z.enum(["active", "archived"]),
       aiMember: z.object({
@@ -344,6 +378,23 @@ export const SkillSchema = z.object({
 });
 
 export type Skill = z.infer<typeof SkillSchema>;
+
+export const SkillCatalogEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  sourceDirectory: z.string(),
+  version: z.string(),
+  locationReference: z.string(),
+  status: z.enum(["discovered", "enabled", "unavailable", "archived"]),
+});
+
+export const SkillCatalogViewSchema = z.object({
+  directories: z.string().array(),
+  skills: SkillCatalogEntrySchema.array(),
+});
+
+export type SkillCatalogView = z.infer<typeof SkillCatalogViewSchema>;
 
 export const SkillFlowSchema = z.object({
   id: z.string(),
@@ -393,6 +444,15 @@ export const SkillConfigurationViewSchema = z.object({
 
 export type SkillConfigurationView = z.infer<
   typeof SkillConfigurationViewSchema
+>;
+
+export const PositionConfigurationResultSchema = z.object({
+  department: DepartmentInspectSchema,
+  skills: SkillConfigurationViewSchema,
+});
+
+export type PositionConfigurationResult = z.infer<
+  typeof PositionConfigurationResultSchema
 >;
 
 export const DepartmentRunStatusSchema = z.enum([
@@ -448,6 +508,10 @@ const RunSnapshotPositionSchema = z.object({
   revision: z.number().int().nonnegative(),
   name: z.string(),
   responsibility: z.string(),
+  defaultAgentId: z.string(),
+  resolvedAgentId: z.string(),
+  agentSource: z.enum(["position-default", "run-override"]),
+  skillIds: z.array(z.string()),
   aiMember: z.object({
     id: z.string(),
     displayName: z.string(),
@@ -751,6 +815,8 @@ export type RuntimeBackupView = z.infer<typeof RuntimeBackupViewSchema>;
 
 export const CompanyQuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("runtime.health") }),
+  z.object({ type: z.literal("agent.catalog.inspect") }),
+  z.object({ type: z.literal("skill.discovery.inspect") }),
   z.object({ type: z.literal("company.overview") }),
   z.object({ type: z.literal("projects.list") }),
   z.object({ type: z.literal("project.inspect"), projectId: z.string() }),
@@ -811,50 +877,71 @@ export type CompanyQuery = z.infer<typeof CompanyQuerySchema>;
 export type CompanyQueryResult<Query extends CompanyQuery> =
   Query["type"] extends "runtime.health"
     ? RuntimeHealth
-    : Query["type"] extends "company.overview"
-      ? CompanyOverview
-      : Query["type"] extends "projects.list"
-        ? readonly CompanyProject[]
-        : Query["type"] extends "project.inspect"
-          ? ProjectEditorView
-          : Query["type"] extends "departments.list"
-            ? readonly CompanyDepartment[]
-            : Query["type"] extends "department.inspect"
-              ? DepartmentInspect
-              : Query["type"] extends "department.skill-configuration.inspect"
-                ? SkillConfigurationView
-                : Query["type"] extends "department.pipeline.inspect"
-                  ? DepartmentPipelineEditorView
-                  : Query["type"] extends "department.pipeline.validate"
-                    ? PipelineValidationResult
-                    : Query["type"] extends "runs.list"
-                      ? readonly DepartmentRunView[]
-                      : Query["type"] extends "runtime.audit"
-                        ? readonly RuntimeAuditRecord[]
-                        : Query["type"] extends
-                              | "runtime.events"
-                              | "runtime.events.consumer"
-                          ? readonly RuntimeEventRecord[]
-                          : Query["type"] extends "artifacts.list"
-                            ? readonly ArtifactVersionView[]
-                            : Query["type"] extends "artifact.inspect"
-                              ? ArtifactLineageView
-                              : Query["type"] extends "interactions.list"
-                                ? readonly InteractionView[]
-                                : Query["type"] extends "interaction.inspect"
-                                  ? InteractionView
-                                  : Query["type"] extends "ag-ui.events"
-                                    ? AgUiReplayView
-                                    : Query["type"] extends "memory.candidates.list"
-                                      ? readonly MemoryCandidateView[]
-                                      : Query["type"] extends "memory.records.list"
-                                        ? readonly MemoryRecordView[]
-                                        : Query["type"] extends "runtime.diagnostics"
-                                          ? RuntimeDiagnosticsView
-                                          : DepartmentRunView;
+    : Query["type"] extends "agent.catalog.inspect"
+      ? AgentCatalogView
+      : Query["type"] extends "skill.discovery.inspect"
+        ? SkillCatalogView
+        : Query["type"] extends "company.overview"
+          ? CompanyOverview
+          : Query["type"] extends "projects.list"
+            ? readonly CompanyProject[]
+            : Query["type"] extends "project.inspect"
+              ? ProjectEditorView
+              : Query["type"] extends "departments.list"
+                ? readonly CompanyDepartment[]
+                : Query["type"] extends "department.inspect"
+                  ? DepartmentInspect
+                  : Query["type"] extends "department.skill-configuration.inspect"
+                    ? SkillConfigurationView
+                    : Query["type"] extends "department.pipeline.inspect"
+                      ? DepartmentPipelineEditorView
+                      : Query["type"] extends "department.pipeline.validate"
+                        ? PipelineValidationResult
+                        : Query["type"] extends "runs.list"
+                          ? readonly DepartmentRunView[]
+                          : Query["type"] extends "runtime.audit"
+                            ? readonly RuntimeAuditRecord[]
+                            : Query["type"] extends
+                                  | "runtime.events"
+                                  | "runtime.events.consumer"
+                              ? readonly RuntimeEventRecord[]
+                              : Query["type"] extends "artifacts.list"
+                                ? readonly ArtifactVersionView[]
+                                : Query["type"] extends "artifact.inspect"
+                                  ? ArtifactLineageView
+                                  : Query["type"] extends "interactions.list"
+                                    ? readonly InteractionView[]
+                                    : Query["type"] extends "interaction.inspect"
+                                      ? InteractionView
+                                      : Query["type"] extends "ag-ui.events"
+                                        ? AgUiReplayView
+                                        : Query["type"] extends "memory.candidates.list"
+                                          ? readonly MemoryCandidateView[]
+                                          : Query["type"] extends "memory.records.list"
+                                            ? readonly MemoryRecordView[]
+                                            : Query["type"] extends "runtime.diagnostics"
+                                              ? RuntimeDiagnosticsView
+                                              : DepartmentRunView;
 
 export const CompanyCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("runtime.shutdown") }),
+  z.object({ type: z.literal("agent.catalog.discover") }),
+  z.object({
+    type: z.literal("agent.test"),
+    agentId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("skill.discovery.refresh"),
+    directories: z.array(z.string().trim().min(1)).default([]),
+  }),
+  z.object({
+    type: z.literal("skill.discovery.enable"),
+    skillId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("skill.discovery.archive"),
+    skillId: z.string().trim().min(1),
+  }),
   z.object({ type: z.literal("runtime.backup") }),
   z.object({
     type: z.literal("artifact.version.status"),
@@ -978,6 +1065,7 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     departmentId: z.string().trim().min(1),
     name: z.string().trim().min(1),
     responsibility: z.string().trim().min(1),
+    defaultAgentId: z.string().trim().min(1).optional(),
     aiMemberDisplayName: z.string().trim().min(1),
     aiMemberProfile: z.string(),
     aiMemberResponsibilityMetadata: z.record(z.string(), z.string()),
@@ -989,10 +1077,26 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     expectedRevision: z.number().int().nonnegative(),
     name: z.string().trim().min(1),
     responsibility: z.string().trim().min(1),
+    defaultAgentId: z.string().trim().min(1).optional(),
     aiMemberDisplayName: z.string().trim().min(1),
     aiMemberProfile: z.string(),
     aiMemberResponsibilityMetadata: z.record(z.string(), z.string()),
     aiMemberStatus: z.enum(["active", "inactive"]),
+  }),
+  z.object({
+    type: z.literal("position.configure"),
+    departmentId: z.string().trim().min(1),
+    positionId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+    expectedSkillRevision: z.number().int().nonnegative(),
+    name: z.string().trim().min(1),
+    responsibility: z.string().trim().min(1),
+    aiMemberDisplayName: z.string().trim().min(1),
+    aiMemberProfile: z.string(),
+    aiMemberResponsibilityMetadata: z.record(z.string(), z.string()),
+    aiMemberStatus: z.enum(["active", "inactive"]),
+    defaultAgentId: z.string().trim().min(1),
+    skillIds: z.array(z.string().trim().min(1)),
   }),
   z.object({
     type: z.literal("position.archive"),
@@ -1093,6 +1197,7 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     type: z.literal("run.start"),
     projectId: z.string().trim().min(1),
     departmentId: z.string().trim().min(1),
+    agentOverrideId: z.string().trim().min(1).optional(),
   }),
   z.object({
     type: z.literal("run.execute-ready"),
@@ -1159,64 +1264,75 @@ export type CompanyCommand = z.infer<typeof CompanyCommandSchema>;
 export type CompanyCommandResult<Command extends CompanyCommand> =
   Command["type"] extends "runtime.shutdown"
     ? { readonly stopping: true }
-    : Command["type"] extends "runtime.backup"
-      ? RuntimeBackupView
-      : Command["type"] extends "artifact.version.status"
-        ? ArtifactVersionView
-        : Command["type"] extends "runtime.events.ack"
-          ? { readonly acknowledged: true }
-          : Command["type"] extends "interaction.session.create"
-            ? InteractionSessionView
-            : Command["type"] extends "interaction.session.close"
-              ? InteractionSessionView
-              : Command["type"] extends "interaction.participant.add"
-                ? SessionParticipantView
-                : Command["type"] extends "interaction.message.add"
-                  ? SessionMessageView
-                  : Command["type"] extends
-                        | "permission.request"
-                        | "permission.decide"
-                    ? PermissionRequestView
-                    : Command["type"] extends "memory.candidate.create"
-                      ? MemoryCandidateView
-                      : Command["type"] extends "memory.candidate.review"
-                        ? MemoryReviewView
-                        : Command["type"] extends "runtime.events.compact"
-                          ? {
-                              readonly deleted: number;
-                              readonly retained: number;
-                            }
-                          : Command["type"] extends "project.create"
-                            ? CompanyProject
-                            : Command["type"] extends
-                                  | "project.update"
-                                  | "project.archive"
-                              ? ProjectEditorView
-                              : Command["type"] extends "department.create"
-                                ? CompanyDepartment
-                                : Command["type"] extends
-                                      | "skill.catalog.save"
-                                      | "skill.catalog.archive"
-                                      | "position.skills.set"
-                                      | "skill-flow.save"
-                                      | "skill-flow.archive"
-                                  ? SkillConfigurationView
+    : Command["type"] extends "agent.catalog.discover"
+      ? AgentCatalogView
+      : Command["type"] extends "agent.test"
+        ? AgentTestResult
+        : Command["type"] extends
+              | "skill.discovery.refresh"
+              | "skill.discovery.enable"
+              | "skill.discovery.archive"
+          ? SkillCatalogView
+          : Command["type"] extends "runtime.backup"
+            ? RuntimeBackupView
+            : Command["type"] extends "artifact.version.status"
+              ? ArtifactVersionView
+              : Command["type"] extends "runtime.events.ack"
+                ? { readonly acknowledged: true }
+                : Command["type"] extends "interaction.session.create"
+                  ? InteractionSessionView
+                  : Command["type"] extends "interaction.session.close"
+                    ? InteractionSessionView
+                    : Command["type"] extends "interaction.participant.add"
+                      ? SessionParticipantView
+                      : Command["type"] extends "interaction.message.add"
+                        ? SessionMessageView
+                        : Command["type"] extends
+                              | "permission.request"
+                              | "permission.decide"
+                          ? PermissionRequestView
+                          : Command["type"] extends "memory.candidate.create"
+                            ? MemoryCandidateView
+                            : Command["type"] extends "memory.candidate.review"
+                              ? MemoryReviewView
+                              : Command["type"] extends "runtime.events.compact"
+                                ? {
+                                    readonly deleted: number;
+                                    readonly retained: number;
+                                  }
+                                : Command["type"] extends "project.create"
+                                  ? CompanyProject
                                   : Command["type"] extends
-                                        | "department.pipeline.draft.save"
-                                        | "department.pipeline.publish"
-                                    ? DepartmentPipelineEditorView
-                                    : Command["type"] extends
-                                          | "run.start"
-                                          | "run.execute-ready"
-                                          | "run.fork"
-                                          | "run.pause"
-                                          | "run.resume"
-                                          | "run.cancel"
-                                          | "run.recover"
-                                          | "run.approval.decide"
-                                          | "run.node.retry"
-                                      ? DepartmentRunView
-                                      : DepartmentInspect;
+                                        | "project.update"
+                                        | "project.archive"
+                                    ? ProjectEditorView
+                                    : Command["type"] extends "department.create"
+                                      ? CompanyDepartment
+                                      : Command["type"] extends
+                                            | "skill.catalog.save"
+                                            | "skill.catalog.archive"
+                                            | "position.skills.set"
+                                            | "skill-flow.save"
+                                            | "skill-flow.archive"
+                                        ? SkillConfigurationView
+                                        : Command["type"] extends "position.configure"
+                                          ? PositionConfigurationResult
+                                          : Command["type"] extends
+                                                | "department.pipeline.draft.save"
+                                                | "department.pipeline.publish"
+                                            ? DepartmentPipelineEditorView
+                                            : Command["type"] extends
+                                                  | "run.start"
+                                                  | "run.execute-ready"
+                                                  | "run.fork"
+                                                  | "run.pause"
+                                                  | "run.resume"
+                                                  | "run.cancel"
+                                                  | "run.recover"
+                                                  | "run.approval.decide"
+                                                  | "run.node.retry"
+                                              ? DepartmentRunView
+                                              : DepartmentInspect;
 
 export const EventEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

@@ -117,6 +117,100 @@ describe("Company Catalog Phase 1 configuration", () => {
     }
   });
 
+  it("persists a Position default Agent and rejects unregistered adapter IDs", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+
+    try {
+      const current = database.catalog.inspectDepartment("software-rnd");
+      const engineer = current.positions.find(
+        (position) => position.id === "software-engineer",
+      );
+      assert.ok(engineer);
+
+      const updated = database.catalog.updatePosition({
+        departmentId: "software-rnd",
+        positionId: engineer.id,
+        expectedRevision: engineer.revision,
+        name: engineer.name,
+        responsibility: engineer.responsibility,
+        aiMemberDisplayName: engineer.aiMember.displayName,
+        aiMemberProfile: engineer.aiMember.profile,
+        aiMemberResponsibilityMetadata:
+          engineer.aiMember.responsibilityMetadata,
+        aiMemberStatus: engineer.aiMember.status,
+        defaultAgentId: "claude-code",
+      });
+      assert.equal(
+        updated.positions.find((position) => position.id === engineer.id)
+          ?.defaultAgentId,
+        "claude-code",
+      );
+
+      assert.throws(
+        () =>
+          database.catalog.updatePosition({
+            departmentId: "software-rnd",
+            positionId: engineer.id,
+            expectedRevision: engineer.revision + 1,
+            name: engineer.name,
+            responsibility: engineer.responsibility,
+            aiMemberDisplayName: engineer.aiMember.displayName,
+            aiMemberProfile: engineer.aiMember.profile,
+            aiMemberResponsibilityMetadata:
+              engineer.aiMember.responsibilityMetadata,
+            aiMemberStatus: engineer.aiMember.status,
+            defaultAgentId: "renderer-display-name",
+          }),
+        (error: unknown) =>
+          error instanceof CompanyCatalogError &&
+          error.code === "AGENT_NOT_REGISTERED",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("saves Position identity, default Agent, and Skills as one configuration", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+
+    try {
+      const current = database.catalog.inspectDepartment("software-rnd");
+      const engineer = current.positions.find(
+        (position) => position.id === "software-engineer",
+      );
+      assert.ok(engineer);
+      const configuration = database.catalog.configurePosition({
+        departmentId: "software-rnd",
+        positionId: engineer.id,
+        expectedRevision: engineer.revision,
+        expectedSkillRevision: 0,
+        name: "Senior Software Engineer",
+        responsibility: "Owns implementation and verification fixes.",
+        aiMemberDisplayName: "Implementation Lead",
+        aiMemberProfile: engineer.aiMember.profile,
+        aiMemberResponsibilityMetadata:
+          engineer.aiMember.responsibilityMetadata,
+        aiMemberStatus: engineer.aiMember.status,
+        defaultAgentId: "claude-code",
+        skillIds: ["code-review", "diagnosing-bugs", "tdd"],
+      });
+
+      const saved = configuration.department.positions.find(
+        (position) => position.id === engineer.id,
+      );
+      assert.equal(saved?.name, "Senior Software Engineer");
+      assert.equal(saved?.defaultAgentId, "claude-code");
+      assert.deepEqual(
+        configuration.skills.positions.find(
+          (position) => position.id === engineer.id,
+        )?.skillIds,
+        ["code-review", "diagnosing-bugs", "tdd"],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("rejects cross-Department Position updates and archive while active configuration references the Position", () => {
     const database = openCompanyDatabase(tempCompanyDir());
 

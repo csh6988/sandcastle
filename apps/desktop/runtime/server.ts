@@ -11,12 +11,15 @@ import { SkillConfigurationError } from "./skill/skillConfiguration.js";
 import { RuntimeInteractionError } from "./interaction.js";
 import { ArtifactRegistryError } from "./artifactRegistry.js";
 import { RuntimeMemoryError } from "./memory.js";
+import { AgentCatalogError } from "./agent/agentCatalog.js";
+import { SkillCatalogError } from "./skill/skillDiscovery.js";
 import {
   AgUiCursorExpiredError,
   replayRuntimeEventsAsAgUi,
 } from "./agUiAdapter.js";
 import { acquireCompanyRuntimeLock } from "./runtimeLock.js";
 import { openCompanyDatabase, type CompanyDatabase } from "./storage/sqlite.js";
+import type { LocalAgentHost } from "./agent/agentCatalog.js";
 import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 
 export interface CompanyRuntimeServerOptions {
@@ -24,6 +27,7 @@ export interface CompanyRuntimeServerOptions {
   readonly companyDir: string;
   readonly token: string;
   readonly executionAdapter?: ExecutionAdapter;
+  readonly agentHost?: LocalAgentHost;
 }
 
 export interface CompanyRuntimeServerHandle {
@@ -58,6 +62,7 @@ export const startCompanyRuntimeServer = async (
   try {
     database = openCompanyDatabase(options.companyDir, {
       executionAdapter: options.executionAdapter,
+      agentHost: options.agentHost,
     });
   } catch (error) {
     releaseLock();
@@ -141,6 +146,10 @@ export const startCompanyRuntimeServer = async (
                     pid: process.pid,
                     startedAt,
                   };
+                case "agent.catalog.inspect":
+                  return database.agentCatalog.inspect();
+                case "skill.discovery.inspect":
+                  return database.skillCatalog.inspect();
                 case "company.overview":
                   return database.catalog.overview();
                 case "projects.list":
@@ -228,6 +237,107 @@ export const startCompanyRuntimeServer = async (
             return;
           }
           switch (request.command.type) {
+            case "agent.catalog.discover":
+              database.agentCatalog
+                .discover()
+                .then((result) =>
+                  sendResponse(socket, { id: request.id, ok: true, result }),
+                )
+                .catch((error: unknown) =>
+                  sendResponse(socket, {
+                    id: request.id,
+                    ok: false,
+                    error: {
+                      name: "AgentCatalogError",
+                      code:
+                        error instanceof AgentCatalogError
+                          ? error.code
+                          : "AGENT_DISCOVERY_FAILED",
+                      message:
+                        error instanceof Error
+                          ? error.message
+                          : "Agent discovery failed.",
+                    },
+                  }),
+                );
+              return;
+            case "agent.test":
+              database.agentCatalog
+                .test(request.command.agentId)
+                .then((result) =>
+                  sendResponse(socket, { id: request.id, ok: true, result }),
+                )
+                .catch((error: unknown) =>
+                  sendResponse(socket, {
+                    id: request.id,
+                    ok: false,
+                    error: {
+                      name: "AgentCatalogError",
+                      code:
+                        error instanceof AgentCatalogError
+                          ? error.code
+                          : "AGENT_TEST_FAILED",
+                      message:
+                        error instanceof Error
+                          ? error.message
+                          : "Agent test failed.",
+                    },
+                  }),
+                );
+              return;
+            case "skill.discovery.refresh":
+              database.skillCatalog
+                .discover({ directories: request.command.directories })
+                .then((result) =>
+                  sendResponse(socket, { id: request.id, ok: true, result }),
+                )
+                .catch((error: unknown) =>
+                  sendResponse(socket, {
+                    id: request.id,
+                    ok: false,
+                    error: {
+                      name: "SkillCatalogError",
+                      code:
+                        error instanceof SkillCatalogError
+                          ? error.code
+                          : "SKILL_DISCOVERY_FAILED",
+                      message:
+                        error instanceof Error
+                          ? error.message
+                          : "Skill discovery failed.",
+                    },
+                  }),
+                );
+              return;
+            case "skill.discovery.enable":
+            case "skill.discovery.archive": {
+              const operation =
+                request.command.type === "skill.discovery.enable"
+                  ? database.skillCatalog.enable(request.command.skillId)
+                  : database.skillCatalog.archive(request.command.skillId);
+              operation
+                .then((result) =>
+                  sendResponse(socket, { id: request.id, ok: true, result }),
+                )
+                .catch((error: unknown) =>
+                  sendResponse(socket, {
+                    id: request.id,
+                    ok: false,
+                    error: {
+                      name: "SkillCatalogError",
+                      code:
+                        error instanceof SkillCatalogError
+                          ? error.code
+                          : "SKILL_DISCOVERY_FAILED",
+                      message:
+                        error instanceof Error
+                          ? error.message
+                          : "Skill Catalog mutation failed.",
+                    },
+                  }),
+                );
+              return;
+            }
             case "artifact.version.status":
               sendResponse(socket, {
                 id: request.id,
@@ -391,6 +501,13 @@ export const startCompanyRuntimeServer = async (
                 id: request.id,
                 ok: true,
                 result: database.catalog.updatePosition(request.command),
+              });
+              return;
+            case "position.configure":
+              sendResponse(socket, {
+                id: request.id,
+                ok: true,
+                result: database.catalog.configurePosition(request.command),
               });
               return;
             case "position.create":

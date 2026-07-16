@@ -40,6 +40,10 @@ const input = (): SoftwareDevelopmentExecutionInput => ({
     revision: 0,
     name: "Planner",
     responsibility: "Aligns goals.",
+    defaultAgentId: "codex",
+    resolvedAgentId: "codex",
+    agentSource: "position-default",
+    skillIds: [],
     aiMember: {
       id: "member-1",
       displayName: "Ada",

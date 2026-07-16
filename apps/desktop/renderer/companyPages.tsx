@@ -18,6 +18,8 @@ import type {
   RuntimeDiagnosticsView,
   RuntimeBackupView,
   SkillConfigurationView,
+  AgentCatalogView,
+  SkillCatalogView,
 } from "../runtime/interface.js";
 import {
   departmentName,
@@ -71,6 +73,201 @@ const skillRuntimeErrorMessage = (
   };
   return code ? (messagesByCode[code] ?? fallback) : fallback;
 };
+
+export function AgentsPage({
+  t,
+  initialCatalog,
+}: {
+  readonly t: Messages;
+  readonly initialCatalog?: AgentCatalogView;
+}) {
+  const [catalog, setCatalog] = useState<AgentCatalogView | null>(
+    initialCatalog ?? null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    window.sandcastle.runtime
+      .discoverAgents()
+      .then(setCatalog)
+      .catch((nextError: unknown) => setError(errorMessage(nextError)));
+  }, []);
+
+  return (
+    <section className="page" data-page="agents">
+      <header className="page-heading">
+        <div>
+          <span className="eyebrow">{t.agentsEyebrow}</span>
+          <h1>{t.agentsTitle}</h1>
+          <p>{t.agentsBody}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            void window.sandcastle.runtime.discoverAgents().then(setCatalog)
+          }
+        >
+          {t.detectAgents}
+        </button>
+      </header>
+      {error ? <div className="warn">{error}</div> : null}
+      <section className="catalog-grid" aria-label={t.agentsTitle}>
+        {catalog?.agents.map((agent) => (
+          <article
+            className="catalog-card"
+            data-agent-id={agent.id}
+            key={agent.id}
+          >
+            <div className="project-card-top">
+              <strong>{agent.name}</strong>
+              <span className="pill">{agent.status}</span>
+            </div>
+            <dl className="catalog-meta">
+              <div>
+                <dt>{t.agentVersion}</dt>
+                <dd>{agent.version ?? t.notAvailable}</dd>
+              </div>
+              <div>
+                <dt>{t.agentExecutable}</dt>
+                <dd>{agent.executablePath ?? t.notAvailable}</dd>
+              </div>
+              <div>
+                <dt>{t.agentDetectedAt}</dt>
+                <dd>{agent.lastDetectedAt}</dd>
+              </div>
+            </dl>
+            <p>{agent.capabilities.join(", ")}</p>
+            <button
+              type="button"
+              data-test-agent={agent.id}
+              disabled={testing === agent.id || agent.status !== "installed"}
+              onClick={() => {
+                setTesting(agent.id);
+                void window.sandcastle.runtime
+                  .testAgent(agent.id)
+                  .then((result) =>
+                    setTestResult((current) => ({
+                      ...current,
+                      [agent.id]: result.summary,
+                    })),
+                  )
+                  .catch((nextError: unknown) =>
+                    setError(errorMessage(nextError)),
+                  )
+                  .finally(() => setTesting(null));
+              }}
+            >
+              {t.testAgent}
+            </button>
+            {testResult[agent.id] ? (
+              <span className="success">{testResult[agent.id]}</span>
+            ) : null}
+          </article>
+        ))}
+      </section>
+    </section>
+  );
+}
+
+export function SkillsPage({
+  t,
+  initialCatalog,
+}: {
+  readonly t: Messages;
+  readonly initialCatalog?: SkillCatalogView;
+}) {
+  const [catalog, setCatalog] = useState<SkillCatalogView | null>(
+    initialCatalog ?? null,
+  );
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    window.sandcastle.runtime
+      .discoverSkills()
+      .then(setCatalog)
+      .catch((nextError: unknown) => setError(errorMessage(nextError)));
+  }, []);
+  const normalized = search.trim().toLowerCase();
+  const skills =
+    catalog?.skills.filter((skill) =>
+      `${skill.name} ${skill.description} ${skill.locationReference}`
+        .toLowerCase()
+        .includes(normalized),
+    ) ?? [];
+  const mutate = (operation: Promise<SkillCatalogView>) =>
+    void operation
+      .then(setCatalog)
+      .catch((nextError: unknown) => setError(errorMessage(nextError)));
+  return (
+    <section className="page" data-page="skills">
+      <header className="page-heading">
+        <div>
+          <span className="eyebrow">{t.skillsEyebrow}</span>
+          <h1>{t.skillsTitle}</h1>
+          <p>{t.skillsBody}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => mutate(window.sandcastle.runtime.discoverSkills())}
+        >
+          {t.refreshSkills}
+        </button>
+      </header>
+      {error ? <div className="warn">{error}</div> : null}
+      <label className="search-field">
+        <span>{t.searchSkills}</span>
+        <input
+          placeholder={t.searchSkills}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+      </label>
+      <section className="catalog-grid" aria-label={t.skillsTitle}>
+        {skills.map((skill) => (
+          <article
+            className="catalog-card"
+            data-skill-catalog-id={skill.id}
+            key={skill.id}
+          >
+            <div className="project-card-top">
+              <strong>{skill.name}</strong>
+              <span className="pill">{skill.status}</span>
+            </div>
+            <p>{skill.description}</p>
+            <code>{skill.locationReference}</code>
+            <small>{skill.version}</small>
+            {skill.status === "discovered" || skill.status === "unavailable" ? (
+              <button
+                type="button"
+                data-enable-skill={skill.id}
+                onClick={() =>
+                  mutate(window.sandcastle.runtime.enableSkill(skill.id))
+                }
+              >
+                {t.enableSkill}
+              </button>
+            ) : skill.status === "enabled" ? (
+              <button
+                className="danger-button"
+                type="button"
+                data-archive-discovered-skill={skill.id}
+                onClick={() =>
+                  mutate(
+                    window.sandcastle.runtime.archiveDiscoveredSkill(skill.id),
+                  )
+                }
+              >
+                {t.archiveSkill}
+              </button>
+            ) : null}
+          </article>
+        ))}
+      </section>
+    </section>
+  );
+}
 
 type SandcastleBridgeRuntimeSaveExecutionProfile = (
   input: Parameters<typeof window.sandcastle.runtime.saveExecutionProfile>[0],
@@ -788,6 +985,8 @@ export function ProjectDetailView({
     null,
   );
   const [runDepartmentId, setRunDepartmentId] = useState("");
+  const [runAgents, setRunAgents] = useState<AgentCatalogView["agents"]>([]);
+  const [agentOverrideId, setAgentOverrideId] = useState("");
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
@@ -817,8 +1016,9 @@ export function ProjectDetailView({
     Promise.all([
       window.sandcastle.runtime.departments(),
       window.sandcastle.runtime.runs(project.id),
+      window.sandcastle.runtime.inspectAgentCatalog(),
     ])
-      .then(([departments, nextRuns]) => {
+      .then(([departments, nextRuns, agents]) => {
         if (!active) return;
         const runnable = departments.filter(
           (department) => department.publishedPipelineVersion !== null,
@@ -827,6 +1027,7 @@ export function ProjectDetailView({
         setRunDepartmentId((current) => current || runnable[0]?.id || "");
         setRuns(nextRuns);
         setSelectedRun(nextRuns[0] ?? null);
+        setRunAgents(agents.agents);
       })
       .catch((nextError: unknown) => {
         if (!active) return;
@@ -848,6 +1049,7 @@ export function ProjectDetailView({
       started = await window.sandcastle.runtime.startRun({
         projectId: project.id,
         departmentId: runDepartmentId,
+        ...(agentOverrideId ? { agentOverrideId } : {}),
       });
       setSelectedRun(started);
       const advanced = await window.sandcastle.runtime.executeReady({
@@ -1194,6 +1396,21 @@ export function ProjectDetailView({
                 </option>
               ))}
             </select>
+            <label htmlFor="project-run-agent-override">
+              {t.temporaryAgentOverride}
+            </label>
+            <select
+              id="project-run-agent-override"
+              value={agentOverrideId}
+              onChange={(event) => setAgentOverrideId(event.target.value)}
+            >
+              <option value="">{t.usePositionDefaults}</option>
+              {runAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
             <button
               data-start-department-run
               disabled={runBusy || runDepartmentId === ""}
@@ -1276,6 +1493,9 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
     useState<DepartmentPipelineEditorView | null>(null);
   const [skillConfiguration, setSkillConfiguration] =
     useState<SkillConfigurationView | null>(null);
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalogView | null>(
+    null,
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<DepartmentTab>("overview");
   const [skillErrorCode, setSkillErrorCode] = useState<string | null>(null);
@@ -1309,14 +1529,16 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
     setSkillErrorCode(null);
     setDetailLoading(true);
     try {
-      const [department, pipeline, skills] = await Promise.all([
+      const [department, pipeline, skills, agents] = await Promise.all([
         window.sandcastle.runtime.inspectDepartment(departmentId),
         window.sandcastle.runtime.inspectPipeline(departmentId),
         window.sandcastle.runtime.inspectSkillConfiguration(departmentId),
+        window.sandcastle.runtime.inspectAgentCatalog(),
       ]);
       setSelectedDepartment(department);
       setPipelineEditor(pipeline);
       setSkillConfiguration(skills);
+      setAgentCatalog(agents);
       setActiveTab("overview");
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -1413,6 +1635,26 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
       );
     } catch (nextError) {
       setError(errorMessage(nextError));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const configurePosition = async (
+    input: Parameters<typeof window.sandcastle.runtime.configurePosition>[0],
+  ) => {
+    setError(null);
+    setSkillErrorCode(null);
+    setDetailLoading(true);
+    try {
+      const configured =
+        await window.sandcastle.runtime.configurePosition(input);
+      setSelectedDepartment(configured.department);
+      setSkillConfiguration(configured.skills);
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+      setSkillErrorCode(runtimeErrorCode(nextError));
+      throw nextError;
     } finally {
       setDetailLoading(false);
     }
@@ -1718,12 +1960,15 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
           setSelectedDepartment(null);
           setPipelineEditor(null);
           setSkillConfiguration(null);
+          setAgentCatalog(null);
         }}
         onTabChange={setActiveTab}
         onUpdateDepartment={updateDepartment}
         onArchiveDepartment={archiveDepartment}
         onCopyDepartment={copyDepartment}
         onUpdatePosition={updatePosition}
+        onConfigurePosition={configurePosition}
+        agentCatalog={agentCatalog ?? undefined}
         onCreatePosition={createPosition}
         onArchivePosition={archivePosition}
         onCreateSecretReference={createSecretReference}
@@ -1820,7 +2065,7 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
   );
 }
 
-export type DepartmentTab = "overview" | "positions" | "pipeline";
+export type DepartmentTab = "overview" | "positions" | "settings" | "pipeline";
 
 export function DepartmentDetailView({
   department,
@@ -1833,6 +2078,8 @@ export function DepartmentDetailView({
   onCopyDepartment,
   onCreatePosition,
   onUpdatePosition,
+  onConfigurePosition,
+  agentCatalog,
   onArchivePosition,
   onCreateSecretReference,
   onArchiveSecretReference,
@@ -1893,6 +2140,10 @@ export function DepartmentDetailView({
     readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
     readonly aiMemberStatus: "active" | "inactive";
   }) => Promise<void>;
+  readonly agentCatalog?: AgentCatalogView;
+  readonly onConfigurePosition?: (
+    input: Parameters<typeof window.sandcastle.runtime.configurePosition>[0],
+  ) => Promise<void>;
   readonly onArchivePosition: (input: {
     readonly departmentId: string;
     readonly positionId: string;
@@ -1979,6 +2230,9 @@ export function DepartmentDetailView({
     department.defaultExecutionProfileId,
   );
   const [copyName, setCopyName] = useState(`${department.name} Copy`);
+  const [selectedPositionId, setSelectedPositionId] = useState<string | null>(
+    null,
+  );
   useEffect(() => {
     setName(department.name);
     setDescription(department.description);
@@ -1987,8 +2241,10 @@ export function DepartmentDetailView({
     setDefaultExecutionProfileId(department.defaultExecutionProfileId);
     setCopyName(`${department.name} Copy`);
   }, [department]);
+  const modernConfiguration = Boolean(agentCatalog && onConfigurePosition);
   return (
     <section
+      aria-busy={busy}
       className="page"
       data-page="department-detail"
       data-runtime-department-id={department.id}
@@ -2022,12 +2278,18 @@ export function DepartmentDetailView({
         </div>
       ) : null}
       <div className="department-tabs" role="tablist">
-        {(
-          [
-            ["overview", t.overviewTab],
-            ["positions", t.positionsTab],
-            ["pipeline", t.pipelineTab],
-          ] as const
+        {(modernConfiguration
+          ? ([
+              ["overview", t.overviewTab],
+              ["positions", t.positionsTab],
+              ["settings", t.departmentSettings],
+              ["pipeline", t.pipelineTab],
+            ] as const)
+          : ([
+              ["overview", t.overviewTab],
+              ["positions", t.positionsTab],
+              ["pipeline", t.pipelineTab],
+            ] as const)
         ).map(([tab, label]) => (
           <button
             aria-selected={activeTab === tab}
@@ -2043,10 +2305,64 @@ export function DepartmentDetailView({
         ))}
       </div>
 
-      {activeTab === "overview" ? (
+      {activeTab === "overview" && modernConfiguration ? (
         <section
           className="department-overview-grid"
           data-department-panel="overview"
+        >
+          <article className="create-panel">
+            <h2>{t.departmentSummary}</h2>
+            <p>{department.description}</p>
+            <dl className="overview-inventory">
+              <div>
+                <dt>{t.publishedPipeline}</dt>
+                <dd>
+                  {department.pipeline
+                    ? `v${department.pipeline.version}`
+                    : t.none}
+                </dd>
+              </div>
+              <div>
+                <dt>{t.positionsTab}</dt>
+                <dd>{department.positions.length}</dd>
+              </div>
+              <div>
+                <dt>{t.defaultRunStatus}</dt>
+                <dd>
+                  {department.activeRuns > 0 ? t.runningStatus : t.readyStatus}
+                </dd>
+              </div>
+              <div>
+                <dt>{t.recentRun}</dt>
+                <dd>
+                  {department.activeRuns > 0
+                    ? `${department.activeRuns} ${t.metricActiveRuns}`
+                    : t.noRecentRun}
+                </dd>
+              </div>
+            </dl>
+          </article>
+          <article className="create-panel">
+            <h2>{t.runtimeInheritance}</h2>
+            {department.positions.map((position) => (
+              <div className="task-card" key={position.id}>
+                <strong>{positionName(t, position)}</strong>
+                <span>
+                  {t.inheritedAgent}:{" "}
+                  {agentCatalog?.agents.find(
+                    (agent) => agent.id === position.defaultAgentId,
+                  )?.name ?? position.defaultAgentId}
+                </span>
+              </div>
+            ))}
+          </article>
+        </section>
+      ) : null}
+
+      {activeTab === (modernConfiguration ? "settings" : "overview") ? (
+        <section
+          className="department-overview-grid"
+          data-department-panel={modernConfiguration ? "settings" : "overview"}
         >
           <article className="create-panel">
             <h2>{t.departmentSettings}</h2>
@@ -2106,24 +2422,31 @@ export function DepartmentDetailView({
                     ))}
                 </select>
               </fieldset>
-              <ArtifactContractsEditor
-                contracts={inputArtifactContracts}
-                label={t.inputArtifactContracts}
-                hint={t.inputArtifactContractsHint}
-                emptyText={t.noInputArtifactContracts}
-                owner="input"
-                setContracts={setInputArtifactContracts}
-                t={t}
-              />
-              <ArtifactContractsEditor
-                contracts={outputArtifactContracts}
-                label={t.outputArtifactContracts}
-                hint={t.outputArtifactContractsHint}
-                emptyText={t.noOutputArtifactContracts}
-                owner="output"
-                setContracts={setOutputArtifactContracts}
-                t={t}
-              />
+              <details data-artifact-contract-settings>
+                <summary>
+                  {t.artifactContractsSettings} ·{" "}
+                  {inputArtifactContracts.length +
+                    outputArtifactContracts.length}
+                </summary>
+                <ArtifactContractsEditor
+                  contracts={inputArtifactContracts}
+                  label={t.inputArtifactContracts}
+                  hint={t.inputArtifactContractsHint}
+                  emptyText={t.noInputArtifactContracts}
+                  owner="input"
+                  setContracts={setInputArtifactContracts}
+                  t={t}
+                />
+                <ArtifactContractsEditor
+                  contracts={outputArtifactContracts}
+                  label={t.outputArtifactContracts}
+                  hint={t.outputArtifactContractsHint}
+                  emptyText={t.noOutputArtifactContracts}
+                  owner="output"
+                  setContracts={setOutputArtifactContracts}
+                  t={t}
+                />
+              </details>
               <button disabled={busy} type="submit">
                 {t.saveDepartment}
               </button>
@@ -2156,20 +2479,23 @@ export function DepartmentDetailView({
               </div>
             </dl>
           </article>
-          <ExecutionProfileConfiguration
-            busy={busy}
-            department={department}
-            onArchive={onArchiveExecutionProfile}
-            onSave={onSaveExecutionProfile}
-            t={t}
-          />
-          <SecretReferenceConfiguration
-            busy={busy}
-            department={department}
-            onArchive={onArchiveSecretReference}
-            onCreate={onCreateSecretReference}
-            t={t}
-          />
+          <details className="create-panel" data-department-advanced-settings>
+            <summary>{t.advancedSettings}</summary>
+            <ExecutionProfileConfiguration
+              busy={busy}
+              department={department}
+              onArchive={onArchiveExecutionProfile}
+              onSave={onSaveExecutionProfile}
+              t={t}
+            />
+            <SecretReferenceConfiguration
+              busy={busy}
+              department={department}
+              onArchive={onArchiveSecretReference}
+              onCreate={onCreateSecretReference}
+              t={t}
+            />
+          </details>
           <article className="create-panel department-actions-panel">
             <h2>{t.departmentActions}</h2>
             <form
@@ -2214,18 +2540,69 @@ export function DepartmentDetailView({
 
       {activeTab === "positions" ? (
         <section data-department-panel="positions">
-          <div className="position-grid">
-            {department.positions.map((position) => (
-              <PositionEditor
-                busy={busy}
-                departmentId={department.id}
-                key={position.id}
-                onArchive={onArchivePosition}
-                onUpdate={onUpdatePosition}
-                position={position}
-                t={t}
-              />
-            ))}
+          <div className="position-grid compact">
+            {department.positions.map((position) => {
+              const binding = skillConfiguration.positions.find(
+                (candidate) => candidate.id === position.id,
+              );
+              const flowCount = skillConfiguration.skillFlows.filter(
+                (flow) =>
+                  flow.positionId === position.id && flow.status === "active",
+              ).length;
+              return agentCatalog && onConfigurePosition ? (
+                <article
+                  className="position-card compact"
+                  data-position-summary={position.id}
+                  key={position.id}
+                >
+                  <div className="project-card-top">
+                    <strong>{positionName(t, position)}</strong>
+                    <span className="pill">
+                      {statusName(t, position.status)}
+                    </span>
+                  </div>
+                  <dl className="catalog-meta">
+                    <div>
+                      <dt>{t.aiMemberDisplayName}</dt>
+                      <dd>{position.aiMember.displayName}</dd>
+                    </div>
+                    <div>
+                      <dt>{t.defaultAgent}</dt>
+                      <dd>
+                        {agentCatalog.agents.find(
+                          (agent) => agent.id === position.defaultAgentId,
+                        )?.name ?? position.defaultAgentId}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t.positionSkills}</dt>
+                      <dd>{binding?.skillIds.length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>{t.skillFlows}</dt>
+                      <dd>{flowCount}</dd>
+                    </div>
+                  </dl>
+                  <button
+                    type="button"
+                    data-edit-position={position.id}
+                    onClick={() => setSelectedPositionId(position.id)}
+                  >
+                    {t.editPosition}
+                  </button>
+                </article>
+              ) : (
+                <PositionEditor
+                  busy={busy}
+                  departmentId={department.id}
+                  key={position.id}
+                  onArchive={onArchivePosition}
+                  onUpdate={onUpdatePosition}
+                  position={position}
+                  t={t}
+                />
+              );
+            })}
             <NewPositionEditor
               busy={busy}
               departmentId={department.id}
@@ -2233,16 +2610,68 @@ export function DepartmentDetailView({
               t={t}
             />
           </div>
-          <SkillConfigurationPanel
-            busy={busy}
-            configuration={skillConfiguration}
-            onArchiveSkillFlow={onArchiveSkillFlow}
-            onArchiveSkill={onArchiveSkill}
-            onSaveSkill={onSaveSkill}
-            onSaveSkillFlow={onSaveSkillFlow}
-            onSetPositionSkills={onSetPositionSkills}
-            t={t}
-          />
+          {agentCatalog && onConfigurePosition ? (
+            <>
+              <PositionSkillFlowPanel
+                busy={busy}
+                configuration={skillConfiguration}
+                onArchiveSkillFlow={onArchiveSkillFlow}
+                onSaveSkillFlow={onSaveSkillFlow}
+                t={t}
+              />
+              <div aria-hidden="true" hidden>
+                {department.positions.map((position) => (
+                  <PositionEditor
+                    busy={busy}
+                    departmentId={department.id}
+                    key={position.id}
+                    onArchive={onArchivePosition}
+                    onUpdate={onUpdatePosition}
+                    position={position}
+                    t={t}
+                  />
+                ))}
+                <SkillConfigurationPanel
+                  busy={busy}
+                  configuration={skillConfiguration}
+                  onArchiveSkillFlow={onArchiveSkillFlow}
+                  onArchiveSkill={onArchiveSkill}
+                  onSaveSkill={onSaveSkill}
+                  onSaveSkillFlow={onSaveSkillFlow}
+                  onSetPositionSkills={onSetPositionSkills}
+                  t={t}
+                />
+              </div>
+            </>
+          ) : (
+            <SkillConfigurationPanel
+              busy={busy}
+              configuration={skillConfiguration}
+              onArchiveSkillFlow={onArchiveSkillFlow}
+              onArchiveSkill={onArchiveSkill}
+              onSaveSkill={onSaveSkill}
+              onSaveSkillFlow={onSaveSkillFlow}
+              onSetPositionSkills={onSetPositionSkills}
+              t={t}
+            />
+          )}
+          {agentCatalog && onConfigurePosition && selectedPositionId ? (
+            <PositionDrawerEditor
+              agentCatalog={agentCatalog}
+              busy={busy}
+              configuration={skillConfiguration}
+              departmentId={department.id}
+              onArchive={onArchivePosition}
+              onClose={() => setSelectedPositionId(null)}
+              onSave={onConfigurePosition}
+              position={
+                department.positions.find(
+                  (position) => position.id === selectedPositionId,
+                )!
+              }
+              t={t}
+            />
+          ) : null}
         </section>
       ) : null}
 
@@ -2764,6 +3193,81 @@ function NewPositionEditor({
         </button>
       </form>
     </article>
+  );
+}
+
+function PositionSkillFlowPanel({
+  configuration,
+  t,
+  busy,
+  onSaveSkillFlow,
+  onArchiveSkillFlow,
+}: {
+  readonly configuration: SkillConfigurationView;
+  readonly t: Messages;
+  readonly busy: boolean;
+  readonly onSaveSkillFlow: (input: {
+    readonly departmentId: string;
+    readonly skillFlowId?: string;
+    readonly positionId: string;
+    readonly expectedRevision: number;
+    readonly name: string;
+    readonly instructions: string;
+    readonly skillIds: readonly string[];
+  }) => Promise<SkillConfigurationView>;
+  readonly onArchiveSkillFlow: (input: {
+    readonly departmentId: string;
+    readonly skillFlowId: string;
+    readonly expectedRevision: number;
+  }) => Promise<SkillConfigurationView>;
+}) {
+  return (
+    <section className="skill-configuration" data-position-skill-flows>
+      <div className="stage-heading">
+        <div>
+          <h2>{t.skillFlows}</h2>
+          <p>{t.skillFlowIndependentBody}</p>
+        </div>
+      </div>
+      {configuration.positions.map((position) => {
+        const flows = configuration.skillFlows.filter(
+          (flow) => flow.positionId === position.id,
+        );
+        const availableSkillIds = position.skillIds;
+        return (
+          <details className="create-panel" key={position.id}>
+            <summary>
+              {position.name} ·{" "}
+              {flows.filter((flow) => flow.status === "active").length}
+            </summary>
+            <div className="skill-flow-list">
+              {flows.map((flow) =>
+                flow.status === "active" ? (
+                  <SkillFlowEditor
+                    availableSkillIds={availableSkillIds}
+                    busy={busy}
+                    configuration={configuration}
+                    flow={flow}
+                    key={flow.id}
+                    onArchive={onArchiveSkillFlow}
+                    onSave={onSaveSkillFlow}
+                    t={t}
+                  />
+                ) : null,
+              )}
+              <NewSkillFlowEditor
+                availableSkillIds={availableSkillIds}
+                busy={busy}
+                configuration={configuration}
+                onSave={onSaveSkillFlow}
+                positionId={position.id}
+                t={t}
+              />
+            </div>
+          </details>
+        );
+      })}
+    </section>
   );
 }
 
@@ -4075,6 +4579,283 @@ const pipelineValidationMessage = (t: Messages, code: string): string => {
     .join("")}` as keyof Messages;
   return t[key] ?? code;
 };
+
+export function PositionDrawerEditor({
+  departmentId,
+  position,
+  configuration,
+  agentCatalog,
+  t,
+  busy,
+  onArchive,
+  onClose,
+  onSave,
+}: {
+  readonly departmentId: string;
+  readonly position: DepartmentInspect["positions"][number];
+  readonly configuration: SkillConfigurationView;
+  readonly agentCatalog: AgentCatalogView;
+  readonly t: Messages;
+  readonly busy: boolean;
+  readonly onClose: () => void;
+  readonly onArchive: (input: {
+    readonly departmentId: string;
+    readonly positionId: string;
+    readonly expectedRevision: number;
+  }) => Promise<void>;
+  readonly onSave: (input: {
+    readonly departmentId: string;
+    readonly positionId: string;
+    readonly expectedRevision: number;
+    readonly expectedSkillRevision: number;
+    readonly name: string;
+    readonly responsibility: string;
+    readonly aiMemberDisplayName: string;
+    readonly aiMemberProfile: string;
+    readonly aiMemberResponsibilityMetadata: Readonly<Record<string, string>>;
+    readonly aiMemberStatus: "active" | "inactive";
+    readonly defaultAgentId: string;
+    readonly skillIds: readonly string[];
+  }) => Promise<void>;
+}) {
+  const [name, setName] = useState(position.name);
+  const [responsibility, setResponsibility] = useState(position.responsibility);
+  const [displayName, setDisplayName] = useState(position.aiMember.displayName);
+  const [profile, setProfile] = useState(position.aiMember.profile);
+  const [status, setStatus] = useState(position.aiMember.status);
+  const [defaultAgentId, setDefaultAgentId] = useState(position.defaultAgentId);
+  const [skillIds, setSkillIds] = useState<string[]>(
+    () =>
+      configuration.positions
+        .find((candidate) => candidate.id === position.id)
+        ?.skillIds.slice() ?? [],
+  );
+  const [search, setSearch] = useState("");
+  const [closePrompt, setClosePrompt] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    setName(position.name);
+    setResponsibility(position.responsibility);
+    setDisplayName(position.aiMember.displayName);
+    setProfile(position.aiMember.profile);
+    setStatus(position.aiMember.status);
+    setDefaultAgentId(position.defaultAgentId);
+    setSkillIds(
+      configuration.positions
+        .find((candidate) => candidate.id === position.id)
+        ?.skillIds.slice() ?? [],
+    );
+    setDirty(false);
+  }, [configuration, position]);
+  const visibleSkills = configuration.activeSkills.filter((skill) =>
+    `${skill.name} ${skill.description}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase()),
+  );
+  const save = () => {
+    void onSave({
+      departmentId,
+      positionId: position.id,
+      expectedRevision: position.revision,
+      expectedSkillRevision: configuration.revision,
+      name: name.trim(),
+      responsibility: responsibility.trim(),
+      aiMemberDisplayName: displayName.trim(),
+      aiMemberProfile: profile,
+      aiMemberResponsibilityMetadata: position.aiMember.responsibilityMetadata,
+      aiMemberStatus: status,
+      defaultAgentId,
+      skillIds,
+    }).then(() => setDirty(false));
+  };
+  const requestClose = () => (dirty ? setClosePrompt(true) : onClose());
+  return (
+    <aside className="position-drawer" data-position-drawer={position.id}>
+      <div className="drawer-heading">
+        <div>
+          <span className="eyebrow">{t.editPosition}</span>
+          <h2>{positionName(t, position)}</h2>
+        </div>
+        <button type="button" onClick={requestClose}>
+          ×
+        </button>
+      </div>
+      <section className="drawer-section">
+        <h3>{t.name}</h3>
+        <label>
+          <span>{t.name}</span>
+          <input
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+              setDirty(true);
+            }}
+          />
+        </label>
+        <label>
+          <span>{t.responsibility}</span>
+          <textarea
+            value={responsibility}
+            onChange={(event) => {
+              setResponsibility(event.target.value);
+              setDirty(true);
+            }}
+            rows={3}
+          />
+        </label>
+        <label>
+          <span>{t.aiMemberDisplayName}</span>
+          <input
+            value={displayName}
+            onChange={(event) => {
+              setDisplayName(event.target.value);
+              setDirty(true);
+            }}
+          />
+        </label>
+        <label>
+          <span>{t.aiMemberProfile}</span>
+          <textarea
+            value={profile}
+            onChange={(event) => {
+              setProfile(event.target.value);
+              setDirty(true);
+            }}
+            rows={2}
+          />
+        </label>
+        <label>
+          <span>{t.status}</span>
+          <select
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value as "active" | "inactive");
+              setDirty(true);
+            }}
+          >
+            <option value="active">{t.activeStatus}</option>
+            <option value="inactive">{t.inactiveStatus}</option>
+          </select>
+        </label>
+      </section>
+      <section className="drawer-section">
+        <h3>{t.defaultAgent}</h3>
+        <p className="muted">{t.inheritedAgent}</p>
+        <select
+          value={defaultAgentId}
+          onChange={(event) => {
+            setDefaultAgentId(event.target.value);
+            setDirty(true);
+          }}
+        >
+          {agentCatalog.agents.map((agent) => (
+            <option
+              disabled={agent.status !== "installed"}
+              key={agent.id}
+              value={agent.id}
+            >
+              {agent.name} · {agent.status}
+            </option>
+          ))}
+        </select>
+      </section>
+      <section className="drawer-section">
+        <div className="project-card-top">
+          <h3>{t.positionSkills}</h3>
+          <span className="pill">
+            {skillIds.length} {t.selectedSkillsCount}
+          </span>
+        </div>
+        <input
+          placeholder={t.searchSkills}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+        <div className="selected-tags">
+          {skillIds.map((skillId) => (
+            <button
+              key={skillId}
+              type="button"
+              onClick={() => {
+                setSkillIds((current) =>
+                  current.filter((candidate) => candidate !== skillId),
+                );
+                setDirty(true);
+              }}
+            >
+              {configuration.activeSkills.find((skill) => skill.id === skillId)
+                ?.name ?? skillId}{" "}
+              ×
+            </button>
+          ))}
+        </div>
+        <div className="skill-picker-list">
+          {visibleSkills.map((skill) => (
+            <label key={skill.id}>
+              <input
+                type="checkbox"
+                checked={skillIds.includes(skill.id)}
+                onChange={(event) => {
+                  setSkillIds((current) =>
+                    event.target.checked
+                      ? [...current, skill.id]
+                      : current.filter((candidate) => candidate !== skill.id),
+                  );
+                  setDirty(true);
+                }}
+              />
+              {skill.name}
+            </label>
+          ))}
+        </div>
+      </section>
+      <div className="drawer-actions">
+        <button
+          data-save-position-configuration
+          disabled={busy}
+          type="button"
+          onClick={save}
+        >
+          {t.savePositionConfiguration}
+        </button>
+        <button type="button" onClick={requestClose}>
+          {t.continueEditing}
+        </button>
+      </div>
+      <section className="drawer-danger" data-position-danger-zone>
+        <h3>{t.positionDangerZone}</h3>
+        <button
+          className="danger-button"
+          disabled={busy || position.status === "archived"}
+          type="button"
+          onClick={() =>
+            void onArchive({
+              departmentId,
+              positionId: position.id,
+              expectedRevision: position.revision,
+            })
+          }
+        >
+          {t.archivePosition}
+        </button>
+      </section>
+      {closePrompt ? (
+        <div className="unsaved-dialog" data-unsaved-dialog>
+          <p>{t.unsavedChangesPrompt}</p>
+          <button type="button" onClick={save}>
+            {t.saveChanges}
+          </button>
+          <button type="button" onClick={onClose}>
+            {t.discardChanges}
+          </button>
+          <button type="button" onClick={() => setClosePrompt(false)}>
+            {t.continueEditing}
+          </button>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
 
 function PositionEditor({
   departmentId,

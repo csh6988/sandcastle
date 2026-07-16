@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -13,6 +13,215 @@ const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-v1-e2e-"));
 
 describe("Sandcastle v1 Company Runtime E2E", () => {
+  it("persists Agent discovery, Skill discovery, Position configuration, and Run override through restart", async () => {
+    const companyDir = tempCompanyDir();
+    const sourceDirectory = join(companyDir, "company-skills");
+    const skillDirectory = join(sourceDirectory, "release-review");
+    mkdirSync(skillDirectory, { recursive: true });
+    writeFileSync(
+      join(skillDirectory, "SKILL.md"),
+      "---\nname: Release Review\ndescription: Reviews release evidence.\n---\n",
+    );
+    const address = companyRuntimeAddress(companyDir);
+    const agentHost = {
+      resolveExecutable: async (names: readonly string[]) =>
+        names.includes("codex")
+          ? "/opt/codex"
+          : names.includes("claude")
+            ? "/opt/claude"
+            : null,
+      run: async (input: { readonly executablePath: string }) => ({
+        exitCode: 0,
+        stdout: input.executablePath.endsWith("codex")
+          ? "codex-cli 1.2.3"
+          : "claude 4.5.6",
+        stderr: "",
+      }),
+    };
+    let runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "agent-skill-e2e-token",
+      agentHost,
+    });
+
+    try {
+      let client = createCompanyRuntimeClient({
+        address,
+        token: "agent-skill-e2e-token",
+      });
+      const discoveredAgents = await client.execute({
+        type: "agent.catalog.discover",
+      });
+      assert.equal(
+        discoveredAgents.agents.find((agent) => agent.id === "codex")?.version,
+        "1.2.3",
+      );
+      assert.equal(
+        discoveredAgents.agents.find((agent) => agent.id === "claude-code")
+          ?.status,
+        "installed",
+      );
+      const testedAgent = await client.execute({
+        type: "agent.test",
+        agentId: "codex",
+      });
+      assert.equal(testedAgent.status, "passed");
+
+      const discoveredSkills = await client.execute({
+        type: "skill.discovery.refresh",
+        directories: [sourceDirectory],
+      });
+      const releaseReview = discoveredSkills.skills.find(
+        (skill) => skill.name === "Release Review",
+      );
+      assert.ok(releaseReview);
+      await client.execute({
+        type: "skill.discovery.enable",
+        skillId: releaseReview.id,
+      });
+
+      const department = await client.query({
+        type: "department.inspect",
+        departmentId: "software-rnd",
+      });
+      const skillConfiguration = await client.query({
+        type: "department.skill-configuration.inspect",
+        departmentId: "software-rnd",
+      });
+      const engineer = department.positions.find(
+        (position) => position.id === "software-engineer",
+      );
+      assert.ok(engineer);
+      const engineerSkills =
+        skillConfiguration.positions.find(
+          (position) => position.id === engineer.id,
+        )?.skillIds ?? [];
+      await client.execute({
+        type: "position.configure",
+        departmentId: "software-rnd",
+        positionId: engineer.id,
+        expectedRevision: engineer.revision,
+        expectedSkillRevision: skillConfiguration.revision,
+        name: engineer.name,
+        responsibility: engineer.responsibility,
+        aiMemberDisplayName: engineer.aiMember.displayName,
+        aiMemberProfile: engineer.aiMember.profile,
+        aiMemberResponsibilityMetadata:
+          engineer.aiMember.responsibilityMetadata,
+        aiMemberStatus: engineer.aiMember.status,
+        defaultAgentId: "codex",
+        skillIds: [...engineerSkills, releaseReview.id],
+      });
+
+      const project = await client.execute({
+        type: "project.create",
+        name: "Agent and Skill E2E",
+        goal: "Freeze Position configuration and a temporary Agent override.",
+      });
+      const started = await client.execute({
+        type: "run.start",
+        projectId: project.id,
+        departmentId: "software-rnd",
+        agentOverrideId: "claude-code",
+      });
+      const snapshotEngineer = started.snapshot.payload.positions.find(
+        (position) => position.id === engineer.id,
+      );
+      assert.ok(snapshotEngineer);
+      assert.equal(snapshotEngineer.defaultAgentId, "codex");
+      assert.equal(snapshotEngineer.resolvedAgentId, "claude-code");
+      assert.equal(snapshotEngineer.agentSource, "run-override");
+      assert.equal(snapshotEngineer.skillIds.includes(releaseReview.id), true);
+
+      const audit = await client.query({
+        type: "runtime.audit",
+        runId: started.run.id,
+        limit: 100,
+      });
+      assert.equal(
+        JSON.stringify(audit).includes('"agentOverrideId":"claude-code"'),
+        true,
+      );
+      const events = await client.query({
+        type: "runtime.events",
+        afterSequence: 0,
+        limit: 100,
+      });
+      assert.equal(
+        JSON.stringify(events).includes('"agentOverrideId":"claude-code"'),
+        true,
+      );
+
+      await runtime.close();
+      runtime = await startCompanyRuntimeServer({
+        address,
+        companyDir,
+        token: "agent-skill-e2e-token",
+        agentHost,
+      });
+      client = createCompanyRuntimeClient({
+        address,
+        token: "agent-skill-e2e-token",
+      });
+
+      const reloadedAgents = await client.query({
+        type: "agent.catalog.inspect",
+      });
+      assert.equal(
+        reloadedAgents.agents.find((agent) => agent.id === "codex")
+          ?.executablePath,
+        "/opt/codex",
+      );
+      const reloadedSkills = await client.query({
+        type: "skill.discovery.inspect",
+      });
+      assert.equal(reloadedSkills.directories.includes(sourceDirectory), true);
+      assert.equal(
+        reloadedSkills.skills.find((skill) => skill.id === releaseReview.id)
+          ?.status,
+        "enabled",
+      );
+      const reloadedDepartment = await client.query({
+        type: "department.inspect",
+        departmentId: "software-rnd",
+      });
+      assert.equal(
+        reloadedDepartment.positions.find(
+          (position) => position.id === engineer.id,
+        )?.defaultAgentId,
+        "codex",
+      );
+      const reloadedSkillConfiguration = await client.query({
+        type: "department.skill-configuration.inspect",
+        departmentId: "software-rnd",
+      });
+      assert.equal(
+        reloadedSkillConfiguration.positions
+          .find((position) => position.id === engineer.id)
+          ?.skillIds.includes(releaseReview.id),
+        true,
+      );
+      const reloadedRun = await client.query({
+        type: "run.inspect",
+        runId: started.run.id,
+      });
+      const reloadedSnapshotEngineer =
+        reloadedRun.snapshot.payload.positions.find(
+          (position) => position.id === engineer.id,
+        );
+      assert.ok(reloadedSnapshotEngineer);
+      assert.equal(reloadedSnapshotEngineer.resolvedAgentId, "claude-code");
+      assert.equal(reloadedSnapshotEngineer.agentSource, "run-override");
+      assert.equal(
+        reloadedSnapshotEngineer.skillIds.includes(releaseReview.id),
+        true,
+      );
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
   it("keeps one authoritative Run through controls, restart, artifacts, interaction, AG-UI, ACP, and Memory", async () => {
     const companyDir = tempCompanyDir();
     const address = companyRuntimeAddress(companyDir);

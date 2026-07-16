@@ -204,6 +204,82 @@ describe("Scripted Runtime transport", () => {
     ]);
   });
 
+  it("serves Agent, Skill discovery, and unified Position configuration through Scripted Runtime", async () => {
+    const agentCatalog = {
+      agents: [
+        {
+          id: "codex",
+          name: "Codex",
+          status: "installed" as const,
+          version: "1.2.3",
+          executablePath: "/opt/codex",
+          lastDetectedAt: "2026-07-16T08:00:00.000Z",
+          capabilities: ["non-interactive" as const],
+          errorCode: null,
+        },
+      ],
+    };
+    const skillCatalog = { directories: [], skills: [] };
+    const transport = createScriptedRuntimeTransport({
+      responses: [
+        { ok: true, result: agentCatalog },
+        { ok: true, result: agentCatalog },
+        {
+          ok: true,
+          result: {
+            agentId: "codex",
+            status: "passed",
+            testedAt: "2026-07-16T08:00:00.000Z",
+            summary: "ok",
+          },
+        },
+        { ok: true, result: skillCatalog },
+        { ok: true, result: skillCatalog },
+        {
+          ok: true,
+          result: {
+            department: scriptedSoftwareRndDepartment,
+            skills: scriptedSkillConfiguration,
+          },
+        },
+      ],
+    });
+    const client = createCompanyRuntimeClientFromTransport(transport);
+    await client.query({ type: "agent.catalog.inspect" });
+    await client.execute({ type: "agent.catalog.discover" });
+    await client.execute({ type: "agent.test", agentId: "codex" });
+    await client.query({ type: "skill.discovery.inspect" });
+    await client.execute({ type: "skill.discovery.refresh", directories: [] });
+    await client.execute({
+      type: "position.configure",
+      departmentId: "software-rnd",
+      positionId: "software-engineer",
+      expectedRevision: 0,
+      expectedSkillRevision: 0,
+      name: "Software Engineer",
+      responsibility: "Ships software.",
+      aiMemberDisplayName: "Engineer",
+      aiMemberProfile: "",
+      aiMemberResponsibilityMetadata: {},
+      aiMemberStatus: "active",
+      defaultAgentId: "codex",
+      skillIds: ["tdd"],
+    });
+    assert.deepEqual(
+      transport.requests.map((request) =>
+        request.kind === "query" ? request.query.type : request.command.type,
+      ),
+      [
+        "agent.catalog.inspect",
+        "agent.catalog.discover",
+        "agent.test",
+        "skill.discovery.inspect",
+        "skill.discovery.refresh",
+        "position.configure",
+      ],
+    );
+  });
+
   it("serves the same typed department.inspect contract as the real Runtime", async () => {
     const transport = createScriptedRuntimeTransport({
       responses: [{ ok: true, result: scriptedSoftwareRndDepartment }],

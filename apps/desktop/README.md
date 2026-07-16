@@ -41,9 +41,19 @@ Responsibilities (and nothing more):
   SHA-256 Run Snapshot r1 from the active published Pipeline Version and the
   resolved Project, Department, Position, AI Member, Skill Flow, Execution
   Profile, Secret Reference IDs, Artifact Contracts, limits, and node
-  configuration. Department Run, Node Run, Node Attempt, Node feedback, and
+  configuration. Agents are discovered through registered local Company Agent
+  Adapters and
+  can be tested with a non-destructive version probe that never creates a Run
+  or persists command output. Skills have an independent `SKILL.md` discovery
+  catalog with fuzzy search, source references, fingerprints, enable/archive
+  lifecycle, and no copied source contents. Position cards are compact and
+  open a drawer that saves identity, default Agent, and Position Skill
+  bindings together; Skill Flows remain separate editors. Department Overview
+  is read-only while Settings holds layered basic, inherited runtime, artifact
+  contract, and advanced sections. Department Run, Node Run, Node Attempt, Node
+  feedback, and
   Approval history, Runtime audit/outbox records, and Artifact Version lineage
-  are stored in SQLite schema v20 and reload entirely from the
+  are stored in SQLite schema v23 and reload entirely from the
   Company Runtime. The Phase 2 scripted pipeline supports Start, AI Task,
   Human Approval Approve/Request Changes/Reject decisions, declarative
   Condition selection, logical Parallel branches, Join, and Complete without

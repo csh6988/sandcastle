@@ -113,7 +113,12 @@ describe("Pipeline Runtime", () => {
             action: "run.start",
             entityType: "department-run",
             entityId: started.run.id,
-            after: { status: "ready", revision: 0 },
+            after: {
+              status: "ready",
+              revision: 0,
+              agentOverrideId: null,
+              agentSource: "position-default",
+            },
           },
         ],
       );
@@ -130,7 +135,12 @@ describe("Pipeline Runtime", () => {
           {
             type: "run.created",
             runId: started.run.id,
-            payload: { status: "ready", revision: 0 },
+            payload: {
+              status: "ready",
+              revision: 0,
+              agentOverrideId: null,
+              agentSource: "position-default",
+            },
           },
         ],
       );
@@ -2706,6 +2716,40 @@ describe("Pipeline Runtime", () => {
       );
       assert.equal(JSON.stringify(started).includes("secretValue"), false);
       assert.equal(JSON.stringify(started).includes("apiKey"), false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("records an explicit temporary Agent override and Position Skills in the Run Snapshot", () => {
+    const { database, project, department } = setup();
+    try {
+      const started = database.pipelineRuntime.startRun({
+        projectId: project.id,
+        departmentId: department.id,
+        agentOverrideId: "claude-code",
+      });
+      const position = started.snapshot.payload.positions[0];
+      assert.ok(position);
+      assert.equal(position.defaultAgentId, "codex");
+      assert.equal(position.resolvedAgentId, "claude-code");
+      assert.equal(position.agentSource, "run-override");
+      assert.deepEqual(position.skillIds, []);
+      const audit = database.pipelineRuntime.auditRecords({
+        runId: started.run.id,
+      });
+      assert.equal(
+        JSON.stringify(audit).includes('"agentOverrideId":"claude-code"'),
+        true,
+      );
+      const events = database.pipelineRuntime.runtimeEvents({
+        afterSequence: 0,
+        limit: 100,
+      });
+      assert.equal(
+        JSON.stringify(events).includes('"agentOverrideId":"claude-code"'),
+        true,
+      );
     } finally {
       database.close();
     }

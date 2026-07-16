@@ -151,6 +151,8 @@ try {
   assert.ok(report.runRuntimeId);
   assert.equal(report.runStatus, "completed");
   assert.match(report.runSnapshotHash, /^[a-f0-9]{64}$/);
+  assert.equal(report.runResolvedAgentId, "claude-code");
+  assert.equal(report.runAgentSource, "run-override");
   assert.equal(report.runAttemptCount, 2);
   assert.equal(report.runApprovalCycles, 2);
   assert.equal(report.reloadRunStatus, "completed");
@@ -158,7 +160,7 @@ try {
   assert.equal(report.permissionStatus, "approved");
   assert.ok(report.agUiEventCount > 0);
   assert.equal(report.memoryRecordVersion, 1);
-  assert.equal(report.backupSchemaVersion, 20);
+  assert.equal(report.backupSchemaVersion, 23);
   assert.equal(report.legacyBoardNavigationVisible, false);
   process.stdout.write(
     `${JSON.stringify({

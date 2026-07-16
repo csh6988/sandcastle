@@ -9,11 +9,18 @@ import {
   ArtifactLineagePanel,
   DepartmentDetailView,
   DepartmentRunDetail,
+  AgentsPage,
+  SkillsPage,
+  PositionDrawerEditor,
   ProjectDetailView,
   RuntimeDiagnosticsPanel,
 } from "./companyPages.js";
 import { messages } from "./i18n.js";
 import type { DepartmentRunView } from "../runtime/interface.js";
+import type {
+  AgentCatalogView,
+  SkillCatalogView,
+} from "../runtime/interface.js";
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
@@ -55,6 +62,109 @@ describe("Artifact lineage", () => {
     assert.match(markup, /snapshot-r2/);
     assert.match(markup, /evaluator-member/);
     assert.match(markup, /artifact-version-1/);
+  });
+});
+
+describe("Company Agent and Skill catalog pages", () => {
+  it("renders detected Agents with stable IDs and a non-destructive test action", () => {
+    const markup = renderToStaticMarkup(
+      <AgentsPage
+        t={messages.en}
+        initialCatalog={
+          {
+            agents: [
+              {
+                id: "codex",
+                name: "Codex",
+                status: "installed",
+                version: "1.2.3",
+                executablePath: "/opt/bin/codex",
+                lastDetectedAt: "2026-07-16T08:00:00.000Z",
+                capabilities: ["non-interactive"],
+                errorCode: null,
+              },
+            ],
+          } satisfies AgentCatalogView
+        }
+      />,
+    );
+    assert.match(markup, /data-page="agents"/);
+    assert.match(markup, /data-agent-id="codex"/);
+    assert.match(markup, /Codex/);
+    assert.match(markup, /1\.2\.3/);
+    assert.match(markup, /data-test-agent="codex"/);
+  });
+
+  it("renders independent Skills search, source references, and lifecycle actions", () => {
+    const markup = renderToStaticMarkup(
+      <SkillsPage
+        t={messages.en}
+        initialCatalog={
+          {
+            directories: ["/Users/test/.codex/skills"],
+            skills: [
+              {
+                id: "local-review",
+                name: "Local Review",
+                description: "Reviews changes.",
+                sourceDirectory: "/Users/test/.codex/skills",
+                version: "sha256:abc",
+                locationReference:
+                  "/Users/test/.codex/skills/local-review/SKILL.md",
+                status: "discovered",
+              },
+            ],
+          } satisfies SkillCatalogView
+        }
+      />,
+    );
+    assert.match(markup, /data-page="skills"/);
+    assert.match(markup, /placeholder="Search Skills"/);
+    assert.match(markup, /Local Review/);
+    assert.match(markup, /SKILL\.md/);
+    assert.match(markup, /data-enable-skill="local-review"/);
+  });
+});
+
+describe("Position drawer", () => {
+  it("edits basic identity, default Agent, and fuzzy-searchable Skills in one save", () => {
+    const position = scriptedSoftwareRndDepartment.positions.find(
+      (candidate) => candidate.id === "software-engineer",
+    );
+    assert.ok(position);
+    const markup = renderToStaticMarkup(
+      <PositionDrawerEditor
+        agentCatalog={{
+          agents: [
+            {
+              id: "codex",
+              name: "Codex",
+              status: "installed",
+              version: "1.2.3",
+              executablePath: "/opt/codex",
+              lastDetectedAt: "2026-07-16T08:00:00.000Z",
+              capabilities: ["non-interactive"],
+              errorCode: null,
+            },
+          ],
+        }}
+        busy={false}
+        configuration={scriptedSkillConfiguration}
+        departmentId="software-rnd"
+        onArchive={async () => undefined}
+        onClose={() => undefined}
+        onSave={async () => undefined}
+        position={position}
+        t={messages.en}
+      />,
+    );
+    assert.match(markup, /data-position-drawer="software-engineer"/);
+    assert.match(markup, /Default Agent/);
+    assert.match(markup, /value="codex"/);
+    assert.match(markup, /placeholder="Search Skills"/);
+    assert.match(markup, /1 selected/);
+    assert.match(markup, /data-save-position-configuration/);
+    assert.match(markup, /data-position-danger-zone/);
   });
 });
 
@@ -227,6 +337,48 @@ describe("Department detail", () => {
     assert.match(positions, /data-position-editor="software-engineer"/);
     assert.match(positions, /AI Member display name/);
     assert.match(positions, /Save position/);
+  });
+
+  it("separates the read-only Department overview from layered Settings", () => {
+    const props = {
+      department: scriptedSoftwareRndDepartment,
+      t: messages.en,
+      onBack: () => undefined,
+      onTabChange: () => undefined,
+      onUpdateDepartment: async () => undefined,
+      onArchiveDepartment: async () => undefined,
+      onCopyDepartment: async () => undefined,
+      onUpdatePosition: async () => undefined,
+      onConfigurePosition: async () => undefined,
+      agentCatalog: {
+        agents: [
+          {
+            id: "codex",
+            name: "Codex",
+            status: "installed" as const,
+            version: "1.2.3",
+            executablePath: "/opt/codex",
+            lastDetectedAt: "2026-07-16T08:00:00.000Z",
+            capabilities: ["non-interactive" as const],
+            errorCode: null,
+          },
+        ],
+      },
+      ...pipelineProps,
+      ...skillProps,
+    };
+    const overview = renderToStaticMarkup(
+      <DepartmentDetailView {...props} activeTab="overview" />,
+    );
+    const settings = renderToStaticMarkup(
+      <DepartmentDetailView {...props} activeTab="settings" />,
+    );
+    assert.match(overview, /data-department-panel="overview"/);
+    assert.match(overview, /Department summary/);
+    assert.doesNotMatch(overview, /data-department-settings/);
+    assert.match(settings, /data-department-settings/);
+    assert.match(settings, /data-artifact-contract-settings/);
+    assert.match(settings, /data-department-advanced-settings/);
   });
 
   it("renders a stable unpublished Pipeline state for a custom Department", () => {
