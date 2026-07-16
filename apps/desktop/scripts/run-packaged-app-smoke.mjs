@@ -170,5 +170,17 @@ try {
     })}\n`,
   );
 } finally {
-  rmSync(tempRoot, { recursive: true, force: true });
+  try {
+    rmSync(tempRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 20 : 0,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+    process.stderr.write(
+      `[packaged-app-smoke] temporary cleanup warning: ${String(error)}\n`,
+    );
+  }
 }
