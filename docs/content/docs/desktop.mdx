@@ -7,6 +7,16 @@ description: Configure local Agents, Skills, Positions, and Departments in Sandc
 
 Sandcastle Desktop opens a persistent Company Runtime workspace. The Runtime owns configuration, Runs, Snapshots, audit records, and event replay; Renderer reloads reconnect to that same local state.
 
+## Windows distribution
+
+Desktop v1 supports Windows x64 as a first-class build target. On Windows,
+`npm run dist:windows` creates an NSIS installer and the unpacked
+`release/win-unpacked` application. CI starts the unpacked `Sandcastle.exe` on
+`windows-latest` and runs the same Company Runtime BrowserWindow and packaged
+smoke used by the other desktop platforms before uploading the unsigned x64
+installer. ARM64, Microsoft code signing, and auto-update are separate release
+gates.
+
 ## Agents
 
 The Agents page lists formally registered local coding Agents by stable ID. Detection records installation status, version, executable path, capabilities, and detection time. The **Test Agent** action performs a safe adapter-specific probe without creating a Run, changing Git, writing project files, or persisting raw command output. Claude Code, Codex, and Pi use ephemeral or non-persistent non-interactive prompts; adapters without a verified prompt contract use a capability probe.

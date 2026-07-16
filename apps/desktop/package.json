@@ -10,10 +10,13 @@
     "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
     "dev:electron": "tsc -p tsconfig.main.json && node scripts/start-dev-electron.mjs",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.main.json",
-    "dist": "npm run build && electron-builder --dir",
+    "dist": "npm run dist:unpacked",
+    "dist:unpacked": "npm run build && electron-builder --dir",
+    "dist:windows": "npm run build && electron-builder --win nsis --x64",
     "test": "tsx --test \"tests/**/*.test.ts\" \"main/**/*.test.ts\" \"runtime/**/*.test.ts\" \"preload/**/*.test.ts\" \"renderer/**/*.test.tsx\"",
     "test:electron-smoke": "electron scripts/electron-runtime-smoke.mjs",
     "test:packaged-app-smoke": "node scripts/run-packaged-app-smoke.mjs",
+    "verify:windows-package": "node scripts/verify-windows-package.mjs",
     "test:runtime-capacity": "tsx scripts/runtime-capacity-smoke.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "acp": "tsx runtime/acpEntry.ts",
@@ -56,6 +59,18 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "assets/sandcastle-icon.png"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/sandcastle-icon.png",
+      "artifactName": "${productName}-${version}-windows-${arch}-setup.${ext}"
     }
   }
 }

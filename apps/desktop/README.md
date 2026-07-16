@@ -116,7 +116,18 @@ npm run start
 
 # Unpacked distributable (release/)
 npm run dist
+
+# Windows x64 NSIS installer (run on Windows)
+npm run dist:windows
+
+# Verify the generated Windows installer (run on Windows)
+npm run verify:windows-package
 ```
+
+The Windows release target is x64 NSIS plus the unpacked `win-unpacked`
+directory. CI runs the packaged Company Runtime smoke against `Sandcastle.exe`
+on `windows-latest` before uploading the unsigned installer. ARM64,
+Microsoft code signing, and auto-update are separate release gates.
 
 On first launch the app asks for the local AI company directory, ensures the
 `projects/` and `.sandcastle/` structure exists, starts the Company Runtime,

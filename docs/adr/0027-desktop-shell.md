@@ -73,6 +73,10 @@ resources attached to a project.
   desktop product without touching the library, CLI, board, or docs.
 - The board's terminal WebSockets still flow through one proxy hop while R&D is
   active; the shell server must keep `ws` upgrades wired.
-- Cross-platform packaging (Windows/Linux installers, code signing,
-  auto-update) remains out of scope for this ADR and needs its own decision
-  when it matters.
+- Desktop v1 has a formal Windows distribution target in addition to the
+  existing macOS/Linux CI smoke coverage: Windows x64 produces an NSIS
+  installer and a `win-unpacked` directory, and `windows-latest` launches the
+  unpacked `Sandcastle.exe` through the same Company Runtime BrowserWindow
+  smoke. The Windows installer is intentionally unsigned until release
+  credentials are available; ARM64, Microsoft code signing, and auto-update
+  remain separate release gates.

@@ -26,9 +26,17 @@ export const findFreePort = (): Promise<number> =>
 export const resolveBoardCommand = (
   repoDir: string,
   desktopRoot: string,
+  platform: NodeJS.Platform = process.platform,
 ): { command: string; args: string[] } => {
   const localBin = join(repoDir, "node_modules", ".bin", "sandcastle");
-  if (existsSync(localBin)) return { command: localBin, args: [] };
+  const localBinCandidates =
+    platform === "win32"
+      ? [`${localBin}.cmd`, `${localBin}.exe`, `${localBin}.bat`, localBin]
+      : [localBin];
+  const localCommand = localBinCandidates.find((candidate) =>
+    existsSync(candidate),
+  );
+  if (localCommand) return { command: localCommand, args: [] };
   if (process.env.SANDCASTLE_CLI) {
     return { command: process.env.SANDCASTLE_CLI, args: [] };
   }
@@ -40,6 +48,11 @@ export const resolveBoardCommand = (
     `No sandcastle CLI found for ${repoDir}. Install sandcastle in the repo, set SANDCASTLE_CLI, or build this checkout (npm run build).`,
   );
 };
+
+export const boardCommandRequiresShell = (
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean => platform === "win32" && /\.(?:cmd|bat)$/iu.test(command);
 
 export interface BoardProcessHandle {
   readonly url: string;
@@ -84,6 +97,7 @@ export const startBoardProcess = async (args: {
     {
       cwd: args.repoDir,
       env: process.env,
+      shell: boardCommandRequiresShell(command),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
