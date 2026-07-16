@@ -29,7 +29,7 @@ const findPackagedExecutable = (directory) => {
           path.endsWith(".app/Contents/MacOS/Sandcastle")) ||
         (process.platform === "win32" && entry.name === "Sandcastle.exe") ||
         (process.platform === "linux" &&
-          ["sandcastle", "Sandcastle"].includes(entry.name) &&
+          entry.name.toLowerCase().startsWith("sandcastle") &&
           basename(current).includes("unpacked"))
       ) {
         candidates.push(path);

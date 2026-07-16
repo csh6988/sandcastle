@@ -96,6 +96,31 @@ const waitForSelector = async (
     ),
   );
 
+const waitForSelectorAbsent = async (
+  window: BrowserWindow,
+  selector: string,
+): Promise<boolean> =>
+  Boolean(
+    await window.webContents.executeJavaScript(
+      `new Promise((resolve) => {
+        const deadline = Date.now() + 5000;
+        const poll = () => {
+          if (!document.querySelector(${JSON.stringify(selector)})) {
+            resolve(true);
+            return;
+          }
+          if (Date.now() >= deadline) {
+            resolve(false);
+            return;
+          }
+          setTimeout(poll, 25);
+        };
+        poll();
+      })`,
+      true,
+    ),
+  );
+
 const clickUntilSelector = async (
   window: BrowserWindow,
   triggerSelector: string,
@@ -327,17 +352,15 @@ export const runRuntimeBrowserWindowSmoke = async (
   if (!(await waitForSelector(window, "[data-page=projects]"))) {
     throw new Error("Archived Project did not return to the active list.");
   }
-  const archivedProjectVisible = Boolean(
-    await window.webContents.executeJavaScript(
-      `document.querySelector(${JSON.stringify(projectSelector)}) !== null`,
-      true,
-    ),
-  );
   const archivedProject = await waitForRuntimeProject(
     window,
     projectRuntimeId,
     (project) => project.status === "archived" && project.revision === 3,
   );
+  const archivedProjectVisible = !(await waitForSelectorAbsent(
+    window,
+    projectSelector,
+  ));
   if (
     archivedProject.repositoryReferences[0] !== "/work/checkout-api" ||
     initialProject.revision !== 0
@@ -1043,12 +1066,10 @@ export const runRuntimeBrowserWindowSmoke = async (
   if (!(await waitForSelector(window, "[data-page=departments]"))) {
     throw new Error("Archived Department did not return to the list.");
   }
-  const archivedDepartmentVisible = Boolean(
-    await window.webContents.executeJavaScript(
-      `document.querySelector('[data-department-id=${JSON.stringify(copiedDepartmentId)}]') !== null`,
-      true,
-    ),
-  );
+  const archivedDepartmentVisible = !(await waitForSelectorAbsent(
+    window,
+    `[data-department-id=${JSON.stringify(copiedDepartmentId)}]`,
+  ));
 
   const customDepartment = (await window.webContents.executeJavaScript(
     `window.sandcastle.runtime.createDepartment({ name: 'Design' })`,
