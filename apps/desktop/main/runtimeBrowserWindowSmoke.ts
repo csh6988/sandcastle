@@ -610,6 +610,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       const setter = Object.getOwnPropertyDescriptor(instructions.constructor.prototype, 'value')?.set;
       setter?.call(instructions, 'Ship one tested BrowserWindow vertical slice.');
       instructions.dispatchEvent(new Event('input', { bubbles: true }));
+      instructions.dispatchEvent(new Event('change', { bubbles: true }));
       if (diagnosing.checked) diagnosing.click();
       return new Promise((resolve) => {
         setTimeout(() => {
@@ -676,6 +677,7 @@ export const runRuntimeBrowserWindowSmoke = async (
         const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')?.set;
         setter?.call(element, value);
         element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
       };
       setValue(name, 'Browser delivery');
       setValue(instructions, 'Deliver and review the BrowserWindow slice.');
@@ -726,6 +728,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       const setter = Object.getOwnPropertyDescriptor(name.constructor.prototype, 'value')?.set;
       setter?.call(name, 'Stale Browser flow');
       name.dispatchEvent(new Event('input', { bubbles: true }));
+      name.dispatchEvent(new Event('change', { bubbles: true }));
       return new Promise((resolve) => {
         setTimeout(() => {
           form.requestSubmit();
