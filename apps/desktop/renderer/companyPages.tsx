@@ -107,7 +107,10 @@ export function AgentsPage({
   useEffect(() => {
     window.sandcastle.runtime
       .discoverAgents()
-      .then(setCatalog)
+      .then((nextCatalog) => {
+        setCatalog(nextCatalog);
+        setError(null);
+      })
       .catch((nextError: unknown) => setError(errorMessage(nextError)));
   }, []);
 
@@ -121,9 +124,16 @@ export function AgentsPage({
         </div>
         <button
           type="button"
-          onClick={() =>
-            void window.sandcastle.runtime.discoverAgents().then(setCatalog)
-          }
+          onClick={() => {
+            setError(null);
+            void window.sandcastle.runtime
+              .discoverAgents()
+              .then((nextCatalog) => {
+                setCatalog(nextCatalog);
+                setError(null);
+              })
+              .catch((nextError: unknown) => setError(errorMessage(nextError)));
+          }}
         >
           {t.detectAgents}
         </button>
@@ -147,7 +157,9 @@ export function AgentsPage({
               </div>
               <div>
                 <dt>{t.agentExecutable}</dt>
-                <dd>{agent.executablePath ?? t.notAvailable}</dd>
+                <dd className="catalog-path">
+                  {agent.executablePath ?? t.notAvailable}
+                </dd>
               </div>
               <div>
                 <dt>{t.agentDetectedAt}</dt>
@@ -163,12 +175,13 @@ export function AgentsPage({
                 setTesting(agent.id);
                 void window.sandcastle.runtime
                   .testAgent(agent.id)
-                  .then((result) =>
+                  .then((result) => {
+                    setError(null);
                     setTestResult((current) => ({
                       ...current,
                       [agent.id]: result.summary,
-                    })),
-                  )
+                    }));
+                  })
                   .catch((nextError: unknown) =>
                     setError(errorMessage(nextError)),
                   )

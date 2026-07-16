@@ -501,11 +501,21 @@ p {
 
 .catalog-meta dt {
   color: var(--muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .catalog-meta dd {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   text-align: right;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.catalog-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .search-field {

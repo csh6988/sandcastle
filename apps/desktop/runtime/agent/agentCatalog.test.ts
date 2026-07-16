@@ -67,6 +67,7 @@ describe("Agent Catalog", () => {
             "--ask-for-approval",
             "never",
             "exec",
+            "--skip-git-repo-check",
             "--json",
             "--sandbox",
             "read-only",

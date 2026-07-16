@@ -93,6 +93,7 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /data-agent-id="codex"/);
     assert.match(markup, /Codex/);
     assert.match(markup, /1\.2\.3/);
+    assert.match(markup, /class="catalog-path"/);
     assert.match(markup, /data-test-agent="codex"/);
   });
 
