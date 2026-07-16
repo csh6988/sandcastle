@@ -231,8 +231,16 @@ export const messages = {
     createPosition: "Create Position",
     archivePosition: "Archive Position",
     activeProfile: "Default Profile",
+    activeProfileHint:
+      "Used when a Run does not override its execution settings.",
     inputArtifactContracts: "Input Artifact Contracts",
+    inputArtifactContractsHint:
+      "Formal inputs required before this Department Run can start.",
     outputArtifactContracts: "Output Artifact Contracts",
+    outputArtifactContractsHint:
+      "Formal outputs required before this Department Run can complete.",
+    noInputArtifactContracts: "No input artifacts are required.",
+    noOutputArtifactContracts: "No output artifacts are required.",
     addArtifactContract: "Add Artifact Contract",
     removeArtifactContract: "Remove Artifact Contract",
     executionProfiles: "Execution Profiles",
@@ -552,8 +560,16 @@ export const messages = {
     createPosition: "创建职位",
     archivePosition: "归档职位",
     activeProfile: "默认执行配置",
+    activeProfileHint:
+      "当流水线节点没有单独配置时，运行将使用这里的 Agent、模型、沙箱和资源限制。",
     inputArtifactContracts: "输入制品契约",
+    inputArtifactContractsHint:
+      "运行开始前必须提供的正式输入；没有要求时可以留空。",
     outputArtifactContracts: "输出制品契约",
+    outputArtifactContractsHint:
+      "运行完成前必须产出的正式输出；没有要求时可以留空。",
+    noInputArtifactContracts: "当前无需输入制品。",
+    noOutputArtifactContracts: "当前无需输出制品。",
     addArtifactContract: "添加制品契约",
     removeArtifactContract: "移除制品契约",
     executionProfiles: "执行配置",

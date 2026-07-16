@@ -705,6 +705,58 @@ p {
   gap: 9px;
 }
 
+.department-settings-form {
+  gap: 14px;
+}
+
+.department-config-section,
+.artifact-contract-editor {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.department-config-section legend,
+.artifact-contract-editor legend {
+  padding: 0 6px;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.field-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.configuration-empty-state {
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.artifact-contract-editor > button {
+  justify-self: start;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  padding: 8px 12px;
+  font-weight: 750;
+}
+
+.department-settings-form > button[type="submit"] {
+  width: 100%;
+}
+
 label {
   color: var(--muted);
   font-size: 12px;

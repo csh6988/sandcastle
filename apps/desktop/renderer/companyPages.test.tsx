@@ -461,6 +461,12 @@ describe("Department detail", () => {
 
     assert.match(overview, /data-artifact-contracts="input"/);
     assert.match(overview, /data-artifact-contracts="output"/);
+    assert.match(
+      overview,
+      /Formal inputs required before this Department Run can start\./,
+    );
+    assert.match(overview, /No input artifacts are required\./);
+    assert.match(overview, /No output artifacts are required\./);
     assert.match(overview, /data-execution-profiles/);
     assert.match(
       overview,

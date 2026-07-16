@@ -2051,7 +2051,7 @@ export function DepartmentDetailView({
           <article className="create-panel">
             <h2>{t.departmentSettings}</h2>
             <form
-              className="form"
+              className="form department-settings-form"
               data-department-settings
               onSubmit={(event) => {
                 event.preventDefault();
@@ -2082,31 +2082,35 @@ export function DepartmentDetailView({
                 onChange={(event) => setDescription(event.target.value)}
                 rows={4}
               />
-              <button disabled={busy} type="submit">
-                {t.saveDepartment}
-              </button>
-              <label htmlFor="department-default-execution-profile">
-                {t.activeProfile}
-              </label>
-              <select
-                id="department-default-execution-profile"
-                onChange={(event) =>
-                  setDefaultExecutionProfileId(event.target.value || null)
-                }
-                value={defaultExecutionProfileId ?? ""}
+              <fieldset
+                className="department-config-section"
+                data-default-execution-profile
               >
-                <option value="">{t.none}</option>
-                {department.executionProfiles
-                  .filter((profile) => profile.status === "active")
-                  .map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.name}
-                    </option>
-                  ))}
-              </select>
+                <legend>{t.activeProfile}</legend>
+                <p className="field-help">{t.activeProfileHint}</p>
+                <select
+                  aria-label={t.activeProfile}
+                  id="department-default-execution-profile"
+                  onChange={(event) =>
+                    setDefaultExecutionProfileId(event.target.value || null)
+                  }
+                  value={defaultExecutionProfileId ?? ""}
+                >
+                  <option value="">{t.none}</option>
+                  {department.executionProfiles
+                    .filter((profile) => profile.status === "active")
+                    .map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.name}
+                      </option>
+                    ))}
+                </select>
+              </fieldset>
               <ArtifactContractsEditor
                 contracts={inputArtifactContracts}
                 label={t.inputArtifactContracts}
+                hint={t.inputArtifactContractsHint}
+                emptyText={t.noInputArtifactContracts}
                 owner="input"
                 setContracts={setInputArtifactContracts}
                 t={t}
@@ -2114,10 +2118,15 @@ export function DepartmentDetailView({
               <ArtifactContractsEditor
                 contracts={outputArtifactContracts}
                 label={t.outputArtifactContracts}
+                hint={t.outputArtifactContractsHint}
+                emptyText={t.noOutputArtifactContracts}
                 owner="output"
                 setContracts={setOutputArtifactContracts}
                 t={t}
               />
+              <button disabled={busy} type="submit">
+                {t.saveDepartment}
+              </button>
             </form>
           </article>
           <article className="create-panel">
@@ -2257,6 +2266,8 @@ function ArtifactContractsEditor({
   contracts,
   setContracts,
   label,
+  hint,
+  emptyText,
   owner,
   t,
 }: {
@@ -2265,6 +2276,8 @@ function ArtifactContractsEditor({
     React.SetStateAction<ArtifactContract[]>
   >;
   readonly label: string;
+  readonly hint: string;
+  readonly emptyText: string;
   readonly owner: string;
   readonly t: Messages;
 }) {
@@ -2276,8 +2289,15 @@ function ArtifactContractsEditor({
     );
   };
   return (
-    <fieldset data-artifact-contracts={owner}>
+    <fieldset
+      className="artifact-contract-editor"
+      data-artifact-contracts={owner}
+    >
       <legend>{label}</legend>
+      <p className="field-help">{hint}</p>
+      {contracts.length === 0 ? (
+        <div className="configuration-empty-state">{emptyText}</div>
+      ) : null}
       {contracts.map((contract, index) => (
         <div className="pipeline-edge-editor" key={`${contract.id}:${index}`}>
           <input
