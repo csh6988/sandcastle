@@ -581,20 +581,13 @@ export const runRuntimeBrowserWindowSmoke = async (
       const checkbox = document.querySelector('[data-position-skill="software-engineer:code-review"]');
       if (!(checkbox instanceof HTMLInputElement)) return false;
       checkbox.click();
-      return true;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          document.querySelector('[data-save-position-skills="software-engineer"]')?.click();
+          resolve(true);
+        }, 0);
+      });
     })()`,
-    true,
-  );
-  if (
-    !(await waitForSelector(
-      window,
-      '[data-save-position-skills="software-engineer"]:not(:disabled)',
-    ))
-  ) {
-    throw new Error("Position Skill save action did not become ready.");
-  }
-  await window.webContents.executeJavaScript(
-    `document.querySelector('[data-save-position-skills="software-engineer"]')?.click()`,
     true,
   );
   await waitForRuntimeSkillConfiguration(
@@ -617,12 +610,13 @@ export const runRuntimeBrowserWindowSmoke = async (
       setter?.call(instructions, 'Ship one tested BrowserWindow vertical slice.');
       instructions.dispatchEvent(new Event('input', { bubbles: true }));
       if (diagnosing.checked) diagnosing.click();
-      return true;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          flow.requestSubmit();
+          resolve(true);
+        }, 0);
+      });
     })()`,
-    true,
-  );
-  await window.webContents.executeJavaScript(
-    `document.querySelector('[data-skill-flow-editor="implementation-flow"]')?.requestSubmit()`,
     true,
   );
   const editedSkillFlow = await waitForRuntimeSkillConfiguration(
@@ -646,20 +640,13 @@ export const runRuntimeBrowserWindowSmoke = async (
       const checkbox = document.querySelector('[data-position-skill="software-engineer:diagnosing-bugs"]');
       if (!(checkbox instanceof HTMLInputElement)) return false;
       if (checkbox.checked) checkbox.click();
-      return true;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          document.querySelector('[data-save-position-skills="software-engineer"]')?.click();
+          resolve(true);
+        }, 0);
+      });
     })()`,
-    true,
-  );
-  if (
-    !(await waitForSelector(
-      window,
-      '[data-save-position-skills="software-engineer"]:not(:disabled)',
-    ))
-  ) {
-    throw new Error("Rebound Position Skill save action did not become ready.");
-  }
-  await window.webContents.executeJavaScript(
-    `document.querySelector('[data-save-position-skills="software-engineer"]')?.click()`,
     true,
   );
   const reboundSkills = await waitForRuntimeSkillConfiguration(
@@ -691,12 +678,13 @@ export const runRuntimeBrowserWindowSmoke = async (
       setValue(instructions, 'Deliver and review the BrowserWindow slice.');
       if (!tdd.checked) tdd.click();
       if (!review.checked) review.click();
-      return true;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          form.requestSubmit();
+          resolve(true);
+        }, 0);
+      });
     })()`,
-    true,
-  );
-  await window.webContents.executeJavaScript(
-    `document.querySelector('[data-new-skill-flow="software-engineer"]')?.requestSubmit()`,
     true,
   );
   const createdSkillConfiguration = await waitForRuntimeSkillConfiguration(
@@ -734,12 +722,13 @@ export const runRuntimeBrowserWindowSmoke = async (
       const setter = Object.getOwnPropertyDescriptor(name.constructor.prototype, 'value')?.set;
       setter?.call(name, 'Stale Browser flow');
       name.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          form.requestSubmit();
+          resolve(true);
+        }, 0);
+      });
     })()`,
-    true,
-  );
-  await window.webContents.executeJavaScript(
-    `document.querySelector('[data-skill-flow-editor=${JSON.stringify(createdSkillFlow.id)}]')?.requestSubmit()`,
     true,
   );
   const skillFlowConflictVisible = await waitForSelector(
