@@ -14,7 +14,6 @@ const supervisor = createCompanyRuntimeSupervisor();
 let window;
 
 app.commandLine.appendSwitch("disable-gpu");
-if (process.platform === "linux") app.commandLine.appendSwitch("no-sandbox");
 
 const cleanup = async () => {
   window?.destroy();

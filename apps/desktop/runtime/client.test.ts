@@ -5,12 +5,13 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { companyRuntimeAddress } from "./address.js";
 import { createLocalRuntimeTransport } from "./client.js";
 
 describe("Company Runtime client", () => {
   it("lets Pipeline Runtime own the timeout for long-running execution commands", async () => {
     const directory = mkdtempSync(join(tmpdir(), "sandcastle-runtime-client-"));
-    const address = join(directory, "runtime.sock");
+    const address = companyRuntimeAddress(directory);
     let activeSocket: import("node:net").Socket | undefined;
     const server = createServer({ allowHalfOpen: true }, (socket) => {
       activeSocket = socket;

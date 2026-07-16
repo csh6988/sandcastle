@@ -53,7 +53,7 @@ jobs:
 
       - name: Electron BrowserWindow smoke (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:electron-smoke
+        run: xvfb-run -a npx electron --no-sandbox scripts/electron-runtime-smoke.mjs
 
       - name: Electron BrowserWindow smoke (macOS/Windows)
         if: runner.os != 'Linux'
