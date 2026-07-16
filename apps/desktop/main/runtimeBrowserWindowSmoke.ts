@@ -593,6 +593,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "save Position Skill bindings",
     (configuration) =>
       configuration.revision === 1 &&
       configuration.positions
@@ -622,6 +623,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   const editedSkillFlow = await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "edit the implementation Skill Flow",
     (configuration) =>
       configuration.skillFlows.some(
         (flow) =>
@@ -652,6 +654,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   const reboundSkills = await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "rebind Position Skills",
     (configuration) =>
       configuration.revision === 3 &&
       JSON.stringify(
@@ -690,6 +693,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   const createdSkillConfiguration = await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "create a Skill Flow",
     (configuration) =>
       configuration.revision === 4 &&
       configuration.skillFlows.some(
@@ -767,6 +771,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   const reloadedSkills = await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "reload the externally edited Skill Flow",
     (configuration) =>
       configuration.skillFlows.some(
         (flow) =>
@@ -782,6 +787,7 @@ export const runRuntimeBrowserWindowSmoke = async (
   const archivedSkills = await waitForRuntimeSkillConfiguration(
     window,
     "software-rnd",
+    "archive the Skill Flow",
     (configuration) =>
       configuration.skillFlows.some(
         (flow) => flow.id === createdSkillFlow.id && flow.status === "archived",
@@ -1717,9 +1723,11 @@ const waitForRuntimeProject = async (
 const waitForRuntimeSkillConfiguration = async (
   window: BrowserWindow,
   departmentId: string,
+  stage: string,
   predicate: (configuration: SkillConfigurationView) => boolean,
 ): Promise<SkillConfigurationView> => {
   const deadline = Date.now() + 5_000;
+  let latest: SkillConfigurationView | undefined;
   while (Date.now() < deadline) {
     const configuration = SkillConfigurationViewSchema.parse(
       await window.webContents.executeJavaScript(
@@ -1727,11 +1735,28 @@ const waitForRuntimeSkillConfiguration = async (
         true,
       ),
     );
+    latest = configuration;
     if (predicate(configuration)) return configuration;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(
-    `Runtime Skill Configuration for Department ${departmentId} did not reach the expected state.`,
+    `Runtime Skill Configuration for Department ${departmentId} did not ${stage}. Last state: ${JSON.stringify(
+      latest && {
+        revision: latest.revision,
+        positions: latest.positions.map((position) => ({
+          id: position.id,
+          skillIds: position.skillIds,
+        })),
+        skillFlows: latest.skillFlows.map((flow) => ({
+          id: flow.id,
+          revision: flow.revision,
+          name: flow.name,
+          instructions: flow.instructions,
+          skillIds: flow.skillIds,
+          status: flow.status,
+        })),
+      },
+    )}`,
   );
 };
 
