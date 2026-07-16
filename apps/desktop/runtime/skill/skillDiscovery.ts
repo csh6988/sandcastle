@@ -343,7 +343,7 @@ export const openSkillCatalog = (
       const markUnavailable = database.prepare(
         `UPDATE skill_discovery_entries
             SET status = 'unavailable'
-          WHERE id = ? AND status NOT IN ('enabled', 'archived')`,
+          WHERE id = ? AND status != 'archived'`,
       );
       for (const row of rows) {
         if (

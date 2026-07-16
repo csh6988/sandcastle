@@ -87,7 +87,15 @@ const setup = (
     departmentId: department.id,
     expectedRevision: draft.draft.revision,
   });
-  return { companyDir, database, project, department, graph, profile };
+  return {
+    companyDir,
+    database,
+    project,
+    department,
+    position,
+    graph,
+    profile,
+  };
 };
 
 describe("Pipeline Runtime", () => {
@@ -2750,6 +2758,46 @@ describe("Pipeline Runtime", () => {
         JSON.stringify(events).includes('"agentOverrideId":"claude-code"'),
         true,
       );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("freezes Position Skill versions in the Run Snapshot", () => {
+    const { database, project, department, position } = setup();
+    try {
+      const configuration = database.skillConfiguration.inspect(department.id);
+      const saved = database.skillConfiguration.saveSkill({
+        departmentId: department.id,
+        expectedRevision: configuration.revision,
+        name: "Release Review",
+        description: "Reviews release evidence.",
+        source: "company-skills",
+        version: "sha256:release-review-v1",
+        locationReference: "/company-skills/release-review/SKILL.md",
+      });
+      const skill = saved.activeSkills.find(
+        (candidate) => candidate.name === "Release Review",
+      );
+      assert.ok(skill);
+      database.skillConfiguration.setPositionSkills({
+        departmentId: department.id,
+        positionId: position.id,
+        expectedRevision: saved.revision,
+        skillIds: [skill.id],
+      });
+
+      const started = database.pipelineRuntime.startRun({
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const snapshotPosition = started.snapshot.payload.positions.find(
+        (candidate) => candidate.id === position.id,
+      );
+      assert.ok(snapshotPosition);
+      assert.deepEqual(snapshotPosition.skillSnapshots, [
+        { id: skill.id, version: "sha256:release-review-v1" },
+      ]);
     } finally {
       database.close();
     }

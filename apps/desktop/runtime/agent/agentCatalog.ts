@@ -72,6 +72,7 @@ interface CompanyAgentAdapter {
   readonly executableNames: readonly string[];
   readonly capabilities: readonly AgentCapability[];
   readonly versionArgs: readonly string[];
+  readonly testArgs: readonly string[];
 }
 
 const registeredAdapters: readonly CompanyAgentAdapter[] = [
@@ -81,6 +82,7 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["claude"],
     capabilities: ["non-interactive", "structured-output", "session-resume"],
     versionArgs: ["--version"],
+    testArgs: ["--help"],
   },
   {
     id: "codex",
@@ -88,6 +90,7 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["codex"],
     capabilities: ["non-interactive", "structured-output", "session-resume"],
     versionArgs: ["--version"],
+    testArgs: ["--help"],
   },
   {
     id: "pi-agent",
@@ -95,6 +98,7 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["pi"],
     capabilities: ["non-interactive", "session-resume"],
     versionArgs: ["--version"],
+    testArgs: ["--help"],
   },
   {
     id: "codem",
@@ -102,6 +106,7 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["codem"],
     capabilities: ["non-interactive"],
     versionArgs: ["--version"],
+    testArgs: ["--help"],
   },
   {
     id: "hermes",
@@ -109,6 +114,7 @@ const registeredAdapters: readonly CompanyAgentAdapter[] = [
     executableNames: ["hermes"],
     capabilities: ["non-interactive", "session-resume"],
     versionArgs: ["--version"],
+    testArgs: ["--help"],
   },
 ];
 
@@ -237,7 +243,7 @@ export const openAgentCatalog = (
       }
       const result = await host.run({
         executablePath,
-        args: adapter.versionArgs,
+        args: adapter.testArgs,
         timeoutMs: 5_000,
       });
       if (result.exitCode !== 0) {
@@ -250,7 +256,7 @@ export const openAgentCatalog = (
         agentId: adapter.id,
         status: "passed",
         testedAt: clock().toISOString(),
-        summary: "Agent executable responded to its non-destructive test.",
+        summary: "Agent executable accepted a safe capability probe.",
       };
     },
     discover: async () => {

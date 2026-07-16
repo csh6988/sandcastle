@@ -406,6 +406,10 @@ _Avoid_: "persona" (too vague), "agent role" (too broad), "model config" (too na
 A stable, versioned capability reference in the **company**-wide Skill Catalog that a **position** may bind for use by its **skill flows**. A Skill is reusable across departments, while each position explicitly owns the subset available to its flows.
 _Avoid_: "prompt" (too narrow), "skill flow" (a flow selects and instructs multiple skills), department-owned skill copies
 
+**Skill Snapshot**:
+A Run Snapshot record containing a bound Skill's stable identifier and source fingerprint/version at Run start. It preserves the exact local capability reference used by historical execution even when the external `SKILL.md` changes or disappears.
+_Avoid_: copying Skill source content into Runtime state, resolving a historical Run from the current Skill Catalog
+
 **Skill Discovery**:
 The process of finding formally readable `SKILL.md` sources in configured host directories and projecting their stable references, descriptions, and fingerprints into the company-wide Skill Catalog without copying their contents into Company Runtime state.
 _Avoid_: manual skill registration, skill import (the source remains external), agent-specific skill list

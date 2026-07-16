@@ -133,6 +133,12 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
       assert.equal(snapshotEngineer.resolvedAgentId, "claude-code");
       assert.equal(snapshotEngineer.agentSource, "run-override");
       assert.equal(snapshotEngineer.skillIds.includes(releaseReview.id), true);
+      assert.deepEqual(
+        snapshotEngineer.skillSnapshots?.find(
+          (skill) => skill.id === releaseReview.id,
+        ),
+        { id: releaseReview.id, version: releaseReview.version },
+      );
 
       const audit = await client.query({
         type: "runtime.audit",
@@ -216,6 +222,12 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
       assert.equal(
         reloadedSnapshotEngineer.skillIds.includes(releaseReview.id),
         true,
+      );
+      assert.deepEqual(
+        reloadedSnapshotEngineer.skillSnapshots?.find(
+          (skill) => skill.id === releaseReview.id,
+        ),
+        { id: releaseReview.id, version: releaseReview.version },
       );
     } finally {
       await runtime.close().catch(() => undefined);

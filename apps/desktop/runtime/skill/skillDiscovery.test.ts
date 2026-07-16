@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -52,6 +52,43 @@ describe("Skill Discovery", () => {
       assert.equal(
         archived.skills.find((skill) => skill.id === discovered.id)?.status,
         "archived",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("marks an enabled Skill unavailable when its source disappears", async () => {
+    const sourceDirectory = mkdtempSync(
+      join(tmpdir(), "sandcastle-skill-discovery-source-"),
+    );
+    const skillDirectory = join(sourceDirectory, "local-review");
+    mkdirSync(skillDirectory);
+    const skillPath = join(skillDirectory, "SKILL.md");
+    writeFileSync(
+      skillPath,
+      "---\nname: Local Review\ndescription: Reviews a change.\n---\n",
+    );
+    const database = openCompanyDatabase(tempCompanyDir());
+
+    try {
+      const discovered = await database.skillCatalog.discover({
+        directories: [sourceDirectory],
+      });
+      const skill = discovered.skills.find(
+        (candidate) => candidate.locationReference === skillPath,
+      );
+      assert.ok(skill);
+      await database.skillCatalog.enable(skill.id);
+
+      rmSync(skillPath);
+      const refreshed = await database.skillCatalog.discover({
+        directories: [sourceDirectory],
+      });
+
+      assert.equal(
+        refreshed.skills.find((candidate) => candidate.id === skill.id)?.status,
+        "unavailable",
       );
     } finally {
       database.close();

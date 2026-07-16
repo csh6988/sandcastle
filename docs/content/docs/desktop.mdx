@@ -1,0 +1,24 @@
+---
+title: Desktop Company Runtime
+description: Configure local Agents, Skills, Positions, and Departments in Sandcastle Desktop.
+---
+
+## Company workspace
+
+Sandcastle Desktop opens a persistent Company Runtime workspace. The Runtime owns configuration, Runs, Snapshots, audit records, and event replay; Renderer reloads reconnect to that same local state.
+
+## Agents
+
+The Agents page lists formally registered local coding Agents by stable ID. Detection records installation status, version, executable path, capabilities, and detection time. The **Test Agent** action performs a safe capability probe without creating a Run, changing Git, writing project files, or persisting raw command output.
+
+## Skills
+
+The Skills page discovers `SKILL.md` files from the default local roots and any directories you add. Only stable references, source paths, and SHA-256 fingerprints are stored; Skill bodies are not copied into the Company database. Skills can be searched with ordered fuzzy matching and move through discovered, enabled, unavailable, and archived states.
+
+## Positions and Departments
+
+Each Position has an AI Member identity, a default Agent, and a set of enabled Skills. The Position editor saves those settings together and shows only enabled Skills. Department Overview is read-only; Department Settings groups basic settings, run environments, artifact contracts, and non-sensitive Secret References behind one bottom **Save department** action. Archive operations remain explicit destructive actions.
+
+## Run history
+
+When a Run starts, its Snapshot records the resolved Agent and whether it came from the Position default or a temporary override. It also records each Position Skill reference and its fingerprint/version, so historical Runs remain explainable after local Agent or Skill installations change.

@@ -400,7 +400,8 @@ export const runRuntimeBrowserWindowSmoke = async (
       const form = document.querySelector('[data-department-settings]');
       const name = document.querySelector('#department-detail-name');
       const description = document.querySelector('#department-detail-description');
-      if (!(form instanceof HTMLFormElement) || !(name instanceof HTMLInputElement) || !(description instanceof HTMLTextAreaElement)) return false;
+      const save = document.querySelector('[data-save-department-settings]');
+      if (!(form instanceof HTMLFormElement) || !(name instanceof HTMLInputElement) || !(description instanceof HTMLTextAreaElement) || !(save instanceof HTMLButtonElement)) return false;
       const setValue = (element, value) => {
         const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')?.set;
         setter?.call(element, value);
@@ -408,7 +409,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       };
       setValue(name, 'Product Engineering');
       setValue(description, 'Builds and verifies product changes.');
-      form.requestSubmit();
+      save.click();
       return true;
     })()`,
     true,

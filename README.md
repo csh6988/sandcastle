@@ -1256,6 +1256,12 @@ Starts a local workflow board so you can watch and manage runs in a browser inst
 
 The board frontend is the v1 **company control plane** shell (ADR 0026): a company-level left navigation with **Departments**, **Projects**, **Artifacts**, **Reviews**, and **Settings**, defaulting to the one operational department — **Software R&D** (the board itself). Projects come from `.sandcastle/workspace.json`, Artifacts aggregate every task's artifact manifest, Reviews list tasks with a verification status, and Settings shows the department's **role profiles**. The backing endpoints are `GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and `GET /api/role-profiles`.
 
+### Desktop Company Runtime
+
+The Desktop Company Runtime provides the persistent local company workspace. Its **Agents** page detects formally registered local coding Agents and runs a safe capability probe without creating a Run. Its independent **Skills** page discovers `SKILL.md` files from the default or configured directories, supports ordered fuzzy search, and tracks discovered, enabled, unavailable, and archived sources without copying Skill bodies.
+
+Departments use compact Position cards and a right-side editor. A Position keeps its AI Member identity separate from its default Agent and enabled Skills. Department Settings presents one bottom **Save department** action for basic settings, run environments, artifact contracts, and non-sensitive Secret References; destructive archive actions remain in the danger area. Every Run Snapshot freezes the selected Agent, override source, Skill references, and Skill fingerprints so later local changes cannot rewrite historical execution context.
+
 Role profiles make the Planner / Generator / Evaluator boundaries explicit configuration: each profile carries a responsibility statement, allowed and forbidden actions, progressive **skill flows** (loaded via `.sandcastle/SKILL_ROUTER.md`, never all at once), optional extra prompt guidance, and advisory agent/model preferences. Built-in defaults ship with the board; override any subset per role in `.sandcastle/role-profiles.json` (invalid files fail fast at board startup):
 
 ```jsonc

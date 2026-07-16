@@ -12,6 +12,7 @@ import {
   AgentsPage,
   SkillsPage,
   PositionDrawerEditor,
+  fuzzyMatch,
   ProjectDetailView,
   RuntimeDiagnosticsPanel,
 } from "./companyPages.js";
@@ -123,6 +124,13 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /Local Review/);
     assert.match(markup, /SKILL\.md/);
     assert.match(markup, /data-enable-skill="local-review"/);
+    assert.match(markup, /data-skill-directory/);
+    assert.match(markup, /Add Skill Directory/);
+  });
+
+  it("matches Skills by ordered fuzzy characters", () => {
+    assert.equal(fuzzyMatch("lrv", "Local Review"), true);
+    assert.equal(fuzzyMatch("xyz", "Local Review"), false);
   });
 });
 
@@ -379,6 +387,14 @@ describe("Department detail", () => {
     assert.match(settings, /data-department-settings/);
     assert.match(settings, /data-artifact-contract-settings/);
     assert.match(settings, /data-department-advanced-settings/);
+    assert.match(settings, /data-save-department-settings/);
+    assert.match(settings, /Run environments/);
+    assert.match(settings, /Agent provider/);
+    assert.match(settings, /Sandbox environment/);
+    assert.doesNotMatch(settings, /Save Execution Profile/);
+    assert.doesNotMatch(settings, /Create Secret Reference/);
+    assert.doesNotMatch(settings, /Provider reference/);
+    assert.doesNotMatch(settings, /Sandbox reference/);
   });
 
   it("renders a stable unpublished Pipeline state for a custom Department", () => {

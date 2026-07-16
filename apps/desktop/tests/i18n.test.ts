@@ -72,14 +72,14 @@ describe("desktop renderer i18n", () => {
   it("localizes Department execution and Artifact Contract terminology", () => {
     const t = messages.zh;
 
-    assert.equal(t.activeProfile, "默认执行配置");
+    assert.equal(t.activeProfile, "默认运行环境");
     assert.equal(t.inputArtifactContracts, "输入制品契约");
     assert.equal(t.outputArtifactContracts, "输出制品契约");
     assert.equal(t.addArtifactContract, "添加制品契约");
-    assert.equal(t.executionProfiles, "执行配置");
+    assert.equal(t.executionProfiles, "运行环境");
     assert.equal(t.secretReferences, "密钥引用");
-    assert.equal(t.providerRef, "提供方引用");
-    assert.equal(t.sandboxRef, "沙箱引用");
+    assert.equal(t.providerRef, "Agent 提供方");
+    assert.equal(t.sandboxRef, "Sandbox 环境");
     assert.equal(t.branchStrategy, "分支策略");
     assert.equal(t.retryMaxAttempts, "最大重试次数");
   });

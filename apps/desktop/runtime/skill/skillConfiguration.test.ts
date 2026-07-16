@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -536,6 +536,54 @@ describe("Skill Configuration", () => {
         (error: unknown) =>
           error instanceof SkillConfigurationError &&
           error.code === "SKILL_ARCHIVED",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("excludes unavailable discovered Skills from Position selection", async () => {
+    const companyDir = tempCompanyDir();
+    const sourceDirectory = join(companyDir, "company-skills");
+    const skillDirectory = join(sourceDirectory, "release-review");
+    mkdirSync(skillDirectory, { recursive: true });
+    const skillPath = join(skillDirectory, "SKILL.md");
+    writeFileSync(
+      skillPath,
+      "---\nname: Release Review\ndescription: Reviews release evidence.\n---\n",
+    );
+    const database = openCompanyDatabase(companyDir);
+
+    try {
+      const discovered = await database.skillCatalog.discover({
+        directories: [sourceDirectory],
+      });
+      const skill = discovered.skills.find(
+        (candidate) => candidate.locationReference === skillPath,
+      );
+      assert.ok(skill);
+      await database.skillCatalog.enable(skill.id);
+      rmSync(skillPath);
+      await database.skillCatalog.discover({ directories: [sourceDirectory] });
+
+      const configuration = database.skillConfiguration.inspect("software-rnd");
+      assert.equal(
+        configuration.activeSkills.some(
+          (candidate) => candidate.id === skill.id,
+        ),
+        false,
+      );
+      assert.throws(
+        () =>
+          database.skillConfiguration.setPositionSkills({
+            departmentId: "software-rnd",
+            positionId: "software-engineer",
+            expectedRevision: configuration.revision,
+            skillIds: [skill.id],
+          }),
+        (error: unknown) =>
+          error instanceof SkillConfigurationError &&
+          error.code === "SKILL_UNAVAILABLE",
       );
     } finally {
       database.close();

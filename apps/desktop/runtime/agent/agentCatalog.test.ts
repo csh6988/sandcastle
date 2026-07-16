@@ -63,10 +63,10 @@ describe("Agent Catalog", () => {
         resolveExecutable: async (names: readonly string[]) =>
           names.includes("codex") ? "/opt/sandcastle/bin/codex" : null,
         run: async ({ args }) => {
-          assert.deepEqual(args, ["--version"]);
+          assert.deepEqual(args, ["--help"]);
           return {
             exitCode: 0,
-            stdout: "codex-cli 1.2.3\nTOKEN=must-not-leak",
+            stdout: "Usage: codex [options]\nTOKEN=must-not-leak",
             stderr: "",
           };
         },
@@ -80,7 +80,7 @@ describe("Agent Catalog", () => {
         agentId: "codex",
         status: "passed",
         testedAt: "2026-07-16T08:01:00.000Z",
-        summary: "Agent executable responded to its non-destructive test.",
+        summary: "Agent executable accepted a safe capability probe.",
       });
       assert.equal("TOKEN=must-not-leak" in result, false);
       assert.equal(database.pipelineRuntime.listRuns().length, 0);

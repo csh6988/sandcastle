@@ -966,6 +966,19 @@ export const openPipelineRuntime = (
           `Position ${positionId} is missing, archived, inactive, or outside Department ${department.id}.`,
         );
       }
+      const skillSnapshots = database
+        .prepare(
+          `SELECT position_skill_bindings.skill_id AS id,
+                  skills.version
+             FROM position_skill_bindings
+             JOIN skills ON skills.id = position_skill_bindings.skill_id
+            WHERE position_skill_bindings.position_id = ?
+         ORDER BY position_skill_bindings.skill_id`,
+        )
+        .all(position.id) as Array<{
+        readonly id: string;
+        readonly version: string;
+      }>;
       return {
         id: position.id,
         revision: Number(position.revision),
@@ -976,16 +989,8 @@ export const openPipelineRuntime = (
         agentSource: input.agentOverrideId
           ? ("run-override" as const)
           : ("position-default" as const),
-        skillIds: (
-          database
-            .prepare(
-              `SELECT skill_id AS skillId
-                 FROM position_skill_bindings
-                WHERE position_id = ?
-             ORDER BY skill_id`,
-            )
-            .all(position.id) as Array<{ readonly skillId: string }>
-        ).map((binding) => binding.skillId),
+        skillIds: skillSnapshots.map((skill) => skill.id),
+        skillSnapshots,
         aiMember: {
           id: position.aiMemberId,
           displayName: position.aiMemberDisplayName,

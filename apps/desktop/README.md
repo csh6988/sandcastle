@@ -43,14 +43,15 @@ Responsibilities (and nothing more):
   Profile, Secret Reference IDs, Artifact Contracts, limits, and node
   configuration. Agents are discovered through registered local Company Agent
   Adapters and
-  can be tested with a non-destructive version probe that never creates a Run
+  can be tested with a safe capability probe that never creates a Run
   or persists command output. Skills have an independent `SKILL.md` discovery
-  catalog with fuzzy search, source references, fingerprints, enable/archive
-  lifecycle, and no copied source contents. Position cards are compact and
-  open a drawer that saves identity, default Agent, and Position Skill
-  bindings together; Skill Flows remain separate editors. Department Overview
-  is read-only while Settings holds layered basic, inherited runtime, artifact
-  contract, and advanced sections. Department Run, Node Run, Node Attempt, Node
+  catalog with ordered fuzzy search, configurable source directories,
+  source references, fingerprints, enable/archive/unavailable lifecycle, and
+  no copied source contents. Position cards are compact and open a drawer that
+  saves identity, default Agent, and Position Skill bindings together; Skill
+  Flows remain separate editors. Department Overview is read-only while
+  Settings uses one bottom save action for basic, run environment, artifact
+  contract, and non-sensitive reference changes. Department Run, Node Run, Node Attempt, Node
   feedback, and
   Approval history, Runtime audit/outbox records, and Artifact Version lineage
   are stored in SQLite schema v23 and reload entirely from the

@@ -100,18 +100,24 @@ export const openSkillConfiguration = (
       .get() as { readonly revision: number };
     const activeSkills = database
       .prepare(
-        `SELECT id,
-                name,
-                description,
-                source,
-                version,
-                location_ref AS locationReference,
-                status,
-                created_at AS createdAt,
-                archived_at AS archivedAt
+        `SELECT skills.id,
+                skills.name,
+                skills.description,
+                skills.source,
+                skills.version,
+                skills.location_ref AS locationReference,
+                skills.status,
+                skills.created_at AS createdAt,
+                skills.archived_at AS archivedAt
            FROM skills
-          WHERE status = 'active'
-       ORDER BY id`,
+      LEFT JOIN skill_discovery_entries
+             ON skill_discovery_entries.id = skills.id
+          WHERE skills.status = 'active'
+            AND (
+              skill_discovery_entries.id IS NULL OR
+              skill_discovery_entries.status = 'enabled'
+            )
+       ORDER BY skills.id`,
       )
       .all();
     const archivedSkills = database
@@ -532,9 +538,19 @@ export const openSkillConfiguration = (
       }
       for (const skillId of skillIds) {
         const skill = database
-          .prepare("SELECT status FROM skills WHERE id = ?")
+          .prepare(
+            `SELECT skills.status,
+                    skill_discovery_entries.status AS discoveryStatus
+               FROM skills
+          LEFT JOIN skill_discovery_entries
+                 ON skill_discovery_entries.id = skills.id
+              WHERE skills.id = ?`,
+          )
           .get(skillId) as
-          | { readonly status: "active" | "archived" }
+          | {
+              readonly status: "active" | "archived";
+              readonly discoveryStatus: string | null;
+            }
           | undefined;
         if (!skill) {
           throw new SkillConfigurationError(
@@ -546,6 +562,12 @@ export const openSkillConfiguration = (
           throw new SkillConfigurationError(
             "SKILL_ARCHIVED",
             `Skill ${skillId} is archived.`,
+          );
+        }
+        if (skill.discoveryStatus && skill.discoveryStatus !== "enabled") {
+          throw new SkillConfigurationError(
+            "SKILL_UNAVAILABLE",
+            `Skill ${skillId} is unavailable on this machine.`,
           );
         }
       }

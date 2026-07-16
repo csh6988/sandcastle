@@ -512,6 +512,14 @@ const RunSnapshotPositionSchema = z.object({
   resolvedAgentId: z.string(),
   agentSource: z.enum(["position-default", "run-override"]),
   skillIds: z.array(z.string()),
+  skillSnapshots: z
+    .array(
+      z.object({
+        id: z.string(),
+        version: z.string(),
+      }),
+    )
+    .optional(),
   aiMember: z.object({
     id: z.string(),
     displayName: z.string(),

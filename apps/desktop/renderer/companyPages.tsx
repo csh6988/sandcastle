@@ -40,6 +40,17 @@ const errorMessage = (error: unknown): string =>
       ? error.message
       : String(error);
 
+export const fuzzyMatch = (query: string, text: string): boolean => {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  let queryIndex = 0;
+  for (const character of text.toLowerCase()) {
+    if (character === normalizedQuery[queryIndex]) queryIndex += 1;
+    if (queryIndex === normalizedQuery.length) return true;
+  }
+  return false;
+};
+
 const runtimeErrorCode = (error: unknown): string | null =>
   typeof error === "object" &&
   error !== null &&
@@ -59,6 +70,7 @@ const skillRuntimeErrorMessage = (
     DEPARTMENT_NOT_FOUND: t.skillErrorDepartmentNotFound,
     SKILL_NOT_FOUND: t.skillErrorSkillNotFound,
     SKILL_ARCHIVED: t.skillErrorSkillArchived,
+    SKILL_UNAVAILABLE: t.skillErrorSkillUnavailable,
     SKILL_IN_USE: t.skillErrorSkillInUse,
     POSITION_OUTSIDE_DEPARTMENT: t.skillErrorPositionOutsideDepartment,
     POSITION_SKILL_IN_USE: t.skillErrorPositionSkillInUse,
@@ -182,6 +194,7 @@ export function SkillsPage({
     initialCatalog ?? null,
   );
   const [search, setSearch] = useState("");
+  const [directory, setDirectory] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     window.sandcastle.runtime
@@ -189,17 +202,23 @@ export function SkillsPage({
       .then(setCatalog)
       .catch((nextError: unknown) => setError(errorMessage(nextError)));
   }, []);
-  const normalized = search.trim().toLowerCase();
   const skills =
     catalog?.skills.filter((skill) =>
-      `${skill.name} ${skill.description} ${skill.locationReference}`
-        .toLowerCase()
-        .includes(normalized),
+      fuzzyMatch(
+        search,
+        `${skill.name} ${skill.description} ${skill.locationReference}`,
+      ),
     ) ?? [];
   const mutate = (operation: Promise<SkillCatalogView>) =>
     void operation
       .then(setCatalog)
       .catch((nextError: unknown) => setError(errorMessage(nextError)));
+  const addDirectory = () => {
+    const nextDirectory = directory.trim();
+    if (!nextDirectory) return;
+    mutate(window.sandcastle.runtime.discoverSkills([nextDirectory]));
+    setDirectory("");
+  };
   return (
     <section className="page" data-page="skills">
       <header className="page-heading">
@@ -224,6 +243,33 @@ export function SkillsPage({
           onChange={(event) => setSearch(event.target.value)}
         />
       </label>
+      <section className="create-panel" data-skill-directories>
+        <h2>{t.skillDirectories}</h2>
+        <form
+          className="form skill-directory-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            addDirectory();
+          }}
+        >
+          <input
+            data-skill-directory
+            placeholder={t.skillDirectoryPlaceholder}
+            value={directory}
+            onChange={(event) => setDirectory(event.target.value)}
+          />
+          <button disabled={!directory.trim()} type="submit">
+            {t.addSkillDirectory}
+          </button>
+        </form>
+        <ul>
+          {(catalog?.directories ?? []).map((path) => (
+            <li key={path}>
+              <code>{path}</code>
+            </li>
+          ))}
+        </ul>
+      </section>
       <section className="catalog-grid" aria-label={t.skillsTitle}>
         {skills.map((skill) => (
           <article
@@ -2242,6 +2288,15 @@ export function DepartmentDetailView({
     setCopyName(`${department.name} Copy`);
   }, [department]);
   const modernConfiguration = Boolean(agentCatalog && onConfigurePosition);
+  const saveAllSettings = () => {
+    document
+      .querySelectorAll<HTMLFormElement>(
+        "[data-department-settings], [data-execution-profile-editor], [data-new-secret-reference]",
+      )
+      .forEach((form) => {
+        if (form.checkValidity()) form.requestSubmit();
+      });
+  };
   return (
     <section
       aria-busy={busy}
@@ -2447,9 +2502,6 @@ export function DepartmentDetailView({
                   t={t}
                 />
               </details>
-              <button disabled={busy} type="submit">
-                {t.saveDepartment}
-              </button>
             </form>
           </article>
           <article className="create-panel">
@@ -2498,6 +2550,14 @@ export function DepartmentDetailView({
           </details>
           <article className="create-panel department-actions-panel">
             <h2>{t.departmentActions}</h2>
+            <button
+              data-save-department-settings
+              disabled={busy}
+              onClick={saveAllSettings}
+              type="button"
+            >
+              {t.saveDepartment}
+            </button>
             <form
               className="form"
               data-department-copy-form
@@ -3015,9 +3075,6 @@ function ExecutionProfileEditor({
           ))}
       </fieldset>
       <div className="action-bar">
-        <button disabled={busy || profile?.status === "archived"} type="submit">
-          {t.saveExecutionProfile}
-        </button>
         {profile ? (
           <button
             className="danger-button"
@@ -3118,9 +3175,6 @@ function SecretReferenceConfiguration({
           required
           value={providerScope}
         />
-        <button disabled={busy} type="submit">
-          {t.createSecretReference}
-        </button>
       </form>
     </article>
   );
@@ -4648,9 +4702,7 @@ export function PositionDrawerEditor({
     setDirty(false);
   }, [configuration, position]);
   const visibleSkills = configuration.activeSkills.filter((skill) =>
-    `${skill.name} ${skill.description}`
-      .toLowerCase()
-      .includes(search.trim().toLowerCase()),
+    fuzzyMatch(search, `${skill.name} ${skill.description}`),
   );
   const save = () => {
     void onSave({
