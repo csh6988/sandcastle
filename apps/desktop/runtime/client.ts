@@ -90,7 +90,7 @@ const sendRequest = async (
     );
     socket.on("error", fail);
     socket.on("connect", () => {
-      socket.end(`${JSON.stringify(request)}\n`);
+      socket.write(`${JSON.stringify(request)}\n`);
     });
     socket.on("data", (chunk) => {
       response += chunk.toString("utf8");

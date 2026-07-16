@@ -112,12 +112,19 @@ export const startCompanyRuntimeServer = async (
     server = createServer({ allowHalfOpen: true }, (socket) => {
       socket.on("error", () => undefined);
       let requestText = "";
+      let handled = false;
       socket.setEncoding("utf8");
       socket.on("data", (chunk) => {
         requestText += chunk;
-        if (requestText.length > 1_048_576) socket.destroy();
+        if (requestText.length > 1_048_576) {
+          socket.destroy();
+          return;
+        }
+        if (requestText.includes("\n")) handleRequest();
       });
-      socket.on("end", () => {
+      function handleRequest(): void {
+        if (handled) return;
+        handled = true;
         let requestId = "unknown";
         try {
           const request = RuntimeRequestSchema.parse(
@@ -762,7 +769,8 @@ export const startCompanyRuntimeServer = async (
             },
           });
         }
-      });
+      }
+      socket.on("end", handleRequest);
     });
 
     await new Promise<void>((resolve, reject) => {

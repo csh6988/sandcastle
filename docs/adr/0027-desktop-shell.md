@@ -80,3 +80,6 @@ resources attached to a project.
   smoke. The Windows installer is intentionally unsigned until release
   credentials are available; ARM64, Microsoft code signing, and auto-update
   remain separate release gates.
+- Company Runtime IPC uses newline-delimited request framing and lets the
+  server close each response. It does not rely on client half-close semantics,
+  which are not reliable across Windows Named Pipes and Unix domain sockets.

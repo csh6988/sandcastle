@@ -45,6 +45,54 @@ describe("Company Runtime", () => {
     }
   });
 
+  it("answers a request before the client half-closes the connection", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+    const socket = createConnection(address);
+    let response = "";
+
+    try {
+      await once(socket, "connect");
+      const ended = once(socket, "end");
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        response += chunk;
+      });
+      socket.write(
+        `${JSON.stringify({
+          id: "named-pipe-compatible-request",
+          token: "valid-token",
+          kind: "query",
+          query: { type: "runtime.health" },
+        })}\n`,
+      );
+      await Promise.race([
+        ended,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Runtime did not answer a framed request.")),
+            1_000,
+          ),
+        ),
+      ]);
+
+      const parsed = JSON.parse(response) as {
+        readonly ok: boolean;
+        readonly result?: { readonly status?: string };
+      };
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.result?.status, "ok");
+    } finally {
+      socket.destroy();
+      await runtime.close();
+    }
+  });
+
   it("serves Agent discovery and testing through the authenticated Runtime contract", async () => {
     const companyDir = tempCompanyDir();
     const address = companyRuntimeAddress(companyDir);

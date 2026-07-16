@@ -3,5 +3,5 @@
 ---
 
 Add Windows x64 Desktop distribution with an NSIS installer, unpacked
-Company Runtime smoke coverage on `windows-latest`, and Windows npm CLI shim
-resolution for the optional Board process.
+Company Runtime smoke coverage on `windows-latest`, Windows-safe local IPC
+framing, and Windows npm CLI shim resolution for the optional Board process.
