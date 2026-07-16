@@ -68,4 +68,19 @@ describe("desktop renderer i18n", () => {
     );
     assert.equal(statusName(t, "published"), "已发布");
   });
+
+  it("localizes Department execution and Artifact Contract terminology", () => {
+    const t = messages.zh;
+
+    assert.equal(t.activeProfile, "默认执行配置");
+    assert.equal(t.inputArtifactContracts, "输入制品契约");
+    assert.equal(t.outputArtifactContracts, "输出制品契约");
+    assert.equal(t.addArtifactContract, "添加制品契约");
+    assert.equal(t.executionProfiles, "执行配置");
+    assert.equal(t.secretReferences, "密钥引用");
+    assert.equal(t.providerRef, "提供方引用");
+    assert.equal(t.sandboxRef, "沙箱引用");
+    assert.equal(t.branchStrategy, "分支策略");
+    assert.equal(t.retryMaxAttempts, "最大重试次数");
+  });
 });
