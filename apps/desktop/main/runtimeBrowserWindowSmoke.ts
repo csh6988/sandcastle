@@ -582,7 +582,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       const save = document.querySelector('[data-save-position-skills="software-engineer"]');
       if (!(checkbox instanceof HTMLInputElement) || !(save instanceof HTMLButtonElement)) return false;
       checkbox.click();
-      save.click();
+      setTimeout(() => save.click(), 0);
       return true;
     })()`,
     true,
@@ -607,7 +607,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       setter?.call(instructions, 'Ship one tested BrowserWindow vertical slice.');
       instructions.dispatchEvent(new Event('input', { bubbles: true }));
       if (diagnosing.checked) diagnosing.click();
-      flow.requestSubmit();
+      setTimeout(() => flow.requestSubmit(), 0);
       return true;
     })()`,
     true,
@@ -634,7 +634,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       const save = document.querySelector('[data-save-position-skills="software-engineer"]');
       if (!(checkbox instanceof HTMLInputElement) || !(save instanceof HTMLButtonElement)) return false;
       if (checkbox.checked) checkbox.click();
-      save.click();
+      setTimeout(() => save.click(), 0);
       return true;
     })()`,
     true,
@@ -668,7 +668,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       setValue(instructions, 'Deliver and review the BrowserWindow slice.');
       if (!tdd.checked) tdd.click();
       if (!review.checked) review.click();
-      form.requestSubmit();
+      setTimeout(() => form.requestSubmit(), 0);
       return true;
     })()`,
     true,
@@ -708,7 +708,7 @@ export const runRuntimeBrowserWindowSmoke = async (
       const setter = Object.getOwnPropertyDescriptor(name.constructor.prototype, 'value')?.set;
       setter?.call(name, 'Stale Browser flow');
       name.dispatchEvent(new Event('input', { bubbles: true }));
-      form.requestSubmit();
+      setTimeout(() => form.requestSubmit(), 0);
       return true;
     })()`,
     true,
