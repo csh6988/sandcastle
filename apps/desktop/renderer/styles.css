@@ -1038,6 +1038,29 @@ p {
   gap: 20px;
 }
 
+.pipeline-editor-fullscreen {
+  background: var(--surface);
+  border: 0;
+  border-radius: 0;
+  box-sizing: border-box;
+  inset: 0;
+  min-height: 100vh;
+  overflow: auto;
+  padding: 24px;
+  position: fixed;
+  width: 100vw;
+  z-index: 100;
+}
+
+.pipeline-editor-fullscreen .pipeline-visual-editor {
+  height: calc(100vh - 156px);
+  min-height: 620px;
+}
+
+.pipeline-editor-fullscreen .pipeline-inspector {
+  max-height: none;
+}
+
 .pipeline-editor-heading {
   align-items: flex-start;
 }

@@ -5173,6 +5173,7 @@ function PipelineEditor({
   const [graph, setGraph] = useState(editor.draft.graph);
   const [validation, setValidation] = useState(editor.validation);
   const [dirty, setDirty] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
@@ -5285,6 +5286,19 @@ function PipelineEditor({
     const timeout = window.setTimeout(() => void saveDraftRef.current(), 700);
     return () => window.clearTimeout(timeout);
   }, [dirty, graph]);
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setFullscreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [fullscreen]);
   const updateNode = (
     nodeId: string,
     update: (
@@ -5366,9 +5380,10 @@ function PipelineEditor({
 
   return (
     <section
-      className="create-panel pipeline-panel pipeline-editor"
+      className={`create-panel pipeline-panel pipeline-editor${fullscreen ? " pipeline-editor-fullscreen" : ""}`}
       data-department-panel="pipeline"
       data-pipeline-draft-revision={editor.draft.revision}
+      data-pipeline-fullscreen={fullscreen ? "true" : "false"}
       data-pipeline-published-version={editor.published?.version}
       data-pipeline-state={editor.published ? "published" : "draft-only"}
     >
@@ -5387,6 +5402,14 @@ function PipelineEditor({
           </p>
         </div>
         <div className="action-bar">
+          <button
+            aria-pressed={fullscreen}
+            data-pipeline-fullscreen-toggle
+            onClick={() => setFullscreen((current) => !current)}
+            type="button"
+          >
+            {fullscreen ? t.exitPipelineFullscreen : t.enterPipelineFullscreen}
+          </button>
           <button
             data-pipeline-validate
             disabled={busy}

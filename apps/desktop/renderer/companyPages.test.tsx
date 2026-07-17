@@ -396,6 +396,7 @@ describe("Department detail", () => {
     assert.match(pipeline, /Technical plan/);
     assert.match(pipeline, /Human acceptance/);
     assert.match(pipeline, /Save Draft/);
+    assert.match(pipeline, /Full-screen editor/);
     assert.match(pipeline, /Validate/);
     assert.match(pipeline, /Publish/);
     assert.match(pipeline, /data-pipeline-canvas/);
