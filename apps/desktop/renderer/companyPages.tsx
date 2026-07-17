@@ -53,6 +53,12 @@ const formatAgentTimestamp = (value: string): string => {
   }).format(timestamp);
 };
 
+export const isAgentTestDisabled = (
+  testingAgentId: string | null,
+  agentId: string,
+  agentStatus: AgentCatalogView["agents"][number]["status"],
+): boolean => testingAgentId === agentId || agentStatus !== "installed";
+
 const fuzzyMatch = (query: string, text: string): boolean => {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return true;
@@ -153,8 +159,9 @@ export function AgentsPage({
       <section className="catalog-grid" aria-label={t.agentsTitle}>
         {catalog?.agents.map((agent) => (
           <article
-            className="catalog-card agent-card"
+            className={`catalog-card agent-card${testing === agent.id ? " is-testing" : ""}`}
             data-agent-id={agent.id}
+            aria-busy={testing === agent.id}
             key={agent.id}
           >
             <div className="project-card-top agent-card-heading">
@@ -199,7 +206,7 @@ export function AgentsPage({
                 className="agent-test-button"
                 type="button"
                 data-test-agent={agent.id}
-                disabled={testing === agent.id || agent.status !== "installed"}
+                disabled={isAgentTestDisabled(testing, agent.id, agent.status)}
                 onClick={() => {
                   setTesting(agent.id);
                   void window.sandcastle.runtime

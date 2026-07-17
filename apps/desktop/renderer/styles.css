@@ -495,6 +495,12 @@ p {
   align-items: center;
 }
 
+.agent-card.is-testing {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  opacity: 0.68;
+}
+
 .catalog-card code,
 .catalog-card small {
   color: var(--muted);

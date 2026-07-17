@@ -15,6 +15,7 @@ import {
   PositionDrawerEditor,
   ProjectDetailView,
   RuntimeDiagnosticsPanel,
+  isAgentTestDisabled,
 } from "./companyPages.js";
 import { messages } from "./i18n.js";
 import type { DepartmentRunView } from "../runtime/interface.js";
@@ -67,6 +68,13 @@ describe("Artifact lineage", () => {
 });
 
 describe("Company Agent and Skill catalog pages", () => {
+  it("locks only the Agent card currently being tested", () => {
+    assert.equal(isAgentTestDisabled(null, "codex", "installed"), false);
+    assert.equal(isAgentTestDisabled("codex", "codex", "installed"), true);
+    assert.equal(isAgentTestDisabled("codex", "hermes", "installed"), false);
+    assert.equal(isAgentTestDisabled(null, "codem", "not-installed"), true);
+  });
+
   it("renders detected Agents with stable IDs and a non-destructive test action", () => {
     const markup = renderToStaticMarkup(
       <AgentsPage
