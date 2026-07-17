@@ -361,12 +361,23 @@ export function SkillCatalogResults({
   readonly onEnable: (skillId: string) => void;
   readonly onArchive: (skillId: string) => void;
 }) {
-  const visibleSkills = skills.filter((skill) =>
-    fuzzyMatch(
-      search,
-      `${skill.name} ${skill.description} ${skill.locationReference}`,
-    ),
-  );
+  const normalizedSearch = search.trim().toLowerCase();
+  const nameMatches = normalizedSearch
+    ? skills.filter((skill) =>
+        skill.name.toLowerCase().includes(normalizedSearch),
+      )
+    : [];
+  const visibleSkills = nameMatches.length
+    ? nameMatches
+    : skills.filter((skill) => {
+        if (!normalizedSearch) return true;
+        const searchableText =
+          `${skill.name} ${skill.description} ${skill.locationReference}`.toLowerCase();
+        return (
+          searchableText.includes(normalizedSearch) ||
+          fuzzyMatch(normalizedSearch, skill.name)
+        );
+      });
   return (
     <section
       className="skill-catalog-list"

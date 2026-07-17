@@ -199,6 +199,39 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /Local Review/);
     assert.doesNotMatch(markup, /Release Notes/);
   });
+
+  it("prefers direct Skill name matches over description-only matches", () => {
+    const markup = renderToStaticMarkup(
+      <SkillCatalogResults
+        onArchive={() => undefined}
+        onEnable={() => undefined}
+        search="ask"
+        skills={[
+          {
+            id: "ask-matt",
+            name: "ask-matt",
+            description: "Ask which skill fits.",
+            sourceDirectory: "/skills",
+            version: "sha256:ask",
+            locationReference: "/skills/ask-matt/SKILL.md",
+            status: "discovered",
+          },
+          {
+            id: "code-review",
+            name: "code-review",
+            description: "Review changes and asks for context.",
+            sourceDirectory: "/skills",
+            version: "sha256:review",
+            locationReference: "/skills/code-review/SKILL.md",
+            status: "discovered",
+          },
+        ]}
+        t={messages.en}
+      />,
+    );
+    assert.match(markup, /data-skill-catalog-id="ask-matt"/);
+    assert.doesNotMatch(markup, /data-skill-catalog-id="code-review"/);
+  });
 });
 
 describe("Position drawer", () => {
