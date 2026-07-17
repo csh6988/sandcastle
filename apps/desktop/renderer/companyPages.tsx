@@ -54,10 +54,10 @@ const formatAgentTimestamp = (value: string): string => {
 };
 
 export const isAgentTestDisabled = (
-  testingAgentId: string | null,
+  testingAgentIds: ReadonlySet<string>,
   agentId: string,
   agentStatus: AgentCatalogView["agents"][number]["status"],
-): boolean => testingAgentId === agentId || agentStatus !== "installed";
+): boolean => testingAgentIds.has(agentId) || agentStatus !== "installed";
 
 const fuzzyMatch = (query: string, text: string): boolean => {
   const normalizedQuery = query.trim().toLowerCase();
@@ -116,7 +116,7 @@ export function AgentsPage({
     initialCatalog ?? null,
   );
   const [error, setError] = useState<string | null>(null);
-  const [testing, setTesting] = useState<string | null>(null);
+  const [testing, setTesting] = useState<ReadonlySet<string>>(() => new Set());
   const [testResult, setTestResult] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -159,9 +159,9 @@ export function AgentsPage({
       <section className="catalog-grid" aria-label={t.agentsTitle}>
         {catalog?.agents.map((agent) => (
           <article
-            className={`catalog-card agent-card${testing === agent.id ? " is-testing" : ""}`}
+            className={`catalog-card agent-card${testing.has(agent.id) ? " is-testing" : ""}`}
             data-agent-id={agent.id}
-            aria-busy={testing === agent.id}
+            aria-busy={testing.has(agent.id)}
             key={agent.id}
           >
             <div className="project-card-top agent-card-heading">
@@ -208,7 +208,11 @@ export function AgentsPage({
                 data-test-agent={agent.id}
                 disabled={isAgentTestDisabled(testing, agent.id, agent.status)}
                 onClick={() => {
-                  setTesting(agent.id);
+                  setTesting((current) => {
+                    const next = new Set(current);
+                    next.add(agent.id);
+                    return next;
+                  });
                   void window.sandcastle.runtime
                     .testAgent(agent.id)
                     .then((result) => {
@@ -221,7 +225,13 @@ export function AgentsPage({
                     .catch((nextError: unknown) =>
                       setError(errorMessage(nextError)),
                     )
-                    .finally(() => setTesting(null));
+                    .finally(() => {
+                      setTesting((current) => {
+                        const next = new Set(current);
+                        next.delete(agent.id);
+                        return next;
+                      });
+                    });
                 }}
               >
                 {t.testAgent}

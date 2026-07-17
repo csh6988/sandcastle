@@ -69,10 +69,28 @@ describe("Artifact lineage", () => {
 
 describe("Company Agent and Skill catalog pages", () => {
   it("locks only the Agent card currently being tested", () => {
-    assert.equal(isAgentTestDisabled(null, "codex", "installed"), false);
-    assert.equal(isAgentTestDisabled("codex", "codex", "installed"), true);
-    assert.equal(isAgentTestDisabled("codex", "hermes", "installed"), false);
-    assert.equal(isAgentTestDisabled(null, "codem", "not-installed"), true);
+    assert.equal(isAgentTestDisabled(new Set(), "codex", "installed"), false);
+    assert.equal(
+      isAgentTestDisabled(new Set(["codex"]), "codex", "installed"),
+      true,
+    );
+    assert.equal(
+      isAgentTestDisabled(new Set(["codex"]), "hermes", "installed"),
+      false,
+    );
+    const concurrentTests = new Set(["codex", "hermes"]);
+    assert.equal(
+      isAgentTestDisabled(concurrentTests, "codex", "installed"),
+      true,
+    );
+    assert.equal(
+      isAgentTestDisabled(concurrentTests, "hermes", "installed"),
+      true,
+    );
+    assert.equal(
+      isAgentTestDisabled(new Set(), "codem", "not-installed"),
+      true,
+    );
   });
 
   it("renders detected Agents with stable IDs and a non-destructive test action", () => {
