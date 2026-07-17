@@ -14,6 +14,7 @@ import {
   SkillsPage,
   PositionDrawerEditor,
   ProjectDetailView,
+  CompanyInteractionPage,
   RuntimeDiagnosticsPanel,
   isAgentTestDisabled,
 } from "./companyPages.js";
@@ -1067,6 +1068,7 @@ describe("Project detail", () => {
       <ProjectDetailView
         project={project}
         t={messages.en}
+        initialTab="settings"
         onBack={() => undefined}
         onSave={async () => project}
         onArchive={async () => project}
@@ -1083,7 +1085,50 @@ describe("Project detail", () => {
     assert.match(markup, /Save project/);
     assert.match(markup, /Archive project/);
     assert.match(markup, /data-project-runs/);
+    assert.match(markup, /data-project-run-list/);
+    assert.match(markup, /data-project-run-detail/);
     assert.match(markup, /data-start-department-run/);
     assert.match(markup, /Start Department Run/);
+  });
+
+  it("opens Project Detail on the PRD Overview tab instead of configuration", () => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const markup = renderToStaticMarkup(
+      <ProjectDetailView
+        project={project}
+        t={messages.en}
+        onBack={() => undefined}
+        onSave={async () => project}
+        onArchive={async () => project}
+      />,
+    );
+
+    assert.match(markup, /data-project-tab="overview"/);
+    assert.match(markup, /aria-selected="true"[^>]*>Overview/);
+    assert.match(markup, /data-active-project-tab="overview"/);
+    assert.match(markup, /data-project-overview/);
+  });
+});
+
+describe("Agent Interaction workspace", () => {
+  it("renders the PRD AI Member conversation workspace instead of a Runtime event debugger", () => {
+    const markup = renderToStaticMarkup(
+      <CompanyInteractionPage t={messages.en} />,
+    );
+
+    assert.match(markup, /data-interaction-member-directory/);
+    assert.match(markup, /data-interaction-conversation/);
+    assert.match(markup, /data-interaction-context/);
+    assert.doesNotMatch(markup, /AG-UI: RAW_RUNTIME_EVENT/);
   });
 });

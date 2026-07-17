@@ -5,7 +5,6 @@ import type {
   ArtifactVersionView,
   ArtifactLineageView,
   InteractionView,
-  AgUiReplayView,
   MemoryCandidateView,
   CompanyDepartment,
   CompanyOverview,
@@ -1128,12 +1127,20 @@ export function DepartmentRunDetail({
   );
 }
 
+type ProjectDetailTab =
+  | "overview"
+  | "runs"
+  | "artifacts"
+  | "memory"
+  | "settings";
+
 export function ProjectDetailView({
   project,
   t,
   onBack,
   onSave,
   onArchive,
+  initialTab = "overview",
   busy = false,
   error = null,
   errorCode = null,
@@ -1153,6 +1160,7 @@ export function ProjectDetailView({
     readonly projectId: string;
     readonly expectedRevision: number;
   }) => Promise<ProjectEditorView>;
+  readonly initialTab?: ProjectDetailTab;
   readonly busy?: boolean;
   readonly error?: string | null;
   readonly errorCode?: string | null;
@@ -1177,6 +1185,7 @@ export function ProjectDetailView({
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<ProjectDetailTab>(initialTab);
 
   useEffect(() => {
     setName(project.name);
@@ -1445,6 +1454,18 @@ export function ProjectDetailView({
     }
   };
 
+  const saveProject = async (): Promise<void> => {
+    await onSave({
+      projectId: project.id,
+      expectedRevision: project.revision,
+      name: name.trim(),
+      goal: goal.trim(),
+      sharedContext,
+      repositoryReferences,
+    });
+    setActiveTab("overview");
+  };
+
   return (
     <section
       className="page"
@@ -1457,7 +1478,7 @@ export function ProjectDetailView({
           <button className="text-button" onClick={onBack} type="button">
             {t.backToProjects}
           </button>
-          <span className="eyebrow">{t.projectDetailEyebrow}</span>
+          <span className="eyebrow">{t.projectWorkbench}</span>
           <h1>{project.name}</h1>
           <p>
             {t.projectRevision} {project.revision}
@@ -1471,7 +1492,78 @@ export function ProjectDetailView({
           {error}
         </div>
       ) : null}
-      <div className="project-configuration-grid">
+      <div className="project-tabs" role="tablist">
+        {(
+          [
+            ["overview", t.projectOverviewTab],
+            ["runs", t.projectRunsTab],
+            ["artifacts", t.projectArtifactsTab],
+            ["memory", t.projectMemoryTab],
+            ["settings", t.projectSettingsTab],
+          ] as const
+        ).map(([tab, label]) => (
+          <button
+            aria-selected={activeTab === tab}
+            className={activeTab === tab ? "on" : ""}
+            data-project-tab={tab}
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            role="tab"
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {activeTab === "overview" ? (
+        <section className="project-overview-grid" data-project-overview>
+          <article className="create-panel">
+            <h2>{t.projectGoal}</h2>
+            <p>{project.goal}</p>
+            <dl className="overview-inventory">
+              <div>
+                <dt>{t.status}</dt>
+                <dd>{statusName(t, project.status)}</dd>
+              </div>
+              <div>
+                <dt>{t.departmentRuns}</dt>
+                <dd>{project.departmentRuns.length}</dd>
+              </div>
+              <div>
+                <dt>{t.repositoryReferences}</dt>
+                <dd>{project.repositoryReferences.length}</dd>
+              </div>
+            </dl>
+          </article>
+          <article className="create-panel">
+            <h2>{t.sharedContext}</h2>
+            <p>{project.sharedContext || t.noSharedContext}</p>
+            <button onClick={() => setActiveTab("settings")} type="button">
+              {t.editProjectSettings}
+            </button>
+          </article>
+        </section>
+      ) : null}
+      {activeTab === "artifacts" ? (
+        <section className="create-panel" data-project-artifacts>
+          <h2>{t.projectArtifactsTab}</h2>
+          <div className="empty-state">
+            <strong>{t.noProjectArtifacts}</strong>
+            <span>{t.noProjectArtifactsBody}</span>
+          </div>
+        </section>
+      ) : null}
+      {activeTab === "memory" ? (
+        <section className="create-panel" data-project-memory>
+          <h2>{t.projectMemoryTab}</h2>
+          <p>{project.sharedContext || t.noSharedContext}</p>
+        </section>
+      ) : null}
+      <div
+        className="project-configuration-grid"
+        data-active-project-tab={activeTab}
+        data-project-tab-content
+      >
         <section className="create-panel">
           <h2>{t.projectDetailEyebrow}</h2>
           <form
@@ -1479,14 +1571,7 @@ export function ProjectDetailView({
             data-project-settings
             onSubmit={(event) => {
               event.preventDefault();
-              void onSave({
-                projectId: project.id,
-                expectedRevision: project.revision,
-                name: name.trim(),
-                goal: goal.trim(),
-                sharedContext,
-                repositoryReferences,
-              }).catch(() => undefined);
+              void saveProject().catch(() => undefined);
             }}
           >
             <label htmlFor="project-detail-name">{t.projectName}</label>
@@ -1567,7 +1652,7 @@ export function ProjectDetailView({
         </section>
         <section className="create-panel" data-project-runs>
           <h2>{t.departmentRuns}</h2>
-          <div className="form run-start-form">
+          <div className="form run-start-form project-run-start-panel">
             <label htmlFor="project-run-department">
               {t.selectRunDepartment}
             </label>
@@ -1616,35 +1701,43 @@ export function ProjectDetailView({
               {runError}
             </div>
           ) : null}
-          {runs.length === 0 ? (
-            <div className="empty-state">{t.noDepartmentRuns}</div>
-          ) : (
-            runs.map((run) => (
-              <button
-                className="task-card run-list-item"
-                data-run-id={run.run.id}
-                key={run.run.id}
-                onClick={() => setSelectedRun(run)}
-                type="button"
-              >
-                <strong>{run.snapshot.payload.department.name}</strong>
-                <span>{statusName(t, run.run.status)}</span>
-              </button>
-            ))
-          )}
-          {selectedRun ? (
-            <DepartmentRunDetail
-              busy={runBusy}
-              onDecision={(input) => void decideApproval(input)}
-              onRetry={(input) => void retryNode(input)}
-              onContinue={() => void continueRun()}
-              onControl={(action) => void controlRun(action)}
-              onRecover={(input) => void recoverRun(input)}
-              onFork={(nodeRunId) => void forkRun(nodeRunId)}
-              run={selectedRun}
-              t={t}
-            />
-          ) : null}
+          <div className="project-runs-workspace">
+            <div className="project-run-list" data-project-run-list>
+              {runs.length === 0 ? (
+                <div className="empty-state">{t.noDepartmentRuns}</div>
+              ) : (
+                runs.map((run) => (
+                  <button
+                    className="task-card run-list-item"
+                    data-run-id={run.run.id}
+                    key={run.run.id}
+                    onClick={() => setSelectedRun(run)}
+                    type="button"
+                  >
+                    <strong>{run.snapshot.payload.department.name}</strong>
+                    <span>{statusName(t, run.run.status)}</span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="project-run-detail-pane" data-project-run-detail>
+              {selectedRun ? (
+                <DepartmentRunDetail
+                  busy={runBusy}
+                  onDecision={(input) => void decideApproval(input)}
+                  onRetry={(input) => void retryNode(input)}
+                  onContinue={() => void continueRun()}
+                  onControl={(action) => void controlRun(action)}
+                  onRecover={(input) => void recoverRun(input)}
+                  onFork={(nodeRunId) => void forkRun(nodeRunId)}
+                  run={selectedRun}
+                  t={t}
+                />
+              ) : (
+                <div className="empty-state">{t.selectRunToInspect}</div>
+              )}
+            </div>
+          </div>
         </section>
         <section className="create-panel department-actions-panel">
           <h2>{t.status}</h2>
@@ -6128,8 +6221,25 @@ export function ArtifactLineagePanel({
   );
 }
 
+type InteractionMemberOption = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly positionName: string;
+  readonly departmentId: string;
+  readonly departmentName: string;
+  readonly defaultAgentId: string;
+};
+
 export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
+  const [projects, setProjects] = useState<readonly CompanyProject[]>([]);
   const [projectId, setProjectId] = useState("");
+  const [members, setMembers] = useState<readonly InteractionMemberOption[]>(
+    [],
+  );
+  const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalogView | null>(
+    null,
+  );
   const [sessions, setSessions] = useState<readonly InteractionView[]>([]);
   const [selected, setSelected] = useState<InteractionView | null>(null);
   const [message, setMessage] = useState("");
@@ -6138,54 +6248,100 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
   const [memoryCandidates, setMemoryCandidates] = useState<
     readonly MemoryCandidateView[]
   >([]);
-  const [agUi, setAgUi] = useState<AgUiReplayView>({
-    events: [],
-    nextSequence: 0,
-  });
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = async (nextProjectId = projectId) => {
+  const selectedMember = members.find(
+    (member) => member.id === selectedMemberId,
+  );
+  const selectedProject = projects.find((project) => project.id === projectId);
+  const participantById = new Map(
+    selected?.participants.map((participant) => [
+      participant.id,
+      participant,
+    ]) ?? [],
+  );
+  const selectedAiParticipant = selected?.participants.find(
+    (participant) => participant.participantType === "ai-member",
+  );
+
+  const refresh = async (nextProjectId: string): Promise<void> => {
     if (!nextProjectId) return;
-    const [next, candidates] = await Promise.all([
+    const [nextSessions, candidates] = await Promise.all([
       window.sandcastle.runtime.interactions(nextProjectId),
       window.sandcastle.runtime.memoryCandidates(nextProjectId),
     ]);
-    setSessions(next);
+    setSessions(nextSessions);
     setMemoryCandidates(candidates);
     setSelected((current) =>
       current
-        ? (next.find((item) => item.session.id === current.session.id) ??
-          current)
-        : (next[0] ?? null),
+        ? (nextSessions.find(
+            (item) => item.session.id === current.session.id,
+          ) ?? current)
+        : (nextSessions[0] ?? null),
     );
   };
 
   useEffect(() => {
     let active = true;
-    window.sandcastle.runtime
-      .projects()
-      .then(async (projects) => {
-        const nextProjectId = projects[0]?.id ?? "";
-        if (!active) return;
-        setProjectId(nextProjectId);
-        if (nextProjectId) await refresh(nextProjectId);
-      })
-      .catch(
-        (nextError: unknown) => active && setError(errorMessage(nextError)),
+    const load = async (): Promise<void> => {
+      const [nextProjects, departments, agents] = await Promise.all([
+        window.sandcastle.runtime.projects(),
+        window.sandcastle.runtime.departments(),
+        window.sandcastle.runtime.inspectAgentCatalog(),
+      ]);
+      const inspected = await Promise.all(
+        departments
+          .filter((department) => department.status === "active")
+          .map((department) =>
+            window.sandcastle.runtime.inspectDepartment(department.id),
+          ),
       );
+      const nextMembers: InteractionMemberOption[] = inspected.flatMap(
+        (department) =>
+          department.positions
+            .filter(
+              (position) =>
+                position.status === "active" &&
+                position.aiMember.status === "active",
+            )
+            .map((position) => ({
+              id: position.aiMember.id,
+              displayName:
+                position.aiMember.displayName.trim() || position.name,
+              positionName: position.name,
+              departmentId: department.id,
+              departmentName: department.name,
+              defaultAgentId: position.defaultAgentId,
+            })),
+      );
+      if (!active) return;
+      setProjects(nextProjects);
+      setAgentCatalog(agents);
+      setMembers(nextMembers);
+      const nextProjectId = nextProjects[0]?.id ?? "";
+      setProjectId(nextProjectId);
+      setSelectedMemberId(nextMembers[0]?.id ?? "");
+      if (nextProjectId) await refresh(nextProjectId);
+    };
+    load().catch((nextError: unknown) => {
+      if (active) setError(errorMessage(nextError));
+    });
     return () => {
       active = false;
     };
   }, []);
-  useEffect(() => {
-    window.sandcastle.runtime
-      .agUiEvents({ afterSequence: 0, limit: 100 })
-      .then(setAgUi)
-      .catch((nextError: unknown) => setError(errorMessage(nextError)));
-  }, [selected?.messages.length, selected?.permissions.length]);
 
-  const createSession = async () => {
-    if (!projectId) return;
+  const selectSession = (item: InteractionView): void => {
+    setSelected(item);
+    setSelectedMemberId(
+      item.participants.find(
+        (participant) => participant.participantType === "ai-member",
+      )?.participantRef ?? selectedMemberId,
+    );
+  };
+
+  const createSession = async (): Promise<void> => {
+    if (!projectId || !selectedMemberId) return;
     try {
       const session = await window.sandcastle.runtime.createInteractionSession({
         projectId,
@@ -6197,33 +6353,45 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
         participantRef: "user-local",
         role: "requester",
       });
-      setSelected(
-        await window.sandcastle.runtime.inspectInteraction(session.id),
+      await window.sandcastle.runtime.addInteractionParticipant({
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: selectedMemberId,
+        role: "consulted-member",
+      });
+      const inspected = await window.sandcastle.runtime.inspectInteraction(
+        session.id,
       );
+      setSelected(inspected);
       await refresh(projectId);
+      setSelected(inspected);
     } catch (nextError) {
       setError(errorMessage(nextError));
     }
   };
 
-  const sendMessage = async () => {
+  const sendMessage = async (): Promise<void> => {
     const participant = selected?.participants.find(
       (candidate) => candidate.participantType === "human",
     );
     if (!selected || !participant || !message.trim()) return;
-    await window.sandcastle.runtime.addInteractionMessage({
-      sessionId: selected.session.id,
-      participantId: participant.id,
-      kind: "text",
-      content: message.trim(),
-    });
-    setMessage("");
-    setSelected(
-      await window.sandcastle.runtime.inspectInteraction(selected.session.id),
-    );
+    try {
+      await window.sandcastle.runtime.addInteractionMessage({
+        sessionId: selected.session.id,
+        participantId: participant.id,
+        kind: "text",
+        content: message.trim(),
+      });
+      setMessage("");
+      setSelected(
+        await window.sandcastle.runtime.inspectInteraction(selected.session.id),
+      );
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    }
   };
 
-  const closeSession = async () => {
+  const closeSession = async (): Promise<void> => {
     if (!selected || selected.session.status === "closed") return;
     try {
       await window.sandcastle.runtime.closeInteractionSession(
@@ -6235,67 +6403,90 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     }
   };
 
-  const requestPermission = async () => {
+  const requestPermission = async (): Promise<void> => {
     if (!selected || !permissionScope.trim()) return;
-    await window.sandcastle.runtime.requestPermission({
-      sessionId: selected.session.id,
-      scope: permissionScope.trim(),
-    });
-    setPermissionScope("");
-    setSelected(
-      await window.sandcastle.runtime.inspectInteraction(selected.session.id),
-    );
+    try {
+      await window.sandcastle.runtime.requestPermission({
+        sessionId: selected.session.id,
+        scope: permissionScope.trim(),
+      });
+      setPermissionScope("");
+      setSelected(
+        await window.sandcastle.runtime.inspectInteraction(selected.session.id),
+      );
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    }
   };
 
   const decidePermission = async (
     permissionId: string,
     decision: "approved" | "denied",
-  ) => {
+  ): Promise<void> => {
     if (!selected) return;
-    await window.sandcastle.runtime.decidePermission({
-      permissionId,
-      expectedStatus: "pending",
-      decision,
-    });
-    setSelected(
-      await window.sandcastle.runtime.inspectInteraction(selected.session.id),
-    );
+    try {
+      await window.sandcastle.runtime.decidePermission({
+        permissionId,
+        expectedStatus: "pending",
+        decision,
+      });
+      setSelected(
+        await window.sandcastle.runtime.inspectInteraction(selected.session.id),
+      );
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    }
   };
 
-  const createMemoryCandidate = async () => {
+  const createMemoryCandidate = async (): Promise<void> => {
     if (!selected || !memorySummary.trim()) return;
-    await window.sandcastle.runtime.createMemoryCandidate({
-      projectId: selected.session.projectId,
-      scope: "project",
-      sourceSessionId: selected.session.id,
-      summary: memorySummary.trim(),
-    });
-    setMemorySummary("");
-    await refresh(selected.session.projectId);
+    try {
+      await window.sandcastle.runtime.createMemoryCandidate({
+        projectId: selected.session.projectId,
+        scope: "project",
+        sourceSessionId: selected.session.id,
+        summary: memorySummary.trim(),
+      });
+      setMemorySummary("");
+      await refresh(selected.session.projectId);
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    }
   };
 
   const reviewMemoryCandidate = async (
     candidateId: string,
     decision: "approved" | "discarded",
-  ) => {
-    await window.sandcastle.runtime.reviewMemoryCandidate({
-      candidateId,
-      expectedStatus: "pending",
-      decision,
-    });
-    if (selected) await refresh(selected.session.projectId);
+  ): Promise<void> => {
+    try {
+      await window.sandcastle.runtime.reviewMemoryCandidate({
+        candidateId,
+        expectedStatus: "pending",
+        decision,
+      });
+      if (selected) await refresh(selected.session.projectId);
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    }
   };
+
+  const agentName =
+    selectedMember && agentCatalog
+      ? (agentCatalog.agents.find(
+          (agent) => agent.id === selectedMember.defaultAgentId,
+        )?.name ?? selectedMember.defaultAgentId)
+      : (selectedMember?.defaultAgentId ?? t.none);
 
   return (
     <section className="page" data-page="interaction">
-      <div className="page-heading">
+      <div className="page-heading interaction-page-heading">
         <div>
           <span className="eyebrow">{t.agentInteraction}</span>
           <h1>{t.agentInteraction}</h1>
           <p>{t.agentInteractionBody}</p>
         </div>
         <button
-          disabled={!projectId}
+          disabled={!projectId || !selectedMemberId}
           onClick={() => void createSession()}
           type="button"
         >
@@ -6303,116 +6494,324 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
         </button>
       </div>
       {error ? <div className="warn">{error}</div> : null}
-      <div className="project-dashboard">
-        <ol className="project-grid">
-          {sessions.map((item) => (
-            <li className="project-card" key={item.session.id}>
-              <button onClick={() => setSelected(item)} type="button">
-                {item.session.mode} · {item.messages.length}
-              </button>
-            </li>
-          ))}
-        </ol>
-        {selected ? (
-          <section
-            className="create-panel"
-            data-interaction-session={selected.session.id}
-          >
-            <h2>{t.messages}</h2>
-            <button
-              disabled={selected.session.status === "closed"}
-              onClick={() => void closeSession()}
-              type="button"
+      <div className="interaction-workspace">
+        <aside
+          className="interaction-sidebar"
+          data-interaction-member-directory
+        >
+          <div className="interaction-panel-heading">
+            <h2>{t.interactionMembers}</h2>
+            <span>{members.length}</span>
+          </div>
+          <label className="interaction-project-select">
+            {t.interactionProjects}
+            <select
+              value={projectId}
+              onChange={(event) => {
+                const nextProjectId = event.target.value;
+                setProjectId(nextProjectId);
+                setSelected(null);
+                void refresh(nextProjectId).catch((nextError: unknown) =>
+                  setError(errorMessage(nextError)),
+                );
+              }}
             >
-              {t.closeSession}
-            </button>
-            <span data-ag-ui-cursor={agUi.nextSequence}>
-              AG-UI: {agUi.events.map((event) => event.type).join(", ")}
-            </span>
-            {selected.messages.map((item) => (
-              <p data-session-message={item.id} key={item.id}>
-                {item.content}
-              </p>
-            ))}
-            <textarea
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-            />
-            <button onClick={() => void sendMessage()} type="button">
-              {t.sendMessage}
-            </button>
-            <h3>{t.permissions}</h3>
-            <input
-              value={permissionScope}
-              onChange={(event) => setPermissionScope(event.target.value)}
-            />
-            <button onClick={() => void requestPermission()} type="button">
-              {t.requestPermission}
-            </button>
-            {selected.permissions.map((permission) => (
-              <div data-permission-request={permission.id} key={permission.id}>
-                <span>
-                  {permission.scope} · {permission.status}
-                </span>
-                {permission.status === "pending" ? (
-                  <div className="action-bar">
-                    <button
-                      onClick={() =>
-                        void decidePermission(permission.id, "approved")
-                      }
-                      type="button"
-                    >
-                      {t.approve}
-                    </button>
-                    <button
-                      onClick={() =>
-                        void decidePermission(permission.id, "denied")
-                      }
-                      type="button"
-                    >
-                      {t.reject}
-                    </button>
-                  </div>
+              <option value="">{t.none}</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="interaction-member-list">
+            {members.length === 0 ? (
+              <div className="empty-state">{t.interactionNoMembers}</div>
+            ) : (
+              members.map((member) => (
+                <button
+                  className={
+                    selectedMemberId === member.id
+                      ? "interaction-member selected"
+                      : "interaction-member"
+                  }
+                  data-interaction-member={member.id}
+                  key={member.id}
+                  onClick={() => setSelectedMemberId(member.id)}
+                  type="button"
+                >
+                  <strong>{member.displayName}</strong>
+                  <span>{member.positionName}</span>
+                  <small>{member.departmentName}</small>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="interaction-session-history">
+            <div className="interaction-panel-heading">
+              <h2>{t.interactionSessions}</h2>
+              <span>{sessions.length}</span>
+            </div>
+            {sessions.length === 0 ? (
+              <div className="empty-state">{t.interactionNoSessions}</div>
+            ) : (
+              sessions.map((item) => (
+                <button
+                  className={
+                    selected?.session.id === item.session.id
+                      ? "interaction-session selected"
+                      : "interaction-session"
+                  }
+                  key={item.session.id}
+                  onClick={() => selectSession(item)}
+                  type="button"
+                >
+                  <strong>
+                    {item.session.mode === "consultation"
+                      ? t.interactionConsultation
+                      : t.interactionRunCollaboration}
+                  </strong>
+                  <span>
+                    {item.messages.length} {t.messages.toLowerCase()}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </aside>
+        <main
+          className="interaction-conversation"
+          data-interaction-conversation
+          data-interaction-session={selected?.session.id}
+        >
+          {selectedMember ? (
+            <>
+              <header className="interaction-conversation-header">
+                <div>
+                  <span className="eyebrow">
+                    {selected?.session.mode === "run-collaboration"
+                      ? t.interactionRunCollaboration
+                      : t.interactionConsultation}
+                  </span>
+                  <h2>{selectedMember.displayName}</h2>
+                  <p>
+                    {selectedMember.positionName} ·{" "}
+                    {selectedMember.departmentName}
+                  </p>
+                </div>
+                {selected ? (
+                  <button
+                    disabled={selected.session.status === "closed"}
+                    onClick={() => void closeSession()}
+                    type="button"
+                  >
+                    {t.closeSession}
+                  </button>
                 ) : null}
-              </div>
-            ))}
-            <h3>{t.memoryCandidates}</h3>
-            <textarea
-              value={memorySummary}
-              onChange={(event) => setMemorySummary(event.target.value)}
-            />
-            <button onClick={() => void createMemoryCandidate()} type="button">
-              {t.createMemoryCandidate}
-            </button>
-            {memoryCandidates.map((candidate) => (
-              <div data-memory-candidate={candidate.id} key={candidate.id}>
-                <span>
-                  {candidate.summary} · {candidate.status}
-                </span>
-                {candidate.status === "pending" ? (
-                  <div className="action-bar">
-                    <button
-                      onClick={() =>
-                        void reviewMemoryCandidate(candidate.id, "approved")
-                      }
-                      type="button"
-                    >
-                      {t.approve}
-                    </button>
-                    <button
-                      onClick={() =>
-                        void reviewMemoryCandidate(candidate.id, "discarded")
-                      }
-                      type="button"
-                    >
-                      {t.discard}
-                    </button>
+              </header>
+              <div className="interaction-message-list">
+                {selected?.messages.length ? (
+                  selected.messages.map((item) => {
+                    const participant = participantById.get(item.participantId);
+                    const member = members.find(
+                      (candidate) =>
+                        candidate.id === participant?.participantRef,
+                    );
+                    const sender =
+                      participant?.participantType === "ai-member"
+                        ? (member?.displayName ?? selectedMember.displayName)
+                        : participant?.participantType === "system"
+                          ? t.interactionSystem
+                          : t.interactionHuman;
+                    return (
+                      <article
+                        className={
+                          "interaction-message interaction-message-" +
+                          (participant?.participantType ?? "system")
+                        }
+                        data-session-message={item.id}
+                        key={item.id}
+                      >
+                        <header>
+                          <strong>{sender}</strong>
+                          <span>{item.kind}</span>
+                        </header>
+                        <p>{item.content}</p>
+                      </article>
+                    );
+                  })
+                ) : (
+                  <div className="interaction-empty-conversation">
+                    <strong>{t.interactionNoMessages}</strong>
+                    <span>
+                      {selected
+                        ? t.interactionMessagePlaceholder
+                        : t.createConsultation}
+                    </span>
                   </div>
-                ) : null}
+                )}
               </div>
-            ))}
-          </section>
-        ) : null}
+              <div className="interaction-composer">
+                <textarea
+                  disabled={!selected || selected.session.status === "closed"}
+                  onChange={(event) => setMessage(event.target.value)}
+                  placeholder={t.interactionMessagePlaceholder}
+                  value={message}
+                />
+                <button
+                  disabled={
+                    !selected ||
+                    selected.session.status === "closed" ||
+                    message.trim() === ""
+                  }
+                  onClick={() => void sendMessage()}
+                  type="button"
+                >
+                  {t.sendMessage}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="interaction-empty-conversation">
+              <strong>{t.interactionSelectMember}</strong>
+            </div>
+          )}
+        </main>
+        <aside className="interaction-context" data-interaction-context>
+          <div className="interaction-panel-heading">
+            <h2>{t.interactionContext}</h2>
+          </div>
+          <dl className="interaction-context-list">
+            <div>
+              <dt>{t.interactionProjects}</dt>
+              <dd>{selectedProject?.name ?? t.none}</dd>
+            </div>
+            <div>
+              <dt>{t.interactionMembers}</dt>
+              <dd>{selectedMember?.displayName ?? t.none}</dd>
+            </div>
+            <div>
+              <dt>{t.interactionPosition}</dt>
+              <dd>{selectedMember?.positionName ?? t.none}</dd>
+            </div>
+            <div>
+              <dt>{t.interactionProvider}</dt>
+              <dd>{agentName}</dd>
+            </div>
+            <div>
+              <dt>{t.departmentRuns}</dt>
+              <dd>
+                {selected?.session.runId
+                  ? selected.session.runId
+                  : t.interactionUnboundRun}
+              </dd>
+            </div>
+          </dl>
+          {selected ? (
+            <>
+              <section className="interaction-context-section">
+                <div className="interaction-panel-heading">
+                  <h3>{t.permissions}</h3>
+                </div>
+                <input
+                  aria-label={t.requestPermission}
+                  onChange={(event) => setPermissionScope(event.target.value)}
+                  placeholder={t.requestPermission}
+                  value={permissionScope}
+                />
+                <button
+                  disabled={!permissionScope.trim()}
+                  onClick={() => void requestPermission()}
+                  type="button"
+                >
+                  {t.requestPermission}
+                </button>
+                {selected.permissions.map((permission) => (
+                  <div
+                    className="interaction-permission"
+                    data-permission-request={permission.id}
+                    key={permission.id}
+                  >
+                    <span>
+                      {permission.scope} · {permission.status}
+                    </span>
+                    {permission.status === "pending" ? (
+                      <div className="action-bar">
+                        <button
+                          onClick={() =>
+                            void decidePermission(permission.id, "approved")
+                          }
+                          type="button"
+                        >
+                          {t.approve}
+                        </button>
+                        <button
+                          onClick={() =>
+                            void decidePermission(permission.id, "denied")
+                          }
+                          type="button"
+                        >
+                          {t.reject}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </section>
+              <section className="interaction-context-section">
+                <div className="interaction-panel-heading">
+                  <h3>{t.memoryCandidates}</h3>
+                </div>
+                <textarea
+                  onChange={(event) => setMemorySummary(event.target.value)}
+                  placeholder={t.memoryCandidates}
+                  value={memorySummary}
+                />
+                <button
+                  disabled={!memorySummary.trim()}
+                  onClick={() => void createMemoryCandidate()}
+                  type="button"
+                >
+                  {t.createMemoryCandidate}
+                </button>
+                {memoryCandidates.map((candidate) => (
+                  <div
+                    className="interaction-memory-candidate"
+                    data-memory-candidate={candidate.id}
+                    key={candidate.id}
+                  >
+                    <span>
+                      {candidate.summary} · {candidate.status}
+                    </span>
+                    {candidate.status === "pending" ? (
+                      <div className="action-bar">
+                        <button
+                          onClick={() =>
+                            void reviewMemoryCandidate(candidate.id, "approved")
+                          }
+                          type="button"
+                        >
+                          {t.approve}
+                        </button>
+                        <button
+                          onClick={() =>
+                            void reviewMemoryCandidate(
+                              candidate.id,
+                              "discarded",
+                            )
+                          }
+                          type="button"
+                        >
+                          {t.discard}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </section>
+            </>
+          ) : null}
+        </aside>
       </div>
     </section>
   );

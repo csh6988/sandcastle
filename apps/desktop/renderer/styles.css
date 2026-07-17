@@ -301,6 +301,56 @@ p {
   align-items: start;
 }
 
+.project-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+
+.project-tabs button {
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 10px 14px;
+  font-weight: 800;
+}
+
+.project-tabs button.on {
+  border-color: var(--border);
+  background: var(--panel);
+  color: var(--primary);
+}
+
+.project-overview-grid {
+  align-items: start;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 16px;
+}
+
+.project-configuration-grid[data-active-project-tab="overview"],
+.project-configuration-grid[data-active-project-tab="artifacts"],
+.project-configuration-grid[data-active-project-tab="memory"] {
+  display: none;
+}
+
+.project-configuration-grid[data-active-project-tab="runs"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.project-configuration-grid[data-active-project-tab="runs"]
+  > :not([data-project-runs]) {
+  display: none;
+}
+
+.project-configuration-grid[data-active-project-tab="settings"]
+  > [data-project-runs] {
+  display: none;
+}
+
 .project-configuration-grid .create-panel {
   position: static;
 }
@@ -1779,12 +1829,254 @@ button:disabled {
   margin-top: 12px;
 }
 
+.project-run-start-panel {
+  align-items: end;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  margin-bottom: 16px;
+}
+
+.project-runs-workspace {
+  align-items: start;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.32fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.project-run-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.project-run-detail-pane {
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+
+.project-run-detail-pane .run-detail {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
 .run-list-item {
   width: 100%;
   display: flex;
   justify-content: space-between;
   margin-top: 8px;
   text-align: left;
+}
+
+.interaction-workspace {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr) 300px;
+  min-height: 680px;
+  gap: 16px;
+}
+
+.interaction-sidebar,
+.interaction-context,
+.interaction-conversation {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.interaction-sidebar,
+.interaction-context {
+  padding: 14px;
+}
+
+.interaction-sidebar {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.interaction-panel-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.interaction-panel-heading h2,
+.interaction-panel-heading h3 {
+  margin: 0;
+}
+
+.interaction-panel-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.interaction-project-select,
+.interaction-context-section {
+  display: grid;
+  gap: 8px;
+}
+
+.interaction-member-list,
+.interaction-session-history {
+  display: grid;
+  gap: 8px;
+}
+
+.interaction-member,
+.interaction-session {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--subtle);
+  color: var(--text);
+  padding: 10px;
+  text-align: left;
+}
+
+.interaction-member:hover,
+.interaction-session:hover,
+.interaction-member.selected,
+.interaction-session.selected {
+  border-color: #93c5fd;
+  background: var(--primary-soft);
+}
+
+.interaction-member span,
+.interaction-member small,
+.interaction-session span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.interaction-conversation {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.interaction-conversation-header {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px;
+}
+
+.interaction-conversation-header h2 {
+  margin: 2px 0 4px;
+}
+
+.interaction-conversation-header p {
+  color: var(--muted);
+  margin: 0;
+}
+
+.interaction-message-list {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+  padding: 18px;
+}
+
+.interaction-message {
+  max-width: 78%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--subtle);
+  padding: 10px 12px;
+}
+
+.interaction-message-human {
+  justify-self: end;
+  border-color: #bfdbfe;
+  background: var(--primary-soft);
+}
+
+.interaction-message-ai-member {
+  justify-self: start;
+  background: var(--panel);
+}
+
+.interaction-message-tool,
+.interaction-message-status,
+.interaction-message-system {
+  justify-self: center;
+  max-width: 90%;
+  background: #f8fafc;
+}
+
+.interaction-message header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+
+.interaction-message header span {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.interaction-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.interaction-composer {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  padding: 14px 18px 18px;
+}
+
+.interaction-composer textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+
+.interaction-empty-conversation {
+  align-self: center;
+  color: var(--muted);
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.interaction-context {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.interaction-context-list {
+  grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
+}
+
+.interaction-context-section {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.interaction-permission,
+.interaction-memory-candidate {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+  padding: 8px;
 }
 
 .run-detail {
@@ -1830,8 +2122,32 @@ dd {
 @media (max-width: 1100px) {
   .project-dashboard,
   .project-configuration-grid,
-  .department-overview-grid {
+  .department-overview-grid,
+  .project-overview-grid {
     grid-template-columns: 1fr;
+  }
+
+  .project-runs-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .project-run-detail-pane {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: 16px;
+  }
+
+  .project-run-start-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .interaction-workspace {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .interaction-context {
+    grid-column: 1 / -1;
   }
 }
 
@@ -1849,7 +2165,8 @@ dd {
   .topbar,
   .metric-row,
   .position-grid,
-  .project-meta-grid {
+  .project-meta-grid,
+  .interaction-workspace {
     grid-template-columns: 1fr;
   }
 
