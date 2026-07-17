@@ -391,12 +391,14 @@ p {
 }
 
 .department-overview-grid {
+  align-items: start;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
   gap: 16px;
 }
 
 .position-grid {
+  align-items: start;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
@@ -879,12 +881,50 @@ p {
 }
 
 .position-grid.compact {
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
 .position-card.compact {
+  align-self: start;
+  align-content: start;
   display: grid;
   gap: 12px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.position-card.compact .catalog-meta {
+  gap: 10px;
+}
+
+.position-card.compact .catalog-meta > div {
+  align-items: start;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+}
+
+.position-card.compact .catalog-meta dt {
+  white-space: normal;
+}
+
+.position-card.compact .catalog-meta dd {
+  overflow-wrap: anywhere;
+  text-align: right;
+  word-break: break-word;
+}
+
+.position-card.compact > button {
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: #ffffff;
+  font-weight: 750;
+  padding: 9px 12px;
+}
+
+.position-card.compact > button:hover {
+  background: #1d4ed8;
 }
 
 .position-drawer {
