@@ -280,13 +280,14 @@ export function SkillsPage({
   };
   return (
     <section className="page" data-page="skills">
-      <header className="page-heading">
+      <header className="page-heading skills-page-heading">
         <div>
           <span className="eyebrow">{t.skillsEyebrow}</span>
           <h1>{t.skillsTitle}</h1>
           <p>{t.skillsBody}</p>
         </div>
         <button
+          className="refresh-skills-button"
           type="button"
           onClick={() => mutate(window.sandcastle.runtime.discoverSkills())}
         >
@@ -302,7 +303,10 @@ export function SkillsPage({
           onChange={(event) => setSearch(event.target.value)}
         />
       </label>
-      <section className="create-panel" data-skill-directories>
+      <section
+        className="create-panel skill-directory-panel"
+        data-skill-directories
+      >
         <h2>{t.skillDirectories}</h2>
         <form
           className="form skill-directory-form"
@@ -321,7 +325,7 @@ export function SkillsPage({
             {t.addSkillDirectory}
           </button>
         </form>
-        <ul>
+        <ul className="skill-directory-list">
           {(catalog?.directories ?? []).map((path) => (
             <li key={path}>
               <code>{path}</code>
@@ -364,49 +368,76 @@ export function SkillCatalogResults({
     ),
   );
   return (
-    <section className="catalog-grid" aria-label={t.skillsTitle}>
+    <section
+      className="skill-catalog-list"
+      data-skill-catalog-list
+      aria-label={t.skillsTitle}
+    >
       {visibleSkills.map((skill) => (
         <article
-          className="catalog-card"
+          className="skill-catalog-item"
           data-skill-catalog-id={skill.id}
           key={skill.id}
         >
-          <div className="project-card-top">
-            <strong>{skill.name}</strong>
-            <span className="pill">{skill.status}</span>
-          </div>
-          <p>{skill.description}</p>
-          {skill.requiredCapabilities?.length ? (
-            <p className="warn" data-skill-capability-warning>
-              {t.requiredAgentCapabilities}:{" "}
-              {skill.requiredCapabilities.join(", ")}
+          <span className="skill-catalog-icon" aria-hidden="true">
+            {skill.name.slice(0, 1).toUpperCase()}
+          </span>
+          <div className="skill-catalog-content">
+            <div className="skill-catalog-heading">
+              <strong>{skill.name}</strong>
+              <span
+                className={`pill skill-status skill-status-${skill.status}`}
+              >
+                {skill.status}
+              </span>
+            </div>
+            <p className="skill-catalog-description" title={skill.description}>
+              {skill.description}
             </p>
-          ) : null}
-          <details data-skill-source={skill.id}>
-            <summary data-view-skill-source={skill.id}>
-              {t.viewSkillSource}
-            </summary>
-            <code>{skill.locationReference}</code>
-          </details>
-          <small>{skill.version}</small>
-          {skill.status === "discovered" || skill.status === "unavailable" ? (
-            <button
-              type="button"
-              data-enable-skill={skill.id}
-              onClick={() => onEnable(skill.id)}
-            >
-              {t.enableSkill}
-            </button>
-          ) : skill.status === "enabled" ? (
-            <button
-              className="danger-button"
-              type="button"
-              data-archive-discovered-skill={skill.id}
-              onClick={() => onArchive(skill.id)}
-            >
-              {t.archiveSkill}
-            </button>
-          ) : null}
+            {skill.requiredCapabilities?.length ? (
+              <p
+                className="skill-capability-warning"
+                data-skill-capability-warning
+              >
+                {t.requiredAgentCapabilities}:{" "}
+                {skill.requiredCapabilities.join(", ")}
+              </p>
+            ) : null}
+            <div className="skill-catalog-meta">
+              <details data-skill-source={skill.id}>
+                <summary data-view-skill-source={skill.id}>
+                  {t.viewSkillSource}
+                </summary>
+                <code title={skill.locationReference}>
+                  {skill.locationReference}
+                </code>
+              </details>
+              <code className="skill-version" title={skill.version}>
+                {skill.version}
+              </code>
+            </div>
+          </div>
+          <div className="skill-catalog-action">
+            {skill.status === "discovered" || skill.status === "unavailable" ? (
+              <button
+                className="skill-enable-button"
+                type="button"
+                data-enable-skill={skill.id}
+                onClick={() => onEnable(skill.id)}
+              >
+                {t.enableSkill}
+              </button>
+            ) : skill.status === "enabled" ? (
+              <button
+                className="skill-archive-button"
+                type="button"
+                data-archive-discovered-skill={skill.id}
+                onClick={() => onArchive(skill.id)}
+              >
+                {t.archiveSkill}
+              </button>
+            ) : null}
+          </div>
         </article>
       ))}
     </section>

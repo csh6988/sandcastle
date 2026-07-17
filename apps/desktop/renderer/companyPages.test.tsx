@@ -157,9 +157,14 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /SKILL\.md/);
     assert.match(markup, /data-enable-skill="local-review"/);
     assert.match(markup, /data-skill-directory/);
+    assert.match(markup, /class="refresh-skills-button"/);
+    assert.match(markup, /class="create-panel skill-directory-panel"/);
     assert.match(markup, /Add Skill Directory/);
     assert.match(markup, /data-view-skill-source="local-review"/);
     assert.match(markup, /Requires Agent capabilities.*structured-output/);
+    assert.match(markup, /data-skill-catalog-list/);
+    assert.match(markup, /class="skill-catalog-item"/);
+    assert.match(markup, /class="skill-enable-button"/);
   });
 
   it("filters the rendered Skill catalog with ordered fuzzy characters", () => {
