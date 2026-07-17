@@ -94,6 +94,10 @@ describe("Company Agent and Skill catalog pages", () => {
     assert.match(markup, /Codex/);
     assert.match(markup, /1\.2\.3/);
     assert.match(markup, /class="catalog-path"/);
+    assert.match(markup, /class="catalog-meta-block"/);
+    assert.match(markup, /data-agent-capabilities/);
+    assert.match(markup, /data-detect-agents/);
+    assert.match(markup, /class="agent-test-button"/);
     assert.match(markup, /data-test-agent="codex"/);
   });
 

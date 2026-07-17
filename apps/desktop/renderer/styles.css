@@ -470,6 +470,7 @@ p {
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: stretch;
 }
 
 .catalog-card {
@@ -477,8 +478,21 @@ p {
   border: 1px solid var(--border);
   border-radius: 12px;
   display: grid;
+  align-content: start;
   gap: 10px;
   padding: 16px;
+  min-width: 0;
+}
+
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.agent-card-heading {
+  align-items: center;
 }
 
 .catalog-card code,
@@ -497,6 +511,32 @@ p {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+}
+
+.catalog-meta .catalog-meta-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.agent-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-meta > div {
+  align-items: baseline;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.agent-meta > .catalog-meta-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
 }
 
 .catalog-meta dt {
@@ -514,8 +554,80 @@ p {
   word-break: break-word;
 }
 
-.catalog-path {
+.catalog-meta dd.catalog-path {
+  display: block;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.capability-pill {
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--muted);
+  background: var(--subtle);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.agent-card-actions {
+  display: grid;
+  gap: 8px;
+  align-items: start;
+  margin-top: auto;
+}
+
+.agent-page-heading {
+  align-items: center;
+}
+
+.detect-agents-button {
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--primary);
+  padding: 9px 14px;
+  box-shadow: var(--shadow);
+  font-weight: 750;
+}
+
+.detect-agents-button:hover {
+  background: var(--primary-soft);
+  border-color: #93c5fd;
+}
+
+.agent-test-button {
+  width: 100%;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: #ffffff;
+  padding: 9px 12px;
+  font-weight: 750;
+}
+
+.agent-test-button:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.agent-test-result {
+  display: block;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f0fdf4;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .search-field {

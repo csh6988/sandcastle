@@ -44,6 +44,15 @@ const errorMessage = (error: unknown): string =>
       ? error.message
       : String(error);
 
+const formatAgentTimestamp = (value: string): string => {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.valueOf())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(timestamp);
+};
+
 const fuzzyMatch = (query: string, text: string): boolean => {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return true;
@@ -116,13 +125,15 @@ export function AgentsPage({
 
   return (
     <section className="page" data-page="agents">
-      <header className="page-heading">
+      <header className="page-heading agent-page-heading">
         <div>
           <span className="eyebrow">{t.agentsEyebrow}</span>
           <h1>{t.agentsTitle}</h1>
           <p>{t.agentsBody}</p>
         </div>
         <button
+          className="detect-agents-button"
+          data-detect-agents
           type="button"
           onClick={() => {
             setError(null);
@@ -142,57 +153,78 @@ export function AgentsPage({
       <section className="catalog-grid" aria-label={t.agentsTitle}>
         {catalog?.agents.map((agent) => (
           <article
-            className="catalog-card"
+            className="catalog-card agent-card"
             data-agent-id={agent.id}
             key={agent.id}
           >
-            <div className="project-card-top">
+            <div className="project-card-top agent-card-heading">
               <strong>{agent.name}</strong>
               <span className="pill">{agent.status}</span>
             </div>
-            <dl className="catalog-meta">
+            <dl className="catalog-meta agent-meta">
               <div>
                 <dt>{t.agentVersion}</dt>
                 <dd>{agent.version ?? t.notAvailable}</dd>
               </div>
-              <div>
+              <div className="catalog-meta-block">
                 <dt>{t.agentExecutable}</dt>
-                <dd className="catalog-path">
+                <dd
+                  className="catalog-path"
+                  title={agent.executablePath ?? undefined}
+                >
                   {agent.executablePath ?? t.notAvailable}
                 </dd>
               </div>
               <div>
                 <dt>{t.agentDetectedAt}</dt>
-                <dd>{agent.lastDetectedAt}</dd>
+                <dd>
+                  <time
+                    dateTime={agent.lastDetectedAt}
+                    title={agent.lastDetectedAt}
+                  >
+                    {formatAgentTimestamp(agent.lastDetectedAt)}
+                  </time>
+                </dd>
               </div>
             </dl>
-            <p>{agent.capabilities.join(", ")}</p>
-            <button
-              type="button"
-              data-test-agent={agent.id}
-              disabled={testing === agent.id || agent.status !== "installed"}
-              onClick={() => {
-                setTesting(agent.id);
-                void window.sandcastle.runtime
-                  .testAgent(agent.id)
-                  .then((result) => {
-                    setError(null);
-                    setTestResult((current) => ({
-                      ...current,
-                      [agent.id]: result.summary,
-                    }));
-                  })
-                  .catch((nextError: unknown) =>
-                    setError(errorMessage(nextError)),
-                  )
-                  .finally(() => setTesting(null));
-              }}
-            >
-              {t.testAgent}
-            </button>
-            {testResult[agent.id] ? (
-              <span className="success">{testResult[agent.id]}</span>
-            ) : null}
+            <div className="agent-capabilities" data-agent-capabilities>
+              {agent.capabilities.map((capability) => (
+                <span className="capability-pill" key={capability}>
+                  {capability}
+                </span>
+              ))}
+            </div>
+            <div className="agent-card-actions">
+              <button
+                className="agent-test-button"
+                type="button"
+                data-test-agent={agent.id}
+                disabled={testing === agent.id || agent.status !== "installed"}
+                onClick={() => {
+                  setTesting(agent.id);
+                  void window.sandcastle.runtime
+                    .testAgent(agent.id)
+                    .then((result) => {
+                      setError(null);
+                      setTestResult((current) => ({
+                        ...current,
+                        [agent.id]: result.summary,
+                      }));
+                    })
+                    .catch((nextError: unknown) =>
+                      setError(errorMessage(nextError)),
+                    )
+                    .finally(() => setTesting(null));
+                }}
+              >
+                {t.testAgent}
+              </button>
+              {testResult[agent.id] ? (
+                <span className="agent-test-result success">
+                  {testResult[agent.id]}
+                </span>
+              ) : null}
+            </div>
           </article>
         ))}
       </section>
