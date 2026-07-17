@@ -2598,176 +2598,180 @@ export function DepartmentDetailView({
           className="department-overview-grid"
           data-department-panel={modernConfiguration ? "settings" : "overview"}
         >
-          <article className="create-panel">
-            <h2>{t.departmentSettings}</h2>
-            <form
-              className="form department-settings-form"
-              data-department-settings
-              onSubmit={(event) => {
-                event.preventDefault();
-                void saveAllSettings();
-              }}
-            >
-              <label htmlFor="department-detail-name">{t.name}</label>
-              <input
-                id="department-detail-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                required
-              />
-              <label htmlFor="department-detail-description">
-                {t.description}
-              </label>
-              <textarea
-                id="department-detail-description"
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                rows={4}
-              />
-              <fieldset
-                className="department-config-section"
-                data-default-execution-profile
+          <div className="department-settings-column">
+            <article className="create-panel">
+              <h2>{t.departmentSettings}</h2>
+              <form
+                className="form department-settings-form"
+                data-department-settings
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveAllSettings();
+                }}
               >
-                <legend>{t.activeProfile}</legend>
-                <p className="field-help">{t.activeProfileHint}</p>
-                <select
-                  aria-label={t.activeProfile}
-                  id="department-default-execution-profile"
-                  onChange={(event) =>
-                    setDefaultExecutionProfileId(event.target.value || null)
-                  }
-                  value={defaultExecutionProfileId ?? ""}
+                <label htmlFor="department-detail-name">{t.name}</label>
+                <input
+                  id="department-detail-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  required
+                />
+                <label htmlFor="department-detail-description">
+                  {t.description}
+                </label>
+                <textarea
+                  id="department-detail-description"
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  rows={4}
+                />
+                <fieldset
+                  className="department-config-section"
+                  data-default-execution-profile
                 >
-                  <option value="">{t.none}</option>
-                  {department.executionProfiles
-                    .filter((profile) => profile.status === "active")
-                    .map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.name}
-                      </option>
-                    ))}
-                </select>
-              </fieldset>
-              <details data-artifact-contract-settings>
-                <summary>
-                  {t.artifactContractsSettings} ·{" "}
-                  {inputArtifactContracts.length +
-                    outputArtifactContracts.length}
-                </summary>
-                <ArtifactContractsEditor
-                  contracts={inputArtifactContracts}
-                  label={t.inputArtifactContracts}
-                  hint={t.inputArtifactContractsHint}
-                  emptyText={t.noInputArtifactContracts}
-                  owner="input"
-                  setContracts={setInputArtifactContracts}
-                  t={t}
-                />
-                <ArtifactContractsEditor
-                  contracts={outputArtifactContracts}
-                  label={t.outputArtifactContracts}
-                  hint={t.outputArtifactContractsHint}
-                  emptyText={t.noOutputArtifactContracts}
-                  owner="output"
-                  setContracts={setOutputArtifactContracts}
-                  t={t}
-                />
-              </details>
-            </form>
-          </article>
-          <article className="create-panel">
-            <h2>{t.departmentConfiguration}</h2>
-            <dl className="overview-inventory">
-              <div>
-                <dt>{t.status}</dt>
-                <dd>{statusName(t, department.status)}</dd>
-              </div>
-              <div>
-                <dt>{t.positionsTab}</dt>
-                <dd>
-                  {department.positions.length} {t.positionsCountSuffix}
-                </dd>
-              </div>
-              <div>
-                <dt>{t.pipelineTab}</dt>
-                <dd>
-                  {department.pipeline
-                    ? `${t.publishedPipeline} v${department.pipeline.version}`
-                    : t.noPublishedPipelineShort}
-                </dd>
-              </div>
-              <div>
-                <dt>{t.metricActiveRuns}</dt>
-                <dd>{department.activeRuns}</dd>
-              </div>
-            </dl>
-          </article>
-          <details className="create-panel" data-department-advanced-settings>
-            <summary>{t.advancedSettings}</summary>
-            <ExecutionProfileConfiguration
-              busy={busy}
-              department={department}
-              onArchive={onArchiveExecutionProfile}
-              registerSave={registerSettingsSave}
-              onSave={onSaveExecutionProfile}
-              t={t}
-            />
-            <SecretReferenceConfiguration
-              busy={busy}
-              department={department}
-              onArchive={onArchiveSecretReference}
-              onCreate={onCreateSecretReference}
-              registerSave={registerSettingsSave}
-              t={t}
-            />
-          </details>
-          <article className="create-panel department-actions-panel">
-            <h2>{t.departmentActions}</h2>
-            <button
-              data-save-department-settings
-              disabled={busy}
-              onClick={() => void saveAllSettings()}
-              type="button"
-            >
-              {t.saveDepartment}
-            </button>
-            <form
-              className="form"
-              data-department-copy-form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void onCopyDepartment({
-                  departmentId: department.id,
-                  name: copyName.trim(),
-                });
-              }}
-            >
-              <label htmlFor="department-copy-name">{t.copyName}</label>
-              <input
-                id="department-copy-name"
-                value={copyName}
-                onChange={(event) => setCopyName(event.target.value)}
-                required
+                  <legend>{t.activeProfile}</legend>
+                  <p className="field-help">{t.activeProfileHint}</p>
+                  <select
+                    aria-label={t.activeProfile}
+                    id="department-default-execution-profile"
+                    onChange={(event) =>
+                      setDefaultExecutionProfileId(event.target.value || null)
+                    }
+                    value={defaultExecutionProfileId ?? ""}
+                  >
+                    <option value="">{t.none}</option>
+                    {department.executionProfiles
+                      .filter((profile) => profile.status === "active")
+                      .map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                  </select>
+                </fieldset>
+                <details data-artifact-contract-settings>
+                  <summary>
+                    {t.artifactContractsSettings} ·{" "}
+                    {inputArtifactContracts.length +
+                      outputArtifactContracts.length}
+                  </summary>
+                  <ArtifactContractsEditor
+                    contracts={inputArtifactContracts}
+                    label={t.inputArtifactContracts}
+                    hint={t.inputArtifactContractsHint}
+                    emptyText={t.noInputArtifactContracts}
+                    owner="input"
+                    setContracts={setInputArtifactContracts}
+                    t={t}
+                  />
+                  <ArtifactContractsEditor
+                    contracts={outputArtifactContracts}
+                    label={t.outputArtifactContracts}
+                    hint={t.outputArtifactContractsHint}
+                    emptyText={t.noOutputArtifactContracts}
+                    owner="output"
+                    setContracts={setOutputArtifactContracts}
+                    t={t}
+                  />
+                </details>
+              </form>
+            </article>
+            <details className="create-panel" data-department-advanced-settings>
+              <summary>{t.advancedSettings}</summary>
+              <ExecutionProfileConfiguration
+                busy={busy}
+                department={department}
+                onArchive={onArchiveExecutionProfile}
+                registerSave={registerSettingsSave}
+                onSave={onSaveExecutionProfile}
+                t={t}
               />
-              <button disabled={busy} type="submit">
-                {t.copyDepartment}
+              <SecretReferenceConfiguration
+                busy={busy}
+                department={department}
+                onArchive={onArchiveSecretReference}
+                onCreate={onCreateSecretReference}
+                registerSave={registerSettingsSave}
+                t={t}
+              />
+            </details>
+          </div>
+          <div className="department-settings-column">
+            <article className="create-panel">
+              <h2>{t.departmentConfiguration}</h2>
+              <dl className="overview-inventory">
+                <div>
+                  <dt>{t.status}</dt>
+                  <dd>{statusName(t, department.status)}</dd>
+                </div>
+                <div>
+                  <dt>{t.positionsTab}</dt>
+                  <dd>
+                    {department.positions.length} {t.positionsCountSuffix}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t.pipelineTab}</dt>
+                  <dd>
+                    {department.pipeline
+                      ? `${t.publishedPipeline} v${department.pipeline.version}`
+                      : t.noPublishedPipelineShort}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t.metricActiveRuns}</dt>
+                  <dd>{department.activeRuns}</dd>
+                </div>
+              </dl>
+            </article>
+            <article className="create-panel department-actions-panel">
+              <h2>{t.departmentActions}</h2>
+              <button
+                data-save-department-settings
+                disabled={busy}
+                onClick={() => void saveAllSettings()}
+                type="button"
+              >
+                {t.saveDepartment}
               </button>
-            </form>
-            <button
-              className="danger-button"
-              data-department-archive
-              disabled={busy}
-              onClick={() =>
-                void onArchiveDepartment({
-                  departmentId: department.id,
-                  expectedRevision: department.revision,
-                })
-              }
-              type="button"
-            >
-              {t.archiveDepartment}
-            </button>
-          </article>
+              <form
+                className="form"
+                data-department-copy-form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void onCopyDepartment({
+                    departmentId: department.id,
+                    name: copyName.trim(),
+                  });
+                }}
+              >
+                <label htmlFor="department-copy-name">{t.copyName}</label>
+                <input
+                  id="department-copy-name"
+                  value={copyName}
+                  onChange={(event) => setCopyName(event.target.value)}
+                  required
+                />
+                <button disabled={busy} type="submit">
+                  {t.copyDepartment}
+                </button>
+              </form>
+              <button
+                className="danger-button"
+                data-department-archive
+                disabled={busy}
+                onClick={() =>
+                  void onArchiveDepartment({
+                    departmentId: department.id,
+                    expectedRevision: department.revision,
+                  })
+                }
+                type="button"
+              >
+                {t.archiveDepartment}
+              </button>
+            </article>
+          </div>
         </section>
       ) : null}
 
@@ -4135,6 +4139,1008 @@ const pipelineNodeTypes = [
   "complete",
 ] as const;
 
+type PipelineDraftNode = DepartmentPipelineDraftGraph["nodes"][number];
+type PipelineDraftEdge = DepartmentPipelineDraftGraph["edges"][number];
+type PipelineNodePoint = { readonly x: number; readonly y: number };
+type PipelineNodePositions = Readonly<Record<string, PipelineNodePoint>>;
+
+const pipelineNodeWidth = 186;
+const pipelineNodeHeight = 112;
+
+const pipelineNodeTypeLabel = (t: Messages, type: string): string => {
+  if (type === "start") return t.startNode;
+  if (type === "ai-task") return t.aiTaskNode;
+  if (type === "human-approval") return t.approvalNode;
+  if (type === "condition") return t.conditionNode;
+  if (type === "parallel") return t.parallelNode;
+  if (type === "join") return t.joinNode;
+  if (type === "complete") return t.completeNode;
+  return type;
+};
+
+const pipelineNodeClass = (type: string): string =>
+  `pipeline-canvas-node pipeline-canvas-node-${type}`;
+
+const createPipelineAutoLayout = (
+  graph: DepartmentPipelineDraftGraph,
+): PipelineNodePositions => {
+  const levels = new Map<string, number>();
+  const incoming = new Map<string, number>();
+  for (const node of graph.nodes) incoming.set(node.id, 0);
+  for (const edge of graph.edges) {
+    incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
+  }
+  const queue = graph.nodes
+    .filter((node) => (incoming.get(node.id) ?? 0) === 0)
+    .map((node) => node.id);
+  for (const nodeId of queue) levels.set(nodeId, 0);
+  for (let index = 0; index < graph.nodes.length; index += 1) {
+    const current = queue[index];
+    if (!current) break;
+    const currentLevel = levels.get(current) ?? 0;
+    for (const edge of graph.edges.filter(
+      (candidate) => candidate.from === current,
+    )) {
+      const nextLevel = Math.max(levels.get(edge.to) ?? 0, currentLevel + 1);
+      levels.set(edge.to, nextLevel);
+      if (!queue.includes(edge.to)) queue.push(edge.to);
+    }
+  }
+  const columns = new Map<number, string[]>();
+  for (const node of graph.nodes) {
+    const level = levels.get(node.id) ?? 0;
+    columns.set(level, [...(columns.get(level) ?? []), node.id]);
+  }
+  const positions: Record<string, PipelineNodePoint> = {};
+  for (const [level, nodeIds] of columns) {
+    nodeIds.forEach((nodeId, row) => {
+      positions[nodeId] = {
+        x: 48 + level * 218,
+        y: 72 + row * 146,
+      };
+    });
+  }
+  return positions;
+};
+
+const pipelineLayoutStorageKey = (departmentId: string): string =>
+  `sandcastle:pipeline-layout:v2:${departmentId}`;
+
+const loadPipelinePositions = (
+  departmentId: string,
+  graph: DepartmentPipelineDraftGraph,
+): PipelineNodePositions => {
+  const fallback = createPipelineAutoLayout(graph);
+  if (typeof window === "undefined") return fallback;
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(pipelineLayoutStorageKey(departmentId)) ??
+        "null",
+    ) as Record<string, PipelineNodePoint> | null;
+    if (!stored) return fallback;
+    return Object.fromEntries(
+      graph.nodes.map((node) => [
+        node.id,
+        stored[node.id] ?? fallback[node.id] ?? { x: 72, y: 72 },
+      ]),
+    );
+  } catch {
+    return fallback;
+  }
+};
+
+function PipelineVisualEditor({
+  department,
+  editor,
+  graph,
+  nodePositions,
+  onAddNode,
+  onConnectNodes,
+  onRemoveEdge,
+  onRemoveNode,
+  onSelectEdge,
+  onSelectNode,
+  onUpdateEdge,
+  onUpdateNode,
+  selectedEdgeIndex,
+  selectedNodeId,
+  setNodePositions,
+  skillConfiguration,
+  t,
+}: {
+  readonly department: DepartmentInspect;
+  readonly editor: DepartmentPipelineEditorView;
+  readonly graph: DepartmentPipelineDraftGraph;
+  readonly nodePositions: PipelineNodePositions;
+  readonly onAddNode: (
+    type?: (typeof pipelineNodeTypes)[number],
+    point?: PipelineNodePoint,
+  ) => void;
+  readonly onConnectNodes: (from: string, to: string) => void;
+  readonly onRemoveEdge: (edgeIndex: number) => void;
+  readonly onRemoveNode: (nodeId: string) => void;
+  readonly onSelectEdge: (edgeIndex: number | null) => void;
+  readonly onSelectNode: (nodeId: string | null) => void;
+  readonly onUpdateEdge: (
+    edgeIndex: number,
+    update: (edge: PipelineDraftEdge) => PipelineDraftEdge,
+  ) => void;
+  readonly onUpdateNode: (
+    nodeId: string,
+    update: (node: PipelineDraftNode) => PipelineDraftNode,
+  ) => void;
+  readonly selectedEdgeIndex: number | null;
+  readonly selectedNodeId: string | null;
+  readonly setNodePositions: React.Dispatch<
+    React.SetStateAction<PipelineNodePositions>
+  >;
+  readonly skillConfiguration: SkillConfigurationView;
+  readonly t: Messages;
+}) {
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [tool, setTool] = useState<"select" | "pan">("select");
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [connectFrom, setConnectFrom] = useState<string | null>(null);
+  const interaction = useRef<
+    | {
+        kind: "node";
+        nodeId: string;
+        startX: number;
+        startY: number;
+        origin: PipelineNodePoint;
+      }
+    | {
+        kind: "pan";
+        startX: number;
+        startY: number;
+        origin: { x: number; y: number };
+      }
+    | null
+  >(null);
+
+  const nodePosition = (node: PipelineDraftNode): PipelineNodePoint =>
+    nodePositions[node.id] ?? { x: 72, y: 72 };
+  const contentSize = {
+    width: Math.max(
+      920,
+      ...graph.nodes.map(
+        (node) => nodePosition(node).x + pipelineNodeWidth + 120,
+      ),
+    ),
+    height: Math.max(
+      620,
+      ...graph.nodes.map(
+        (node) => nodePosition(node).y + pipelineNodeHeight + 120,
+      ),
+    ),
+  };
+  const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+  const selectedEdge =
+    selectedEdgeIndex === null ? undefined : graph.edges[selectedEdgeIndex];
+  const visibleSkillFlows = selectedNode
+    ? skillConfiguration.skillFlows.filter(
+        (flow) =>
+          flow.status === "active" &&
+          flow.positionId === selectedNode.positionId,
+      )
+    : [];
+
+  const updateSelectedNodeType = (type: string): void => {
+    if (!selectedNode) return;
+    onUpdateNode(selectedNode.id, (current) => ({
+      ...current,
+      type: type as (typeof pipelineNodeTypes)[number],
+      ...(type === "condition"
+        ? {
+            condition: current.condition ?? {
+              leftReference: "",
+              operator: "exists" as const,
+              branches: [
+                { id: "match", label: "Match", kind: "match" as const },
+                {
+                  id: "default",
+                  label: "Default",
+                  kind: "default" as const,
+                },
+              ],
+            },
+          }
+        : { condition: undefined }),
+      ...(["ai-task", "human-approval"].includes(type)
+        ? {}
+        : {
+            positionId: undefined,
+            skillFlowId: undefined,
+            instructions: undefined,
+            executionProfileId: undefined,
+          }),
+    }));
+  };
+  const handleCanvasPointerDown = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    const target = event.target as HTMLElement;
+    if (
+      target.closest("[data-pipeline-canvas-node]") ||
+      target.closest("[data-pipeline-edge]")
+    ) {
+      return;
+    }
+    interaction.current = {
+      kind: "pan",
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: pan,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const handleCanvasPointerMove = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    const current = interaction.current;
+    if (!current) return;
+    if (current.kind === "node") {
+      const dx = (event.clientX - current.startX) / zoom;
+      const dy = (event.clientY - current.startY) / zoom;
+      setNodePositions((positions) => ({
+        ...positions,
+        [current.nodeId]: {
+          x: Math.max(24, current.origin.x + dx),
+          y: Math.max(24, current.origin.y + dy),
+        },
+      }));
+      return;
+    }
+    setPan({
+      x: current.origin.x + event.clientX - current.startX,
+      y: current.origin.y + event.clientY - current.startY,
+    });
+  };
+  const handleCanvasPointerUp = (): void => {
+    interaction.current = null;
+  };
+  const handleNodePointerDown = (
+    event: React.PointerEvent<HTMLElement>,
+    node: PipelineDraftNode,
+  ): void => {
+    if (tool !== "select") return;
+    const target = event.target as HTMLElement;
+    if (target.closest("[data-pipeline-port]")) return;
+    onSelectNode(node.id);
+    interaction.current = {
+      kind: "node",
+      nodeId: node.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: nodePosition(node),
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    const type = event.dataTransfer.getData("application/x-sandcastle-node");
+    if (
+      !pipelineNodeTypes.includes(type as (typeof pipelineNodeTypes)[number])
+    ) {
+      return;
+    }
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    onAddNode(type as (typeof pipelineNodeTypes)[number], {
+      x: Math.max(
+        24,
+        (event.clientX - rect.left - pan.x) / zoom - pipelineNodeWidth / 2,
+      ),
+      y: Math.max(
+        24,
+        (event.clientY - rect.top - pan.y) / zoom - pipelineNodeHeight / 2,
+      ),
+    });
+  };
+  const autoLayout = (): void => {
+    setNodePositions(createPipelineAutoLayout(graph));
+    setPan({ x: 0, y: 0 });
+    setZoom(1);
+  };
+
+  return (
+    <section className="pipeline-visual-editor" data-pipeline-canvas>
+      <aside className="pipeline-node-library" data-pipeline-node-library>
+        <div className="pipeline-panel-title">{t.nodeLibrary}</div>
+        {pipelineNodeTypes.map((type) => (
+          <button
+            className={`pipeline-library-item pipeline-library-item-${type}`}
+            draggable
+            key={type}
+            onClick={() => onAddNode(type)}
+            onDragStart={(event) =>
+              event.dataTransfer.setData("application/x-sandcastle-node", type)
+            }
+            type="button"
+          >
+            <span className="pipeline-library-dot" />
+            {pipelineNodeTypeLabel(t, type)}
+          </button>
+        ))}
+        <p className="pipeline-canvas-hint">{t.connectNodesHint}</p>
+      </aside>
+
+      <div
+        className={`pipeline-canvas pipeline-canvas-tool-${tool}`}
+        data-pipeline-canvas-surface
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleDrop}
+        onPointerDown={handleCanvasPointerDown}
+        onPointerMove={handleCanvasPointerMove}
+        onPointerUp={handleCanvasPointerUp}
+        ref={canvasRef}
+      >
+        <div className="pipeline-canvas-toolbar">
+          <div className="pipeline-toolbar-group">
+            <button
+              className={tool === "select" ? "active" : ""}
+              onClick={() => setTool("select")}
+              type="button"
+            >
+              {t.selectTool}
+            </button>
+            <button
+              className={tool === "pan" ? "active" : ""}
+              onClick={() => setTool("pan")}
+              type="button"
+            >
+              {t.panTool}
+            </button>
+            <button
+              aria-label={t.zoomOut}
+              onClick={() =>
+                setZoom((current) => Math.max(0.55, current - 0.1))
+              }
+              type="button"
+            >
+              −
+            </button>
+            <button
+              aria-label={t.zoomIn}
+              onClick={() => setZoom((current) => Math.min(1.5, current + 0.1))}
+              type="button"
+            >
+              +
+            </button>
+          </div>
+          <div className="pipeline-toolbar-group">
+            <button onClick={autoLayout} type="button">
+              {t.autoLayout}
+            </button>
+            <span>{Math.round(zoom * 100)}%</span>
+          </div>
+        </div>
+        <div
+          className="pipeline-canvas-content"
+          style={{
+            height: contentSize.height,
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            width: contentSize.width,
+          }}
+        >
+          <svg
+            aria-hidden="true"
+            className="pipeline-canvas-edges"
+            height={contentSize.height}
+            width={contentSize.width}
+          >
+            <defs>
+              <marker
+                id="pipeline-arrow"
+                markerHeight="8"
+                markerWidth="8"
+                orient="auto"
+                refX="7"
+                refY="4"
+              >
+                <path d="M0,0 L8,4 L0,8 z" fill="currentColor" />
+              </marker>
+            </defs>
+            {graph.edges.map((edge, index) => {
+              const from = nodePositions[edge.from] ?? { x: 72, y: 72 };
+              const to = nodePositions[edge.to] ?? { x: 72, y: 72 };
+              const startX = from.x + pipelineNodeWidth;
+              const startY = from.y + pipelineNodeHeight / 2;
+              const endX = to.x;
+              const endY = to.y + pipelineNodeHeight / 2;
+              const curve = Math.max(60, Math.abs(endX - startX) / 2);
+              const path = `M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}`;
+              return (
+                <g key={`${edge.from}:${edge.to}:${index}`}>
+                  <path
+                    className={`pipeline-canvas-edge${selectedEdgeIndex === index ? " selected" : ""}`}
+                    d={path}
+                    data-pipeline-edge={index}
+                    markerEnd="url(#pipeline-arrow)"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelectEdge(index);
+                    }}
+                  />
+                </g>
+              );
+            })}
+          </svg>
+          {graph.nodes.map((node) => {
+            const point = nodePosition(node);
+            const position = editor.positions.find(
+              (candidate) => candidate.id === node.positionId,
+            );
+            const flow = skillConfiguration.skillFlows.find(
+              (candidate) => candidate.id === node.skillFlowId,
+            );
+            return (
+              <article
+                className={`${pipelineNodeClass(node.type)}${selectedNodeId === node.id ? " selected" : ""}`}
+                data-pipeline-canvas-node={node.id}
+                key={node.id}
+                onClick={() => onSelectNode(node.id)}
+                onPointerDown={(event) => handleNodePointerDown(event, node)}
+                style={{ left: point.x, top: point.y }}
+              >
+                <button
+                  aria-label={`${t.toNode}: ${node.name}`}
+                  className={`pipeline-port pipeline-port-input${connectFrom ? " connectable" : ""}`}
+                  data-pipeline-port="input"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (connectFrom) {
+                      onConnectNodes(connectFrom, node.id);
+                      setConnectFrom(null);
+                    }
+                  }}
+                  type="button"
+                />
+                <div className="pipeline-node-type-label">
+                  {pipelineNodeTypeLabel(t, node.type)}
+                </div>
+                <strong>{node.name}</strong>
+                {position ? (
+                  <span className="pipeline-node-person">{position.name}</span>
+                ) : null}
+                {flow ? (
+                  <span className="pipeline-node-chip">{flow.name}</span>
+                ) : null}
+                {node.inputContractRefs?.length ||
+                node.outputContractRefs?.length ? (
+                  <span className="pipeline-node-contracts">
+                    ↓ {node.inputContractRefs?.length ?? 0} · ↑{" "}
+                    {node.outputContractRefs?.length ?? 0}
+                  </span>
+                ) : null}
+                <button
+                  aria-label={`${t.fromNode}: ${node.name}`}
+                  className={`pipeline-port pipeline-port-output${connectFrom === node.id ? " active" : ""}`}
+                  data-pipeline-port="output"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setConnectFrom(node.id);
+                    onSelectNode(node.id);
+                  }}
+                  type="button"
+                />
+              </article>
+            );
+          })}
+        </div>
+      </div>
+
+      <aside className="pipeline-inspector" data-pipeline-inspector>
+        <div className="pipeline-panel-title">{t.nodeInspector}</div>
+        {selectedNode ? (
+          <div className="pipeline-inspector-body">
+            <h3>{selectedNode.name}</h3>
+            <label>
+              {t.name}
+              <input
+                onChange={(event) =>
+                  onUpdateNode(selectedNode.id, (node) => ({
+                    ...node,
+                    name: event.target.value,
+                  }))
+                }
+                value={selectedNode.name}
+              />
+            </label>
+            <label>
+              {t.nodeType}
+              <select
+                onChange={(event) => updateSelectedNodeType(event.target.value)}
+                value={selectedNode.type}
+              >
+                {pipelineNodeTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {pipelineNodeTypeLabel(t, type)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedNode.type === "ai-task" ||
+            selectedNode.type === "human-approval" ? (
+              <label>
+                {t.position}
+                <select
+                  onChange={(event) =>
+                    onUpdateNode(selectedNode.id, (node) => ({
+                      ...node,
+                      positionId: event.target.value || undefined,
+                      skillFlowId: undefined,
+                    }))
+                  }
+                  value={selectedNode.positionId ?? ""}
+                >
+                  <option value="">{t.none}</option>
+                  {editor.positions.map((position) => (
+                    <option key={position.id} value={position.id}>
+                      {position.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {selectedNode.type === "ai-task" ? (
+              <>
+                <label>
+                  {t.skillFlow}
+                  <select
+                    data-pipeline-inspector-field="skill-flow"
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        skillFlowId: event.target.value || undefined,
+                      }))
+                    }
+                    value={selectedNode.skillFlowId ?? ""}
+                  >
+                    <option value="">{t.none}</option>
+                    {visibleSkillFlows.map((flow) => (
+                      <option key={flow.id} value={flow.id}>
+                        {flow.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <details className="pipeline-inspector-section" open>
+                  <summary>{t.advancedSettings}</summary>
+                  <label>
+                    {t.skillFlowInstructions}
+                    <textarea
+                      data-pipeline-inspector-field="instructions"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          instructions: event.target.value,
+                        }))
+                      }
+                      rows={4}
+                      value={selectedNode.instructions ?? ""}
+                    />
+                  </label>
+                  <label>
+                    {t.executionProfiles}
+                    <select
+                      data-pipeline-inspector-field="execution-profile"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          executionProfileId: event.target.value || undefined,
+                        }))
+                      }
+                      value={selectedNode.executionProfileId ?? ""}
+                    >
+                      <option value="">{t.none}</option>
+                      {department.executionProfiles
+                        .filter((profile) => profile.status === "active")
+                        .map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    {t.inputArtifactContracts}
+                    <input
+                      data-pipeline-inspector-field="input-contracts"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          inputContractRefs: event.target.value
+                            .split(",")
+                            .map((value) => value.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                      value={(selectedNode.inputContractRefs ?? []).join(", ")}
+                    />
+                  </label>
+                  <label>
+                    {t.outputArtifactContracts}
+                    <input
+                      data-pipeline-inspector-field="output-contracts"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          outputContractRefs: event.target.value
+                            .split(",")
+                            .map((value) => value.trim())
+                            .filter(Boolean),
+                        }))
+                      }
+                      value={(selectedNode.outputContractRefs ?? []).join(", ")}
+                    />
+                  </label>
+                  <div className="pipeline-inspector-pair">
+                    <label>
+                      {t.timeoutSeconds}
+                      <input
+                        data-pipeline-inspector-field="timeout"
+                        min={1}
+                        onChange={(event) =>
+                          onUpdateNode(selectedNode.id, (node) => ({
+                            ...node,
+                            timeoutSeconds: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={selectedNode.timeoutSeconds ?? ""}
+                      />
+                    </label>
+                    <label>
+                      {t.retryMaxAttempts}
+                      <input
+                        data-pipeline-inspector-field="retry"
+                        min={0}
+                        onChange={(event) =>
+                          onUpdateNode(selectedNode.id, (node) => ({
+                            ...node,
+                            retryMaxAttempts: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={selectedNode.retryMaxAttempts ?? ""}
+                      />
+                    </label>
+                  </div>
+                  <div className="pipeline-inspector-pair">
+                    <label>
+                      {t.maxIterations}
+                      <input
+                        data-pipeline-inspector-field="max-iterations"
+                        min={1}
+                        onChange={(event) =>
+                          onUpdateNode(selectedNode.id, (node) => ({
+                            ...node,
+                            maxIterations: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={selectedNode.maxIterations ?? ""}
+                      />
+                    </label>
+                    <label>
+                      {t.maxTokens}
+                      <input
+                        data-pipeline-inspector-field="max-tokens"
+                        min={1}
+                        onChange={(event) =>
+                          onUpdateNode(selectedNode.id, (node) => ({
+                            ...node,
+                            maxTokens: event.target.value
+                              ? Number(event.target.value)
+                              : null,
+                          }))
+                        }
+                        type="number"
+                        value={selectedNode.maxTokens ?? ""}
+                      />
+                    </label>
+                  </div>
+                </details>
+              </>
+            ) : null}
+            {selectedNode.type === "human-approval" ? (
+              <details className="pipeline-inspector-section" open>
+                <summary>{t.advancedSettings}</summary>
+                <label>
+                  {t.approvalTitle}
+                  <input
+                    data-pipeline-inspector-field="approval-title"
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        approvalTitle: event.target.value,
+                      }))
+                    }
+                    value={selectedNode.approvalTitle ?? ""}
+                  />
+                </label>
+                <label>
+                  {t.inputArtifactContracts}
+                  <input
+                    data-pipeline-inspector-field="approval-evidence"
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        inputContractRefs: event.target.value
+                          .split(",")
+                          .map((value) => value.trim())
+                          .filter(Boolean),
+                      }))
+                    }
+                    value={(selectedNode.inputContractRefs ?? []).join(", ")}
+                  />
+                </label>
+                <label>
+                  {t.permissionPolicy}
+                  <select
+                    data-pipeline-inspector-field="approval-policy"
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        approvalPolicy: event.target.value
+                          ? (event.target.value as "any" | "all" | "named")
+                          : undefined,
+                      }))
+                    }
+                    value={selectedNode.approvalPolicy ?? ""}
+                  >
+                    <option value="">{t.none}</option>
+                    <option value="any">any</option>
+                    <option value="all">all</option>
+                    <option value="named">named</option>
+                  </select>
+                </label>
+                <label>
+                  {t.approverReference}
+                  <input
+                    data-pipeline-inspector-field="approver"
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        approverReference: event.target.value,
+                      }))
+                    }
+                    value={selectedNode.approverReference ?? ""}
+                  />
+                </label>
+              </details>
+            ) : null}
+            {selectedNode.type === "condition" && selectedNode.condition ? (
+              <>
+                <label>
+                  Left reference
+                  <input
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        condition: node.condition
+                          ? {
+                              ...node.condition,
+                              leftReference: event.target.value,
+                            }
+                          : undefined,
+                      }))
+                    }
+                    value={selectedNode.condition.leftReference}
+                  />
+                </label>
+                <label>
+                  Operator
+                  <select
+                    onChange={(event) =>
+                      onUpdateNode(selectedNode.id, (node) => ({
+                        ...node,
+                        condition: node.condition
+                          ? {
+                              ...node.condition,
+                              operator: event.target.value as
+                                | "equals"
+                                | "not-equals"
+                                | "exists"
+                                | "not-exists"
+                                | "in",
+                            }
+                          : undefined,
+                      }))
+                    }
+                    value={selectedNode.condition.operator}
+                  >
+                    <option value="equals">equals</option>
+                    <option value="not-equals">not-equals</option>
+                    <option value="exists">exists</option>
+                    <option value="not-exists">not-exists</option>
+                    <option value="in">in</option>
+                  </select>
+                </label>
+                {selectedNode.condition.branches.map((branch, branchIndex) => (
+                  <div
+                    className="pipeline-inspector-branch"
+                    key={`${branch.id}:${branchIndex}`}
+                  >
+                    <input
+                      aria-label="Condition branch ID"
+                      data-pipeline-inspector-field="condition-branch-id"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          condition: node.condition
+                            ? {
+                                ...node.condition,
+                                branches: node.condition.branches.map(
+                                  (candidate, candidateIndex) =>
+                                    candidateIndex === branchIndex
+                                      ? {
+                                          ...candidate,
+                                          id: event.target.value,
+                                        }
+                                      : candidate,
+                                ),
+                              }
+                            : undefined,
+                        }))
+                      }
+                      value={branch.id}
+                    />
+                    <input
+                      aria-label="Condition branch label"
+                      data-pipeline-inspector-field="condition-branch-label"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          condition: node.condition
+                            ? {
+                                ...node.condition,
+                                branches: node.condition.branches.map(
+                                  (candidate, candidateIndex) =>
+                                    candidateIndex === branchIndex
+                                      ? {
+                                          ...candidate,
+                                          label: event.target.value,
+                                        }
+                                      : candidate,
+                                ),
+                              }
+                            : undefined,
+                        }))
+                      }
+                      value={branch.label}
+                    />
+                    <select
+                      aria-label="Condition branch kind"
+                      data-pipeline-inspector-field="condition-branch-kind"
+                      onChange={(event) =>
+                        onUpdateNode(selectedNode.id, (node) => ({
+                          ...node,
+                          condition: node.condition
+                            ? {
+                                ...node.condition,
+                                branches: node.condition.branches.map(
+                                  (candidate, candidateIndex) =>
+                                    candidateIndex === branchIndex
+                                      ? {
+                                          ...candidate,
+                                          kind: event.target.value as
+                                            | "match"
+                                            | "no-match"
+                                            | "default",
+                                        }
+                                      : candidate,
+                                ),
+                              }
+                            : undefined,
+                        }))
+                      }
+                      value={branch.kind}
+                    >
+                      <option value="match">match</option>
+                      <option value="no-match">no-match</option>
+                      <option value="default">default</option>
+                    </select>
+                  </div>
+                ))}
+              </>
+            ) : null}
+            <button
+              className="danger-button"
+              onClick={() => onRemoveNode(selectedNode.id)}
+              type="button"
+            >
+              {t.removeNode}
+            </button>
+          </div>
+        ) : selectedEdge ? (
+          <div className="pipeline-inspector-body">
+            <h3>{t.pipelineEdges}</h3>
+            <label>
+              {t.fromNode}
+              <select
+                onChange={(event) =>
+                  onUpdateEdge(selectedEdgeIndex ?? 0, (edge) => ({
+                    ...edge,
+                    from: event.target.value,
+                  }))
+                }
+                value={selectedEdge.from}
+              >
+                {graph.nodes.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t.toNode}
+              <select
+                onChange={(event) =>
+                  onUpdateEdge(selectedEdgeIndex ?? 0, (edge) => ({
+                    ...edge,
+                    to: event.target.value,
+                  }))
+                }
+                value={selectedEdge.to}
+              >
+                {graph.nodes.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {node.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {graph.nodes.find((node) => node.id === selectedEdge.from)?.type ===
+            "condition" ? (
+              <label>
+                Branch
+                <select
+                  data-pipeline-inspector-field="edge-branch"
+                  onChange={(event) =>
+                    onUpdateEdge(selectedEdgeIndex ?? 0, (edge) => ({
+                      ...edge,
+                      branchId: event.target.value || undefined,
+                    }))
+                  }
+                  value={selectedEdge.branchId ?? ""}
+                >
+                  <option value="">{t.none}</option>
+                  {graph.nodes
+                    .find((node) => node.id === selectedEdge.from)
+                    ?.condition?.branches.map((branch) => (
+                      <option key={branch.id} value={branch.id}>
+                        {branch.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            ) : null}
+            <button
+              className="danger-button"
+              onClick={() => onRemoveEdge(selectedEdgeIndex ?? 0)}
+              type="button"
+            >
+              {t.removeEdge}
+            </button>
+          </div>
+        ) : (
+          <p className="pipeline-inspector-empty">{t.noNodeSelected}</p>
+        )}
+      </aside>
+    </section>
+  );
+}
+
 function PipelineEditor({
   editor,
   department,
@@ -4167,16 +5173,118 @@ function PipelineEditor({
   const [graph, setGraph] = useState(editor.draft.graph);
   const [validation, setValidation] = useState(editor.validation);
   const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draftSaveError, setDraftSaveError] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
+    editor.draft.graph.nodes[0]?.id ?? null,
+  );
+  const [selectedEdgeIndex, setSelectedEdgeIndex] = useState<number | null>(
+    null,
+  );
+  const [nodePositions, setNodePositions] = useState<PipelineNodePositions>(
+    () => loadPipelinePositions(editor.department.id, editor.draft.graph),
+  );
+  const graphRef = useRef(graph);
+  const dirtyRef = useRef(false);
+  const editSequenceRef = useRef(0);
+  const serverRevisionRef = useRef(editor.draft.revision);
+  const departmentIdRef = useRef(editor.department.id);
+  const saveInFlightRef = useRef(false);
+  const saveAgainRef = useRef(false);
+  const saveDraftRef = useRef<() => Promise<void>>(async () => undefined);
   useEffect(() => {
-    setGraph(editor.draft.graph);
+    const departmentChanged = departmentIdRef.current !== editor.department.id;
+    departmentIdRef.current = editor.department.id;
+    serverRevisionRef.current = editor.draft.revision;
     setValidation(editor.validation);
-    setDirty(false);
+    if (departmentChanged || !dirtyRef.current) {
+      graphRef.current = editor.draft.graph;
+      dirtyRef.current = false;
+      setGraph(editor.draft.graph);
+      setDirty(false);
+      setDraftSaveError(null);
+      setSelectedNodeId((current) =>
+        current && editor.draft.graph.nodes.some((node) => node.id === current)
+          ? current
+          : (editor.draft.graph.nodes[0]?.id ?? null),
+      );
+      setSelectedEdgeIndex(null);
+      setNodePositions((current) => {
+        const fallback = createPipelineAutoLayout(editor.draft.graph);
+        return Object.fromEntries(
+          editor.draft.graph.nodes.map((node) => [
+            node.id,
+            current[node.id] ?? fallback[node.id] ?? { x: 72, y: 72 },
+          ]),
+        );
+      });
+    }
   }, [editor.department.id, editor.draft.revision, editor.published?.id]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        pipelineLayoutStorageKey(editor.department.id),
+        JSON.stringify(nodePositions),
+      );
+    } catch {
+      // Layout persistence is a renderer convenience; graph editing still works.
+    }
+  }, [editor.department.id, nodePositions]);
 
   const replaceGraph = (nextGraph: DepartmentPipelineDraftGraph): void => {
+    graphRef.current = nextGraph;
+    dirtyRef.current = true;
+    editSequenceRef.current += 1;
     setGraph(nextGraph);
     setDirty(true);
+    setDraftSaveError(null);
   };
+
+  const saveCurrentDraft = async (): Promise<void> => {
+    if (saveInFlightRef.current) {
+      saveAgainRef.current = true;
+      return;
+    }
+    if (!dirtyRef.current) return;
+
+    const graphSnapshot = graphRef.current;
+    const savedEditSequence = editSequenceRef.current;
+    saveInFlightRef.current = true;
+    setSaving(true);
+    setDraftSaveError(null);
+    try {
+      const nextEditor = await onSave({
+        departmentId: editor.department.id,
+        expectedRevision: serverRevisionRef.current,
+        graph: graphSnapshot,
+      });
+      serverRevisionRef.current = nextEditor.draft.revision;
+      setValidation(nextEditor.validation);
+      if (editSequenceRef.current === savedEditSequence) {
+        dirtyRef.current = false;
+        graphRef.current = nextEditor.draft.graph;
+        setGraph(nextEditor.draft.graph);
+        setDirty(false);
+      } else {
+        saveAgainRef.current = true;
+      }
+    } catch (nextError) {
+      setDraftSaveError(errorMessage(nextError));
+    } finally {
+      saveInFlightRef.current = false;
+      setSaving(false);
+      if (saveAgainRef.current && dirtyRef.current) {
+        saveAgainRef.current = false;
+        window.setTimeout(() => void saveDraftRef.current(), 0);
+      }
+    }
+  };
+  saveDraftRef.current = saveCurrentDraft;
+  useEffect(() => {
+    if (!dirty) return;
+    const timeout = window.setTimeout(() => void saveDraftRef.current(), 700);
+    return () => window.clearTimeout(timeout);
+  }, [dirty, graph]);
   const updateNode = (
     nodeId: string,
     update: (
@@ -4190,16 +5298,70 @@ function PipelineEditor({
       ),
     });
   };
-  const addNode = (): void => {
+  const addNode = (
+    type: (typeof pipelineNodeTypes)[number] = "ai-task",
+    point?: PipelineNodePoint,
+  ): void => {
     let index = graph.nodes.length + 1;
     while (graph.nodes.some((node) => node.id === `node-${index}`)) index += 1;
+    const nodeId = `node-${index}`;
     replaceGraph({
       ...graph,
-      nodes: [
-        ...graph.nodes,
-        { id: `node-${index}`, type: "ai-task", name: `Node ${index}` },
-      ],
+      nodes: [...graph.nodes, { id: nodeId, type, name: `Node ${index}` }],
     });
+    setNodePositions((current) => ({
+      ...current,
+      [nodeId]: point ?? {
+        x: 48 + (graph.nodes.length % 4) * 218,
+        y: 72 + Math.floor(graph.nodes.length / 4) * 146,
+      },
+    }));
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeIndex(null);
+  };
+  const removeNode = (nodeId: string): void => {
+    replaceGraph({
+      nodes: graph.nodes.filter((candidate) => candidate.id !== nodeId),
+      edges: graph.edges.filter(
+        (edge) => edge.from !== nodeId && edge.to !== nodeId,
+      ),
+    });
+    setNodePositions((current) => {
+      const next = { ...current };
+      delete next[nodeId];
+      return next;
+    });
+    setSelectedNodeId((current) => (current === nodeId ? null : current));
+    setSelectedEdgeIndex(null);
+  };
+  const connectNodes = (from: string, to: string): void => {
+    if (
+      from === to ||
+      graph.edges.some((edge) => edge.from === from && edge.to === to)
+    ) {
+      return;
+    }
+    replaceGraph({ ...graph, edges: [...graph.edges, { from, to }] });
+    setSelectedNodeId(null);
+    setSelectedEdgeIndex(graph.edges.length);
+  };
+  const updateEdge = (
+    edgeIndex: number,
+    update: (edge: PipelineDraftEdge) => PipelineDraftEdge,
+  ): void => {
+    replaceGraph({
+      ...graph,
+      edges: graph.edges.map((edge, index) =>
+        index === edgeIndex ? update(edge) : edge,
+      ),
+    });
+  };
+  const removeEdge = (edgeIndex: number): void => {
+    replaceGraph({
+      ...graph,
+      edges: graph.edges.filter((_edge, index) => index !== edgeIndex),
+    });
+    setSelectedEdgeIndex(null);
   };
 
   return (
@@ -4214,8 +5376,14 @@ function PipelineEditor({
         <div>
           <h2>{t.pipelineTab}</h2>
           <p>
-            {t.draftRevision} {editor.draft.revision}
-            {dirty ? ` · ${t.unsavedChanges}` : ""}
+            {t.draftBasedOn}{" "}
+            {editor.published ? `v${editor.published.version}` : t.none}
+            {` · ${t.draftRevision} ${serverRevisionRef.current}`}
+            {saving
+              ? ` · ${t.savingDraft}`
+              : dirty
+                ? ` · ${t.unsavedChanges}`
+                : ` · ${t.draftSaved}`}
           </p>
         </div>
         <div className="action-bar">
@@ -4236,17 +5404,11 @@ function PipelineEditor({
           </button>
           <button
             data-pipeline-save
-            disabled={busy}
-            onClick={() =>
-              void onSave({
-                departmentId: editor.department.id,
-                expectedRevision: editor.draft.revision,
-                graph,
-              }).catch(() => undefined)
-            }
+            disabled={busy || saving || !dirty}
+            onClick={() => void saveDraftRef.current()}
             type="button"
           >
-            {t.saveDraft}
+            {saving ? t.savingDraft : t.saveDraft}
           </button>
           <button
             data-pipeline-publish
@@ -4266,6 +5428,12 @@ function PipelineEditor({
         </div>
       </div>
 
+      {draftSaveError ? (
+        <div className="warn" data-pipeline-save-error>
+          {t.draftSaveFailed}: {draftSaveError}
+        </div>
+      ) : null}
+
       {!editor.published ? (
         <div className="pipeline-unpublished-note">
           <strong>{t.noPublishedPipeline}</strong>
@@ -4273,563 +5441,601 @@ function PipelineEditor({
         </div>
       ) : null}
 
-      <div className="pipeline-editor-grid">
-        <section>
-          <div className="section-title-row">
-            <h3>{t.pipelineNodes}</h3>
-            <button data-pipeline-add-node onClick={addNode} type="button">
-              {t.addNode}
-            </button>
-          </div>
-          <div className="pipeline-editor-list">
-            {graph.nodes.map((node) => (
-              <article
-                className="pipeline-node-editor"
-                data-pipeline-node-editor={node.id}
-                key={node.id}
-              >
-                <label htmlFor={`pipeline-node-name-${node.id}`}>
-                  {t.name}
-                </label>
-                <input
-                  id={`pipeline-node-name-${node.id}`}
-                  value={node.name}
-                  onChange={(event) =>
-                    updateNode(node.id, (current) => ({
-                      ...current,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-                <label htmlFor={`pipeline-node-type-${node.id}`}>
-                  {t.nodeType}
-                </label>
-                <select
-                  id={`pipeline-node-type-${node.id}`}
-                  value={node.type}
-                  onChange={(event) =>
-                    updateNode(node.id, (current) => ({
-                      ...current,
-                      type: event.target.value,
-                      ...(!["ai-task", "human-approval"].includes(
-                        event.target.value,
-                      )
-                        ? {
-                            positionId: undefined,
-                            skillFlowId: undefined,
-                            instructions: undefined,
-                            executionProfileId: undefined,
-                            inputContractRefs: undefined,
-                            outputContractRefs: undefined,
-                            timeoutSeconds: undefined,
-                            retryMaxAttempts: undefined,
-                            maxIterations: undefined,
-                            maxTokens: undefined,
-                          }
-                        : event.target.value === "human-approval"
-                          ? { skillFlowId: undefined }
-                          : {}),
-                      ...(event.target.value === "condition"
-                        ? {
-                            condition: current.condition ?? {
-                              leftReference: "",
-                              operator: "exists" as const,
-                              branches: [
-                                {
-                                  id: "match",
-                                  label: "Match",
-                                  kind: "match" as const,
-                                },
-                                {
-                                  id: "default",
-                                  label: "Default",
-                                  kind: "default" as const,
-                                },
-                              ],
-                            },
-                          }
-                        : { condition: undefined }),
-                    }))
-                  }
-                >
-                  {pipelineNodeTypes.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
-                </select>
-                {node.type === "ai-task" || node.type === "human-approval" ? (
-                  <>
-                    <label htmlFor={`pipeline-node-position-${node.id}`}>
-                      {t.position}
-                    </label>
-                    <select
-                      id={`pipeline-node-position-${node.id}`}
-                      value={node.positionId ?? ""}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          positionId: event.target.value || undefined,
-                          skillFlowId: undefined,
-                        }))
-                      }
-                    >
-                      <option value="">{t.none}</option>
-                      {editor.positions.map((position) => (
-                        <option key={position.id} value={position.id}>
-                          {position.name}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                ) : null}
-                {node.type === "ai-task" ? (
-                  <>
-                    <label htmlFor={`pipeline-node-skill-flow-${node.id}`}>
-                      {t.skillFlow}
-                    </label>
-                    <select
-                      data-pipeline-node-skill-flow={node.id}
-                      id={`pipeline-node-skill-flow-${node.id}`}
-                      value={node.skillFlowId ?? ""}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          skillFlowId: event.target.value || undefined,
-                        }))
-                      }
-                    >
-                      <option value="">{t.none}</option>
-                      {skillConfiguration.skillFlows
-                        .filter(
-                          (flow) =>
-                            flow.status === "active" &&
-                            flow.positionId === node.positionId,
-                        )
-                        .map((flow) => (
-                          <option key={flow.id} value={flow.id}>
-                            {flow.name}
-                          </option>
-                        ))}
-                    </select>
-                    <label htmlFor={`pipeline-node-instructions-${node.id}`}>
-                      {t.skillFlowInstructions}
-                    </label>
-                    <textarea
-                      id={`pipeline-node-instructions-${node.id}`}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          instructions: event.target.value,
-                        }))
-                      }
-                      rows={3}
-                      value={node.instructions ?? ""}
-                    />
-                    <label htmlFor={`pipeline-node-profile-${node.id}`}>
-                      {t.executionProfiles}
-                    </label>
-                    <select
-                      id={`pipeline-node-profile-${node.id}`}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          executionProfileId: event.target.value || undefined,
-                        }))
-                      }
-                      value={node.executionProfileId ?? ""}
-                    >
-                      <option value="">{t.none}</option>
-                      {department.executionProfiles
-                        .filter((profile) => profile.status === "active")
-                        .map((profile) => (
-                          <option key={profile.id} value={profile.id}>
-                            {profile.name}
-                          </option>
-                        ))}
-                    </select>
-                    <label htmlFor={`pipeline-node-input-contracts-${node.id}`}>
-                      {t.inputArtifactContracts}
-                    </label>
-                    <input
-                      id={`pipeline-node-input-contracts-${node.id}`}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          inputContractRefs: event.target.value
-                            .split(",")
-                            .map((value) => value.trim())
-                            .filter(Boolean),
-                        }))
-                      }
-                      value={(node.inputContractRefs ?? []).join(", ")}
-                    />
-                    <label
-                      htmlFor={`pipeline-node-output-contracts-${node.id}`}
-                    >
-                      {t.outputArtifactContracts}
-                    </label>
-                    <input
-                      id={`pipeline-node-output-contracts-${node.id}`}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          outputContractRefs: event.target.value
-                            .split(",")
-                            .map((value) => value.trim())
-                            .filter(Boolean),
-                        }))
-                      }
-                      value={(node.outputContractRefs ?? []).join(", ")}
-                    />
-                    <label>{t.timeoutSeconds}</label>
-                    <input
-                      id={`pipeline-node-timeout-${node.id}`}
-                      min={1}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          timeoutSeconds: event.target.value
-                            ? Number(event.target.value)
-                            : undefined,
-                        }))
-                      }
-                      type="number"
-                      value={node.timeoutSeconds ?? ""}
-                    />
-                    <label>{t.retryMaxAttempts}</label>
-                    <input
-                      id={`pipeline-node-retry-${node.id}`}
-                      min={0}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          retryMaxAttempts: event.target.value
-                            ? Number(event.target.value)
-                            : undefined,
-                        }))
-                      }
-                      type="number"
-                      value={node.retryMaxAttempts ?? ""}
-                    />
-                    <label>{t.maxIterations}</label>
-                    <input
-                      id={`pipeline-node-max-iterations-${node.id}`}
-                      min={1}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          maxIterations: event.target.value
-                            ? Number(event.target.value)
-                            : undefined,
-                        }))
-                      }
-                      type="number"
-                      value={node.maxIterations ?? ""}
-                    />
-                    <label>{t.maxTokens}</label>
-                    <input
-                      id={`pipeline-node-max-tokens-${node.id}`}
-                      min={1}
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          maxTokens: event.target.value
-                            ? Number(event.target.value)
-                            : null,
-                        }))
-                      }
-                      type="number"
-                      value={node.maxTokens ?? ""}
-                    />
-                  </>
-                ) : null}
-                {node.type === "human-approval" ? (
-                  <>
-                    <label>{t.approvalTitle ?? "Approval title"}</label>
-                    <input
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          approvalTitle: event.target.value,
-                        }))
-                      }
-                      value={node.approvalTitle ?? ""}
-                    />
-                    <label>{t.permissionPolicy}</label>
-                    <select
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          approvalPolicy: event.target.value as
-                            | "any"
-                            | "all"
-                            | "named",
-                        }))
-                      }
-                      value={node.approvalPolicy ?? ""}
-                    >
-                      <option value="">{t.none}</option>
-                      <option value="any">any</option>
-                      <option value="all">all</option>
-                      <option value="named">named</option>
-                    </select>
-                    <label>{t.approverReference ?? "Approver reference"}</label>
-                    <input
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          approverReference: event.target.value,
-                        }))
-                      }
-                      value={node.approverReference ?? ""}
-                    />
-                  </>
-                ) : null}
-                {node.type === "condition" && node.condition ? (
-                  <>
-                    <label>Left reference</label>
-                    <input
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          condition: current.condition
-                            ? {
-                                ...current.condition,
-                                leftReference: event.target.value,
-                              }
-                            : undefined,
-                        }))
-                      }
-                      value={node.condition.leftReference}
-                    />
-                    <label>Operator</label>
-                    <select
-                      onChange={(event) =>
-                        updateNode(node.id, (current) => ({
-                          ...current,
-                          condition: current.condition
-                            ? {
-                                ...current.condition,
-                                operator: event.target.value as
-                                  | "equals"
-                                  | "not-equals"
-                                  | "exists"
-                                  | "not-exists"
-                                  | "in",
-                              }
-                            : undefined,
-                        }))
-                      }
-                      value={node.condition.operator}
-                    >
-                      <option value="equals">equals</option>
-                      <option value="not-equals">not-equals</option>
-                      <option value="exists">exists</option>
-                      <option value="not-exists">not-exists</option>
-                      <option value="in">in</option>
-                    </select>
-                    {node.condition.branches.map((branch, branchIndex) => (
-                      <div className="pipeline-edge-editor" key={branch.id}>
-                        <input
-                          aria-label="Condition branch ID"
-                          onChange={(event) =>
-                            updateNode(node.id, (current) => ({
-                              ...current,
-                              condition: current.condition
-                                ? {
-                                    ...current.condition,
-                                    branches: current.condition.branches.map(
-                                      (candidate, candidateIndex) =>
-                                        candidateIndex === branchIndex
-                                          ? {
-                                              ...candidate,
-                                              id: event.target.value,
-                                            }
-                                          : candidate,
-                                    ),
-                                  }
-                                : undefined,
-                            }))
-                          }
-                          value={branch.id}
-                        />
-                        <input
-                          aria-label="Condition branch label"
-                          onChange={(event) =>
-                            updateNode(node.id, (current) => ({
-                              ...current,
-                              condition: current.condition
-                                ? {
-                                    ...current.condition,
-                                    branches: current.condition.branches.map(
-                                      (candidate, candidateIndex) =>
-                                        candidateIndex === branchIndex
-                                          ? {
-                                              ...candidate,
-                                              label: event.target.value,
-                                            }
-                                          : candidate,
-                                    ),
-                                  }
-                                : undefined,
-                            }))
-                          }
-                          value={branch.label}
-                        />
-                      </div>
-                    ))}
-                  </>
-                ) : null}
-                <button
-                  className="danger-button"
-                  data-pipeline-remove-node={node.id}
-                  onClick={() =>
-                    replaceGraph({
-                      nodes: graph.nodes.filter(
-                        (candidate) => candidate.id !== node.id,
-                      ),
-                      edges: graph.edges.filter(
-                        (edge) => edge.from !== node.id && edge.to !== node.id,
-                      ),
-                    })
-                  }
-                  type="button"
-                >
-                  {t.removeNode}
-                </button>
-              </article>
-            ))}
-          </div>
-        </section>
+      <PipelineVisualEditor
+        department={department}
+        editor={editor}
+        graph={graph}
+        nodePositions={nodePositions}
+        onAddNode={addNode}
+        onConnectNodes={connectNodes}
+        onRemoveEdge={removeEdge}
+        onRemoveNode={removeNode}
+        onSelectEdge={setSelectedEdgeIndex}
+        onSelectNode={(nodeId) => {
+          setSelectedNodeId(nodeId);
+          setSelectedEdgeIndex(null);
+        }}
+        onUpdateEdge={updateEdge}
+        onUpdateNode={updateNode}
+        selectedEdgeIndex={selectedEdgeIndex}
+        selectedNodeId={selectedNodeId}
+        setNodePositions={setNodePositions}
+        skillConfiguration={skillConfiguration}
+        t={t}
+      />
 
-        <section>
-          <div className="section-title-row">
-            <h3>{t.pipelineEdges}</h3>
-            <button
-              data-pipeline-add-edge
-              disabled={graph.nodes.length < 2}
-              onClick={() => {
-                const from = graph.nodes[0]?.id;
-                const to = graph.nodes[1]?.id;
-                if (from && to) {
-                  replaceGraph({
-                    ...graph,
-                    edges: [...graph.edges, { from, to }],
-                  });
-                }
-              }}
-              type="button"
-            >
-              {t.addEdge}
-            </button>
-          </div>
-          <div className="pipeline-editor-list">
-            {graph.edges.map((edge, index) => (
-              <article
-                className="pipeline-edge-editor"
-                data-pipeline-edge-editor={`${edge.from}:${edge.to}`}
-                key={`${edge.from}:${edge.to}:${index}`}
+      <details className="pipeline-list-editor">
+        <summary>{t.listEditor}</summary>
+        <div className="pipeline-editor-grid">
+          <section>
+            <div className="section-title-row">
+              <h3>{t.pipelineNodes}</h3>
+              <button
+                data-pipeline-add-node
+                onClick={() => addNode()}
+                type="button"
               >
-                <label htmlFor={`pipeline-edge-from-${index}`}>
-                  {t.fromNode}
-                </label>
-                <select
-                  id={`pipeline-edge-from-${index}`}
-                  value={edge.from}
-                  onChange={(event) =>
-                    replaceGraph({
-                      ...graph,
-                      edges: graph.edges.map((candidate, candidateIndex) =>
-                        candidateIndex === index
-                          ? { ...candidate, from: event.target.value }
-                          : candidate,
-                      ),
-                    })
-                  }
+                {t.addNode}
+              </button>
+            </div>
+            <div className="pipeline-editor-list">
+              {graph.nodes.map((node) => (
+                <article
+                  className="pipeline-node-editor"
+                  data-pipeline-node-editor={node.id}
+                  key={node.id}
                 >
-                  {graph.nodes.map((node) => (
-                    <option key={node.id} value={node.id}>
-                      {node.name}
-                    </option>
-                  ))}
-                </select>
-                <label htmlFor={`pipeline-edge-to-${index}`}>{t.toNode}</label>
-                <select
-                  id={`pipeline-edge-to-${index}`}
-                  value={edge.to}
-                  onChange={(event) =>
-                    replaceGraph({
-                      ...graph,
-                      edges: graph.edges.map((candidate, candidateIndex) =>
-                        candidateIndex === index
-                          ? { ...candidate, to: event.target.value }
-                          : candidate,
-                      ),
-                    })
-                  }
-                >
-                  {graph.nodes.map((node) => (
-                    <option key={node.id} value={node.id}>
-                      {node.name}
-                    </option>
-                  ))}
-                </select>
-                {graph.nodes.find((node) => node.id === edge.from)?.type ===
-                "condition" ? (
-                  <>
-                    <label htmlFor={`pipeline-edge-branch-${index}`}>
-                      Branch
-                    </label>
-                    <select
-                      id={`pipeline-edge-branch-${index}`}
-                      onChange={(event) =>
-                        replaceGraph({
-                          ...graph,
-                          edges: graph.edges.map((candidate, candidateIndex) =>
-                            candidateIndex === index
-                              ? {
-                                  ...candidate,
-                                  branchId: event.target.value || undefined,
-                                }
-                              : candidate,
-                          ),
-                        })
-                      }
-                      value={edge.branchId ?? ""}
-                    >
-                      <option value="">{t.none}</option>
-                      {graph.nodes
-                        .find((node) => node.id === edge.from)
-                        ?.condition?.branches.map((branch) => (
-                          <option key={branch.id} value={branch.id}>
-                            {branch.label}
+                  <label htmlFor={`pipeline-node-name-${node.id}`}>
+                    {t.name}
+                  </label>
+                  <input
+                    id={`pipeline-node-name-${node.id}`}
+                    value={node.name}
+                    onChange={(event) =>
+                      updateNode(node.id, (current) => ({
+                        ...current,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                  <label htmlFor={`pipeline-node-type-${node.id}`}>
+                    {t.nodeType}
+                  </label>
+                  <select
+                    id={`pipeline-node-type-${node.id}`}
+                    value={node.type}
+                    onChange={(event) =>
+                      updateNode(node.id, (current) => ({
+                        ...current,
+                        type: event.target.value,
+                        ...(!["ai-task", "human-approval"].includes(
+                          event.target.value,
+                        )
+                          ? {
+                              positionId: undefined,
+                              skillFlowId: undefined,
+                              instructions: undefined,
+                              executionProfileId: undefined,
+                              inputContractRefs: undefined,
+                              outputContractRefs: undefined,
+                              timeoutSeconds: undefined,
+                              retryMaxAttempts: undefined,
+                              maxIterations: undefined,
+                              maxTokens: undefined,
+                            }
+                          : event.target.value === "human-approval"
+                            ? { skillFlowId: undefined }
+                            : {}),
+                        ...(event.target.value === "condition"
+                          ? {
+                              condition: current.condition ?? {
+                                leftReference: "",
+                                operator: "exists" as const,
+                                branches: [
+                                  {
+                                    id: "match",
+                                    label: "Match",
+                                    kind: "match" as const,
+                                  },
+                                  {
+                                    id: "default",
+                                    label: "Default",
+                                    kind: "default" as const,
+                                  },
+                                ],
+                              },
+                            }
+                          : { condition: undefined }),
+                      }))
+                    }
+                  >
+                    {pipelineNodeTypes.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                  {node.type === "ai-task" || node.type === "human-approval" ? (
+                    <>
+                      <label htmlFor={`pipeline-node-position-${node.id}`}>
+                        {t.position}
+                      </label>
+                      <select
+                        id={`pipeline-node-position-${node.id}`}
+                        value={node.positionId ?? ""}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            positionId: event.target.value || undefined,
+                            skillFlowId: undefined,
+                          }))
+                        }
+                      >
+                        <option value="">{t.none}</option>
+                        {editor.positions.map((position) => (
+                          <option key={position.id} value={position.id}>
+                            {position.name}
                           </option>
                         ))}
-                    </select>
-                  </>
-                ) : null}
-                <button
-                  className="danger-button"
-                  data-pipeline-remove-edge={index}
-                  onClick={() =>
+                      </select>
+                    </>
+                  ) : null}
+                  {node.type === "ai-task" ? (
+                    <>
+                      <label htmlFor={`pipeline-node-skill-flow-${node.id}`}>
+                        {t.skillFlow}
+                      </label>
+                      <select
+                        data-pipeline-node-skill-flow={node.id}
+                        id={`pipeline-node-skill-flow-${node.id}`}
+                        value={node.skillFlowId ?? ""}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            skillFlowId: event.target.value || undefined,
+                          }))
+                        }
+                      >
+                        <option value="">{t.none}</option>
+                        {skillConfiguration.skillFlows
+                          .filter(
+                            (flow) =>
+                              flow.status === "active" &&
+                              flow.positionId === node.positionId,
+                          )
+                          .map((flow) => (
+                            <option key={flow.id} value={flow.id}>
+                              {flow.name}
+                            </option>
+                          ))}
+                      </select>
+                      <label htmlFor={`pipeline-node-instructions-${node.id}`}>
+                        {t.skillFlowInstructions}
+                      </label>
+                      <textarea
+                        id={`pipeline-node-instructions-${node.id}`}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            instructions: event.target.value,
+                          }))
+                        }
+                        rows={3}
+                        value={node.instructions ?? ""}
+                      />
+                      <label htmlFor={`pipeline-node-profile-${node.id}`}>
+                        {t.executionProfiles}
+                      </label>
+                      <select
+                        id={`pipeline-node-profile-${node.id}`}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            executionProfileId: event.target.value || undefined,
+                          }))
+                        }
+                        value={node.executionProfileId ?? ""}
+                      >
+                        <option value="">{t.none}</option>
+                        {department.executionProfiles
+                          .filter((profile) => profile.status === "active")
+                          .map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name}
+                            </option>
+                          ))}
+                      </select>
+                      <label
+                        htmlFor={`pipeline-node-input-contracts-${node.id}`}
+                      >
+                        {t.inputArtifactContracts}
+                      </label>
+                      <input
+                        id={`pipeline-node-input-contracts-${node.id}`}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            inputContractRefs: event.target.value
+                              .split(",")
+                              .map((value) => value.trim())
+                              .filter(Boolean),
+                          }))
+                        }
+                        value={(node.inputContractRefs ?? []).join(", ")}
+                      />
+                      <label
+                        htmlFor={`pipeline-node-output-contracts-${node.id}`}
+                      >
+                        {t.outputArtifactContracts}
+                      </label>
+                      <input
+                        id={`pipeline-node-output-contracts-${node.id}`}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            outputContractRefs: event.target.value
+                              .split(",")
+                              .map((value) => value.trim())
+                              .filter(Boolean),
+                          }))
+                        }
+                        value={(node.outputContractRefs ?? []).join(", ")}
+                      />
+                      <label>{t.timeoutSeconds}</label>
+                      <input
+                        id={`pipeline-node-timeout-${node.id}`}
+                        min={1}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            timeoutSeconds: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={node.timeoutSeconds ?? ""}
+                      />
+                      <label>{t.retryMaxAttempts}</label>
+                      <input
+                        id={`pipeline-node-retry-${node.id}`}
+                        min={0}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            retryMaxAttempts: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={node.retryMaxAttempts ?? ""}
+                      />
+                      <label>{t.maxIterations}</label>
+                      <input
+                        id={`pipeline-node-max-iterations-${node.id}`}
+                        min={1}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            maxIterations: event.target.value
+                              ? Number(event.target.value)
+                              : undefined,
+                          }))
+                        }
+                        type="number"
+                        value={node.maxIterations ?? ""}
+                      />
+                      <label>{t.maxTokens}</label>
+                      <input
+                        id={`pipeline-node-max-tokens-${node.id}`}
+                        min={1}
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            maxTokens: event.target.value
+                              ? Number(event.target.value)
+                              : null,
+                          }))
+                        }
+                        type="number"
+                        value={node.maxTokens ?? ""}
+                      />
+                    </>
+                  ) : null}
+                  {node.type === "human-approval" ? (
+                    <>
+                      <label>{t.approvalTitle ?? "Approval title"}</label>
+                      <input
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            approvalTitle: event.target.value,
+                          }))
+                        }
+                        value={node.approvalTitle ?? ""}
+                      />
+                      <label>{t.permissionPolicy}</label>
+                      <select
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            approvalPolicy: event.target.value as
+                              | "any"
+                              | "all"
+                              | "named",
+                          }))
+                        }
+                        value={node.approvalPolicy ?? ""}
+                      >
+                        <option value="">{t.none}</option>
+                        <option value="any">any</option>
+                        <option value="all">all</option>
+                        <option value="named">named</option>
+                      </select>
+                      <label>
+                        {t.approverReference ?? "Approver reference"}
+                      </label>
+                      <input
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            approverReference: event.target.value,
+                          }))
+                        }
+                        value={node.approverReference ?? ""}
+                      />
+                    </>
+                  ) : null}
+                  {node.type === "condition" && node.condition ? (
+                    <>
+                      <label>Left reference</label>
+                      <input
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            condition: current.condition
+                              ? {
+                                  ...current.condition,
+                                  leftReference: event.target.value,
+                                }
+                              : undefined,
+                          }))
+                        }
+                        value={node.condition.leftReference}
+                      />
+                      <label>Operator</label>
+                      <select
+                        onChange={(event) =>
+                          updateNode(node.id, (current) => ({
+                            ...current,
+                            condition: current.condition
+                              ? {
+                                  ...current.condition,
+                                  operator: event.target.value as
+                                    | "equals"
+                                    | "not-equals"
+                                    | "exists"
+                                    | "not-exists"
+                                    | "in",
+                                }
+                              : undefined,
+                          }))
+                        }
+                        value={node.condition.operator}
+                      >
+                        <option value="equals">equals</option>
+                        <option value="not-equals">not-equals</option>
+                        <option value="exists">exists</option>
+                        <option value="not-exists">not-exists</option>
+                        <option value="in">in</option>
+                      </select>
+                      {node.condition.branches.map((branch, branchIndex) => (
+                        <div className="pipeline-edge-editor" key={branch.id}>
+                          <input
+                            aria-label="Condition branch ID"
+                            onChange={(event) =>
+                              updateNode(node.id, (current) => ({
+                                ...current,
+                                condition: current.condition
+                                  ? {
+                                      ...current.condition,
+                                      branches: current.condition.branches.map(
+                                        (candidate, candidateIndex) =>
+                                          candidateIndex === branchIndex
+                                            ? {
+                                                ...candidate,
+                                                id: event.target.value,
+                                              }
+                                            : candidate,
+                                      ),
+                                    }
+                                  : undefined,
+                              }))
+                            }
+                            value={branch.id}
+                          />
+                          <input
+                            aria-label="Condition branch label"
+                            onChange={(event) =>
+                              updateNode(node.id, (current) => ({
+                                ...current,
+                                condition: current.condition
+                                  ? {
+                                      ...current.condition,
+                                      branches: current.condition.branches.map(
+                                        (candidate, candidateIndex) =>
+                                          candidateIndex === branchIndex
+                                            ? {
+                                                ...candidate,
+                                                label: event.target.value,
+                                              }
+                                            : candidate,
+                                      ),
+                                    }
+                                  : undefined,
+                              }))
+                            }
+                            value={branch.label}
+                          />
+                        </div>
+                      ))}
+                    </>
+                  ) : null}
+                  <button
+                    className="danger-button"
+                    data-pipeline-remove-node={node.id}
+                    onClick={() =>
+                      replaceGraph({
+                        nodes: graph.nodes.filter(
+                          (candidate) => candidate.id !== node.id,
+                        ),
+                        edges: graph.edges.filter(
+                          (edge) =>
+                            edge.from !== node.id && edge.to !== node.id,
+                        ),
+                      })
+                    }
+                    type="button"
+                  >
+                    {t.removeNode}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <div className="section-title-row">
+              <h3>{t.pipelineEdges}</h3>
+              <button
+                data-pipeline-add-edge
+                disabled={graph.nodes.length < 2}
+                onClick={() => {
+                  const from = graph.nodes[0]?.id;
+                  const to = graph.nodes[1]?.id;
+                  if (from && to) {
                     replaceGraph({
                       ...graph,
-                      edges: graph.edges.filter(
-                        (_candidate, candidateIndex) =>
-                          candidateIndex !== index,
-                      ),
-                    })
+                      edges: [...graph.edges, { from, to }],
+                    });
                   }
-                  type="button"
+                }}
+                type="button"
+              >
+                {t.addEdge}
+              </button>
+            </div>
+            <div className="pipeline-editor-list">
+              {graph.edges.map((edge, index) => (
+                <article
+                  className="pipeline-edge-editor"
+                  data-pipeline-edge-editor={`${edge.from}:${edge.to}`}
+                  key={`${edge.from}:${edge.to}:${index}`}
                 >
-                  {t.removeEdge}
-                </button>
-              </article>
-            ))}
-          </div>
-        </section>
-      </div>
+                  <label htmlFor={`pipeline-edge-from-${index}`}>
+                    {t.fromNode}
+                  </label>
+                  <select
+                    id={`pipeline-edge-from-${index}`}
+                    value={edge.from}
+                    onChange={(event) =>
+                      replaceGraph({
+                        ...graph,
+                        edges: graph.edges.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? { ...candidate, from: event.target.value }
+                            : candidate,
+                        ),
+                      })
+                    }
+                  >
+                    {graph.nodes.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label htmlFor={`pipeline-edge-to-${index}`}>
+                    {t.toNode}
+                  </label>
+                  <select
+                    id={`pipeline-edge-to-${index}`}
+                    value={edge.to}
+                    onChange={(event) =>
+                      replaceGraph({
+                        ...graph,
+                        edges: graph.edges.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? { ...candidate, to: event.target.value }
+                            : candidate,
+                        ),
+                      })
+                    }
+                  >
+                    {graph.nodes.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.name}
+                      </option>
+                    ))}
+                  </select>
+                  {graph.nodes.find((node) => node.id === edge.from)?.type ===
+                  "condition" ? (
+                    <>
+                      <label htmlFor={`pipeline-edge-branch-${index}`}>
+                        Branch
+                      </label>
+                      <select
+                        id={`pipeline-edge-branch-${index}`}
+                        onChange={(event) =>
+                          replaceGraph({
+                            ...graph,
+                            edges: graph.edges.map(
+                              (candidate, candidateIndex) =>
+                                candidateIndex === index
+                                  ? {
+                                      ...candidate,
+                                      branchId: event.target.value || undefined,
+                                    }
+                                  : candidate,
+                            ),
+                          })
+                        }
+                        value={edge.branchId ?? ""}
+                      >
+                        <option value="">{t.none}</option>
+                        {graph.nodes
+                          .find((node) => node.id === edge.from)
+                          ?.condition?.branches.map((branch) => (
+                            <option key={branch.id} value={branch.id}>
+                              {branch.label}
+                            </option>
+                          ))}
+                      </select>
+                    </>
+                  ) : null}
+                  <button
+                    className="danger-button"
+                    data-pipeline-remove-edge={index}
+                    onClick={() =>
+                      replaceGraph({
+                        ...graph,
+                        edges: graph.edges.filter(
+                          (_candidate, candidateIndex) =>
+                            candidateIndex !== index,
+                        ),
+                      })
+                    }
+                    type="button"
+                  >
+                    {t.removeEdge}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      </details>
 
       <section
         className={

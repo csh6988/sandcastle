@@ -398,12 +398,75 @@ describe("Department detail", () => {
     assert.match(pipeline, /Save Draft/);
     assert.match(pipeline, /Validate/);
     assert.match(pipeline, /Publish/);
+    assert.match(pipeline, /data-pipeline-canvas/);
+    assert.match(pipeline, /data-pipeline-node-library/);
+    assert.match(pipeline, /data-pipeline-canvas-node="technical-plan"/);
+    assert.match(pipeline, /data-pipeline-inspector/);
+    assert.match(pipeline, /Accessible list editor/);
     assert.match(pipeline, /data-pipeline-node-editor="technical-plan"/);
     assert.match(
       pipeline,
       /data-pipeline-edge-editor="start:product-alignment"/,
     );
     assert.match(pipeline, /data-pipeline-history-version="1"/);
+  });
+
+  it("renders the complete AI Task configuration in the visual Inspector", () => {
+    const aiTask = scriptedSoftwareRndPipelineEditor.draft.graph.nodes.find(
+      (node) => node.id === "implementation",
+    );
+    assert.ok(aiTask);
+    const inspectorEditor = {
+      ...scriptedSoftwareRndPipelineEditor,
+      draft: {
+        ...scriptedSoftwareRndPipelineEditor.draft,
+        graph: {
+          ...scriptedSoftwareRndPipelineEditor.draft.graph,
+          nodes: [
+            {
+              ...aiTask,
+              instructions: "Implement the approved plan.",
+              executionProfileId: "default",
+              inputContractRefs: ["technical-plan"],
+              outputContractRefs: ["implementation"],
+              timeoutSeconds: 900,
+              retryMaxAttempts: 2,
+              maxIterations: 6,
+              maxTokens: 32_000,
+            },
+            ...scriptedSoftwareRndPipelineEditor.draft.graph.nodes.filter(
+              (node) => node.id !== aiTask.id,
+            ),
+          ],
+        },
+      },
+    };
+    const pipeline = renderToStaticMarkup(
+      <DepartmentDetailView
+        department={scriptedSoftwareRndDepartment}
+        t={messages.en}
+        activeTab="pipeline"
+        onBack={() => undefined}
+        onTabChange={() => undefined}
+        onUpdateDepartment={async () => undefined}
+        onArchiveDepartment={async () => undefined}
+        onCopyDepartment={async () => undefined}
+        onUpdatePosition={async () => undefined}
+        {...pipelineProps}
+        {...skillProps}
+        pipelineEditor={inspectorEditor}
+      />,
+    );
+
+    assert.match(pipeline, /Draft based on.*v2/);
+    assert.match(pipeline, /data-pipeline-inspector-field="instructions"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="execution-profile"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="input-contracts"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="output-contracts"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="timeout"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="retry"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="max-iterations"/);
+    assert.match(pipeline, /data-pipeline-inspector-field="max-tokens"/);
   });
 
   it("renders Department and Position edit controls from the deep Runtime read model", () => {
