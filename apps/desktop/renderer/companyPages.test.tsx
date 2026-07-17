@@ -403,12 +403,8 @@ describe("Department detail", () => {
     assert.match(pipeline, /data-pipeline-node-library/);
     assert.match(pipeline, /data-pipeline-canvas-node="technical-plan"/);
     assert.match(pipeline, /data-pipeline-inspector/);
-    assert.match(pipeline, /Accessible list editor/);
-    assert.match(pipeline, /data-pipeline-node-editor="technical-plan"/);
-    assert.match(
-      pipeline,
-      /data-pipeline-edge-editor="start:product-alignment"/,
-    );
+    assert.doesNotMatch(pipeline, /Accessible list editor/);
+    assert.doesNotMatch(pipeline, /data-pipeline-node-editor=/);
     assert.match(pipeline, /data-pipeline-history-version="1"/);
   });
 
@@ -694,7 +690,7 @@ describe("Department detail", () => {
     assert.match(positions, /data-skill-flow-editor="implementation-flow"/);
     assert.match(positions, /Implement one tested vertical slice at a time./);
     assert.match(positions, /Archive Skill Flow/);
-    assert.match(pipeline, /data-pipeline-node-skill-flow="implementation"/);
+    assert.match(pipeline, /data-pipeline-canvas-node="implementation"/);
     assert.match(pipeline, /Implementation/);
   });
 

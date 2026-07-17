@@ -1038,7 +1038,7 @@ p {
   gap: 20px;
 }
 
-.pipeline-editor-fullscreen {
+.pipeline-editor.pipeline-editor-fullscreen {
   background: var(--surface);
   border: 0;
   border-radius: 0;
@@ -1414,22 +1414,6 @@ p {
   margin-top: 14px;
 }
 
-.pipeline-list-editor {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-}
-
-.pipeline-list-editor > summary {
-  color: var(--muted);
-  cursor: pointer;
-  font-weight: 800;
-  padding: 4px 0;
-}
-
-.pipeline-list-editor[open] > .pipeline-editor-grid {
-  margin-top: 14px;
-}
-
 .pipeline-unpublished-note,
 .pipeline-validation,
 .pipeline-history {
@@ -1446,34 +1430,6 @@ p {
   color: var(--muted);
 }
 
-.pipeline-editor-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
-  gap: 18px;
-}
-
-.pipeline-editor-grid > section {
-  min-width: 0;
-}
-
-.section-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.section-title-row h3 {
-  margin: 0;
-}
-
-.pipeline-editor-list {
-  display: grid;
-  gap: 10px;
-}
-
-.pipeline-node-editor,
 .pipeline-edge-editor {
   display: grid;
   grid-template-columns: minmax(100px, 1fr) minmax(140px, 2fr);
@@ -1485,7 +1441,6 @@ p {
   padding: 12px;
 }
 
-.pipeline-node-editor .danger-button,
 .pipeline-edge-editor .danger-button {
   grid-column: 2;
   justify-self: start;
@@ -1581,10 +1536,6 @@ p {
     border-left: 0;
     border-top: 1px solid var(--border);
     grid-column: 1 / -1;
-  }
-
-  .pipeline-editor-grid {
-    grid-template-columns: 1fr;
   }
 }
 

@@ -204,7 +204,6 @@ export const messages = {
     zoomIn: "Zoom in",
     zoomOut: "Zoom out",
     autoLayout: "Auto layout",
-    listEditor: "Accessible list editor",
     noNodeSelected: "Select a node or edge to edit its properties.",
     connectNodesHint:
       "Select an output handle, then an input handle, to connect nodes.",
@@ -616,7 +615,6 @@ export const messages = {
     zoomIn: "放大",
     zoomOut: "缩小",
     autoLayout: "自动布局",
-    listEditor: "无障碍列表编辑",
     noNodeSelected: "选择节点或边以编辑属性。",
     connectNodesHint: "先选择输出连接点，再选择输入连接点，即可连接节点。",
     aiTaskNode: "AI 任务",
