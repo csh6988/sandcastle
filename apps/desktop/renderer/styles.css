@@ -1054,6 +1054,22 @@ p {
   background: #1d4ed8;
 }
 
+.position-drawer-backdrop {
+  background: rgb(15 23 42 / 20%);
+  border: 0;
+  border-radius: 0;
+  bottom: 0;
+  left: 0;
+  padding: 0;
+  position: fixed;
+  right: min(520px, 92vw);
+  top: 0;
+}
+
+.position-drawer-backdrop:hover:not(:disabled) {
+  background: rgb(15 23 42 / 24%);
+}
+
 .position-drawer {
   background: var(--panel);
   border-left: 1px solid var(--border);
@@ -1077,6 +1093,19 @@ p {
   display: flex;
   gap: 10px;
   justify-content: space-between;
+}
+
+.drawer-close-button {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 0 36px;
+  font-size: 24px;
+  height: 36px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 36px;
 }
 
 .drawer-section,

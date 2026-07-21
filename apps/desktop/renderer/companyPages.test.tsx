@@ -276,6 +276,10 @@ describe("Position drawer", () => {
       />,
     );
     assert.match(markup, /data-position-drawer="software-engineer"/);
+    assert.match(markup, /data-position-drawer-layer/);
+    assert.match(markup, /data-position-drawer-backdrop/);
+    assert.match(markup, /data-close-position-drawer/);
+    assert.match(markup, /aria-label="Close position editor"/);
     assert.match(markup, /Default Agent/);
     assert.match(markup, /value="codex"/);
     assert.match(markup, /placeholder="Search Skills"/);

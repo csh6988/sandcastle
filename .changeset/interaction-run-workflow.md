@@ -2,4 +2,4 @@
 "@chenshaohui6988/sandcastle": patch
 ---
 
-Improve Desktop Agent Interaction and Department Run visibility with structured progress, current-node context, live Run Collaboration updates, real AI Member consultation replies, and clearer Position Skill selection.
+Improve Desktop Agent Interaction and Department Run visibility with structured progress, current-node context, live Run Collaboration updates, real AI Member consultation replies, clearer Position Skill selection, and dismissible Position editors.

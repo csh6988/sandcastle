@@ -5981,14 +5981,39 @@ export function PositionDrawerEditor({
     }).then(() => setDirty(false));
   };
   const requestClose = () => (dirty ? setClosePrompt(true) : onClose());
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") requestClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [dirty, onClose]);
   return (
-    <aside className="position-drawer" data-position-drawer={position.id}>
+    <aside
+      className="position-drawer"
+      data-position-drawer={position.id}
+      data-position-drawer-layer
+    >
+      <button
+        aria-label={t.closePositionEditor}
+        className="position-drawer-backdrop"
+        data-position-drawer-backdrop
+        type="button"
+        onClick={requestClose}
+      />
       <div className="drawer-heading">
         <div>
           <span className="eyebrow">{t.editPosition}</span>
           <h2>{positionName(t, position)}</h2>
         </div>
-        <button type="button" onClick={requestClose}>
+        <button
+          aria-label={t.closePositionEditor}
+          className="drawer-close-button"
+          data-close-position-drawer
+          title={t.closePositionEditor}
+          type="button"
+          onClick={requestClose}
+        >
           ×
         </button>
       </div>
@@ -6144,8 +6169,12 @@ export function PositionDrawerEditor({
         >
           {t.savePositionConfiguration}
         </button>
-        <button type="button" onClick={requestClose}>
-          {t.continueEditing}
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={requestClose}
+        >
+          {t.closePositionEditor}
         </button>
       </div>
       <section className="drawer-danger" data-position-danger-zone>
@@ -6166,7 +6195,12 @@ export function PositionDrawerEditor({
         </button>
       </section>
       {closePrompt ? (
-        <div className="unsaved-dialog" data-unsaved-dialog>
+        <div
+          aria-modal="true"
+          className="unsaved-dialog"
+          data-unsaved-dialog
+          role="dialog"
+        >
           <p>{t.unsavedChangesPrompt}</p>
           <button type="button" onClick={save}>
             {t.saveChanges}
