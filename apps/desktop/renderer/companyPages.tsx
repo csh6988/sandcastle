@@ -4327,6 +4327,7 @@ function SkillFlowEditor({
       />
       <SkillSelection
         availableSkills={availableSkills}
+        label={t.skillFlowSkills}
         ownerId={flow.id}
         selectedSkillIds={skillIds}
         setSelectedSkillIds={setSkillIds}
@@ -4426,6 +4427,7 @@ function NewSkillFlowEditor({
       />
       <SkillSelection
         availableSkills={availableSkills}
+        label={t.skillFlowSkills}
         ownerId={`new:${positionId}`}
         selectedSkillIds={skillIds}
         setSelectedSkillIds={setSkillIds}
@@ -4439,21 +4441,36 @@ function NewSkillFlowEditor({
 
 function SkillSelection({
   availableSkills,
+  label,
   ownerId,
   selectedSkillIds,
   setSelectedSkillIds,
 }: {
   readonly availableSkills: SkillConfigurationView["activeSkills"];
+  readonly label: string;
   readonly ownerId: string;
   readonly selectedSkillIds: readonly string[];
   readonly setSelectedSkillIds: React.Dispatch<React.SetStateAction<string[]>>;
 }) {
   return (
-    <fieldset>
+    <fieldset
+      className="skill-flow-skill-list"
+      data-skill-flow-skill-list={ownerId}
+    >
+      <legend>{label}</legend>
       {availableSkills.map((skill) => (
-        <label key={skill.id}>
+        <label
+          className={
+            selectedSkillIds.includes(skill.id)
+              ? "skill-flow-skill-option selected"
+              : "skill-flow-skill-option"
+          }
+          data-skill-flow-skill-option={`${ownerId}:${skill.id}`}
+          key={skill.id}
+        >
           <input
             checked={selectedSkillIds.includes(skill.id)}
+            className="skill-flow-skill-checkbox"
             data-skill-flow-skill={`${ownerId}:${skill.id}`}
             onChange={(event) =>
               setSelectedSkillIds((current) =>
@@ -4464,7 +4481,10 @@ function SkillSelection({
             }
             type="checkbox"
           />
-          {skill.name}
+          <span className="skill-flow-skill-copy">
+            <strong>{skill.name}</strong>
+            <small>{skill.description}</small>
+          </span>
         </label>
       ))}
     </fieldset>

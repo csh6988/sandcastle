@@ -803,11 +803,63 @@ p {
   padding: 0;
 }
 
-.position-skill-panel fieldset label,
-.skill-flow-card fieldset label {
+.position-skill-panel fieldset label {
   align-items: center;
   display: flex;
   gap: 8px;
+}
+
+.skill-flow-card .skill-flow-skill-list {
+  gap: 8px;
+}
+
+.skill-flow-skill-list legend {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.skill-flow-skill-option {
+  align-items: start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 20px minmax(0, 1fr);
+  padding: 10px 12px;
+}
+
+.skill-flow-skill-option:hover,
+.skill-flow-skill-option.selected {
+  background: var(--primary-soft);
+  border-color: #93c5fd;
+}
+
+.skill-flow-skill-option .skill-flow-skill-checkbox {
+  height: 18px;
+  margin: 2px 0 0;
+  width: 18px;
+}
+
+.skill-flow-skill-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.skill-flow-skill-copy strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.skill-flow-skill-copy small {
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.35;
 }
 
 .skill-flow-card.archived {

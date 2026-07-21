@@ -711,6 +711,15 @@ describe("Department detail", () => {
     assert.match(positions, /Test-Driven Development/);
     assert.match(positions, /data-position-skill-binding="software-engineer"/);
     assert.match(positions, /data-skill-flow-editor="implementation-flow"/);
+    assert.match(positions, /data-skill-flow-skill-list="implementation-flow"/);
+    assert.match(
+      positions,
+      /class="skill-flow-skill-option selected" data-skill-flow-skill-option="implementation-flow:tdd"/,
+    );
+    assert.match(
+      positions,
+      /Builds behavior through red-green vertical slices./,
+    );
     assert.match(positions, /Implement one tested vertical slice at a time./);
     assert.match(positions, /Archive Skill Flow/);
     assert.match(pipeline, /data-pipeline-canvas-node="implementation"/);
