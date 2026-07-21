@@ -730,6 +730,115 @@ export function ProjectsPage({ t }: { readonly t: Messages }) {
   );
 }
 
+type DepartmentRunNodeView = DepartmentRunView["nodes"][number];
+
+const completedNodeStatuses = new Set(["succeeded", "skipped", "cancelled"]);
+
+const activeRunStatuses = new Set([
+  "ready",
+  "running",
+  "waiting-approval",
+  "blocked",
+  "recovering",
+  "paused",
+]);
+
+const runProgress = (
+  run: DepartmentRunView,
+): {
+  readonly completed: number;
+  readonly total: number;
+  readonly percentage: number;
+} => {
+  const total = run.nodes.length;
+  const completed = run.nodes.filter((node) =>
+    completedNodeStatuses.has(node.status),
+  ).length;
+  return {
+    completed,
+    total,
+    percentage: total === 0 ? 0 : Math.round((completed / total) * 100),
+  };
+};
+
+const currentRunNode = (
+  run: DepartmentRunView,
+): {
+  readonly nodeRun: DepartmentRunNodeView | undefined;
+  readonly node:
+    | DepartmentRunView["snapshot"]["payload"]["pipelineVersion"]["graph"]["nodes"][number]
+    | undefined;
+  readonly position:
+    | DepartmentRunView["snapshot"]["payload"]["positions"][number]
+    | undefined;
+} => {
+  const priority = [
+    "running",
+    "waiting-permission",
+    "waiting-approval",
+    "ready",
+    "paused",
+    "failed",
+  ] as const;
+  const nodeRun =
+    priority.flatMap((status) =>
+      run.nodes.filter((candidate) => candidate.status === status),
+    )[0] ??
+    [...run.nodes]
+      .reverse()
+      .find((candidate) => completedNodeStatuses.has(candidate.status)) ??
+    run.nodes[0];
+  const node = run.snapshot.payload.pipelineVersion.graph.nodes.find(
+    (candidate) => candidate.id === nodeRun?.pipelineNodeId,
+  );
+  const position = node?.positionId
+    ? run.snapshot.payload.positions.find(
+        (candidate) => candidate.id === node.positionId,
+      )
+    : undefined;
+  return { nodeRun, node, position };
+};
+
+const structuredValueText = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+};
+
+export const interactionSessionCloseLabel = (
+  t: Messages,
+  status: InteractionView["session"]["status"],
+): string => (status === "closed" ? t.sessionClosed : t.closeSession);
+
+export const interactionStatusLabel = (
+  t: Messages,
+  content: string,
+): string => {
+  if (content === "Agent is processing this message.")
+    return t.interactionAgentWorking;
+  if (content === "Agent response completed.")
+    return t.interactionAgentCompleted;
+  if (content === "Agent execution is unavailable in this Runtime.")
+    return t.interactionAgentUnavailable;
+  const missingConfiguration =
+    "Agent execution failed because the AI Member has no active Position or Execution Profile.";
+  if (content === missingConfiguration)
+    return t.interactionAgentConfigurationMissing;
+  if (content.startsWith("Agent execution failed: ")) {
+    const detail = content
+      .slice("Agent execution failed: ".length)
+      .split("\n")[0]
+      ?.trim();
+    return detail
+      ? `${t.interactionAgentFailed}: ${detail}`
+      : t.interactionAgentFailed;
+  }
+  return content;
+};
+
 export function DepartmentRunDetail({
   run,
   t,
@@ -812,6 +921,8 @@ export function DepartmentRunDetail({
   ].includes(run.run.status);
   const canResume = run.run.status === "paused";
   const canCancel = !["completed", "cancelled"].includes(run.run.status);
+  const progress = runProgress(run);
+  const current = currentRunNode(run);
   return (
     <article
       className="run-detail"
@@ -822,6 +933,64 @@ export function DepartmentRunDetail({
         <strong>{run.snapshot.payload.department.name}</strong>
         <span className="pill primary">{statusName(t, run.run.status)}</span>
       </div>
+      <section className="run-progress" data-run-progress>
+        <div className="run-progress-heading">
+          <div>
+            <span>{t.runProgress}</span>
+            <strong>
+              {progress.completed} / {progress.total}
+            </strong>
+          </div>
+          <span className="pill">{statusName(t, run.run.status)}</span>
+        </div>
+        <progress
+          aria-label={t.runProgress}
+          max={Math.max(progress.total, 1)}
+          value={progress.completed}
+        />
+        <dl className="run-current-context" data-current-node>
+          <div>
+            <dt>{t.currentNode}</dt>
+            <dd>
+              {current.node
+                ? pipelineNodeName(t, current.node)
+                : (current.nodeRun?.pipelineNodeId ?? t.none)}
+            </dd>
+          </div>
+          <div>
+            <dt>{t.currentAiMember}</dt>
+            <dd>{current.position?.aiMember.displayName ?? t.none}</dd>
+          </div>
+          <div>
+            <dt>{t.interactionPosition}</dt>
+            <dd>
+              {current.position ? positionName(t, current.position) : t.none}
+            </dd>
+          </div>
+          <div>
+            <dt>{t.status}</dt>
+            <dd>{statusName(t, run.run.status)}</dd>
+          </div>
+        </dl>
+        <div className="run-execution-info" data-run-execution-info>
+          <span className="eyebrow">{t.executionInfo}</span>
+          <strong>
+            {current.node
+              ? pipelineNodeName(t, current.node)
+              : (current.nodeRun?.pipelineNodeId ?? t.none)}
+          </strong>
+          <div data-run-current-activity>
+            <span>{t.currentActivity}</span>
+            <strong>
+              {current.nodeRun ? statusName(t, current.nodeRun.status) : t.none}
+            </strong>
+            <span>
+              {current.position?.aiMember.displayName ?? t.none} ·{" "}
+              {current.position ? positionName(t, current.position) : t.none}
+            </span>
+          </div>
+        </div>
+      </section>
       <dl className="overview-inventory">
         <div>
           <dt>{t.runSnapshot}</dt>
@@ -838,7 +1007,7 @@ export function DepartmentRunDetail({
           <dd>{run.run.revision}</dd>
         </div>
       </dl>
-      <ol className="run-node-list">
+      <ol className="run-node-list" data-run-node-timeline>
         {run.nodes.map((nodeRun) => {
           const node = run.snapshot.payload.pipelineVersion.graph.nodes.find(
             (candidate) => candidate.id === nodeRun.pipelineNodeId,
@@ -849,21 +1018,30 @@ export function DepartmentRunDetail({
               data-node-run-status={nodeRun.status}
               key={nodeRun.id}
             >
-              <strong>
-                {node ? pipelineNodeName(t, node) : nodeRun.pipelineNodeId}
-              </strong>
-              <span>{statusName(t, nodeRun.status)}</span>
-              <span>
-                {t.nodeAttempts}: {nodeRun.attemptCount}
-              </span>
-              {nodeRun.failure ? (
-                <span data-node-failure-code={nodeRun.failure.code}>
-                  {nodeRun.failure.code}: {nodeRun.failure.message}
+              <div
+                className="run-node-summary"
+                data-run-node-summary={nodeRun.id}
+              >
+                <strong>
+                  {node ? pipelineNodeName(t, node) : nodeRun.pipelineNodeId}
+                </strong>
+                <span>
+                  {t.nodeAttempts}: {nodeRun.attemptCount}
                 </span>
-              ) : null}
-              {nodeRun.attempts.length > 0 ? (
-                <details>
-                  <summary>{t.attemptHistory}</summary>
+                {current.nodeRun?.id === nodeRun.id ? (
+                  <span className="run-node-active-indicator">
+                    {t.currentActivity}: {statusName(t, nodeRun.status)} ·{" "}
+                    {current.position?.aiMember.displayName ?? t.none}
+                  </span>
+                ) : null}
+              </div>
+              <div className="run-node-status">
+                <span className="eyebrow">{t.status}</span>
+                <strong>{statusName(t, nodeRun.status)}</strong>
+              </div>
+              <div className="run-node-attempts">
+                <span className="eyebrow">{t.attemptHistory}</span>
+                {nodeRun.attempts.length > 0 ? (
                   <ol>
                     {nodeRun.attempts.map((attempt) => (
                       <li
@@ -876,6 +1054,12 @@ export function DepartmentRunDetail({
                           {run.snapshot.revision} ·{" "}
                           {statusName(t, attempt.status)}
                         </span>
+                        {attempt.startedAt || attempt.completedAt ? (
+                          <small>
+                            {attempt.startedAt ?? t.notStarted} →{" "}
+                            {attempt.completedAt ?? t.inProgress}
+                          </small>
+                        ) : null}
                         {attempt.failure ? (
                           <span>
                             {attempt.failure.code}: {attempt.failure.message}
@@ -889,33 +1073,53 @@ export function DepartmentRunDetail({
                       </li>
                     ))}
                   </ol>
-                </details>
-              ) : null}
-              {nodeRun.approvals.length > 0 ? (
-                <details>
-                  <summary>{t.approvalHistory}</summary>
-                  <ol>
-                    {nodeRun.approvals.map((approval) => (
-                      <li
-                        data-run-approval-cycle={approval.cycle}
-                        key={approval.id}
-                      >
-                        #{approval.cycle} ·{" "}
-                        {approval.decision ?? approval.status}
-                      </li>
-                    ))}
-                  </ol>
-                </details>
-              ) : null}
+                ) : !nodeRun.failure && nodeRun.result === null ? (
+                  <span>{t.none}</span>
+                ) : null}
+              </div>
+              <div className="run-node-evidence">
+                <span className="eyebrow">{t.evidence}</span>
+                {nodeRun.failure ? (
+                  <span data-node-failure-code={nodeRun.failure.code}>
+                    {nodeRun.failure.code}: {nodeRun.failure.message}
+                  </span>
+                ) : null}
+                {nodeRun.approvals.length > 0 ? (
+                  <details>
+                    <summary>{t.approvalHistory}</summary>
+                    <ol>
+                      {nodeRun.approvals.map((approval) => (
+                        <li
+                          data-run-approval-cycle={approval.cycle}
+                          key={approval.id}
+                        >
+                          #{approval.cycle} ·{" "}
+                          {approval.decision ?? approval.status}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                ) : (
+                  <span>{t.none}</span>
+                )}
+                {nodeRun.result !== null ? (
+                  <pre data-run-node-result>
+                    {structuredValueText(nodeRun.result)}
+                  </pre>
+                ) : null}
+              </div>
               {nodeRun.status !== "queued" ? (
-                <button
-                  data-run-fork-node={nodeRun.id}
-                  disabled={busy}
-                  onClick={() => onFork?.(nodeRun.id)}
-                  type="button"
-                >
-                  {t.forkRun}
-                </button>
+                <div className="run-node-actions">
+                  <span className="eyebrow">{t.runActions}</span>
+                  <button
+                    data-run-fork-node={nodeRun.id}
+                    disabled={busy}
+                    onClick={() => onFork?.(nodeRun.id)}
+                    type="button"
+                  >
+                    {t.forkRun}
+                  </button>
+                </div>
               ) : null}
             </li>
           );
@@ -936,6 +1140,7 @@ export function DepartmentRunDetail({
           />
           <div className="action-bar">
             <button
+              className="primary-button"
               data-run-approval-decision="approve"
               disabled={busy}
               onClick={() =>
@@ -949,6 +1154,7 @@ export function DepartmentRunDetail({
               {t.approve}
             </button>
             <button
+              className="secondary-button"
               data-run-approval-decision="request-changes"
               disabled={busy || approvalFeedback.trim() === ""}
               onClick={() =>
@@ -996,6 +1202,7 @@ export function DepartmentRunDetail({
             value={retryFeedback}
           />
           <button
+            className="primary-button"
             data-run-node-retry={failedAiTask.id}
             disabled={busy || retriesRemaining === 0}
             onClick={() =>
@@ -1051,6 +1258,7 @@ export function DepartmentRunDetail({
             />
           </label>
           <button
+            className="primary-button"
             data-run-recover
             disabled={busy}
             onClick={() =>
@@ -1080,6 +1288,7 @@ export function DepartmentRunDetail({
       ) : null}
       {canContinue ? (
         <button
+          className="primary-button"
           data-run-continue
           disabled={busy}
           onClick={onContinue}
@@ -1234,6 +1443,34 @@ export function ProjectDetailView({
       active = false;
     };
   }, [project.id]);
+
+  useEffect(() => {
+    if (!selectedRun || !activeRunStatuses.has(selectedRun.run.status)) {
+      return;
+    }
+    let active = true;
+    const poll = (): void => {
+      void window.sandcastle.runtime
+        .inspectRun(selectedRun.run.id)
+        .then((nextRun) => {
+          if (!active) return;
+          setSelectedRun(nextRun);
+          setRuns((current) =>
+            current.map((run) =>
+              run.run.id === nextRun.run.id ? nextRun : run,
+            ),
+          );
+        })
+        .catch((nextError: unknown) => {
+          if (active) setRunError(errorMessage(nextError));
+        });
+    };
+    const stopPolling = startRunProgressPolling(poll);
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [selectedRun?.run.id, selectedRun?.run.status]);
 
   const startRun = async (): Promise<void> => {
     if (!runDepartmentId) return;
@@ -1538,7 +1775,11 @@ export function ProjectDetailView({
           <article className="create-panel">
             <h2>{t.sharedContext}</h2>
             <p>{project.sharedContext || t.noSharedContext}</p>
-            <button onClick={() => setActiveTab("settings")} type="button">
+            <button
+              className="primary-button"
+              onClick={() => setActiveTab("settings")}
+              type="button"
+            >
               {t.editProjectSettings}
             </button>
           </article>
@@ -1653,44 +1894,51 @@ export function ProjectDetailView({
         <section className="create-panel" data-project-runs>
           <h2>{t.departmentRuns}</h2>
           <div className="form run-start-form project-run-start-panel">
-            <label htmlFor="project-run-department">
-              {t.selectRunDepartment}
-            </label>
-            <select
-              id="project-run-department"
-              onChange={(event) => setRunDepartmentId(event.target.value)}
-              value={runDepartmentId}
-            >
-              <option value="">{t.none}</option>
-              {runDepartments.map((department) => (
-                <option key={department.id} value={department.id}>
-                  {departmentName(t, department)}
-                </option>
-              ))}
-            </select>
-            <label htmlFor="project-run-agent-override">
-              {t.temporaryAgentOverride}
-            </label>
-            <select
-              id="project-run-agent-override"
-              value={agentOverrideId}
-              onChange={(event) => setAgentOverrideId(event.target.value)}
-            >
-              <option value="">{t.usePositionDefaults}</option>
-              {runAgents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-            <button
-              data-start-department-run
-              disabled={runBusy || runDepartmentId === ""}
-              onClick={() => void startRun()}
-              type="button"
-            >
-              {t.startDepartmentRun}
-            </button>
+            <div className="run-start-field">
+              <label htmlFor="project-run-department">
+                {t.selectRunDepartment}
+              </label>
+              <select
+                id="project-run-department"
+                onChange={(event) => setRunDepartmentId(event.target.value)}
+                value={runDepartmentId}
+              >
+                <option value="">{t.none}</option>
+                {runDepartments.map((department) => (
+                  <option key={department.id} value={department.id}>
+                    {departmentName(t, department)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="run-start-field">
+              <label htmlFor="project-run-agent-override">
+                {t.temporaryAgentOverride}
+              </label>
+              <select
+                id="project-run-agent-override"
+                value={agentOverrideId}
+                onChange={(event) => setAgentOverrideId(event.target.value)}
+              >
+                <option value="">{t.usePositionDefaults}</option>
+                {runAgents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="run-start-submit" data-run-start-submit>
+              <button
+                className="primary-button"
+                data-start-department-run
+                disabled={runBusy || runDepartmentId === ""}
+                onClick={() => void startRun()}
+                type="button"
+              >
+                {t.startDepartmentRun}
+              </button>
+            </div>
           </div>
           {runError ? (
             <div
@@ -5855,8 +6103,17 @@ export function PositionDrawerEditor({
         </div>
         <div className="skill-picker-list">
           {visibleSkills.map((skill) => (
-            <label key={skill.id}>
+            <label
+              className={
+                skillIds.includes(skill.id)
+                  ? "skill-picker-option selected"
+                  : "skill-picker-option"
+              }
+              data-position-skill-option={skill.id}
+              key={skill.id}
+            >
               <input
+                className="skill-picker-checkbox"
                 type="checkbox"
                 checked={skillIds.includes(skill.id)}
                 onChange={(event) => {
@@ -5868,7 +6125,12 @@ export function PositionDrawerEditor({
                   setDirty(true);
                 }}
               />
-              {skill.name}
+              <span className="skill-picker-option-copy">
+                <strong className="skill-picker-option-name">
+                  {skill.name}
+                </strong>
+                <small>{skill.description}</small>
+              </span>
             </label>
           ))}
         </div>
@@ -6230,6 +6492,261 @@ type InteractionMemberOption = {
   readonly defaultAgentId: string;
 };
 
+type InteractionRuntime = Pick<
+  (typeof window.sandcastle)["runtime"],
+  "interactions" | "memoryCandidates" | "runs"
+>;
+
+type RunCollaborationRuntime = Pick<
+  (typeof window.sandcastle)["runtime"],
+  | "createInteractionSession"
+  | "addInteractionParticipant"
+  | "inspectInteraction"
+>;
+
+type InteractionPromptRuntime = Pick<
+  (typeof window.sandcastle)["runtime"],
+  "promptInteraction" | "inspectInteraction"
+>;
+
+export const RUN_PROGRESS_POLL_INTERVAL_MS = 2_500;
+
+export const loadInteractionProjectContext = async (
+  runtime: InteractionRuntime,
+  projectId: string,
+): Promise<{
+  readonly sessions: readonly InteractionView[];
+  readonly memoryCandidates: readonly MemoryCandidateView[];
+  readonly runs: readonly DepartmentRunView[];
+}> => {
+  const [sessions, memoryCandidates, runs] = await Promise.all([
+    runtime.interactions(projectId),
+    runtime.memoryCandidates(projectId),
+    runtime.runs(projectId),
+  ]);
+  return { sessions, memoryCandidates, runs };
+};
+
+export const startRunProgressPolling = (
+  poll: () => void,
+  timers: Pick<Window, "setInterval" | "clearInterval"> = window,
+): (() => void) => {
+  const timer = timers.setInterval(poll, RUN_PROGRESS_POLL_INTERVAL_MS);
+  return () => timers.clearInterval(timer);
+};
+
+export const promptInteractionSession = async (
+  runtime: InteractionPromptRuntime,
+  interaction: InteractionView,
+  content: string,
+): Promise<InteractionView> => {
+  const participant = interaction.participants.find(
+    (candidate) => candidate.participantType === "human",
+  );
+  if (!participant || !content.trim()) return interaction;
+  await runtime.promptInteraction({
+    sessionId: interaction.session.id,
+    participantId: participant.id,
+    content: content.trim(),
+  });
+  return runtime.inspectInteraction(interaction.session.id);
+};
+
+const interactionRunsToDisplay = (
+  runs: readonly DepartmentRunView[],
+  selectedRunId?: string | null,
+  currentRunId?: string | null,
+): readonly DepartmentRunView[] => {
+  const activeRuns = runs.filter((run) =>
+    activeRunStatuses.has(run.run.status),
+  );
+  const selected = runs.find(
+    (run) => run.run.id === (selectedRunId ?? currentRunId),
+  );
+  const visible =
+    selected && !activeRunStatuses.has(selected.run.status)
+      ? [...activeRuns, selected]
+      : activeRuns;
+  if (visible.length > 0) return visible;
+  return runs[0] ? [runs[0]] : [];
+};
+
+export const createRunCollaborationSession = async (
+  runtime: RunCollaborationRuntime,
+  projectId: string,
+  run: DepartmentRunView,
+): Promise<InteractionView | null> => {
+  const current = currentRunNode(run);
+  const aiMemberId = current.position?.aiMember.id;
+  if (!current.nodeRun || !aiMemberId) return null;
+  const session = await runtime.createInteractionSession({
+    projectId,
+    mode: "run-collaboration",
+    runId: run.run.id,
+    nodeRunId: current.nodeRun.id,
+  });
+  await runtime.addInteractionParticipant({
+    sessionId: session.id,
+    participantType: "human",
+    participantRef: "user-local",
+    role: "requester",
+  });
+  await runtime.addInteractionParticipant({
+    sessionId: session.id,
+    participantType: "ai-member",
+    participantRef: aiMemberId,
+    role: "current-node-agent",
+  });
+  return runtime.inspectInteraction(session.id);
+};
+
+export function InteractionRunPanel({
+  currentRunId,
+  onCollaborate,
+  onSelectRun,
+  runs,
+  selectedRunId,
+  t,
+}: {
+  readonly currentRunId?: string | null;
+  readonly onCollaborate: (run: DepartmentRunView) => void;
+  readonly onSelectRun: (runId: string) => void;
+  readonly runs: readonly DepartmentRunView[];
+  readonly selectedRunId?: string | null;
+  readonly t: Messages;
+}) {
+  const visibleRuns = interactionRunsToDisplay(
+    runs,
+    selectedRunId,
+    currentRunId,
+  );
+  return (
+    <section className="interaction-run-panel" data-interaction-active-run>
+      <div className="interaction-panel-heading">
+        <h2>{t.departmentRuns}</h2>
+        <span>{visibleRuns.length}</span>
+      </div>
+      {visibleRuns.length === 0 ? (
+        <div className="empty-state">{t.noDepartmentRuns}</div>
+      ) : (
+        <div className="interaction-run-list">
+          {visibleRuns.map((run) => {
+            const progress = runProgress(run);
+            const current = currentRunNode(run);
+            const canCollaborate =
+              activeRunStatuses.has(run.run.status) &&
+              current.position?.aiMember.status === "active";
+            return (
+              <article
+                className={
+                  selectedRunId === run.run.id || currentRunId === run.run.id
+                    ? "interaction-run-card selected"
+                    : "interaction-run-card"
+                }
+                data-interaction-run={run.run.id}
+                key={run.run.id}
+              >
+                <div className="interaction-run-card-heading">
+                  <strong>{run.snapshot.payload.department.name}</strong>
+                  <span className="pill primary">
+                    {statusName(t, run.run.status)}
+                  </span>
+                </div>
+                <div className="interaction-run-meta">
+                  <span>
+                    {t.runSnapshot}: r{run.snapshot.revision}
+                  </span>
+                  <span>
+                    {t.currentNode}:{" "}
+                    {current.node ? pipelineNodeName(t, current.node) : t.none}
+                  </span>
+                  <span>
+                    {t.currentAiMember}:{" "}
+                    {current.position?.aiMember.displayName ?? t.none}
+                  </span>
+                  <span>
+                    {t.interactionPosition}:{" "}
+                    {current.position
+                      ? positionName(t, current.position)
+                      : t.none}
+                  </span>
+                </div>
+                <div
+                  className="interaction-run-progress"
+                  data-interaction-run-progress
+                >
+                  <div className="interaction-run-progress-heading">
+                    <span>{t.runProgress}</span>
+                    <strong>
+                      {progress.completed} / {progress.total} (
+                      {progress.percentage}%)
+                    </strong>
+                  </div>
+                  <progress
+                    aria-label={t.runProgress}
+                    max={Math.max(progress.total, 1)}
+                    value={progress.completed}
+                  />
+                </div>
+                <div
+                  className="interaction-run-current-node"
+                  data-interaction-current-node
+                >
+                  <span>{t.currentNode}</span>
+                  <strong>
+                    {current.node
+                      ? pipelineNodeName(t, current.node)
+                      : (current.nodeRun?.pipelineNodeId ?? t.none)}
+                  </strong>
+                </div>
+                <ol className="interaction-run-timeline">
+                  {run.nodes.map((nodeRun) => {
+                    const node =
+                      run.snapshot.payload.pipelineVersion.graph.nodes.find(
+                        (candidate) => candidate.id === nodeRun.pipelineNodeId,
+                      );
+                    return (
+                      <li
+                        data-interaction-run-node={nodeRun.id}
+                        data-interaction-run-node-status={nodeRun.status}
+                        key={nodeRun.id}
+                      >
+                        <span>
+                          {node
+                            ? pipelineNodeName(t, node)
+                            : nodeRun.pipelineNodeId}
+                        </span>
+                        <strong>{statusName(t, nodeRun.status)}</strong>
+                      </li>
+                    );
+                  })}
+                </ol>
+                <button
+                  className="primary-button"
+                  data-interaction-collaborate={run.run.id}
+                  disabled={!canCollaborate}
+                  onClick={() => onCollaborate(run)}
+                  type="button"
+                >
+                  {t.collaborateWithAgent}
+                </button>
+                <button
+                  className="text-button"
+                  data-interaction-select-run={run.run.id}
+                  onClick={() => onSelectRun(run.run.id)}
+                  type="button"
+                >
+                  {t.viewRunContext}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
   const [projects, setProjects] = useState<readonly CompanyProject[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -6241,6 +6758,8 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     null,
   );
   const [sessions, setSessions] = useState<readonly InteractionView[]>([]);
+  const [runs, setRuns] = useState<readonly DepartmentRunView[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selected, setSelected] = useState<InteractionView | null>(null);
   const [message, setMessage] = useState("");
   const [permissionScope, setPermissionScope] = useState("");
@@ -6249,6 +6768,8 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     readonly MemoryCandidateView[]
   >([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [sendingMessage, setSendingMessage] = useState(false);
 
   const selectedMember = members.find(
     (member) => member.id === selectedMemberId,
@@ -6266,18 +6787,27 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
 
   const refresh = async (nextProjectId: string): Promise<void> => {
     if (!nextProjectId) return;
-    const [nextSessions, candidates] = await Promise.all([
-      window.sandcastle.runtime.interactions(nextProjectId),
-      window.sandcastle.runtime.memoryCandidates(nextProjectId),
-    ]);
-    setSessions(nextSessions);
-    setMemoryCandidates(candidates);
+    const context = await loadInteractionProjectContext(
+      window.sandcastle.runtime,
+      nextProjectId,
+    );
+    setSessions(context.sessions);
+    setMemoryCandidates(context.memoryCandidates);
+    setRuns(context.runs);
+    setSelectedRunId((current) =>
+      current && context.runs.some((run) => run.run.id === current)
+        ? current
+        : (context.runs.find((run) => activeRunStatuses.has(run.run.status))
+            ?.run.id ??
+          context.runs[0]?.run.id ??
+          null),
+    );
     setSelected((current) =>
       current
-        ? (nextSessions.find(
+        ? (context.sessions.find(
             (item) => item.session.id === current.session.id,
           ) ?? current)
-        : (nextSessions[0] ?? null),
+        : (context.sessions[0] ?? null),
     );
   };
 
@@ -6331,8 +6861,25 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!projectId) return;
+    let active = true;
+    const poll = (): void => {
+      void refresh(projectId).catch((nextError: unknown) => {
+        if (active) setError(errorMessage(nextError));
+      });
+    };
+    const stopPolling = startRunProgressPolling(poll);
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [projectId]);
+
   const selectSession = (item: InteractionView): void => {
+    setNotice(null);
     setSelected(item);
+    if (item.session.runId) setSelectedRunId(item.session.runId);
     setSelectedMemberId(
       item.participants.find(
         (participant) => participant.participantType === "ai-member",
@@ -6343,6 +6890,7 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
   const createSession = async (): Promise<void> => {
     if (!projectId || !selectedMemberId) return;
     try {
+      setNotice(null);
       const session = await window.sandcastle.runtime.createInteractionSession({
         projectId,
         mode: "consultation",
@@ -6370,24 +6918,45 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     }
   };
 
-  const sendMessage = async (): Promise<void> => {
-    const participant = selected?.participants.find(
-      (candidate) => candidate.participantType === "human",
-    );
-    if (!selected || !participant || !message.trim()) return;
+  const createRunCollaboration = async (
+    run: DepartmentRunView,
+  ): Promise<void> => {
+    const current = currentRunNode(run);
+    const aiMemberId = current.position?.aiMember.id;
+    if (!projectId || !current.nodeRun || !aiMemberId) return;
     try {
-      await window.sandcastle.runtime.addInteractionMessage({
-        sessionId: selected.session.id,
-        participantId: participant.id,
-        kind: "text",
-        content: message.trim(),
-      });
-      setMessage("");
-      setSelected(
-        await window.sandcastle.runtime.inspectInteraction(selected.session.id),
+      const inspected = await createRunCollaborationSession(
+        window.sandcastle.runtime,
+        projectId,
+        run,
       );
+      if (!inspected) return;
+      setSelectedMemberId(aiMemberId);
+      setSelectedRunId(run.run.id);
+      setSelected(inspected);
+      await refresh(projectId);
+      setSelected(inspected);
     } catch (nextError) {
       setError(errorMessage(nextError));
+    }
+  };
+
+  const sendMessage = async (): Promise<void> => {
+    if (!selected || !message.trim()) return;
+    try {
+      setError(null);
+      setSendingMessage(true);
+      const inspected = await promptInteractionSession(
+        window.sandcastle.runtime,
+        selected,
+        message,
+      );
+      setMessage("");
+      setSelected(inspected);
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setSendingMessage(false);
     }
   };
 
@@ -6398,6 +6967,8 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
         selected.session.id,
       );
       await refresh(selected.session.projectId);
+      setSelected(null);
+      setNotice(t.sessionClosedBody);
     } catch (nextError) {
       setError(errorMessage(nextError));
     }
@@ -6476,6 +7047,12 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
           (agent) => agent.id === selectedMember.defaultAgentId,
         )?.name ?? selectedMember.defaultAgentId)
       : (selectedMember?.defaultAgentId ?? t.none);
+  const currentRunId =
+    selectedRunId ??
+    selected?.session.runId ??
+    runs.find((run) => activeRunStatuses.has(run.run.status))?.run.id ??
+    runs[0]?.run.id ??
+    null;
 
   return (
     <section className="page" data-page="interaction">
@@ -6486,6 +7063,7 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
           <p>{t.agentInteractionBody}</p>
         </div>
         <button
+          className="primary-button"
           disabled={!projectId || !selectedMemberId}
           onClick={() => void createSession()}
           type="button"
@@ -6494,6 +7072,11 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
         </button>
       </div>
       {error ? <div className="warn">{error}</div> : null}
+      {notice ? (
+        <div className="interaction-notice" data-interaction-notice>
+          {notice}
+        </div>
+      ) : null}
       <div className="interaction-workspace">
         <aside
           className="interaction-sidebar"
@@ -6511,6 +7094,8 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                 const nextProjectId = event.target.value;
                 setProjectId(nextProjectId);
                 setSelected(null);
+                setSelectedRunId(null);
+                setNotice(null);
                 void refresh(nextProjectId).catch((nextError: unknown) =>
                   setError(errorMessage(nextError)),
                 );
@@ -6601,11 +7186,12 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                 </div>
                 {selected ? (
                   <button
+                    className="secondary-button"
                     disabled={selected.session.status === "closed"}
                     onClick={() => void closeSession()}
                     type="button"
                   >
-                    {t.closeSession}
+                    {interactionSessionCloseLabel(t, selected.session.status)}
                   </button>
                 ) : null}
               </header>
@@ -6623,7 +7209,30 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                         : participant?.participantType === "system"
                           ? t.interactionSystem
                           : t.interactionHuman;
-                    return (
+                    return item.kind === "status" ? (
+                      item.content.startsWith("Agent execution failed: ") ? (
+                        <details
+                          className="interaction-prompt-status failure"
+                          data-interaction-prompt-status="failure"
+                          data-session-message={item.id}
+                          key={item.id}
+                        >
+                          <summary>
+                            {interactionStatusLabel(t, item.content)}
+                          </summary>
+                          <pre>{item.content}</pre>
+                        </details>
+                      ) : (
+                        <div
+                          className="interaction-prompt-status"
+                          data-interaction-prompt-status
+                          data-session-message={item.id}
+                          key={item.id}
+                        >
+                          <span>{interactionStatusLabel(t, item.content)}</span>
+                        </div>
+                      )
+                    ) : (
                       <article
                         className={
                           "interaction-message interaction-message-" +
@@ -6651,25 +7260,39 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                   </div>
                 )}
               </div>
-              <div className="interaction-composer">
-                <textarea
-                  disabled={!selected || selected.session.status === "closed"}
-                  onChange={(event) => setMessage(event.target.value)}
-                  placeholder={t.interactionMessagePlaceholder}
-                  value={message}
-                />
-                <button
-                  disabled={
-                    !selected ||
-                    selected.session.status === "closed" ||
-                    message.trim() === ""
-                  }
-                  onClick={() => void sendMessage()}
-                  type="button"
+              {sendingMessage ? (
+                <div
+                  className="interaction-prompt-status active"
+                  data-interaction-prompt-status="pending"
                 >
-                  {t.sendMessage}
-                </button>
-              </div>
+                  <span>{t.interactionAgentWorking}</span>
+                </div>
+              ) : null}
+              {selected?.session.status === "closed" ? (
+                <div className="interaction-session-closed">
+                  <strong>{t.sessionClosed}</strong>
+                  <span>{t.sessionClosedBody}</span>
+                </div>
+              ) : (
+                <div className="interaction-composer">
+                  <textarea
+                    disabled={!selected || sendingMessage}
+                    onChange={(event) => setMessage(event.target.value)}
+                    placeholder={t.interactionMessagePlaceholder}
+                    value={message}
+                  />
+                  <button
+                    className="primary-button"
+                    disabled={
+                      !selected || sendingMessage || message.trim() === ""
+                    }
+                    onClick={() => void sendMessage()}
+                    type="button"
+                  >
+                    {t.sendMessage}
+                  </button>
+                </div>
+              )}
             </>
           ) : (
             <div className="interaction-empty-conversation">
@@ -6682,31 +7305,35 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
             <h2>{t.interactionContext}</h2>
           </div>
           <dl className="interaction-context-list">
-            <div>
+            <div className="interaction-context-item">
               <dt>{t.interactionProjects}</dt>
               <dd>{selectedProject?.name ?? t.none}</dd>
             </div>
-            <div>
+            <div className="interaction-context-item">
               <dt>{t.interactionMembers}</dt>
               <dd>{selectedMember?.displayName ?? t.none}</dd>
             </div>
-            <div>
+            <div className="interaction-context-item">
               <dt>{t.interactionPosition}</dt>
               <dd>{selectedMember?.positionName ?? t.none}</dd>
             </div>
-            <div>
+            <div className="interaction-context-item">
               <dt>{t.interactionProvider}</dt>
               <dd>{agentName}</dd>
             </div>
-            <div>
+            <div className="interaction-context-item">
               <dt>{t.departmentRuns}</dt>
-              <dd>
-                {selected?.session.runId
-                  ? selected.session.runId
-                  : t.interactionUnboundRun}
-              </dd>
+              <dd>{currentRunId ?? t.interactionUnboundRun}</dd>
             </div>
           </dl>
+          <InteractionRunPanel
+            currentRunId={currentRunId}
+            onCollaborate={(run) => void createRunCollaboration(run)}
+            onSelectRun={setSelectedRunId}
+            runs={runs}
+            selectedRunId={currentRunId}
+            t={t}
+          />
           {selected ? (
             <>
               <section className="interaction-context-section">

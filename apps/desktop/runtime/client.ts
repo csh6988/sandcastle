@@ -319,7 +319,10 @@ export const createCompanyRuntimeClientFromTransport = (
         result,
       ) as CompanyCommandResult<Command>;
     }
-    if (command.type === "interaction.message.add") {
+    if (
+      command.type === "interaction.message.add" ||
+      command.type === "interaction.prompt"
+    ) {
       return SessionMessageViewSchema.parse(
         result,
       ) as CompanyCommandResult<Command>;

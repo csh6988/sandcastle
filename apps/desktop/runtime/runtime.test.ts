@@ -533,6 +533,102 @@ describe("Company Runtime", () => {
     }
   });
 
+  it("executes an Interaction Prompt and persists the AI Member response", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const prompts: string[] = [];
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+      interactionExecutionAdapter: {
+        execute: async (input) => {
+          prompts.push(input.prompt);
+          return { response: "你好，我是 Product Planner。" };
+        },
+      },
+    });
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const project = await client.execute({
+        type: "project.create",
+        name: "Interaction Project",
+        goal: "Verify consultation replies",
+      });
+      const session = await client.execute({
+        type: "interaction.session.create",
+        projectId: project.id,
+        mode: "consultation",
+      });
+      const human = await client.execute({
+        type: "interaction.participant.add",
+        sessionId: session.id,
+        participantType: "human",
+        participantRef: "user-local",
+        role: "requester",
+      });
+      const aiMember = await client.execute({
+        type: "interaction.participant.add",
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: "product-planner-member",
+        role: "consulted-member",
+      });
+
+      await client.execute({
+        type: "interaction.prompt",
+        sessionId: session.id,
+        participantId: human.id,
+        content: "你好",
+      });
+
+      let inspected = await client.query({
+        type: "interaction.inspect",
+        sessionId: session.id,
+      });
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (
+          inspected.messages.some(
+            (message) =>
+              message.participantId === aiMember.id &&
+              message.content === "你好，我是 Product Planner。",
+          )
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inspected = await client.query({
+          type: "interaction.inspect",
+          sessionId: session.id,
+        });
+      }
+
+      assert.deepEqual(prompts, ["你好"]);
+      assert.equal(inspected.messages[0]?.content, "你好");
+      assert.equal(
+        inspected.messages.some(
+          (message) =>
+            message.kind === "status" &&
+            message.content === "Agent is processing this message.",
+        ),
+        true,
+      );
+      assert.equal(
+        inspected.messages.some(
+          (message) =>
+            message.participantId === aiMember.id &&
+            message.content === "你好，我是 Product Planner。",
+        ),
+        true,
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("returns the Runtime-backed Company Overview read model", async () => {
     const companyDir = tempCompanyDir();
     const address = companyRuntimeAddress(companyDir);

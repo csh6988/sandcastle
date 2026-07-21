@@ -87,10 +87,9 @@ export const createAcpStdioFacade = (
         }
         case "session/prompt": {
           const message = await client.execute({
-            type: "interaction.message.add",
+            type: "interaction.prompt",
             sessionId: requiredString(request.params, "sessionId"),
             participantId: requiredString(request.params, "participantId"),
-            kind: "text",
             content: requiredString(request.params, "content"),
           });
           return { id: request.id, result: { messageId: message.id } };

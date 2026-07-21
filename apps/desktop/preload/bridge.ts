@@ -143,6 +143,7 @@ export const INTERACTION_PARTICIPANT_ADD_CHANNEL =
   "sandcastle:interaction.participant.add";
 export const INTERACTION_MESSAGE_ADD_CHANNEL =
   "sandcastle:interaction.message.add";
+export const INTERACTION_PROMPT_CHANNEL = "sandcastle:interaction.prompt";
 export const PERMISSION_REQUEST_CHANNEL = "sandcastle:permission.request";
 export const PERMISSION_DECIDE_CHANNEL = "sandcastle:permission.decide";
 export const AG_UI_EVENTS_CHANNEL = "sandcastle:ag-ui.events";
@@ -452,6 +453,11 @@ export interface SandcastleBridge {
       readonly sessionId: string;
       readonly participantId: string;
       readonly kind: "text" | "tool" | "status";
+      readonly content: string;
+    }) => Promise<SessionMessageView>;
+    readonly promptInteraction: (input: {
+      readonly sessionId: string;
+      readonly participantId: string;
       readonly content: string;
     }) => Promise<SessionMessageView>;
     readonly requestPermission: (input: {
@@ -817,6 +823,10 @@ export const createSandcastleBridge = (
           INTERACTION_MESSAGE_ADD_CHANNEL,
           input,
         ),
+      ),
+    promptInteraction: async (input) =>
+      SessionMessageViewSchema.parse(
+        await invokeRuntimeCommand(invoke, INTERACTION_PROMPT_CHANNEL, input),
       ),
     requestPermission: async (input) =>
       PermissionRequestViewSchema.parse(

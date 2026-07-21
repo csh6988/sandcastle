@@ -1,5 +1,8 @@
 import { startCompanyRuntimeServer } from "./server.js";
-import { loadConfiguredExecutionAdapter } from "./adapters/configuredExecutionAdapter.js";
+import {
+  loadConfiguredExecutionAdapter,
+  loadConfiguredInteractionExecutionAdapter,
+} from "./adapters/configuredExecutionAdapter.js";
 
 const requiredEnvironment = (name: string): string => {
   const value = process.env[name];
@@ -9,11 +12,14 @@ const requiredEnvironment = (name: string): string => {
 
 const main = async (): Promise<void> => {
   const executionAdapter = await loadConfiguredExecutionAdapter();
+  const interactionExecutionAdapter =
+    await loadConfiguredInteractionExecutionAdapter();
   const runtime = await startCompanyRuntimeServer({
     address: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_ADDRESS"),
     companyDir: requiredEnvironment("SANDCASTLE_COMPANY_DIR"),
     token: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_TOKEN"),
     executionAdapter,
+    interactionExecutionAdapter,
   });
   const close = (): void => {
     void runtime.close();

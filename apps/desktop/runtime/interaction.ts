@@ -504,7 +504,7 @@ export const openRuntimeInteraction = (
                 participant_ref AS participantRef, role,
                 created_at AS createdAt
            FROM session_participants WHERE session_id = ?
-          ORDER BY created_at, id`,
+          ORDER BY created_at, rowid`,
       )
       .all(sessionId) as unknown as SessionParticipantView[];
     const messages = database
@@ -512,7 +512,7 @@ export const openRuntimeInteraction = (
         `SELECT id, session_id AS sessionId, participant_id AS participantId,
                 kind, content, created_at AS createdAt
            FROM session_messages WHERE session_id = ?
-          ORDER BY created_at, id`,
+          ORDER BY created_at, rowid`,
       )
       .all(sessionId) as unknown as SessionMessageView[];
     const permissions = database

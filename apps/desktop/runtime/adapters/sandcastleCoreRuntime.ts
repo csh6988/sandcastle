@@ -36,7 +36,10 @@ interface SandcastleCoreModule {
     model?: string,
     options?: { readonly captureSessions?: boolean },
   ) => unknown;
-  readonly codex: (model: string) => unknown;
+  readonly codex: (
+    model: string,
+    options?: { readonly captureSessions?: boolean },
+  ) => unknown;
   readonly copilot: (model?: string) => unknown;
   readonly cursor: (model?: string) => unknown;
   readonly opencode: (model?: string) => unknown;
@@ -183,7 +186,7 @@ export const createSandcastleExecutionRuntimeFromModules = (
     noSandboxModule,
   );
   return {
-    resolveAgent: (providerRef, model) => {
+    resolveAgent: (providerRef, model, options) => {
       const resolvedProvider =
         providerRef === "default-agent"
           ? process.env.SANDCASTLE_DEFAULT_AGENT_PROVIDER
@@ -192,7 +195,7 @@ export const createSandcastleExecutionRuntimeFromModules = (
         case "claude-code":
           return core.claudeCode(model, { captureSessions: false });
         case "codex":
-          return core.codex(model);
+          return core.codex(model, options);
         case "copilot":
           return core.copilot(model);
         case "cursor":

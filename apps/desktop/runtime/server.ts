@@ -21,12 +21,17 @@ import { acquireCompanyRuntimeLock } from "./runtimeLock.js";
 import { openCompanyDatabase, type CompanyDatabase } from "./storage/sqlite.js";
 import type { LocalAgentHost } from "./agent/agentCatalog.js";
 import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
+import type {
+  InteractionExecutionAdapter,
+  InteractionExecutionInput,
+} from "./adapters/interactionExecutionAdapter.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
   readonly companyDir: string;
   readonly token: string;
   readonly executionAdapter?: ExecutionAdapter;
+  readonly interactionExecutionAdapter?: InteractionExecutionAdapter;
   readonly agentHost?: LocalAgentHost;
 }
 
@@ -75,6 +80,191 @@ export const startCompanyRuntimeServer = async (
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
+
+  const startInteractionPrompt = (input: {
+    readonly sessionId: string;
+    readonly participantId: string;
+    readonly content: string;
+  }): ReturnType<CompanyDatabase["interaction"]["addMessage"]> => {
+    const before = database.interaction.inspectSession(input.sessionId);
+    const humanParticipant = before.participants.find(
+      (participant) => participant.id === input.participantId,
+    );
+    if (humanParticipant?.participantType !== "human") {
+      throw new RuntimeInteractionError(
+        "SESSION_MESSAGE_INVALID",
+        "Interaction Prompt requires a human participant in the same Session.",
+      );
+    }
+    const aiParticipant = before.participants.find(
+      (participant) => participant.participantType === "ai-member",
+    );
+    if (!aiParticipant) {
+      throw new RuntimeInteractionError(
+        "SESSION_PARTICIPANT_NOT_FOUND",
+        `Interaction Session ${input.sessionId} has no AI Member participant.`,
+      );
+    }
+    const statusParticipant =
+      before.participants.find(
+        (participant) =>
+          participant.participantType === "system" &&
+          participant.role === "runtime-status",
+      ) ??
+      database.interaction.addParticipant({
+        sessionId: input.sessionId,
+        participantType: "system",
+        participantRef: "company-runtime",
+        role: "runtime-status",
+      });
+    const humanMessage = database.interaction.addMessage({
+      sessionId: input.sessionId,
+      participantId: input.participantId,
+      kind: "text",
+      content: input.content,
+    });
+    database.interaction.addMessage({
+      sessionId: input.sessionId,
+      participantId: statusParticipant.id,
+      kind: "status",
+      content: "Agent is processing this message.",
+    });
+
+    const adapter = options.interactionExecutionAdapter;
+    if (!adapter) {
+      database.interaction.addMessage({
+        sessionId: input.sessionId,
+        participantId: statusParticipant.id,
+        kind: "status",
+        content: "Agent execution is unavailable in this Runtime.",
+      });
+      return humanMessage;
+    }
+
+    let project = database.projectConfiguration.inspect(
+      before.session.projectId,
+    );
+    const department = database.catalog
+      .departments()
+      .map((item) => database.catalog.inspectDepartment(item.id))
+      .find((item) =>
+        item.positions.some(
+          (position) => position.aiMember.id === aiParticipant.participantRef,
+        ),
+      );
+    let position: InteractionExecutionInput["position"] | undefined =
+      department?.positions.find(
+        (candidate) => candidate.aiMember.id === aiParticipant.participantRef,
+      );
+    let executionProfile:
+      | InteractionExecutionInput["executionProfile"]
+      | undefined = department?.executionProfiles.find(
+      (profile) => profile.id === department.defaultExecutionProfileId,
+    );
+
+    if (before.session.mode === "run-collaboration") {
+      const run = before.session.runId
+        ? database.pipelineRuntime.inspectRun(before.session.runId)
+        : undefined;
+      const nodeRun = run?.nodes.find(
+        (candidate) => candidate.id === before.session.nodeRunId,
+      );
+      const pipelineNode =
+        run?.snapshot.payload.pipelineVersion.graph.nodes.find(
+          (candidate) => candidate.id === nodeRun?.pipelineNodeId,
+        );
+      const snapshotPosition = run?.snapshot.payload.positions.find(
+        (candidate) => candidate.id === pipelineNode?.positionId,
+      );
+      const profileId =
+        pipelineNode?.executionProfileId ??
+        run?.snapshot.payload.department.defaultExecutionProfileId;
+      const snapshotProfile = run?.snapshot.payload.executionProfiles.find(
+        (candidate) => candidate.id === profileId,
+      );
+      if (
+        !run ||
+        !nodeRun ||
+        !pipelineNode ||
+        !snapshotPosition ||
+        snapshotPosition.aiMember.id !== aiParticipant.participantRef ||
+        !snapshotProfile
+      ) {
+        position = undefined;
+        executionProfile = undefined;
+      } else {
+        project = {
+          ...project,
+          revision: run.snapshot.payload.project.revision,
+          name: run.snapshot.payload.project.name,
+          goal: run.snapshot.payload.project.goal,
+          sharedContext: run.snapshot.payload.project.sharedContext,
+          repositoryReferences:
+            run.snapshot.payload.project.repositoryReferences,
+        };
+        position = {
+          ...snapshotPosition,
+          defaultAgentId: snapshotPosition.resolvedAgentId,
+        };
+        executionProfile = snapshotProfile;
+      }
+    }
+    if (!position || !executionProfile) {
+      database.interaction.addMessage({
+        sessionId: input.sessionId,
+        participantId: statusParticipant.id,
+        kind: "status",
+        content:
+          "Agent execution failed because the AI Member has no active Position or Execution Profile.",
+      });
+      return humanMessage;
+    }
+
+    const addBackgroundMessage = (message: {
+      readonly participantId: string;
+      readonly kind: "text" | "status";
+      readonly content: string;
+    }): void => {
+      try {
+        database.interaction.addMessage({
+          sessionId: input.sessionId,
+          ...message,
+        });
+      } catch {
+        // The Session or Runtime may have closed while the Agent was running.
+      }
+    };
+
+    void adapter
+      .execute({
+        session: before.session,
+        project,
+        aiParticipant,
+        position,
+        executionProfile,
+        prompt: input.content,
+      })
+      .then((result) => {
+        addBackgroundMessage({
+          participantId: aiParticipant.id,
+          kind: "text",
+          content: result.response,
+        });
+        addBackgroundMessage({
+          participantId: statusParticipant.id,
+          kind: "status",
+          content: "Agent response completed.",
+        });
+      })
+      .catch((error: unknown) => {
+        addBackgroundMessage({
+          participantId: statusParticipant.id,
+          kind: "status",
+          content: `Agent execution failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      });
+    return humanMessage;
+  };
 
   const cleanup = (): void => {
     database.close();
@@ -405,6 +595,13 @@ export const startCompanyRuntimeServer = async (
                 id: request.id,
                 ok: true,
                 result: database.interaction.addMessage(request.command),
+              });
+              return;
+            case "interaction.prompt":
+              sendResponse(socket, {
+                id: request.id,
+                ok: true,
+                result: startInteractionPrompt(request.command),
               });
               return;
             case "permission.request":

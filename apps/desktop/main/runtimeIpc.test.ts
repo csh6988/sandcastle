@@ -293,6 +293,9 @@ describe("Runtime Electron IPC", () => {
         addInteractionMessage: async () => {
           throw new Error("not used");
         },
+        promptInteraction: async () => {
+          throw new Error("not used");
+        },
         requestPermission: async () => {
           throw new Error("not used");
         },

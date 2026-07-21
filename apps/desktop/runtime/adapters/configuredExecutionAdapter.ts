@@ -5,6 +5,7 @@ import {
   createSandcastleExecutionPort,
   type SandcastleExecutionRuntime,
 } from "./sandcastleExecutionPort.js";
+import { createSandcastleInteractionExecutionAdapter } from "./interactionExecutionAdapter.js";
 
 export const loadConfiguredExecutionAdapter = async (
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -20,3 +21,7 @@ export const loadConfiguredExecutionAdapter = async (
     createSandcastleExecutionPort(await loadRuntime()),
   );
 };
+
+export const loadConfiguredInteractionExecutionAdapter = async (
+  loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
+) => createSandcastleInteractionExecutionAdapter(await loadRuntime());

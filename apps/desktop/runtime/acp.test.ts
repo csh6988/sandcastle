@@ -60,7 +60,7 @@ describe("ACP stdio facade", () => {
             createdAt: "2026-07-15T00:00:00.000Z",
           };
         }
-        if (command.type === "interaction.message.add") {
+        if (command.type === "interaction.prompt") {
           return {
             id: "message-1",
             sessionId: "session-1",
@@ -111,7 +111,7 @@ describe("ACP stdio facade", () => {
     });
     assert.ok(opened.result);
     assert.equal(opened.result.sessionId, "session-1");
-    await facade.handle({
+    const prompted = await facade.handle({
       id: "3",
       method: "session/prompt",
       params: {
@@ -120,6 +120,7 @@ describe("ACP stdio facade", () => {
         content: "Hello",
       },
     });
+    assert.equal(prompted.result?.messageId, "message-1");
     await facade.handle({
       id: "4",
       method: "session/request_permission",
@@ -140,7 +141,7 @@ describe("ACP stdio facade", () => {
       "query:runtime.health",
       "command:interaction.session.create",
       "command:interaction.participant.add",
-      "command:interaction.message.add",
+      "command:interaction.prompt",
       "command:permission.decide",
       "query:ag-ui.events",
       "command:interaction.session.close",

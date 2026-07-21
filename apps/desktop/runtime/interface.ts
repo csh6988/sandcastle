@@ -995,6 +995,12 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     content: z.string().trim().min(1).max(100_000),
   }),
   z.object({
+    type: z.literal("interaction.prompt"),
+    sessionId: z.string().trim().min(1),
+    participantId: z.string().trim().min(1),
+    content: z.string().trim().min(1).max(100_000),
+  }),
+  z.object({
     type: z.literal("permission.request"),
     sessionId: z.string().trim().min(1),
     scope: z.string().trim().min(1),
@@ -1296,52 +1302,54 @@ export type CompanyCommandResult<Command extends CompanyCommand> =
                       ? SessionParticipantView
                       : Command["type"] extends "interaction.message.add"
                         ? SessionMessageView
-                        : Command["type"] extends
-                              | "permission.request"
-                              | "permission.decide"
-                          ? PermissionRequestView
-                          : Command["type"] extends "memory.candidate.create"
-                            ? MemoryCandidateView
-                            : Command["type"] extends "memory.candidate.review"
-                              ? MemoryReviewView
-                              : Command["type"] extends "runtime.events.compact"
-                                ? {
-                                    readonly deleted: number;
-                                    readonly retained: number;
-                                  }
-                                : Command["type"] extends "project.create"
-                                  ? CompanyProject
-                                  : Command["type"] extends
-                                        | "project.update"
-                                        | "project.archive"
-                                    ? ProjectEditorView
-                                    : Command["type"] extends "department.create"
-                                      ? CompanyDepartment
-                                      : Command["type"] extends
-                                            | "skill.catalog.save"
-                                            | "skill.catalog.archive"
-                                            | "position.skills.set"
-                                            | "skill-flow.save"
-                                            | "skill-flow.archive"
-                                        ? SkillConfigurationView
-                                        : Command["type"] extends "position.configure"
-                                          ? PositionConfigurationResult
-                                          : Command["type"] extends
-                                                | "department.pipeline.draft.save"
-                                                | "department.pipeline.publish"
-                                            ? DepartmentPipelineEditorView
+                        : Command["type"] extends "interaction.prompt"
+                          ? SessionMessageView
+                          : Command["type"] extends
+                                | "permission.request"
+                                | "permission.decide"
+                            ? PermissionRequestView
+                            : Command["type"] extends "memory.candidate.create"
+                              ? MemoryCandidateView
+                              : Command["type"] extends "memory.candidate.review"
+                                ? MemoryReviewView
+                                : Command["type"] extends "runtime.events.compact"
+                                  ? {
+                                      readonly deleted: number;
+                                      readonly retained: number;
+                                    }
+                                  : Command["type"] extends "project.create"
+                                    ? CompanyProject
+                                    : Command["type"] extends
+                                          | "project.update"
+                                          | "project.archive"
+                                      ? ProjectEditorView
+                                      : Command["type"] extends "department.create"
+                                        ? CompanyDepartment
+                                        : Command["type"] extends
+                                              | "skill.catalog.save"
+                                              | "skill.catalog.archive"
+                                              | "position.skills.set"
+                                              | "skill-flow.save"
+                                              | "skill-flow.archive"
+                                          ? SkillConfigurationView
+                                          : Command["type"] extends "position.configure"
+                                            ? PositionConfigurationResult
                                             : Command["type"] extends
-                                                  | "run.start"
-                                                  | "run.execute-ready"
-                                                  | "run.fork"
-                                                  | "run.pause"
-                                                  | "run.resume"
-                                                  | "run.cancel"
-                                                  | "run.recover"
-                                                  | "run.approval.decide"
-                                                  | "run.node.retry"
-                                              ? DepartmentRunView
-                                              : DepartmentInspect;
+                                                  | "department.pipeline.draft.save"
+                                                  | "department.pipeline.publish"
+                                              ? DepartmentPipelineEditorView
+                                              : Command["type"] extends
+                                                    | "run.start"
+                                                    | "run.execute-ready"
+                                                    | "run.fork"
+                                                    | "run.pause"
+                                                    | "run.resume"
+                                                    | "run.cancel"
+                                                    | "run.recover"
+                                                    | "run.approval.decide"
+                                                    | "run.node.retry"
+                                                ? DepartmentRunView
+                                                : DepartmentInspect;
 
 export const EventEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

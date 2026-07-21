@@ -223,6 +223,11 @@ export interface CompanyRuntimeSupervisor {
     readonly kind: "text" | "tool" | "status";
     readonly content: string;
   }): Promise<SessionMessageView>;
+  promptInteraction(input: {
+    readonly sessionId: string;
+    readonly participantId: string;
+    readonly content: string;
+  }): Promise<SessionMessageView>;
   requestPermission(input: {
     readonly sessionId: string;
     readonly scope: string;
@@ -763,6 +768,8 @@ export const createCompanyRuntimeSupervisor = (
       execute({ type: "interaction.participant.add", ...input }),
     addInteractionMessage: (input) =>
       execute({ type: "interaction.message.add", ...input }),
+    promptInteraction: (input) =>
+      execute({ type: "interaction.prompt", ...input }),
     requestPermission: (input) =>
       execute({ type: "permission.request", ...input }),
     decidePermission: (input) =>

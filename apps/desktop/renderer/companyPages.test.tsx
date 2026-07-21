@@ -15,6 +15,14 @@ import {
   PositionDrawerEditor,
   ProjectDetailView,
   CompanyInteractionPage,
+  InteractionRunPanel,
+  RUN_PROGRESS_POLL_INTERVAL_MS,
+  createRunCollaborationSession,
+  interactionSessionCloseLabel,
+  interactionStatusLabel,
+  loadInteractionProjectContext,
+  promptInteractionSession,
+  startRunProgressPolling,
   RuntimeDiagnosticsPanel,
   isAgentTestDisabled,
 } from "./companyPages.js";
@@ -272,6 +280,14 @@ describe("Position drawer", () => {
     assert.match(markup, /value="codex"/);
     assert.match(markup, /placeholder="Search Skills"/);
     assert.match(markup, /1 selected/);
+    assert.match(
+      markup,
+      /class="skill-picker-option selected" data-position-skill-option="tdd"/,
+    );
+    assert.match(
+      markup,
+      /class="skill-picker-option-name">Test-Driven Development</,
+    );
     assert.match(markup, /data-save-position-configuration/);
     assert.match(markup, /data-position-danger-zone/);
   });
@@ -904,6 +920,121 @@ describe("Project detail", () => {
     assert.match(markup, />Reject</);
   });
 
+  it("renders structured run progress and separated node timeline regions", () => {
+    const runWithCurrentNode: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, status: "running" },
+      snapshot: {
+        ...scriptedDepartmentRun.snapshot,
+        payload: {
+          ...scriptedDepartmentRun.snapshot.payload,
+          pipelineVersion: {
+            ...scriptedDepartmentRun.snapshot.payload.pipelineVersion,
+            graph: {
+              nodes: [
+                { id: "start", type: "start", name: "Start" },
+                {
+                  id: "implement",
+                  type: "ai-task",
+                  name: "Implement",
+                  positionId: "engineer",
+                },
+                { id: "complete", type: "complete", name: "Complete" },
+              ],
+              edges: [
+                { from: "start", to: "implement" },
+                { from: "implement", to: "complete" },
+              ],
+            },
+          },
+          positions: [
+            {
+              id: "engineer",
+              revision: 1,
+              name: "Software Engineer",
+              responsibility: "Implement the change",
+              defaultAgentId: "codex",
+              resolvedAgentId: "codex",
+              agentSource: "position-default",
+              skillIds: [],
+              aiMember: {
+                id: "engineer-member",
+                displayName: "Ada",
+                profile: "",
+                responsibilityMetadata: {},
+                status: "active",
+              },
+            },
+          ],
+        },
+      },
+      nodes: [
+        { ...scriptedDepartmentRun.nodes[0]!, status: "succeeded" },
+        {
+          id: "node-run-implement",
+          runId: "run-1",
+          pipelineNodeId: "implement",
+          nodeType: "ai-task",
+          status: "running",
+          attemptCount: 1,
+          attempts: [
+            {
+              id: "attempt-1",
+              attemptNumber: 1,
+              snapshotRevisionId: "snapshot-1",
+              reason: "initial",
+              recoverable: true,
+              status: "running",
+              result: null,
+              failure: null,
+              feedback: [],
+              createdAt: "2026-07-15T00:00:00.000Z",
+              startedAt: "2026-07-15T00:01:00.000Z",
+              completedAt: null,
+            },
+          ],
+          approvals: [],
+          requiredDependencyIds: ["start"],
+          result: null,
+          failure: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          updatedAt: "2026-07-15T00:01:00.000Z",
+        },
+        {
+          ...scriptedDepartmentRun.nodes[1]!,
+          requiredDependencyIds: ["implement"],
+        },
+      ],
+    };
+    const markup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onDecision={() => undefined}
+        onRetry={() => undefined}
+        onFork={() => undefined}
+        run={runWithCurrentNode}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-run-progress/);
+    assert.match(markup, /data-current-node/);
+    assert.match(markup, /data-run-execution-info/);
+    assert.match(markup, /data-run-current-activity/);
+    assert.match(markup, /data-run-node-timeline/);
+    assert.match(markup, /data-run-node-summary="node-run-implement"/);
+    assert.match(markup, /class="run-node-status"/);
+    assert.match(markup, /class="run-node-attempts"/);
+    assert.match(markup, /class="run-node-evidence"/);
+    assert.match(markup, /class="run-node-actions"/);
+    assert.match(markup, /1 \/ 3/);
+    assert.match(markup, /Ada/);
+    assert.match(markup, /Software Engineer/);
+  });
+
   it("renders failed AI Task recovery and persisted Continue Run actions", () => {
     const failedRun: DepartmentRunView = {
       ...scriptedDepartmentRun,
@@ -1087,8 +1218,11 @@ describe("Project detail", () => {
     assert.match(markup, /data-project-runs/);
     assert.match(markup, /data-project-run-list/);
     assert.match(markup, /data-project-run-detail/);
+    assert.match(markup, /class="primary-button"/);
     assert.match(markup, /data-start-department-run/);
     assert.match(markup, /Start Department Run/);
+    assert.match(markup, /class="run-start-field"/);
+    assert.match(markup, /data-run-start-submit/);
   });
 
   it("opens Project Detail on the PRD Overview tab instead of configuration", () => {
@@ -1121,6 +1255,247 @@ describe("Project detail", () => {
 });
 
 describe("Agent Interaction workspace", () => {
+  it("localizes persisted Agent execution status outside the chat transcript", () => {
+    assert.equal(
+      interactionStatusLabel(messages.zh, "Agent is processing this message."),
+      "Agent 正在处理这条消息…",
+    );
+    assert.equal(
+      interactionStatusLabel(
+        messages.zh,
+        "Agent execution failed: provider unavailable\nWARN noisy detail",
+      ),
+      "Agent 执行失败: provider unavailable",
+    );
+  });
+
+  it("sends a human prompt through the Agent execution command", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const interaction = {
+      session: {
+        id: "session-1",
+        mode: "consultation" as const,
+        projectId: "project-1",
+        runId: null,
+        nodeRunId: null,
+        status: "active" as const,
+        createdAt: "2026-07-15T00:00:00.000Z",
+        closedAt: null,
+      },
+      participants: [
+        {
+          id: "human-1",
+          sessionId: "session-1",
+          participantType: "human" as const,
+          participantRef: "user-local",
+          role: "requester",
+          createdAt: "2026-07-15T00:00:00.000Z",
+        },
+      ],
+      messages: [],
+      permissions: [],
+    };
+    const runtime = {
+      promptInteraction: async (input: Record<string, string>) => {
+        calls.push(input);
+        return {
+          id: "message-1",
+          sessionId: "session-1",
+          participantId: "human-1",
+          kind: "text" as const,
+          content: "你好",
+          createdAt: "2026-07-15T00:00:00.000Z",
+        };
+      },
+      inspectInteraction: async () => interaction,
+    };
+
+    await promptInteractionSession(runtime, interaction, " 你好 ");
+
+    assert.deepEqual(calls, [
+      {
+        sessionId: "session-1",
+        participantId: "human-1",
+        content: "你好",
+      },
+    ]);
+  });
+
+  it("makes a closed Session visibly non-interactive", () => {
+    assert.equal(
+      interactionSessionCloseLabel(messages.en, "active"),
+      "Close session",
+    );
+    assert.equal(
+      interactionSessionCloseLabel(messages.en, "closed"),
+      "Session closed",
+    );
+  });
+
+  it("loads interactions, memory candidates, and Department Runs together", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      interactions: async (projectId: string) => {
+        calls.push(`interactions:${projectId}`);
+        return [];
+      },
+      memoryCandidates: async (projectId: string) => {
+        calls.push(`memory:${projectId}`);
+        return [];
+      },
+      runs: async (projectId: string) => {
+        calls.push(`runs:${projectId}`);
+        return [];
+      },
+    } as unknown as Parameters<typeof loadInteractionProjectContext>[0];
+
+    const context = await loadInteractionProjectContext(runtime, "project-1");
+
+    assert.deepEqual(context, { sessions: [], memoryCandidates: [], runs: [] });
+    assert.deepEqual(calls.sort(), [
+      "interactions:project-1",
+      "memory:project-1",
+      "runs:project-1",
+    ]);
+  });
+
+  it("cleans up the live Run polling timer", () => {
+    let timerCallback: (() => void) | undefined;
+    let cleared: ReturnType<Window["setInterval"]> | undefined;
+    const stop = startRunProgressPolling(() => undefined, {
+      setInterval: (callback, delay) => {
+        timerCallback =
+          typeof callback === "function" ? (callback as () => void) : undefined;
+        assert.equal(delay, RUN_PROGRESS_POLL_INTERVAL_MS);
+        return 42 as unknown as ReturnType<Window["setInterval"]>;
+      },
+      clearInterval: (timer) => {
+        cleared = timer;
+      },
+    });
+
+    assert.ok(timerCallback);
+    stop();
+    assert.equal(cleared, 42);
+  });
+
+  it("binds Run Collaboration to the current node with human and AI participants", async () => {
+    const collaborationRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, status: "running" },
+      snapshot: {
+        ...scriptedDepartmentRun.snapshot,
+        payload: {
+          ...scriptedDepartmentRun.snapshot.payload,
+          pipelineVersion: {
+            ...scriptedDepartmentRun.snapshot.payload.pipelineVersion,
+            graph: {
+              nodes: [
+                {
+                  id: "start",
+                  type: "start",
+                  name: "Start",
+                  positionId: "engineer",
+                },
+                { id: "complete", type: "complete", name: "Complete" },
+              ],
+              edges: [{ from: "start", to: "complete" }],
+            },
+          },
+          positions: [
+            {
+              id: "engineer",
+              revision: 1,
+              name: "Software Engineer",
+              responsibility: "Implement the change",
+              defaultAgentId: "codex",
+              resolvedAgentId: "codex",
+              agentSource: "position-default",
+              skillIds: [],
+              aiMember: {
+                id: "engineer-member",
+                displayName: "Ada",
+                profile: "",
+                responsibilityMetadata: {},
+                status: "active",
+              },
+            },
+          ],
+        },
+      },
+      nodes: [
+        { ...scriptedDepartmentRun.nodes[0]!, status: "running" },
+        scriptedDepartmentRun.nodes[1]!,
+      ],
+    };
+    const participantInputs: Array<Record<string, string>> = [];
+    const runtime = {
+      createInteractionSession: async (input: Record<string, string>) => {
+        participantInputs.push({ session: "create", ...input });
+        return {
+          id: "session-1",
+          mode: "run-collaboration" as const,
+          projectId: "project-1",
+          runId: "run-1",
+          nodeRunId: "node-run-start",
+          status: "active" as const,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          closedAt: null,
+        };
+      },
+      addInteractionParticipant: async (input: Record<string, string>) => {
+        participantInputs.push(input);
+        return {
+          id: `participant-${participantInputs.length}`,
+          sessionId: "session-1",
+          participantType: input.participantType as "human" | "ai-member",
+          participantRef: input.participantRef,
+          role: input.role,
+          createdAt: "2026-07-15T00:00:00.000Z",
+        };
+      },
+      inspectInteraction: async () => ({
+        session: {
+          id: "session-1",
+          mode: "run-collaboration" as const,
+          projectId: "project-1",
+          runId: "run-1",
+          nodeRunId: "node-run-start",
+          status: "active" as const,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          closedAt: null,
+        },
+        participants: [],
+        messages: [],
+        permissions: [],
+      }),
+    } as unknown as Parameters<typeof createRunCollaborationSession>[0];
+
+    await createRunCollaborationSession(runtime, "project-1", collaborationRun);
+
+    assert.deepEqual(participantInputs, [
+      {
+        session: "create",
+        projectId: "project-1",
+        mode: "run-collaboration",
+        runId: "run-1",
+        nodeRunId: "node-run-start",
+      },
+      {
+        sessionId: "session-1",
+        participantType: "human",
+        participantRef: "user-local",
+        role: "requester",
+      },
+      {
+        sessionId: "session-1",
+        participantType: "ai-member",
+        participantRef: "engineer-member",
+        role: "current-node-agent",
+      },
+    ]);
+  });
+
   it("renders the PRD AI Member conversation workspace instead of a Runtime event debugger", () => {
     const markup = renderToStaticMarkup(
       <CompanyInteractionPage t={messages.en} />,
@@ -1129,6 +1504,58 @@ describe("Agent Interaction workspace", () => {
     assert.match(markup, /data-interaction-member-directory/);
     assert.match(markup, /data-interaction-conversation/);
     assert.match(markup, /data-interaction-context/);
+    assert.match(markup, /class="primary-button"/);
     assert.doesNotMatch(markup, /AG-UI: RAW_RUNTIME_EVENT/);
+  });
+
+  it("keeps interaction context rows single-column and renders active Run progress", () => {
+    const activeRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, status: "running" },
+    };
+    const markup = renderToStaticMarkup(
+      <>
+        <CompanyInteractionPage t={messages.en} />
+        <InteractionRunPanel
+          currentRunId={activeRun.run.id}
+          onCollaborate={() => undefined}
+          onSelectRun={() => undefined}
+          runs={[activeRun]}
+          selectedRunId={activeRun.run.id}
+          t={messages.en}
+        />
+      </>,
+    );
+
+    assert.match(markup, /class="interaction-context-list"/);
+    assert.match(markup, /class="interaction-context-item"/);
+    assert.match(markup, /data-interaction-active-run/);
+    assert.match(markup, /data-interaction-run-progress/);
+    assert.match(markup, /data-interaction-current-node/);
+  });
+
+  it("shows the latest completed Run when the project has no active Run", () => {
+    const completedRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, status: "completed" },
+      nodes: scriptedDepartmentRun.nodes.map((node) => ({
+        ...node,
+        status: "succeeded" as const,
+      })),
+    };
+    const markup = renderToStaticMarkup(
+      <InteractionRunPanel
+        currentRunId={completedRun.run.id}
+        onCollaborate={() => undefined}
+        onSelectRun={() => undefined}
+        runs={[completedRun]}
+        selectedRunId={completedRun.run.id}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-interaction-run="run-1"/);
+    assert.match(markup, /Completed/);
+    assert.match(markup, /2 \/ 2 \(100%\)/);
   });
 });

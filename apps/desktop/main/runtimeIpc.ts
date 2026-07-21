@@ -9,6 +9,7 @@ import {
   INTERACTION_SESSION_CLOSE_CHANNEL,
   INTERACTION_PARTICIPANT_ADD_CHANNEL,
   INTERACTION_MESSAGE_ADD_CHANNEL,
+  INTERACTION_PROMPT_CHANNEL,
   PERMISSION_REQUEST_CHANNEL,
   PERMISSION_DECIDE_CHANNEL,
   AG_UI_EVENTS_CHANNEL,
@@ -141,6 +142,7 @@ interface RuntimeHealthSource {
   closeInteractionSession: SandcastleBridge["runtime"]["closeInteractionSession"];
   addInteractionParticipant: SandcastleBridge["runtime"]["addInteractionParticipant"];
   addInteractionMessage: SandcastleBridge["runtime"]["addInteractionMessage"];
+  promptInteraction: SandcastleBridge["runtime"]["promptInteraction"];
   requestPermission: SandcastleBridge["runtime"]["requestPermission"];
   decidePermission: SandcastleBridge["runtime"]["decidePermission"];
   agUiEvents: SandcastleBridge["runtime"]["agUiEvents"];
@@ -705,6 +707,7 @@ export const registerRuntimeIpc = (
       | "interaction.session.close"
       | "interaction.participant.add"
       | "interaction.message.add"
+      | "interaction.prompt"
       | "permission.request"
       | "permission.decide"
       | "memory.candidate.create"
@@ -751,6 +754,11 @@ export const registerRuntimeIpc = (
     INTERACTION_MESSAGE_ADD_CHANNEL,
     "interaction.message.add",
     (command) => runtime().addInteractionMessage(command),
+  );
+  registerInteractionCommand(
+    INTERACTION_PROMPT_CHANNEL,
+    "interaction.prompt",
+    (command) => runtime().promptInteraction(command),
   );
   registerInteractionCommand(
     PERMISSION_REQUEST_CHANNEL,

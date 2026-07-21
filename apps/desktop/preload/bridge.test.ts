@@ -51,6 +51,7 @@ import {
   AGENT_CATALOG_INSPECT_CHANNEL,
   AGENT_CATALOG_DISCOVER_CHANNEL,
   AGENT_TEST_CHANNEL,
+  INTERACTION_PROMPT_CHANNEL,
   SKILL_DISCOVERY_INSPECT_CHANNEL,
   SKILL_DISCOVERY_REFRESH_CHANNEL,
   SKILL_DISCOVERY_ENABLE_CHANNEL,
@@ -61,6 +62,38 @@ import { scriptedSkillConfiguration } from "../runtime/testing/skillConfiguratio
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
 describe("Sandcastle preload bridge", () => {
+  it("exposes Interaction Prompt without leaking Electron IPC", async () => {
+    const calls: Array<{ channel: string; payload: unknown }> = [];
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      calls.push({ channel, payload });
+      return {
+        id: "message-1",
+        sessionId: "session-1",
+        participantId: "human-1",
+        kind: "text",
+        content: "你好",
+        createdAt: "2026-07-15T00:00:00.000Z",
+      };
+    });
+
+    await bridge.runtime.promptInteraction({
+      sessionId: "session-1",
+      participantId: "human-1",
+      content: "你好",
+    });
+
+    assert.deepEqual(calls, [
+      {
+        channel: INTERACTION_PROMPT_CHANNEL,
+        payload: {
+          sessionId: "session-1",
+          participantId: "human-1",
+          content: "你好",
+        },
+      },
+    ]);
+  });
+
   it("exposes Agent and independent Skill Catalog commands through preload", async () => {
     const calls: Array<{ channel: string; payload?: unknown }> = [];
     const agentCatalog = {
@@ -239,6 +272,7 @@ describe("Sandcastle preload bridge", () => {
       "closeInteractionSession",
       "addInteractionParticipant",
       "addInteractionMessage",
+      "promptInteraction",
       "requestPermission",
       "decidePermission",
       "agUiEvents",

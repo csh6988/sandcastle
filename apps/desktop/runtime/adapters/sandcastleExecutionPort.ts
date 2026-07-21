@@ -6,7 +6,11 @@ import type { ExecutionFact } from "./scriptedExecutionAdapter.js";
 import { resolve, win32 } from "node:path";
 
 export interface SandcastleExecutionRuntime {
-  readonly resolveAgent: (providerRef: string, model: string) => unknown;
+  readonly resolveAgent: (
+    providerRef: string,
+    model: string,
+    options?: { readonly captureSessions?: boolean },
+  ) => unknown;
   readonly resolveSandbox: (sandboxRef: string) => unknown;
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;
