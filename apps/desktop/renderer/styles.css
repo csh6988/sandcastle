@@ -1097,15 +1097,31 @@ p {
 
 .drawer-close-button {
   align-items: center;
-  border-radius: 999px;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 8px;
+  color: var(--muted);
   display: inline-flex;
-  flex: 0 0 36px;
-  font-size: 24px;
-  height: 36px;
+  flex: 0 0 32px;
+  height: 32px;
   justify-content: center;
-  line-height: 1;
   padding: 0;
-  width: 36px;
+  width: 32px;
+}
+
+.drawer-close-button:hover:not(:disabled) {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.drawer-close-icon {
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+  width: 18px;
 }
 
 .drawer-section,

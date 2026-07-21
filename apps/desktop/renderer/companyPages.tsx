@@ -6014,7 +6014,14 @@ export function PositionDrawerEditor({
           type="button"
           onClick={requestClose}
         >
-          ×
+          <svg
+            aria-hidden="true"
+            className="drawer-close-icon"
+            data-drawer-close-icon
+            viewBox="0 0 20 20"
+          >
+            <path d="m6 6 8 8M14 6l-8 8" />
+          </svg>
         </button>
       </div>
       <section className="drawer-section">
