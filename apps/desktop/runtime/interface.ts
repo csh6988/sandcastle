@@ -883,6 +883,43 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
 
 export type CompanyQuery = z.infer<typeof CompanyQuerySchema>;
 
+export const ActorRefSchema = z.object({
+  type: z.enum([
+    "human",
+    "electron-main",
+    "acp-client",
+    "runtime-worker",
+    "test-driver",
+  ]),
+  id: z.string().trim().min(1),
+  authenticatedBy: z.enum([
+    "local-session",
+    "ipc-token",
+    "acp-connection",
+    "runtime",
+  ]),
+});
+
+export type ActorRef = z.infer<typeof ActorRefSchema>;
+
+export const QueryEnvelopeSchema = z.object({
+  schemaVersion: z.literal(1),
+  requestId: z.string().trim().min(1),
+  principal: ActorRefSchema,
+  consumerId: z.string().trim().min(1),
+  query: CompanyQuerySchema,
+});
+
+export type QueryEnvelope<Query extends CompanyQuery = CompanyQuery> = Omit<
+  z.infer<typeof QueryEnvelopeSchema>,
+  "query"
+> & { readonly query: Query };
+
+export interface QueryResult<View> {
+  readonly view: View;
+  readonly asOfSequence: number;
+}
+
 export type CompanyQueryResult<Query extends CompanyQuery> =
   Query["type"] extends "runtime.health"
     ? RuntimeHealth
@@ -1276,6 +1313,69 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
 
 export type CompanyCommand = z.infer<typeof CompanyCommandSchema>;
 
+export const ProjectUpdateEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("project.update"),
+    projectId: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    goal: z.string().trim().min(1),
+    sharedContext: z.string(),
+    repositoryReferences: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export type EnvelopeCommand = z.infer<
+  typeof ProjectUpdateEnvelopeCommandSchema
+>;
+
+export const CommandEnvelopeSchema = z.object({
+  schemaVersion: z.literal(1),
+  commandId: z.string().trim().min(1),
+  actor: ActorRefSchema,
+  consumerId: z.string().trim().min(1).optional(),
+  expectedRevision: z.number().int().nonnegative().optional(),
+  command: ProjectUpdateEnvelopeCommandSchema,
+});
+
+export type CommandEnvelope<Command extends EnvelopeCommand = EnvelopeCommand> =
+  Omit<z.infer<typeof CommandEnvelopeSchema>, "command"> & {
+    readonly command: Command;
+  };
+
+export interface CommandSucceeded<Value> {
+  readonly status: "succeeded";
+  readonly value: Value;
+  readonly effectIds: readonly string[];
+}
+
+export interface CommandRejected {
+  readonly status: "rejected";
+  readonly error: { readonly code: string; readonly message: string };
+  readonly effectIds: readonly string[];
+}
+
+export type CommandResult<Value = ProjectEditorView> =
+  | CommandSucceeded<Value>
+  | CommandRejected;
+
+export const CommandResultSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("succeeded"),
+    value: z.unknown(),
+    effectIds: z.array(z.string()),
+  }),
+  z.object({
+    status: z.literal("rejected"),
+    error: z.object({ code: z.string(), message: z.string() }),
+    effectIds: z.array(z.string()),
+  }),
+]);
+
+export const QueryResultSchema = z.object({
+  view: z.unknown(),
+  asOfSequence: z.number().int().nonnegative(),
+});
+
 export type CompanyCommandResult<Command extends CompanyCommand> =
   Command["type"] extends "runtime.shutdown"
     ? { readonly stopping: true }
@@ -1370,7 +1470,36 @@ export const EventEnvelopeSchema = z.object({
 
 export type EventEnvelope = z.infer<typeof EventEnvelopeSchema>;
 
-export const RuntimeRequestSchema = z.discriminatedUnion("kind", [
+export const RuntimeRequestSchema = z.union([
+  z
+    .object({
+      id: z.string(),
+      token: z.string().min(1),
+      kind: z.literal("query"),
+      envelope: QueryEnvelopeSchema,
+      query: CompanyQuerySchema.optional(),
+    })
+    .transform((request) => ({
+      ...request,
+      query: request.query ?? request.envelope.query,
+    })),
+  z
+    .object({
+      id: z.string(),
+      token: z.string().min(1),
+      kind: z.literal("command"),
+      envelope: CommandEnvelopeSchema,
+      command: CompanyCommandSchema.optional(),
+    })
+    .transform((request) => ({
+      ...request,
+      command:
+        request.command ??
+        ({
+          ...request.envelope.command,
+          expectedRevision: request.envelope.expectedRevision ?? 0,
+        } as CompanyCommand),
+    })),
   z.object({
     id: z.string(),
     token: z.string().min(1),
@@ -1385,7 +1514,8 @@ export const RuntimeRequestSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export type RuntimeRequest = z.infer<typeof RuntimeRequestSchema>;
+export type RuntimeRequestInput = z.input<typeof RuntimeRequestSchema>;
+export type RuntimeRequest = z.output<typeof RuntimeRequestSchema>;
 
 export const RuntimeErrorSchema = z.object({
   name: z.string().default("RuntimeError"),
@@ -1411,4 +1541,10 @@ export interface CompanyRuntimeClient {
   execute<Command extends CompanyCommand>(
     command: Command,
   ): Promise<CompanyCommandResult<Command>>;
+  queryEnvelope<Query extends CompanyQuery>(
+    envelope: QueryEnvelope<Query>,
+  ): Promise<QueryResult<CompanyQueryResult<Query>>>;
+  executeEnvelope<Command extends EnvelopeCommand>(
+    envelope: CommandEnvelope<Command>,
+  ): Promise<CommandResult<ProjectEditorView>>;
 }

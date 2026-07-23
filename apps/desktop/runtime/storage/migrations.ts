@@ -4,7 +4,7 @@ import {
   pipelineHash,
 } from "../pipeline/canonicalPipeline.js";
 
-export const CURRENT_SCHEMA_VERSION = 23;
+export const CURRENT_SCHEMA_VERSION = 24;
 
 interface CompanyMigration {
   readonly version: number;
@@ -1313,6 +1313,152 @@ const migrations: readonly CompanyMigration[] = [
           last_seen_at TEXT NOT NULL
         ) STRICT;
       `);
+    },
+  },
+  {
+    version: 24,
+    name: "command_envelopes_and_receipts",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS command_deduplication (
+          command_id TEXT PRIMARY KEY,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          authenticated_by TEXT NOT NULL,
+          consumer_id TEXT,
+          schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+          request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+          status TEXT NOT NULL CHECK (status = 'completed'),
+          result_json TEXT NOT NULL,
+          result_hash TEXT NOT NULL CHECK (length(result_hash) = 64),
+          effect_ids_json TEXT NOT NULL,
+          completed_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS runtime_unit_of_work_context (
+          slot INTEGER PRIMARY KEY CHECK (slot = 1),
+          command_id TEXT NOT NULL,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          authenticated_by TEXT NOT NULL,
+          consumer_id TEXT,
+          schema_version INTEGER NOT NULL CHECK (schema_version > 0)
+        ) STRICT;
+      `);
+
+      const auditColumns = new Set(
+        database
+          .prepare("PRAGMA table_info(runtime_audit_records)")
+          .all()
+          .map((column) => (column as { readonly name: string }).name),
+      );
+      for (const column of [
+        "command_id",
+        "actor_type",
+        "actor_id",
+        "authenticated_by",
+        "consumer_id",
+      ]) {
+        if (!auditColumns.has(column)) {
+          database.exec(
+            `ALTER TABLE runtime_audit_records ADD COLUMN ${column} TEXT`,
+          );
+        }
+      }
+
+      const triggers = database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'runtime_%'",
+        )
+        .all() as Array<{ readonly name: string }>;
+      for (const trigger of triggers) {
+        database.exec(`DROP TRIGGER "${trigger.name.replaceAll('"', '""')}"`);
+      }
+
+      const tables = [
+        { table: "projects", entity: "project", id: "NEW.id" },
+        { table: "departments", entity: "department", id: "NEW.id" },
+        { table: "positions", entity: "position", id: "NEW.id" },
+        { table: "ai_members", entity: "ai-member", id: "NEW.id" },
+        {
+          table: "execution_profiles",
+          entity: "execution-profile",
+          id: "NEW.id",
+        },
+        {
+          table: "secret_references",
+          entity: "secret-reference",
+          id: "NEW.id",
+        },
+        { table: "skills", entity: "skill", id: "NEW.id" },
+        { table: "skill_flows", entity: "skill-flow", id: "NEW.id" },
+        {
+          table: "pipeline_drafts",
+          entity: "pipeline-draft",
+          id: "NEW.department_id",
+        },
+        {
+          table: "pipeline_versions",
+          entity: "pipeline-version",
+          id: "NEW.id",
+        },
+        {
+          table: "position_skill_bindings",
+          entity: "position-skill-binding",
+          id: "NEW.position_id || ':' || NEW.skill_id",
+        },
+      ] as const;
+      for (const table of tables) {
+        for (const operation of ["created", "updated", "deleted"] as const) {
+          const timing =
+            operation === "created"
+              ? "INSERT"
+              : operation === "updated"
+                ? "UPDATE"
+                : "DELETE";
+          const reference =
+            operation === "deleted"
+              ? table.id.replaceAll("NEW.", "OLD.")
+              : table.id;
+          const payload = `json_object('entityId', ${reference}, 'operation', '${operation}')`;
+          database.exec(`
+            CREATE TRIGGER runtime_${table.table}_${operation}
+            AFTER ${timing} ON ${table.table}
+            BEGIN
+              INSERT INTO runtime_audit_records(
+                id, action, entity_type, entity_id, run_id, node_run_id,
+                before_json, after_json, created_at, command_id, actor_type,
+                actor_id, authenticated_by, consumer_id
+              ) VALUES (
+                lower(hex(randomblob(16))),
+                'catalog.${table.entity}.${operation}',
+                '${table.entity}',
+                ${reference},
+                NULL,
+                NULL,
+                ${operation === "created" ? "NULL" : payload},
+                ${operation === "deleted" ? "NULL" : payload},
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                (SELECT command_id FROM runtime_unit_of_work_context WHERE slot = 1),
+                (SELECT actor_type FROM runtime_unit_of_work_context WHERE slot = 1),
+                (SELECT actor_id FROM runtime_unit_of_work_context WHERE slot = 1),
+                (SELECT authenticated_by FROM runtime_unit_of_work_context WHERE slot = 1),
+                (SELECT consumer_id FROM runtime_unit_of_work_context WHERE slot = 1)
+              );
+              INSERT INTO runtime_event_outbox(
+                event_id, type, run_id, node_run_id, payload_json, created_at
+              ) VALUES (
+                lower(hex(randomblob(16))),
+                '${table.entity}.${operation}',
+                NULL,
+                NULL,
+                ${payload},
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              );
+            END;
+          `);
+        }
+      }
     },
   },
 ];

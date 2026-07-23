@@ -2,7 +2,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
-import { RuntimeRequestSchema, type RuntimeResponse } from "./interface.js";
+import {
+  RuntimeRequestSchema,
+  type ActorRef,
+  type RuntimeResponse,
+} from "./interface.js";
 import { CompanyCatalogError } from "./catalog/companyCatalog.js";
 import { PipelineConfigurationError } from "./pipeline/pipelineConfiguration.js";
 import { PipelineRuntimeError } from "./pipeline/pipelineRuntime.js";
@@ -25,6 +29,7 @@ import type {
   InteractionExecutionAdapter,
   InteractionExecutionInput,
 } from "./adapters/interactionExecutionAdapter.js";
+import { CompanyCommandError } from "./commandRegistry.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -33,6 +38,8 @@ export interface CompanyRuntimeServerOptions {
   readonly executionAdapter?: ExecutionAdapter;
   readonly interactionExecutionAdapter?: InteractionExecutionAdapter;
   readonly agentHost?: LocalAgentHost;
+  readonly principal?: ActorRef;
+  readonly consumerId?: string;
 }
 
 export interface CompanyRuntimeServerHandle {
@@ -74,6 +81,14 @@ export const startCompanyRuntimeServer = async (
     throw error;
   }
   const startedAt = new Date().toISOString();
+  const principal =
+    options.principal ??
+    ({
+      type: "electron-main",
+      id: "desktop-main",
+      authenticatedBy: "ipc-token",
+    } satisfies ActorRef);
+  const consumerId = options.consumerId ?? "desktop-window-1";
   let server: Server | null = null;
   let closing: Promise<void> | null = null;
   let resolveClosed!: () => void;
@@ -329,6 +344,38 @@ export const startCompanyRuntimeServer = async (
                 name: "RuntimeAuthenticationError",
                 code: "UNAUTHENTICATED",
                 message: "Runtime IPC authentication failed.",
+              },
+            });
+            return;
+          }
+          if ("envelope" in request) {
+            if (request.kind === "command") {
+              const result = database.commandRegistry.execute({
+                ...request.envelope,
+                actor: principal,
+                consumerId,
+              });
+              sendResponse(socket, {
+                id: request.id,
+                ok: true,
+                result,
+              });
+              return;
+            }
+            if (request.envelope.query.type !== "project.inspect") {
+              throw new Error(
+                `Verified QueryEnvelope does not support ${request.envelope.query.type} in T01.`,
+              );
+            }
+            const view = database.projectConfiguration.inspect(
+              request.envelope.query.projectId,
+            );
+            sendResponse(socket, {
+              id: request.id,
+              ok: true,
+              result: {
+                view,
+                asOfSequence: database.eventSequence(),
               },
             });
             return;
@@ -948,7 +995,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeInteractionError ||
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
-                error instanceof RuntimeMemoryError
+                error instanceof RuntimeMemoryError ||
+                error instanceof CompanyCommandError
                   ? error.code
                   : "PROTOCOL_ERROR",
               message:
@@ -960,7 +1008,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeInteractionError ||
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
-                error instanceof RuntimeMemoryError
+                error instanceof RuntimeMemoryError ||
+                error instanceof CompanyCommandError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,
             },

@@ -207,7 +207,7 @@ describe("Company database migrations", () => {
     const database = openCompanyDatabase(companyDir);
 
     try {
-      assert.equal(database.schemaVersion(), 23);
+      assert.equal(database.schemaVersion(), 24);
       const inspected = new DatabaseSync(database.path);
       try {
         assert.deepEqual(
@@ -244,6 +244,7 @@ describe("Company database migrations", () => {
             { version: 21, name: "local_agent_detection_results" },
             { version: 22, name: "position_default_agent_bindings" },
             { version: 23, name: "local_skill_discovery_catalog" },
+            { version: 24, name: "command_envelopes_and_receipts" },
           ],
         );
         assert.equal(
@@ -252,7 +253,7 @@ describe("Company database migrations", () => {
               user_version: number;
             }
           ).user_version,
-          23,
+          24,
         );
         assert.deepEqual(
           inspected
@@ -275,15 +276,23 @@ describe("Company database migrations", () => {
             .prepare(
               `SELECT name FROM sqlite_schema
                WHERE type = 'table'
-                 AND name IN ('runtime_audit_records', 'runtime_event_outbox', 'runtime_event_cursors')
+                 AND name IN (
+                   'command_deduplication',
+                   'runtime_audit_records',
+                   'runtime_event_outbox',
+                   'runtime_event_cursors',
+                   'runtime_unit_of_work_context'
+                 )
                ORDER BY name`,
             )
             .all()
             .map((row) => ({ ...row })),
           [
+            { name: "command_deduplication" },
             { name: "runtime_audit_records" },
             { name: "runtime_event_cursors" },
             { name: "runtime_event_outbox" },
+            { name: "runtime_unit_of_work_context" },
           ],
         );
       } finally {
@@ -291,6 +300,64 @@ describe("Company database migrations", () => {
       }
     } finally {
       database.close();
+    }
+  });
+
+  it("upgrades a schema version 23 database with command receipt and trigger context storage", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    current.close();
+
+    const versionTwentyThree = new DatabaseSync(databasePath);
+    removeCatalogAuditTriggers(versionTwentyThree);
+    versionTwentyThree.exec(`
+      DROP TABLE command_deduplication;
+      DROP TABLE runtime_unit_of_work_context;
+      ALTER TABLE runtime_audit_records DROP COLUMN command_id;
+      ALTER TABLE runtime_audit_records DROP COLUMN actor_type;
+      ALTER TABLE runtime_audit_records DROP COLUMN actor_id;
+      ALTER TABLE runtime_audit_records DROP COLUMN authenticated_by;
+      ALTER TABLE runtime_audit_records DROP COLUMN consumer_id;
+      UPDATE schema_metadata SET value = '23' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 24;
+      PRAGMA user_version = 23;
+    `);
+    versionTwentyThree.close();
+
+    const migrated = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(migrated.schemaVersion(), 24);
+      const inspected = new DatabaseSync(migrated.path);
+      try {
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT name FROM sqlite_schema
+               WHERE type = 'table'
+                 AND name IN ('command_deduplication', 'runtime_unit_of_work_context')
+               ORDER BY name`,
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            { name: "command_deduplication" },
+            { name: "runtime_unit_of_work_context" },
+          ],
+        );
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name = 'runtime_projects_updated'",
+            )
+            .get() !== undefined,
+          true,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      migrated.close();
     }
   });
 
@@ -356,7 +423,7 @@ describe("Company database migrations", () => {
 
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(database.schemaVersion(), 23);
+      assert.equal(database.schemaVersion(), 24);
       assert.equal(
         database.catalog.inspectDepartment("existing-department").name,
         "Existing",
@@ -418,7 +485,7 @@ describe("Company database migrations", () => {
     try {
       const pipeline =
         migrated.pipelineConfiguration.inspect("software-rnd").published;
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       assert.equal(
         pipeline?.hash,
         "bceeae6c19bab660551f35f602d07bab10c6a93388556346cc19f6fbb748acdb",
@@ -462,7 +529,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       assert.deepEqual(migrated.projectConfiguration.inspect(project.id), {
         id: project.id,
         name: "Existing Project",
@@ -501,7 +568,7 @@ describe("Company database migrations", () => {
     const migrated = openCompanyDatabase(companyDir);
     try {
       const configuration = migrated.skillConfiguration.inspect("software-rnd");
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       assert.equal(configuration.revision, 0);
       assert.equal(configuration.activeSkills.length, 7);
       assert.equal(configuration.skillFlows.length, 5);
@@ -537,7 +604,7 @@ describe("Company database migrations", () => {
         (position) => position.id === "software-engineer",
       );
 
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       assert.equal(department.revision, 0);
       assert.deepEqual(department.inputArtifactContracts, []);
       assert.deepEqual(department.outputArtifactContracts, []);
@@ -578,7 +645,7 @@ describe("Company database migrations", () => {
       const departmentAfter =
         migrated.catalog.inspectDepartment("software-rnd");
 
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       assert.deepEqual(after.published, before.published);
       assert.deepEqual(after.history, before.history);
       assert.deepEqual(
@@ -626,7 +693,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -706,7 +773,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -757,7 +824,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.equal(
@@ -794,7 +861,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 23);
+      assert.equal(migrated.schemaVersion(), 24);
       const inspected = new DatabaseSync(migrated.path);
       try {
         const table = inspected
@@ -825,14 +892,14 @@ describe("Company database migrations", () => {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '24');
-      PRAGMA user_version = 24;
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '25');
+      PRAGMA user_version = 25;
     `);
     future.close();
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Unsupported company database schema version 24/,
+      /Unsupported company database schema version 25/,
     );
 
     const inspected = new DatabaseSync(databasePath);
@@ -845,7 +912,7 @@ describe("Company database migrations", () => {
             )
             .get() as { value: string }
         ).value,
-        "24",
+        "25",
       );
       assert.equal(
         (
@@ -853,7 +920,7 @@ describe("Company database migrations", () => {
             user_version: number;
           }
         ).user_version,
-        24,
+        25,
       );
       assert.equal(
         inspected
@@ -877,7 +944,7 @@ describe("Company database backups", () => {
     const backup = await database.backup();
     database.close();
 
-    assert.equal(backup.schemaVersion, 23);
+    assert.equal(backup.schemaVersion, 24);
     assert.equal(existsSync(backup.path), true);
     if (process.platform !== "win32") {
       assert.equal(statSync(backup.path).mode & 0o777, 0o600);
@@ -888,7 +955,7 @@ describe("Company database backups", () => {
 
     const restored = openCompanyDatabase(companyDir);
     try {
-      assert.equal(restored.schemaVersion(), 23);
+      assert.equal(restored.schemaVersion(), 24);
     } finally {
       restored.close();
     }

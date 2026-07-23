@@ -54,6 +54,10 @@ import {
   openSkillCatalog,
   type SkillCatalog,
 } from "../skill/skillDiscovery.js";
+import {
+  openCompanyCommandRegistry,
+  type CompanyCommandRegistry,
+} from "../commandRegistry.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -68,7 +72,9 @@ export interface CompanyDatabase {
   readonly diagnostics: RuntimeDiagnostics;
   readonly agentCatalog: AgentCatalog;
   readonly skillCatalog: SkillCatalog;
+  readonly commandRegistry: CompanyCommandRegistry;
   readonly schemaVersion: () => number;
+  readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
   readonly close: () => void;
 }
@@ -111,6 +117,11 @@ export const openCompanyDatabase = (
     skillConfiguration,
   );
   const projectConfiguration = openProjectConfiguration(database);
+  const commandRegistry = openCompanyCommandRegistry(
+    database,
+    projectConfiguration,
+    options.clock,
+  );
   const pipelineConfiguration = openPipelineConfiguration(
     database,
     skillConfiguration,
@@ -154,6 +165,7 @@ export const openCompanyDatabase = (
     diagnostics,
     agentCatalog,
     skillCatalog,
+    commandRegistry,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")
@@ -163,6 +175,14 @@ export const openCompanyDatabase = (
         throw new Error("Company database schema version is invalid.");
       }
       return version;
+    },
+    eventSequence: () => {
+      const row = database
+        .prepare(
+          "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM runtime_event_outbox",
+        )
+        .get() as { readonly sequence: number };
+      return Number(row.sequence);
     },
     backup: () => createCompanyDatabaseBackup(database, companyDir),
     close: () => database.close(),

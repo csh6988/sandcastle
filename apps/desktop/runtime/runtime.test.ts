@@ -34,7 +34,7 @@ describe("Company Runtime", () => {
       const health = await client.query({ type: "runtime.health" });
 
       assert.equal(health.status, "ok");
-      assert.equal(health.schemaVersion, 23);
+      assert.equal(health.schemaVersion, 24);
       assert.equal(health.pid, process.pid);
       assert.equal(
         existsSync(join(companyDir, ".sandcastle", "company.sqlite")),
@@ -301,7 +301,7 @@ describe("Company Runtime", () => {
         type: "runtime.backup",
       });
 
-      assert.equal(created.schemaVersion, 23);
+      assert.equal(created.schemaVersion, 24);
       assert.equal(existsSync(created.path), true);
       assert.equal(
         created.path.startsWith(join(companyDir, ".sandcastle", "backups")),
@@ -767,6 +767,118 @@ describe("Company Runtime", () => {
         ).repositoryReferences,
         updated.repositoryReferences,
       );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("executes project.update with a transactional receipt and verified envelopes", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+      principal: {
+        type: "electron-main",
+        id: "desktop-main",
+        authenticatedBy: "ipc-token",
+      },
+      consumerId: "desktop-window-1",
+    });
+
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const project = await client.execute({
+        type: "project.create",
+        name: "Checkout",
+        goal: "Ship checkout",
+      });
+      const envelope = {
+        schemaVersion: 1 as const,
+        commandId: "project-update-over-real-runtime",
+        actor: {
+          type: "human" as const,
+          id: "untrusted-renderer-claim",
+          authenticatedBy: "local-session" as const,
+        },
+        consumerId: "untrusted-renderer-consumer",
+        expectedRevision: 0,
+        command: {
+          type: "project.update" as const,
+          projectId: project.id,
+          name: "Checkout Platform",
+          goal: "Ship resilient checkout",
+          sharedContext: "Preserve payment contracts.",
+          repositoryReferences: ["/work/checkout"],
+        },
+      };
+
+      const first = await client.executeEnvelope(envelope);
+      const replay = await client.executeEnvelope({
+        ...envelope,
+        actor: {
+          type: "human",
+          id: "different-untrusted-claim",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "different-untrusted-consumer",
+      });
+      const inspected = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "inspect-updated-project",
+        principal: {
+          type: "human",
+          id: "untrusted-renderer-claim",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "untrusted-renderer-consumer",
+        query: { type: "project.inspect", projectId: project.id },
+      });
+
+      assert.deepEqual(replay, first);
+      assert.equal(first.status, "succeeded");
+      assert.equal(first.value.revision, 1);
+      assert.equal(inspected.view.name, "Checkout Platform");
+      assert.ok(inspected.asOfSequence >= 1);
+
+      const reused = await client.executeEnvelope({
+        ...envelope,
+        command: { ...envelope.command, name: "Conflicting input" },
+      });
+      assert.equal(reused.status, "rejected");
+      assert.equal(reused.error.code, "COMMAND_ID_REUSE");
+
+      const sqlite = new DatabaseSync(
+        join(companyDir, ".sandcastle", "company.sqlite"),
+      );
+      try {
+        assert.deepEqual(
+          {
+            ...sqlite
+              .prepare(
+                `SELECT actor_type AS actorType,
+                        actor_id AS actorId,
+                        authenticated_by AS authenticatedBy,
+                        consumer_id AS consumerId
+                   FROM command_deduplication
+                  WHERE command_id = ?`,
+              )
+              .get(envelope.commandId),
+          },
+          {
+            actorType: "electron-main",
+            actorId: "desktop-main",
+            authenticatedBy: "ipc-token",
+            consumerId: "desktop-window-1",
+          },
+        );
+      } finally {
+        sqlite.close();
+      }
     } finally {
       await runtime.close();
     }
@@ -1593,7 +1705,7 @@ describe("Company Runtime", () => {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '24');
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '25');
     `);
     database.close();
 
@@ -1604,7 +1716,7 @@ describe("Company Runtime", () => {
           companyDir,
           token: "valid-token",
         }),
-      /Unsupported company database schema version 24/,
+      /Unsupported company database schema version 25/,
     );
 
     assert.equal(

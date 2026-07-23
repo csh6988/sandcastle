@@ -24,6 +24,14 @@ export interface ProjectConfiguration {
     readonly sharedContext: string;
     readonly repositoryReferences: readonly string[];
   }) => ProjectEditorView;
+  readonly updateInTransaction: (input: {
+    readonly projectId: string;
+    readonly expectedRevision: number;
+    readonly name: string;
+    readonly goal: string;
+    readonly sharedContext: string;
+    readonly repositoryReferences: readonly string[];
+  }) => ProjectEditorView;
   readonly archive: (input: {
     readonly projectId: string;
     readonly expectedRevision: number;
@@ -84,67 +92,73 @@ export const openProjectConfiguration = (
     });
   };
 
+  const updateInTransaction: ProjectConfiguration["updateInTransaction"] = (
+    input,
+  ) => {
+    const repositoryReferences = input.repositoryReferences.map((reference) =>
+      reference.trim(),
+    );
+    if (
+      repositoryReferences.some((reference) => reference.length === 0) ||
+      new Set(repositoryReferences).size !== repositoryReferences.length
+    ) {
+      throw new ProjectConfigurationError(
+        "PROJECT_CONFIGURATION_INVALID",
+        "Project repository references must be non-empty and unique.",
+      );
+    }
+
+    const current = database
+      .prepare("SELECT revision FROM projects WHERE id = ?")
+      .get(input.projectId) as { readonly revision: number } | undefined;
+    if (!current) {
+      throw new Error(`Project ${input.projectId} was not found.`);
+    }
+    const currentRevision = Number(current.revision);
+    if (currentRevision !== input.expectedRevision) {
+      throw new ProjectConfigurationError(
+        "VERSION_CONFLICT",
+        `Project revision ${input.expectedRevision} does not match current revision ${currentRevision}.`,
+      );
+    }
+
+    database
+      .prepare(
+        `UPDATE projects
+              SET name = ?,
+                  goal = ?,
+                  shared_context = ?,
+                  revision = revision + 1
+            WHERE id = ?`,
+      )
+      .run(input.name, input.goal, input.sharedContext, input.projectId);
+    database
+      .prepare("DELETE FROM project_repository_references WHERE project_id = ?")
+      .run(input.projectId);
+    const insertReference = database.prepare(
+      `INSERT INTO project_repository_references(
+           project_id, repository_ref, sort_order
+         ) VALUES (?, ?, ?)`,
+    );
+    repositoryReferences.forEach((reference, index) => {
+      insertReference.run(input.projectId, reference, index);
+    });
+    return inspect(input.projectId);
+  };
+
   return {
     inspect,
+    updateInTransaction,
     update: (input) => {
-      const repositoryReferences = input.repositoryReferences.map((reference) =>
-        reference.trim(),
-      );
-      if (
-        repositoryReferences.some((reference) => reference.length === 0) ||
-        new Set(repositoryReferences).size !== repositoryReferences.length
-      ) {
-        throw new ProjectConfigurationError(
-          "PROJECT_CONFIGURATION_INVALID",
-          "Project repository references must be non-empty and unique.",
-        );
-      }
-
       database.exec("BEGIN IMMEDIATE");
       try {
-        const current = database
-          .prepare("SELECT revision FROM projects WHERE id = ?")
-          .get(input.projectId) as { readonly revision: number } | undefined;
-        if (!current) {
-          throw new Error(`Project ${input.projectId} was not found.`);
-        }
-        const currentRevision = Number(current.revision);
-        if (currentRevision !== input.expectedRevision) {
-          throw new ProjectConfigurationError(
-            "VERSION_CONFLICT",
-            `Project revision ${input.expectedRevision} does not match current revision ${currentRevision}.`,
-          );
-        }
-
-        database
-          .prepare(
-            `UPDATE projects
-                SET name = ?,
-                    goal = ?,
-                    shared_context = ?,
-                    revision = revision + 1
-              WHERE id = ?`,
-          )
-          .run(input.name, input.goal, input.sharedContext, input.projectId);
-        database
-          .prepare(
-            "DELETE FROM project_repository_references WHERE project_id = ?",
-          )
-          .run(input.projectId);
-        const insertReference = database.prepare(
-          `INSERT INTO project_repository_references(
-             project_id, repository_ref, sort_order
-           ) VALUES (?, ?, ?)`,
-        );
-        repositoryReferences.forEach((reference, index) => {
-          insertReference.run(input.projectId, reference, index);
-        });
+        const result = updateInTransaction(input);
         database.exec("COMMIT");
+        return result;
       } catch (error) {
         database.exec("ROLLBACK");
         throw error;
       }
-      return inspect(input.projectId);
     },
     archive: (input) => {
       database.exec("BEGIN IMMEDIATE");

@@ -30,13 +30,22 @@ import {
   RuntimeAuditRecordSchema,
   RuntimeEventRecordSchema,
   RuntimeResponseSchema,
+  CommandResultSchema,
+  QueryResultSchema,
+  ProjectUpdateEnvelopeCommandSchema,
   SkillConfigurationViewSchema,
+  type ActorRef,
+  type CommandEnvelope,
+  type CommandResult,
   type CompanyCommand,
   type CompanyCommandResult,
   type CompanyQuery,
   type CompanyQueryResult,
   type CompanyRuntimeClient,
-  type RuntimeRequest,
+  type EnvelopeCommand,
+  type QueryEnvelope,
+  type QueryResult,
+  type RuntimeRequestInput,
   type RuntimeResponse,
 } from "./interface.js";
 
@@ -57,12 +66,12 @@ export interface CompanyRuntimeConnection {
 }
 
 export interface RuntimeRequestTransport {
-  request(request: RuntimeRequest): Promise<RuntimeResponse>;
+  request(request: RuntimeRequestInput): Promise<RuntimeResponse>;
 }
 
 const sendRequest = async (
   connection: CompanyRuntimeConnection,
-  request: RuntimeRequest,
+  request: RuntimeRequestInput,
 ): Promise<RuntimeResponse> =>
   new Promise((resolve, reject) => {
     const socket = createConnection(connection.address);
@@ -75,8 +84,14 @@ const sendRequest = async (
       reject(error);
     };
 
+    const commandType =
+      request.kind === "command"
+        ? "envelope" in request
+          ? request.envelope.command.type
+          : request.command.type
+        : undefined;
     const longRunningCommand =
-      request.kind === "command" &&
+      commandType !== undefined &&
       [
         "run.execute-ready",
         "run.pause",
@@ -84,7 +99,7 @@ const sendRequest = async (
         "run.cancel",
         "agent.catalog.discover",
         "agent.test",
-      ].includes(request.command.type);
+      ].includes(commandType);
     socket.setTimeout(
       longRunningCommand ? 0 : (connection.timeoutMs ?? 5_000),
       () => {
@@ -135,7 +150,7 @@ export const createLocalRuntimeTransport = (
 
 const requestResult = async (
   transport: RuntimeRequestTransport,
-  request: RuntimeRequest,
+  request: RuntimeRequestInput,
 ): Promise<unknown> => {
   const response = RuntimeResponseSchema.parse(
     await transport.request(request),
@@ -155,16 +170,46 @@ const requestResult = async (
 export const createCompanyRuntimeClientFromTransport = (
   transport: RuntimeRequestTransport,
   token = "scripted-runtime",
+  context: {
+    readonly actor?: ActorRef;
+    readonly consumerId?: string;
+  } = {},
 ): CompanyRuntimeClient => ({
   query: async <Query extends CompanyQuery>(
     query: Query,
   ): Promise<CompanyQueryResult<Query>> => {
-    const result = await requestResult(transport, {
-      id: randomUUID(),
-      token,
-      kind: "query",
-      query,
-    });
+    const result = await requestResult(
+      transport,
+      query.type === "project.inspect"
+        ? {
+            id: randomUUID(),
+            token,
+            kind: "query",
+            envelope: {
+              schemaVersion: 1,
+              requestId: randomUUID(),
+              principal:
+                context.actor ??
+                ({
+                  type: "test-driver",
+                  id: "runtime-client",
+                  authenticatedBy: "ipc-token",
+                } satisfies ActorRef),
+              consumerId: context.consumerId ?? "runtime-client",
+              query,
+            },
+          }
+        : {
+            id: randomUUID(),
+            token,
+            kind: "query",
+            query,
+          },
+    );
+    const parsedQueryResult = QueryResultSchema.safeParse(result);
+    const queryValue = parsedQueryResult.success
+      ? parsedQueryResult.data.view
+      : result;
     switch (query.type) {
       case "runtime.health":
         return RuntimeHealthSchema.parse(result) as CompanyQueryResult<Query>;
@@ -184,7 +229,7 @@ export const createCompanyRuntimeClientFromTransport = (
         ) as unknown as CompanyQueryResult<Query>;
       case "project.inspect":
         return ProjectEditorViewSchema.parse(
-          result,
+          queryValue,
         ) as CompanyQueryResult<Query>;
       case "departments.list":
         return CompanyDepartmentSchema.array().parse(
@@ -256,12 +301,59 @@ export const createCompanyRuntimeClientFromTransport = (
   execute: async <Command extends CompanyCommand>(
     command: Command,
   ): Promise<CompanyCommandResult<Command>> => {
-    const result = await requestResult(transport, {
-      id: randomUUID(),
-      token,
-      kind: "command",
-      command,
-    });
+    const rawResult = await requestResult(
+      transport,
+      command.type === "project.update"
+        ? {
+            id: randomUUID(),
+            token,
+            kind: "command",
+            envelope: {
+              schemaVersion: 1,
+              commandId: randomUUID(),
+              actor:
+                context.actor ??
+                ({
+                  type: "test-driver",
+                  id: "runtime-client",
+                  authenticatedBy: "ipc-token",
+                } satisfies ActorRef),
+              consumerId: context.consumerId ?? "runtime-client",
+              expectedRevision: command.expectedRevision,
+              command: ProjectUpdateEnvelopeCommandSchema.parse({
+                type: command.type,
+                projectId: command.projectId,
+                name: command.name,
+                goal: command.goal,
+                sharedContext: command.sharedContext,
+                repositoryReferences: command.repositoryReferences,
+              }),
+            },
+          }
+        : {
+            id: randomUUID(),
+            token,
+            kind: "command",
+            command,
+          },
+    );
+    const parsedCommandResult = CommandResultSchema.safeParse(rawResult);
+    if (
+      command.type === "project.update" &&
+      parsedCommandResult.success &&
+      parsedCommandResult.data.status === "rejected"
+    ) {
+      throw new RuntimeClientError(
+        parsedCommandResult.data.error.code,
+        parsedCommandResult.data.error.message,
+      );
+    }
+    const result =
+      command.type === "project.update" &&
+      parsedCommandResult.success &&
+      parsedCommandResult.data.status === "succeeded"
+        ? parsedCommandResult.data.value
+        : rawResult;
     if (command.type === "project.create") {
       return CompanyProjectSchema.parse(
         result,
@@ -413,6 +505,50 @@ export const createCompanyRuntimeClientFromTransport = (
       "Runtime shutdown response was invalid.",
     );
   },
+  queryEnvelope: async <Query extends CompanyQuery>(
+    envelope: QueryEnvelope<Query>,
+  ): Promise<QueryResult<CompanyQueryResult<Query>>> => {
+    const raw = await requestResult(transport, {
+      id: randomUUID(),
+      token,
+      kind: "query",
+      envelope,
+    });
+    const parsed = QueryResultSchema.parse(raw);
+    if (envelope.query.type !== "project.inspect") {
+      throw new RuntimeClientError(
+        "PROTOCOL_ERROR",
+        "T01 only supports project.inspect QueryEnvelope reads.",
+      );
+    }
+    return {
+      view: ProjectEditorViewSchema.parse(
+        parsed.view,
+      ) as CompanyQueryResult<Query>,
+      asOfSequence: parsed.asOfSequence,
+    };
+  },
+  executeEnvelope: async <Command extends EnvelopeCommand>(
+    envelope: CommandEnvelope<Command>,
+  ): Promise<CommandResult<import("./interface.js").ProjectEditorView>> => {
+    const raw = await requestResult(transport, {
+      id: randomUUID(),
+      token,
+      kind: "command",
+      envelope,
+    });
+    const parsed = CommandResultSchema.safeParse(raw);
+    if (parsed.success) {
+      return parsed.data as CommandResult<
+        import("./interface.js").ProjectEditorView
+      >;
+    }
+    return {
+      status: "succeeded",
+      value: ProjectEditorViewSchema.parse(raw),
+      effectIds: [],
+    };
+  },
 });
 
 export const createCompanyRuntimeClient = (
@@ -421,4 +557,12 @@ export const createCompanyRuntimeClient = (
   createCompanyRuntimeClientFromTransport(
     createLocalRuntimeTransport(connection),
     connection.token,
+    {
+      actor: {
+        type: "electron-main",
+        id: "desktop-main",
+        authenticatedBy: "ipc-token",
+      },
+      consumerId: "desktop-window-1",
+    },
   );
