@@ -11,6 +11,7 @@ import {
   openCompanyCommandRegistry,
 } from "./commandRegistry.js";
 import { openProjectConfiguration } from "./project/projectConfiguration.js";
+import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -22,6 +23,104 @@ const actor = {
 };
 
 describe("Company Runtime command registry", () => {
+  it("persists an idempotent ACP Permission decision, receipt, and registry-valid events in one unit of work", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+    try {
+      const project = database.catalog.createProject({
+        name: "Checkout",
+        goal: "Ship checkout",
+      });
+      const session = database.interaction.createSession({
+        projectId: project.id,
+        mode: "consultation",
+      });
+      const permission = database.interaction.requestPermission({
+        sessionId: session.id,
+        scope: "repository.write",
+      });
+      const envelope = {
+        schemaVersion: 1 as const,
+        commandId: "acp:editor-1:permission:event-permission-1",
+        actor: {
+          type: "acp-client" as const,
+          id: "editor-1",
+          authenticatedBy: "acp-connection" as const,
+        },
+        consumerId: "acp:editor-1",
+        command: {
+          type: "permission.decide" as const,
+          permissionId: permission.id,
+          expectedStatus: "pending" as const,
+          decision: "denied" as const,
+        },
+      };
+
+      const first = database.commandRegistry.execute(envelope);
+      const replay = database.commandRegistry.execute(envelope);
+
+      assert.deepEqual(replay, first);
+      assert.equal(first.status, "succeeded");
+      assert.equal(first.value.status, "denied");
+      assert.equal(first.value.decisionCommandId, envelope.commandId);
+      const events = database.events
+        .readAfter(0, 100)
+        .filter((event) => event.type.startsWith("permission."));
+      assert.deepEqual(
+        events.map((event) => ({
+          type: event.type,
+          registryVersion: event.registryVersion,
+          projectId: event.projectId,
+          sessionId: event.sessionId,
+          permissionRequestId: event.permissionRequestId,
+        })),
+        [
+          {
+            type: "permission.requested",
+            registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
+            projectId: project.id,
+            sessionId: session.id,
+            permissionRequestId: permission.id,
+          },
+          {
+            type: "permission.decided",
+            registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
+            projectId: project.id,
+            sessionId: session.id,
+            permissionRequestId: permission.id,
+          },
+        ],
+      );
+
+      const inspected = new DatabaseSync(database.path);
+      try {
+        assert.equal(
+          (
+            inspected
+              .prepare(
+                "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+              )
+              .get(envelope.commandId) as { readonly count: number }
+          ).count,
+          1,
+        );
+        assert.equal(
+          (
+            inspected
+              .prepare(
+                "SELECT COUNT(*) AS count FROM runtime_unit_of_work_context",
+              )
+              .get() as { readonly count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      database.close();
+    }
+  });
+
   it("replays a completed project.update before checking the current revision", () => {
     const database = openCompanyDatabase(tempCompanyDir());
     try {

@@ -1427,6 +1427,98 @@ describe("Company Runtime", () => {
     }
   });
 
+  it("maps a dedicated local ACP token to its trusted principal and durable consumer", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "desktop-token",
+      principal: {
+        type: "electron-main",
+        id: "desktop-main",
+        authenticatedBy: "ipc-token",
+      },
+      consumerId: "desktop-window-1",
+      trustedConnections: [
+        {
+          token: "acp-token",
+          principal: {
+            type: "acp-client",
+            id: "editor-1",
+            authenticatedBy: "acp-connection",
+          },
+          consumerId: "acp:editor-1",
+        },
+      ],
+    });
+
+    try {
+      const desktop = createCompanyRuntimeClient({
+        address,
+        token: "desktop-token",
+      });
+      await desktop.execute({
+        type: "project.create",
+        name: "Checkout",
+        goal: "Ship checkout",
+      });
+      const acp = createCompanyRuntimeClient({
+        address,
+        token: "acp-token",
+      });
+      await assert.rejects(
+        () =>
+          acp.execute({
+            type: "project.create",
+            name: "Forbidden",
+            goal: "Must not bypass the ACP facade",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "FORBIDDEN",
+      );
+      const subscription = await acp.openSubscription();
+      const batch = await acp.readSubscription({
+        ...subscription,
+        limit: 100,
+      });
+      await acp.execute({
+        type: "ack-runtime-events",
+        sequence: batch.nextSequence,
+        subscriptionGeneration: subscription.subscriptionGeneration,
+      });
+      await acp.closeSubscription(subscription);
+
+      const sqlite = new DatabaseSync(
+        join(companyDir, ".sandcastle", "company.sqlite"),
+      );
+      try {
+        const cursor = sqlite
+          .prepare(
+            `SELECT consumer_id AS consumerId,
+                    owner_principal_json AS ownerPrincipalJson
+               FROM runtime_event_cursors WHERE consumer_id = ?`,
+          )
+          .get("acp:editor-1") as {
+          readonly consumerId: string;
+          readonly ownerPrincipalJson: string;
+        };
+        assert.equal(cursor.consumerId, "acp:editor-1");
+        assert.deepEqual(JSON.parse(cursor.ownerPrincipalJson), {
+          type: "acp-client",
+          id: "editor-1",
+          authenticatedBy: "acp-connection",
+        });
+      } finally {
+        sqlite.close();
+      }
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("serves the typed department.inspect read model through the real Runtime", async () => {
     const companyDir = tempCompanyDir();
     const address = companyRuntimeAddress(companyDir);

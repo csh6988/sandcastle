@@ -31,6 +31,8 @@ import {
   type InteractionTurnView,
   RunSupervisionViewSchema,
   type RunSupervisionView,
+  PermissionRequestViewSchema,
+  type PermissionRequestView,
 } from "./interface.js";
 import {
   ProjectConfigurationError,
@@ -558,6 +560,314 @@ const executeInteractionPrompt = (
       if (!rejection) throw error;
       database.exec("ROLLBACK TO interaction_prompt");
       database.exec("RELEASE interaction_prompt");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    if (
+      error instanceof Error &&
+      (("errcode" in error && error.errcode === 5) ||
+        /database (?:is )?(?:locked|busy)/i.test(error.message))
+    ) {
+      throw new CompanyCommandError(
+        "STORE_BUSY",
+        "Company database is busy; retry the same Command ID.",
+      );
+    }
+    throw error;
+  }
+};
+
+const executePermissionDecision = (
+  database: DatabaseSync,
+  pipelineRuntime: PipelineRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<PermissionRequestView> => {
+  if (envelope.command.type !== "permission.decide") {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Permission Decision command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<PermissionRequestView>;
+      }
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<PermissionRequestView>;
+    }
+
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+
+    let result: CommandResult<PermissionRequestView>;
+    database.exec("SAVEPOINT permission_decision");
+    try {
+      const value = pipelineRuntime.decidePermissionInTransaction({
+        ...envelope.command,
+        actor: envelope.actor,
+        commandId: envelope.commandId,
+      });
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      database.exec("RELEASE permission_decision");
+      result = {
+        status: "succeeded",
+        value: PermissionRequestViewSchema.parse(value),
+        effectIds,
+      };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO permission_decision");
+      database.exec("RELEASE permission_decision");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    if (
+      error instanceof Error &&
+      (("errcode" in error && error.errcode === 5) ||
+        /database (?:is )?(?:locked|busy)/i.test(error.message))
+    ) {
+      throw new CompanyCommandError(
+        "STORE_BUSY",
+        "Company database is busy; retry the same Command ID.",
+      );
+    }
+    throw error;
+  }
+};
+
+const executeInteractionTurnCancellation = (
+  database: DatabaseSync,
+  interaction: RuntimeInteraction,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<InteractionTurnView> => {
+  if (envelope.command.type !== "interaction.turn.cancel") {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not an Interaction Turn cancellation command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<InteractionTurnView>;
+      }
+      const replay = CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<InteractionTurnView>;
+      return replay.status === "succeeded"
+        ? { ...replay, value: interaction.inspectTurn(replay.value.id) }
+        : replay;
+    }
+
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+
+    let result: CommandResult<InteractionTurnView>;
+    database.exec("SAVEPOINT interaction_turn_cancel");
+    try {
+      const value = interaction.requestTurnCancellationInTransaction({
+        sessionId: envelope.command.sessionId,
+        turnId: envelope.command.turnId,
+        actor: envelope.actor,
+        commandId: envelope.commandId,
+      });
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      database.exec("RELEASE interaction_turn_cancel");
+      result = {
+        status: "succeeded",
+        value: InteractionTurnViewSchema.parse(value),
+        effectIds,
+      };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO interaction_turn_cancel");
+      database.exec("RELEASE interaction_turn_cancel");
       result = { status: "rejected", error: rejection, effectIds: [] };
     }
 
@@ -2148,6 +2458,38 @@ export const openCompanyCommandRegistry = (
       return executeInteractionPrompt(
         database,
         interaction,
+        envelope,
+        typeof artifactRegistryOrClock === "function"
+          ? artifactRegistryOrClock
+          : clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type === "interaction.turn.cancel") {
+      if (!interaction) {
+        throw new CompanyCommandError(
+          "INTERACTION_RUNTIME_UNAVAILABLE",
+          "Interaction Runtime is unavailable for Turn cancellation.",
+        );
+      }
+      return executeInteractionTurnCancellation(
+        database,
+        interaction,
+        envelope,
+        typeof artifactRegistryOrClock === "function"
+          ? artifactRegistryOrClock
+          : clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type === "permission.decide") {
+      if (!pipelineRuntime) {
+        throw new CompanyCommandError(
+          "PERMISSION_RUNTIME_UNAVAILABLE",
+          "Pipeline Runtime is unavailable for Permission decisions.",
+        );
+      }
+      return executePermissionDecision(
+        database,
+        pipelineRuntime,
         envelope,
         typeof artifactRegistryOrClock === "function"
           ? artifactRegistryOrClock

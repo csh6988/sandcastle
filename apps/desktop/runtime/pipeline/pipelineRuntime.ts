@@ -319,6 +319,13 @@ export interface PipelineRuntime {
     readonly actor: ActorRef;
     readonly commandId: string;
   }) => PermissionRequestView;
+  readonly decidePermissionInTransaction: (input: {
+    readonly permissionId: string;
+    readonly expectedStatus: "pending";
+    readonly decision: "approved" | "denied";
+    readonly actor: ActorRef;
+    readonly commandId: string;
+  }) => PermissionRequestView;
   readonly inspectRun: (runId: string) => DepartmentRunView;
   readonly listRuns: (input?: {
     readonly projectId?: string;
@@ -7779,7 +7786,7 @@ export const openPipelineRuntime = (
     return inspectRun(input.runId);
   };
 
-  const decidePermission = (input: {
+  const decidePermissionInTransaction = (input: {
     readonly permissionId: string;
     readonly expectedStatus: "pending";
     readonly decision: "approved" | "denied";
@@ -7792,15 +7799,12 @@ export const openPipelineRuntime = (
         "Runtime Permission handling is unavailable.",
       );
     }
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      const permission =
-        options.interaction.decidePermissionInTransaction(input);
-      if (permission.runId && permission.nodeRunId) {
-        const now = clock().toISOString();
-        const waiting = database
-          .prepare(
-            `SELECT node_runs.status AS nodeStatus,
+    const permission = options.interaction.decidePermissionInTransaction(input);
+    if (permission.runId && permission.nodeRunId) {
+      const now = clock().toISOString();
+      const waiting = database
+        .prepare(
+          `SELECT node_runs.status AS nodeStatus,
                     node_attempts.id AS attemptId,
                     node_attempts.status AS attemptStatus
                FROM node_runs
@@ -7812,123 +7816,136 @@ export const openPipelineRuntime = (
                    WHERE latest.node_run_id = node_runs.id
                 )
               WHERE node_runs.id = ? AND node_runs.run_id = ?`,
-          )
-          .get(permission.nodeRunId, permission.runId) as
-          | {
-              readonly nodeStatus: string;
-              readonly attemptId: string;
-              readonly attemptStatus: string;
-            }
-          | undefined;
-        if (waiting?.nodeStatus === "waiting-permission") {
-          if (permission.status === "approved") {
-            const resetAttempt = database
-              .prepare(
-                `UPDATE node_attempts
+        )
+        .get(permission.nodeRunId, permission.runId) as
+        | {
+            readonly nodeStatus: string;
+            readonly attemptId: string;
+            readonly attemptStatus: string;
+          }
+        | undefined;
+      if (waiting?.nodeStatus === "waiting-permission") {
+        if (permission.status === "approved") {
+          const resetAttempt = database
+            .prepare(
+              `UPDATE node_attempts
                     SET status = 'ready', lease_id = NULL, lease_owner = NULL,
                         lease_expires_at = NULL, failure_code = NULL,
                         failure_message = NULL, recoverable = 0,
                         completed_at = NULL
                   WHERE id = ? AND status = 'running'`,
-              )
-              .run(waiting.attemptId);
-            const resetNode = database
-              .prepare(
-                `UPDATE node_runs
+            )
+            .run(waiting.attemptId);
+          const resetNode = database
+            .prepare(
+              `UPDATE node_runs
                     SET status = 'ready', failure_code = NULL,
                         failure_message = NULL, updated_at = ?
                   WHERE id = ? AND status = 'waiting-permission'`,
-              )
-              .run(now, permission.nodeRunId);
-            const resetRun = database
-              .prepare(
-                `UPDATE department_runs
+            )
+            .run(now, permission.nodeRunId);
+          const resetRun = database
+            .prepare(
+              `UPDATE department_runs
                     SET status = 'running', revision = revision + 1,
                         updated_at = ?
                   WHERE id = ? AND status = 'running'`,
-              )
-              .run(now, permission.runId);
-            if (
-              resetAttempt.changes !== 1 ||
-              resetNode.changes !== 1 ||
-              resetRun.changes !== 1
-            ) {
-              throw new PipelineRuntimeError(
-                "PERMISSION_STATE_INVALID",
-                `Permission ${permission.id} changed before execution could resume.`,
-              );
-            }
-            appendRuntimeMutation({
-              action: "node.permission-approved",
-              entityType: "node-run",
-              entityId: permission.nodeRunId,
-              eventType: "node.status.changed",
-              runId: permission.runId,
-              nodeRunId: permission.nodeRunId,
-              before: { status: "waiting-permission" },
-              after: { status: "ready", permissionId: permission.id },
-              createdAt: now,
-            });
-          } else {
-            const failAttempt = database
-              .prepare(
-                `UPDATE node_attempts
+            )
+            .run(now, permission.runId);
+          if (
+            resetAttempt.changes !== 1 ||
+            resetNode.changes !== 1 ||
+            resetRun.changes !== 1
+          ) {
+            throw new PipelineRuntimeError(
+              "PERMISSION_STATE_INVALID",
+              `Permission ${permission.id} changed before execution could resume.`,
+            );
+          }
+          appendRuntimeMutation({
+            action: "node.permission-approved",
+            entityType: "node-run",
+            entityId: permission.nodeRunId,
+            eventType: "node.status.changed",
+            runId: permission.runId,
+            nodeRunId: permission.nodeRunId,
+            before: { status: "waiting-permission" },
+            after: { status: "ready", permissionId: permission.id },
+            createdAt: now,
+          });
+        } else {
+          const failAttempt = database
+            .prepare(
+              `UPDATE node_attempts
                     SET status = 'failed', failure_code = 'PERMISSION_DENIED',
                         failure_message = ?, recoverable = 0, completed_at = ?
                   WHERE id = ? AND status = 'running'`,
-              )
-              .run(
-                `Permission ${permission.scope} was denied.`,
-                now,
-                waiting.attemptId,
-              );
-            const failNode = database
-              .prepare(
-                `UPDATE node_runs
+            )
+            .run(
+              `Permission ${permission.scope} was denied.`,
+              now,
+              waiting.attemptId,
+            );
+          const failNode = database
+            .prepare(
+              `UPDATE node_runs
                     SET status = 'failed', failure_code = 'PERMISSION_DENIED',
                         failure_message = ?, updated_at = ?
                   WHERE id = ? AND status = 'waiting-permission'`,
-              )
-              .run(
-                `Permission ${permission.scope} was denied.`,
-                now,
-                permission.nodeRunId,
-              );
-            const failRun = database
-              .prepare(
-                `UPDATE department_runs
+            )
+            .run(
+              `Permission ${permission.scope} was denied.`,
+              now,
+              permission.nodeRunId,
+            );
+          const failRun = database
+            .prepare(
+              `UPDATE department_runs
                     SET status = 'failed', revision = revision + 1,
                         updated_at = ?
                   WHERE id = ? AND status = 'running'`,
-              )
-              .run(now, permission.runId);
-            if (
-              failAttempt.changes !== 1 ||
-              failNode.changes !== 1 ||
-              failRun.changes !== 1
-            ) {
-              throw new PipelineRuntimeError(
-                "PERMISSION_STATE_INVALID",
-                `Permission ${permission.id} changed before denial could be applied.`,
-              );
-            }
-            appendRuntimeMutation({
-              action: "node.permission-denied",
-              entityType: "node-run",
-              entityId: permission.nodeRunId,
-              eventType: "node.failed",
-              runId: permission.runId,
-              nodeRunId: permission.nodeRunId,
-              before: { status: "waiting-permission" },
-              after: {
-                status: "failed",
-                failure: { code: "PERMISSION_DENIED", scope: permission.scope },
-              },
-              createdAt: now,
-            });
+            )
+            .run(now, permission.runId);
+          if (
+            failAttempt.changes !== 1 ||
+            failNode.changes !== 1 ||
+            failRun.changes !== 1
+          ) {
+            throw new PipelineRuntimeError(
+              "PERMISSION_STATE_INVALID",
+              `Permission ${permission.id} changed before denial could be applied.`,
+            );
           }
+          appendRuntimeMutation({
+            action: "node.permission-denied",
+            entityType: "node-run",
+            entityId: permission.nodeRunId,
+            eventType: "node.failed",
+            runId: permission.runId,
+            nodeRunId: permission.nodeRunId,
+            before: { status: "waiting-permission" },
+            after: {
+              status: "failed",
+              failure: { code: "PERMISSION_DENIED", scope: permission.scope },
+            },
+            createdAt: now,
+          });
         }
       }
+    }
+    return permission;
+  };
+
+  const decidePermission = (input: {
+    readonly permissionId: string;
+    readonly expectedStatus: "pending";
+    readonly decision: "approved" | "denied";
+    readonly actor: ActorRef;
+    readonly commandId: string;
+  }): PermissionRequestView => {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const permission = decidePermissionInTransaction(input);
       database.exec("COMMIT");
       return permission;
     } catch (error) {
@@ -7967,6 +7984,7 @@ export const openPipelineRuntime = (
     retryApproval,
     retryNode,
     decidePermission,
+    decidePermissionInTransaction,
     inspectRun,
     listRuns,
     auditRecords,

@@ -139,6 +139,13 @@ export interface RuntimeInteraction {
   readonly dispatchInteractionTurnCancellation: (
     turnId: string,
   ) => Promise<void>;
+  readonly requestTurnCancellationInTransaction: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly actor: ActorRef;
+    readonly commandId: string;
+  }) => InteractionTurnView;
+  readonly cancelTurn: (turnId: string) => Promise<InteractionTurnView>;
   readonly reconcilePendingTurns: () => Promise<number>;
   readonly prepareForShutdown: () => Promise<void>;
   readonly inspectTurn: (turnId: string) => InteractionTurnView;
@@ -209,6 +216,8 @@ export const openRuntimeInteraction = (
     readonly runId?: string | null;
     readonly nodeRunId?: string | null;
     readonly sessionId: string;
+    readonly projectId?: string;
+    readonly permissionRequestId?: string;
     readonly payload: unknown;
     readonly createdAt: string;
     readonly actor?: ActorRef;
@@ -259,6 +268,31 @@ export const openRuntimeInteraction = (
         actor?.id ?? null,
         actor?.authenticatedBy ?? null,
       );
+    if (input.permissionRequestId) {
+      if (!options.events || !input.projectId) {
+        throw new RuntimeInteractionError(
+          "RUNTIME_EVENTS_UNAVAILABLE",
+          "Permission mutations require the Runtime Event outbox.",
+        );
+      }
+      options.events.append({
+        type: input.eventType,
+        scope: {
+          companyId: "company",
+          projectId: input.projectId,
+          ...(input.runId ? { runId: input.runId } : {}),
+          ...(input.nodeRunId ? { nodeRunId: input.nodeRunId } : {}),
+          sessionId: input.sessionId,
+          permissionRequestId: input.permissionRequestId,
+          ...((input.commandId ?? commandContext?.commandId)
+            ? { commandId: input.commandId ?? commandContext!.commandId }
+            : {}),
+        },
+        payload: input.payload,
+        timestamp: input.createdAt,
+      });
+      return;
+    }
     database
       .prepare(
         `INSERT INTO runtime_event_outbox(
@@ -1238,7 +1272,7 @@ export const openRuntimeInteraction = (
               `UPDATE interaction_turns
                   SET status = ?, terminal_execution_fact_id = ?,
                       failure_code = ?, failure_message = ?, completed_at = ?
-                WHERE id = ? AND status = 'running'`,
+                WHERE id = ? AND status IN ('running', 'reconciling')`,
             )
             .run(
               status,
@@ -1355,6 +1389,55 @@ export const openRuntimeInteraction = (
       activeTurns.delete(turnId);
       resolveDone();
     }
+  };
+
+  const requestTurnCancellationInTransaction: RuntimeInteraction["requestTurnCancellationInTransaction"] =
+    (input) => {
+      const turn = readTurn(input.turnId);
+      if (turn.sessionId !== input.sessionId) {
+        throw new RuntimeInteractionError(
+          "INTERACTION_TURN_NOT_FOUND",
+          `Interaction Turn ${input.turnId} was not found in Session ${input.sessionId}.`,
+        );
+      }
+      const actorIsVerified =
+        (input.actor.type === "human" &&
+          input.actor.authenticatedBy === "local-session") ||
+        (input.actor.type === "acp-client" &&
+          input.actor.authenticatedBy === "acp-connection");
+      if (!actorIsVerified) {
+        throw new RuntimeInteractionError(
+          "INTERACTION_CANCEL_ACTOR_INVALID",
+          "Turn cancellation requires a verified Human or ACP Client actor.",
+        );
+      }
+      const participant = database
+        .prepare(
+          `SELECT id FROM session_participants
+            WHERE session_id = ? AND participant_type = 'human'
+              AND participant_ref = ? LIMIT 1`,
+        )
+        .get(input.sessionId, input.actor.id);
+      if (!participant) {
+        throw new RuntimeInteractionError(
+          "INTERACTION_TURN_NOT_FOUND",
+          `Interaction Turn ${input.turnId} was not found in Session ${input.sessionId}.`,
+        );
+      }
+      if (
+        turn.status === "completed" ||
+        turn.status === "failed" ||
+        turn.status === "cancelled" ||
+        turn.status === "interrupted"
+      ) {
+        return turn;
+      }
+      return requestInteractionTurnCancellationInTransaction(turn.id);
+    };
+
+  const cancelTurn: RuntimeInteraction["cancelTurn"] = async (turnId) => {
+    await dispatchInteractionTurnCancellation(turnId);
+    return readTurn(turnId);
   };
 
   const reconcilePendingTurns: RuntimeInteraction["reconcilePendingTurns"] =
@@ -1839,11 +1922,11 @@ export const openRuntimeInteraction = (
       database
         .prepare(
           `UPDATE execution_leases
-                SET cancel_requested = 1, released_at = COALESCE(released_at, ?)
+                SET cancel_requested = 1
               WHERE target_kind = 'interaction-turn' AND target_id = ?
                 AND released_at IS NULL`,
         )
-        .run(now, turnId);
+        .run(turnId);
       appendMutation({
         action: "interaction.turn.cancel.request",
         entityType: "interaction-turn",
@@ -1997,6 +2080,8 @@ export const openRuntimeInteraction = (
       runId: input.session.runId,
       nodeRunId: input.session.nodeRunId,
       sessionId: input.session.id,
+      projectId: input.session.projectId,
+      permissionRequestId: id,
       payload: { permissionId: id, scope: input.scope, status: "pending" },
       createdAt: input.now,
     });
@@ -2162,6 +2247,8 @@ export const openRuntimeInteraction = (
         runId: current.runId,
         nodeRunId: current.nodeRunId,
         sessionId: current.sessionId,
+        projectId: readSession(current.sessionId).projectId,
+        permissionRequestId: current.id,
         payload: {
           permissionId: current.id,
           scope: current.scope,
@@ -2305,6 +2392,8 @@ export const openRuntimeInteraction = (
     cancelInteractionTurn,
     requestInteractionTurnCancellationInTransaction,
     dispatchInteractionTurnCancellation,
+    requestTurnCancellationInTransaction,
+    cancelTurn,
     reconcilePendingTurns,
     prepareForShutdown,
     inspectTurn: readTurn,

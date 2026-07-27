@@ -113,6 +113,144 @@ describe("Runtime Interaction", () => {
     }
   });
 
+  it("cancels an ACP-owned Turn only after the Adapter records a terminal cancelled Fact", async () => {
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let releaseCancellation!: () => void;
+    const cancellationRequested = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const adapter: ModelOnlyInteractionExecutionAdapter = {
+      capabilities: {
+        reattachRunningOperation: false,
+        strongExecutionFence: false,
+        enforceNoSideEffects: {
+          mechanism: "model-only",
+          mechanismVersion: "1",
+          policySchemaHash: MODEL_ONLY_CONTEXT_SCHEMA_HASH,
+        },
+      },
+      execute: async (request, sink) => {
+        notifyStarted();
+        await cancellationRequested;
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-cancelled",
+          ordinal: 1,
+          kind: "cancelled",
+          schemaVersion: 1,
+          payload: { code: "MODEL_CANCELLED" },
+          evidenceRefs: [],
+        });
+        return {
+          operationKey: request.operationKey,
+          terminalExecutionFactId: receipt.executionFactId,
+          status: "cancelled",
+          evidenceRefs: [],
+        };
+      },
+      cancel: async () => {
+        releaseCancellation();
+        return "cancelled";
+      },
+    };
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      interactionExecutionAdapter: adapter,
+    });
+    try {
+      const project = database.catalog.createProject({
+        name: "Checkout",
+        goal: "Ship checkout",
+      });
+      const session = database.interaction.createSession({
+        projectId: project.id,
+        mode: "consultation",
+      });
+      const client = database.interaction.addParticipant({
+        sessionId: session.id,
+        participantType: "human",
+        participantRef: "editor-1",
+        role: "requester",
+      });
+      database.interaction.addParticipant({
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: "product-planner-member",
+        role: "assistant",
+      });
+      const prompt = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "acp:editor-1:prompt:prompt-1",
+        actor: {
+          type: "acp-client",
+          id: "editor-1",
+          authenticatedBy: "acp-connection",
+        },
+        consumerId: "acp:editor-1",
+        command: {
+          type: "interaction.prompt",
+          sessionId: session.id,
+          participantId: client.id,
+          content: "Wait for cancellation.",
+        },
+      });
+      assert.equal(prompt.status, "succeeded");
+      if (prompt.status !== "succeeded") assert.fail("Prompt should succeed.");
+      const executing = database.interaction.executeTurn(prompt.value.id);
+      await started;
+
+      const cancellationEnvelope = {
+        schemaVersion: 1 as const,
+        commandId: `acp:editor-1:cancel:${prompt.value.id}`,
+        actor: {
+          type: "acp-client" as const,
+          id: "editor-1",
+          authenticatedBy: "acp-connection" as const,
+        },
+        consumerId: "acp:editor-1",
+        command: {
+          type: "interaction.turn.cancel" as const,
+          sessionId: session.id,
+          turnId: prompt.value.id,
+        },
+      };
+      const requested = database.commandRegistry.execute(cancellationEnvelope);
+      assert.equal(requested.status, "succeeded");
+      assert.equal(
+        database.interaction.inspectTurn(prompt.value.id).status,
+        "reconciling",
+      );
+
+      const cancelled = await database.interaction.cancelTurn(prompt.value.id);
+      await executing;
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(
+        database.interaction.inspectSession(session.id).session.status,
+        "active",
+      );
+      const replayed = database.commandRegistry.execute(cancellationEnvelope);
+      assert.equal(replayed.status, "succeeded");
+      if (replayed.status !== "succeeded") {
+        assert.fail("Cancellation replay should succeed.");
+      }
+      assert.equal(replayed.value.status, "cancelled");
+      assert.equal(
+        database.events
+          .readAfter(0, 100)
+          .some(
+            (event) =>
+              event.type === "interaction.turn.cancelled" &&
+              event.interactionTurnId === prompt.value.id,
+          ),
+        true,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("executes one replay-safe model-only consultation Turn through fenced Execution Facts", async () => {
     let receivedContext:
       | Parameters<

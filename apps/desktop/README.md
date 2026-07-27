@@ -155,6 +155,25 @@ Environment overrides (mainly for scripted runs):
   Production Execution Adapter in the Runtime child process. The default is
   the deterministic Scripted adapter used by smoke tests.
 
+### Local ACP stdio facade
+
+The ACP facade is local-only and communicates with an existing Company Runtime
+over its Unix socket or named pipe. Configure the Runtime and `npm run acp`
+process with the same `SANDCASTLE_COMPANY_RUNTIME_ADDRESS`,
+`SANDCASTLE_COMPANY_RUNTIME_ACP_TOKEN`, and `SANDCASTLE_ACP_CLIENT_ID`. The
+Runtime registers that dedicated token as an `acp-client` principal and derives
+the durable event consumer as `acp:<client-id>`; ACP payloads cannot override
+the actor or consumer identity.
+
+Client-to-Agent methods are `initialize`, `session/new`, `session/load`,
+`session/prompt`, and the `session/cancel` notification. `session/update` is an
+Agent-to-Client notification, while `session/request_permission` is an
+Agent-to-Client request whose JSON-RPC response is persisted as the existing
+Runtime Permission decision. Updates are acknowledged only after successful
+stdio delivery, so reconnecting with the same client ID replays any unacknowledged
+Runtime Events without creating a second state store or invoking a Sandbox
+provider directly.
+
 ## Layout
 
 - `renderer/` — Company-first React UI (Vite).

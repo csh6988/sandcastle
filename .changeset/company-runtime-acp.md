@@ -2,4 +2,4 @@
 "@chenshaohui6988/sandcastle": minor
 ---
 
-Add a local ACP stdio facade that maps sessions, prompts, permissions, and updates onto the authenticated Company Runtime.
+Expose a bidirectional local ACP stdio facade with session load, durable Runtime Event replay, correlated outbound permissions, and stable Interaction Turn cancellation through the authenticated Company Runtime.

@@ -3015,10 +3015,27 @@ export const NodeAttemptCancelEnvelopeCommandSchema = z
   })
   .strict();
 
-export const InteractionTurnCancelEnvelopeCommandSchema = z
+export const PermissionDecideEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("permission.decide"),
+    permissionId: z.string().trim().min(1),
+    expectedStatus: z.literal("pending"),
+    decision: z.enum(["approved", "denied"]),
+  })
+  .strict();
+
+export const SupervisionInteractionTurnCancelEnvelopeCommandSchema = z
   .object({
     type: z.literal("interaction-turn.cancel"),
     runId: z.string().trim().min(1),
+    turnId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const InteractionTurnCancelEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("interaction.turn.cancel"),
+    sessionId: z.string().trim().min(1),
     turnId: z.string().trim().min(1),
   })
   .strict();
@@ -3277,12 +3294,14 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   ProductGatePromoteEnvelopeCommandSchema,
   InteractionPromptEnvelopeCommandSchema,
   NodeAttemptCancelEnvelopeCommandSchema,
-  InteractionTurnCancelEnvelopeCommandSchema,
+  SupervisionInteractionTurnCancelEnvelopeCommandSchema,
   GovernedInterventionEnvelopeCommandSchema,
   MemoryCandidateProposeEnvelopeCommandSchema,
   MemoryReviewStartEnvelopeCommandSchema,
   MemoryCandidateDecideEnvelopeCommandSchema,
   MemoryEntrySelectForRunEnvelopeCommandSchema,
+  PermissionDecideEnvelopeCommandSchema,
+  InteractionTurnCancelEnvelopeCommandSchema,
   ReviewTopicCreateEnvelopeCommandSchema,
   ReviewFindingSubmitEnvelopeCommandSchema,
   ReviewFindingDispositionEnvelopeCommandSchema,
@@ -3325,27 +3344,31 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
                   | "interaction-turn.cancel"
                   | "run.governed-intervention"
               ? RunSupervisionView
-              : Command["type"] extends
-                    | "memory.candidate.propose"
-                    | "memory.review.start"
-                ? MemoryCandidateView
-                : Command["type"] extends "memory.candidate.decide"
-                  ? MemoryDecisionView
-                  : Command["type"] extends "memory.entry.select-for-run"
-                    ? RunMemorySelectionView
-                    : Command["type"] extends ReviewEnvelopeCommand["type"]
-                      ? ReviewTopicView
-                      : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-                        ? ProductReviewStateView
-                        : Command["type"] extends ProductEnvelopeCommand["type"]
-                          ? ProductDiscoveryView
-                          : Command["type"] extends "artifact.version.register"
-                            ? ArtifactRegistrationView
-                            : Command["type"] extends
-                                  | "artifact.version.finalize"
-                                  | "artifact.version.supersede"
-                              ? ArtifactVersionView
-                              : ProjectEditorView;
+              : Command["type"] extends "interaction.turn.cancel"
+                ? InteractionTurnView
+                : Command["type"] extends "permission.decide"
+                  ? PermissionRequestView
+                  : Command["type"] extends
+                        | "memory.candidate.propose"
+                        | "memory.review.start"
+                    ? MemoryCandidateView
+                    : Command["type"] extends "memory.candidate.decide"
+                      ? MemoryDecisionView
+                      : Command["type"] extends "memory.entry.select-for-run"
+                        ? RunMemorySelectionView
+                        : Command["type"] extends ReviewEnvelopeCommand["type"]
+                          ? ReviewTopicView
+                          : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                            ? ProductReviewStateView
+                            : Command["type"] extends ProductEnvelopeCommand["type"]
+                              ? ProductDiscoveryView
+                              : Command["type"] extends "artifact.version.register"
+                                ? ArtifactRegistrationView
+                                : Command["type"] extends
+                                      | "artifact.version.finalize"
+                                      | "artifact.version.supersede"
+                                  ? ArtifactVersionView
+                                  : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

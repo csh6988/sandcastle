@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import {
   RuntimeRequestSchema,
   type ActorRef,
+  type RuntimeRequest,
   type RuntimeResponse,
 } from "./interface.js";
 import { CompanyCatalogError } from "./catalog/companyCatalog.js";
@@ -40,6 +41,11 @@ export interface CompanyRuntimeServerOptions {
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
+  readonly trustedConnections?: readonly {
+    readonly token: string;
+    readonly principal: ActorRef;
+    readonly consumerId: string;
+  }[];
 }
 
 export interface CompanyRuntimeServerHandle {
@@ -53,6 +59,28 @@ const tokenDigest = (token: string): Buffer =>
 
 const tokenMatches = (actual: string, expected: string): boolean =>
   timingSafeEqual(tokenDigest(actual), tokenDigest(expected));
+
+const acpRequestAllowed = (request: RuntimeRequest): boolean => {
+  if (request.kind.startsWith("subscription.")) return true;
+  if (request.kind === "query") {
+    return "envelope" in request
+      ? request.envelope.query.type === "interaction.inspect"
+      : request.query.type === "runtime.health";
+  }
+  if (request.kind === "command") {
+    return "envelope" in request
+      ? [
+          "ack-runtime-events",
+          "interaction.prompt",
+          "interaction.turn.cancel",
+          "permission.decide",
+        ].includes(request.envelope.command.type)
+      : ["interaction.session.create", "interaction.participant.add"].includes(
+          request.command.type,
+        );
+  }
+  return false;
+};
 
 const sendResponse = (
   socket: Socket,
@@ -86,14 +114,30 @@ export const startCompanyRuntimeServer = async (
   await database.pipelineRuntime.reconcilePendingExecutions();
   await database.interaction.reconcilePendingTurns();
   const startedAt = new Date().toISOString();
-  const principal =
-    options.principal ??
-    ({
-      type: "human",
-      id: "local-desktop-user",
-      authenticatedBy: "local-session",
-    } satisfies ActorRef);
-  const consumerId = options.consumerId ?? "desktop-window-1";
+  const trustedConnections = [
+    {
+      token: options.token,
+      principal:
+        options.principal ??
+        ({
+          type: "human",
+          id: "local-desktop-user",
+          authenticatedBy: "local-session",
+        } satisfies ActorRef),
+      consumerId: options.consumerId ?? "desktop-window-1",
+    },
+    ...(options.trustedConnections ?? []),
+  ];
+  if (
+    new Set(trustedConnections.map((connection) => connection.token)).size !==
+    trustedConnections.length
+  ) {
+    database.close();
+    releaseLock();
+    throw new Error(
+      "Company Runtime trusted connection tokens must be unique.",
+    );
+  }
   let server: Server | null = null;
   let closing: Promise<void> | null = null;
   let resolveClosed!: () => void;
@@ -166,7 +210,10 @@ export const startCompanyRuntimeServer = async (
             JSON.parse(requestText.trim()),
           );
           requestId = request.id;
-          if (!tokenMatches(request.token, options.token)) {
+          const trustedConnection = trustedConnections.find((connection) =>
+            tokenMatches(request.token, connection.token),
+          );
+          if (!trustedConnection) {
             sendResponse(socket, {
               id: request.id,
               ok: false,
@@ -174,6 +221,20 @@ export const startCompanyRuntimeServer = async (
                 name: "RuntimeAuthenticationError",
                 code: "UNAUTHENTICATED",
                 message: "Runtime IPC authentication failed.",
+              },
+            });
+            return;
+          }
+          const { principal, consumerId } = trustedConnection;
+          if (principal.type === "acp-client" && !acpRequestAllowed(request)) {
+            sendResponse(socket, {
+              id: request.id,
+              ok: false,
+              error: {
+                name: "RuntimeAuthorizationError",
+                code: "FORBIDDEN",
+                message:
+                  "ACP Client is not authorized for this Runtime request.",
               },
             });
             return;
@@ -242,6 +303,11 @@ export const startCompanyRuntimeServer = async (
                 result.status === "succeeded"
               ) {
                 void database.interaction.executeTurn(result.value.id);
+              } else if (
+                request.envelope.command.type === "interaction.turn.cancel" &&
+                result.status === "succeeded"
+              ) {
+                void database.interaction.cancelTurn(result.value.id);
               }
               if (result.status === "succeeded") {
                 if (
@@ -328,6 +394,8 @@ export const startCompanyRuntimeServer = async (
                     return database.memory.listSelections(query.runId);
                   case "memory.legacy-records.list":
                     return database.memory.listLegacyRecords(query.projectId);
+                  case "interaction.inspect":
+                    return database.interaction.inspectSession(query.sessionId);
                   default:
                     throw new Error(
                       `Verified QueryEnvelope does not support ${query.type}.`,

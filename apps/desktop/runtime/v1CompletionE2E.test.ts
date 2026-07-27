@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { companyRuntimeAddress } from "./address.js";
-import { createAcpStdioFacade } from "./acp.js";
+import { createAcpFacade, type AcpMessage } from "./acp.js";
 import { createCompanyRuntimeClient } from "./client.js";
 import { startCompanyRuntimeServer } from "./server.js";
 import { createScriptedExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
@@ -329,6 +329,17 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
       address,
       companyDir,
       token: "e2e-token",
+      trustedConnections: [
+        {
+          token: "e2e-acp-token",
+          principal: {
+            type: "acp-client",
+            id: "e2e-editor",
+            authenticatedBy: "acp-connection",
+          },
+          consumerId: "acp:e2e-editor",
+        },
+      ],
       executionAdapter: runtimeAdapter,
     });
 
@@ -354,6 +365,17 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         address,
         companyDir,
         token: "e2e-token",
+        trustedConnections: [
+          {
+            token: "e2e-acp-token",
+            principal: {
+              type: "acp-client",
+              id: "e2e-editor",
+              authenticatedBy: "acp-connection",
+            },
+            consumerId: "acp:e2e-editor",
+          },
+        ],
         executionAdapter: runtimeAdapter,
       });
       client = createCompanyRuntimeClient({
@@ -376,28 +398,61 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
       );
       assert.ok(approvalNode);
 
-      const acp = createAcpStdioFacade(client);
-      const sessionResponse = await acp.handle({
+      const acpClient = createCompanyRuntimeClient({
+        address,
+        token: "e2e-acp-token",
+      });
+      const acpMessages: AcpMessage[] = [];
+      let acp!: ReturnType<typeof createAcpFacade>;
+      acp = createAcpFacade({
+        client: acpClient,
+        connection: {
+          clientId: "e2e-editor",
+          consumerId: "acp:e2e-editor",
+        },
+        pollIntervalMs: 1,
+        send: async (message) => {
+          acpMessages.push(message);
+          if (
+            "method" in message &&
+            message.method === "session/request_permission" &&
+            "id" in message
+          ) {
+            await acp.receive({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                outcome: { outcome: "selected", optionId: "approved" },
+              },
+            });
+          }
+        },
+      });
+      const sessionRequestId = "session-new";
+      await acp.receive({
+        jsonrpc: "2.0",
         id: "session-new",
         method: "session/new",
         params: {
           projectId: project.id,
           aiMemberId: "product-planner-member",
-          runId: started.run.id,
-          nodeRunId: approvalNode.id,
         },
       });
-      if (!sessionResponse.result) {
+      const sessionResponse = acpMessages.find(
+        (message) => "id" in message && message.id === sessionRequestId,
+      );
+      if (!sessionResponse || !("result" in sessionResponse)) {
         throw new Error(JSON.stringify(sessionResponse));
       }
-      const sessionId = String(sessionResponse.result.sessionId);
-      const participantId = String(sessionResponse.result.participantId);
-      await acp.handle({
+      const sessionId = String(
+        (sessionResponse.result as { readonly sessionId: string }).sessionId,
+      );
+      await acp.receive({
+        jsonrpc: "2.0",
         id: "session-prompt",
         method: "session/prompt",
         params: {
           sessionId,
-          participantId,
           content: "Please explain the approval evidence.",
         },
       });
@@ -406,22 +461,28 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         sessionId,
         scope: "repository.write",
       });
-      const permissionDecision = await acp.handle({
-        id: "permission-decide",
-        method: "session/request_permission",
-        params: { permissionId: permission.id, decision: "approved" },
-      });
-      assert.equal(permissionDecision.result?.status, "approved");
-      const replay = await acp.handle({
-        id: "session-update",
-        method: "session/update",
-        params: { afterSequence: 0, limit: 100 },
-      });
-      assert.ok(replay.result, JSON.stringify(replay));
-      assert.ok(
-        Array.isArray(
-          (replay.result as { readonly events?: unknown[] }).events,
+      while (
+        (
+          await client.query({ type: "interaction.inspect", sessionId })
+        ).permissions.find((candidate) => candidate.id === permission.id)
+          ?.status === "pending"
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      assert.equal(
+        (
+          await client.query({ type: "interaction.inspect", sessionId })
+        ).permissions.find((candidate) => candidate.id === permission.id)
+          ?.status,
+        "approved",
+      );
+      assert.equal(
+        acpMessages.some(
+          (message) =>
+            "method" in message &&
+            message.method === "session/request_permission",
         ),
+        true,
       );
 
       const changed = await client.execute({
@@ -501,12 +562,12 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         }),
         [],
       );
-      const closed = await acp.handle({
-        id: "session-cancel",
-        method: "session/cancel",
-        params: { sessionId },
-      });
-      assert.equal(closed.result?.status, "closed");
+      await acp.close();
+      assert.equal(
+        (await client.query({ type: "interaction.inspect", sessionId })).session
+          .status,
+        "active",
+      );
 
       const audit = await client.query({
         type: "runtime.audit",
