@@ -1,0 +1,744 @@
+apps/desktop/renderer/icons.tsx
+  0c9d5c72c1684277 1-401
+apps/desktop/runtime/events/outbox.ts
+  b6feead63165a382 1-151
+apps/desktop/runtime/interaction.ts
+  500adcb2efe28bb9 133-134,188-194,1272-1277,1322-1324,1328-1827,2123-2132,2164-2165
+  3266f94c8373fba5 3,93-94,142-148,153-161,163,186,205-206,212-214,225-228,504-519,523-539,541-549,556-572,1828-1870,1873-1984,1998-2015,2028,2031-2032,2035-2042,2072,2076-2079,2157,2159-2160
+  57740ea0eefefad0 1,4-21,34-64,101,125-132,135-136,180-184,187,267-470,769-949,951,954,957-961,964-967,969,971-1080,1082-1095,1102-1271,1278-1321,1325,2080-2092,2105-2122,2133-2150,2162-2163,2166-2170
+apps/desktop/runtime/adapters/scriptedExecutionAdapter.test.ts
+  c957e65619b15f29 1-107
+apps/desktop/runtime/interaction.test.ts
+  500adcb2efe28bb9 9-12,368-474,478-597
+  57740ea0eefefad0 6-8,13,18-61,63-367,475-477,625-642,647-663,670-676,682-686,702-744
+apps/desktop/runtime/adapters/productionExecutionAdapter.ts
+  c957e65619b15f29 7-11,59-62,119-193
+apps/desktop/scripts/electron-runtime-smoke.mjs
+  c957e65619b15f29 7,24-28,35-36,58-98,184,199-217,230-231,236
+apps/desktop/server/shellServer.ts
+  c957e65619b15f29 28-34
+apps/desktop/runtime/runtime.test.ts
+  e587c26d27d35f89 1724-1728,1865-1869
+  2c281947f9d56260 1475,1491
+  b6feead63165a382 704-883
+  9aa5f08e1b49b301 13,230,626,2237,2243,2254-2256
+  1155a86e320cda09 16-19,24-76,78-211,576-580,655-659,671-682,1824-1828,1948-1952
+  500adcb2efe28bb9 1877-1893
+  57740ea0eefefad0 14,1055-1061,1063,1084,1125
+  63f34d72eadd945e 12,241-364
+apps/desktop/runtime/review/reviewRuntime.test.ts
+  c957e65619b15f29 1-906
+.changeset/t09-durable-execution-recovery.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/execution/executionFacts.ts
+  c957e65619b15f29 1-452
+apps/desktop/tests/shellServer.test.ts
+  c957e65619b15f29 43-46
+apps/desktop/runtime/events/subscription.test.ts
+  b6feead63165a382 1-240
+apps/desktop/runtime/storage/migrations.ts
+  3266f94c8373fba5 2030-2148
+  2c281947f9d56260 8,2908-3172
+  500adcb2efe28bb9 2355-2554,2904-2907,3215-3250,3263
+  e587c26d27d35f89 6,16-33,1483-1497,1499-1512,1514-1516,1518-1529,1531-1533,1535-1592,1594-2028,3214,3262,3264-3265
+  9aa5f08e1b49b301 2555-2785
+  45fc69b7c1b76736 2786-2903
+  57740ea0eefefad0 2151-2354
+apps/desktop/preload/index.ts
+  c957e65619b15f29 2-6,10-32
+.changeset/t11-product-review-readiness.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/diagnostics.test.ts
+  c957e65619b15f29 6,40
+apps/desktop/runtime/artifactRegistry.test.ts
+  c957e65619b15f29 2-9,13-14,19-33,35-667,737-741
+apps/desktop/runtime/events/registry.test.ts
+  c957e65619b15f29 1-177
+apps/desktop/runtime/events/registry.ts
+  500adcb2efe28bb9 300,313,641-642
+  b6feead63165a382 1-2,4-13,21-27,31-63,324-350,429,662-719
+  63f34d72eadd945e 30,126-136,562-580,657-661
+  1155a86e320cda09 14-15,20,137-164,208-219,430-446,512-531
+  57740ea0eefefad0 233-267,604-629
+  45fc69b7c1b76736 16,165-207,447-456,458-471,473-511
+  2c281947f9d56260 3,17-19,64-125,351-428,457,472
+  e587c26d27d35f89 220-232,294-299,301-312,314-323,581-600
+  3266f94c8373fba5 268-278,601-603,630-640,643-656
+  9aa5f08e1b49b301 28-29,279-293,532-561
+docs/adr/0040-supervised-multi-role-software-delivery.md
+  c957e65619b15f29 1-3
+docs/agents/desktop-ipc.md
+  c957e65619b15f29 1-61
+apps/desktop/runtime/client.test.ts
+  c957e65619b15f29 109-287
+apps/desktop/main/companyRuntimeSupervisor.test.ts
+  c957e65619b15f29 93-95,103-106,109,115-171,244,340-344,352-355,358-363
+docs/adr/0034-parallel-node-workspace-isolation.md
+  d3487a1528255ca3 3-5
+apps/desktop/runtime/review/reviewRuntime.ts
+  c957e65619b15f29 1-1738
+apps/desktop/runtime/testing/departmentInspectContract.ts
+  c957e65619b15f29 128-144,255-276,290-291,300-301,311-312
+apps/desktop/runtime/pipeline/pipelineConfiguration.ts
+  c957e65619b15f29 12-15,104-116,544-547,557-558,561-590,625-626,635-636,740-752,782-784,786-811
+apps/desktop/runtime/project/technicalReviewRuntime.test.ts
+  c957e65619b15f29 1-1366
+apps/desktop/runtime/events/subscription.ts
+  b6feead63165a382 1-260
+apps/desktop/runtime/events/cursor.ts
+  b6feead63165a382 1-619
+apps/desktop/renderer/companyPages.test.tsx
+  c957e65619b15f29 27-29,31-35,37,39-44,52-463,836,1272-1287,1336-1341,1344,1385-1421,1479-1484,1536-1537,1732,1768-2097,2136,2143,2145-2160,2162-2163,2238,2288-2304,2306,2309-2310,2323,2326-2338
+docs/agents/runtime-events.md
+  c957e65619b15f29 1-41
+apps/desktop/runtime/client.ts
+  e587c26d27d35f89 721
+  b6feead63165a382 44-45,61,360-366,377,561-574,779,784,793-799,803-805,809-832
+  45fc69b7c1b76736 31,202,266-269
+  2c281947f9d56260 5,32,200,203,258-261,270-273,758-775
+  57740ea0eefefad0 14,390-406,416,418-453,456-486,636,641-655
+  9aa5f08e1b49b301 33,204-205,274-281
+  500adcb2efe28bb9 25,310-311
+  63f34d72eadd945e 8-9,206-207,329-333,581-615
+  1155a86e320cda09 30,47-50,199,201,262-263,407-415,417,454-455,510-529,755-757,777
+CONTEXT.md
+  d3487a1528255ca3 46,62,65-92,101-104,241-248,276,280,287-290,307-310,338,341-348,354,357-360,370,374,378,382,393-400,402,405-412,422-427,450,461-465,467,472-476,478,489-498,514,527,539,546,548-549,551,554-560,574-580,595-596,647,651,654-657,659,663,665-668,687,689-692,703-704
+  2c281947f9d56260 453-460,466,468-471
+  45fc69b7c1b76736 434-447
+  7a4ea6243bf74139 505-512,542,544-545,561,563,630-646,648-650,652-653,658,660-662,664,669-686,688,693
+  9aa5f08e1b49b301 543,547
+apps/desktop/main/companyRuntimeSupervisor.ts
+  c957e65619b15f29 17,30-37,239,284,323-327,372-387,416,539-541,861,885-909
+apps/desktop/main/runtimeIpc.test.ts
+  c957e65619b15f29 47-48,56-464,661
+apps/desktop/preload/bridge.ts
+  45fc69b7c1b76736 21,77-78,393-400,855-859,1062-1069,1079
+  fa8017a2497d75ca 1,33-45,163-164,194-294,353-366,743-776,779-805,819-848,879-932,934-1016,1018-1020,1022-1024,1026-1028,1030-1034,1036-1040,1042-1046,1048-1054,1056-1057,1091-1270,1272-1273,1275,1277-1280,1282-1331,1342-1385,1387,1389-1392,1394-1430,1437-1444
+  57740ea0eefefad0 10,53,641,849,1332-1341
+  500adcb2efe28bb9 690
+  e587c26d27d35f89 156,729-733,1431-1436
+  1155a86e320cda09 20,76,390-392,850-854,1060-1061
+  9aa5f08e1b49b301 24,82-83,409-418,1080-1090
+  2c281947f9d56260 22-23,79-81,387-389,401-408,806-818,860-878,1058-1059,1070-1078
+apps/desktop/runtime/product/productReviewRuntime.ts
+  c957e65619b15f29 1-967
+apps/desktop/preload/bridge.test.ts
+  1155a86e320cda09 275
+  fa8017a2497d75ca 58-60,253-259,442-450,452-459,484,862-932,1051-1271
+  45fc69b7c1b76736 276-277,933-982,1043-1047,1049-1050
+  9aa5f08e1b49b301 280-282
+  e587c26d27d35f89 343
+  2c281947f9d56260 274,278-279,983-1042,1048
+  57740ea0eefefad0 72-96,106-116,118-122,128
+apps/desktop/runtime/pipeline/pipelineRuntime.ts
+  c957e65619b15f29 6-22,28,33-36,57-59,99-159,169,201-203,217,238,258-265,273-279,300-303,312,327-329,346-353,376,378-385,388,439-441,445,460,466,468-552,554-557,559-583,716-740,749,818-820,870-879,912-972,981,1000-1028,1035-1046,1089-1106,1109,1164-1168,1257-1259,1271-1272,1306-1322,1550-1552,1585-1589,1603-1605,1609-1641,1643-1659,1662-1665,1667-1730,1732-1746,1752,1754-1788,1791-2138,2156-2234,2239,2304,2348-2349,2352,2365-2369,2371,2375-2377,2386-2469,2481-2487,2530-2531,2559,2587-2588,2602-2603,2631-2678,2699-2701,2755-2768,2794,2817-2818,2826,2899-2905,2931,2946-2947,2957,3028-4172,4181,4183-4203,4206-4210,4214-4215,4217-4222,4225-4230,4232-4233,4237-4244,4299-4388,4406-4408,4412-4413,4541-4548,4554-4557,4563,4565-4575,4643-4653,4666-4677,4923-4924,4929-4938,4963-4989,5013-5033,5076-5081,5116-5143,5151,5156-5165,5169-5178,5190-5206,5218-5220,5233-5243,5251,5254-5257,5260-5261,5264-5266,5273-5310,5447,5449,5525-5567,5575-5576,5607,5631-5642,5659-5660,5676-5756,5829-6291,6293-6323,6325,6327-6328,6330-6350,6352-6364,6366-6395,6428-6497,6499,6552,6732-6770,6780-6781,6783,6785-6812,6829-6835,6868,6876,6884-6889,6891-6901,6999-7001,7007-7082,7103,7105,7107-7108,7160,7196,7260-7417,7419-7424,7432-7434,7440,7442,7449
+apps/desktop/runtime/testing/runContract.ts
+  c957e65619b15f29 10,79
+docs/adr/0041-review-topic-quorum-and-unanimous-pass.md
+  c957e65619b15f29 1-3
+apps/desktop/runtime/storage/sqlite.ts
+  9aa5f08e1b49b301 74-78,108,210-212,313-319,346,371
+  2c281947f9d56260 84-88,107,218-222,329-337,349-350,370
+  1155a86e320cda09 2,69-73,105,117-193,205-209,235-238,305-312,338-344,351,368
+  57740ea0eefefad0 46,198,271-274,345
+  3266f94c8373fba5 269-270,275,297
+  63f34d72eadd945e 39,65-68,104,204,257-259,264-268,367,382
+  e587c26d27d35f89 30,201-203,296,298-300,304
+  45fc69b7c1b76736 79-83,106,213-217,320-328,347-348,369
+apps/desktop/runtime/adapters/interactionExecutionAdapter.test.ts
+  c957e65619b15f29 3-7,9-10,13-22,24-42,48-54,58-69,72-81,84-88,91-93,95-109,113-121,123-134,136-145
+apps/desktop/runtime/product/productReviewRuntime.test.ts
+  c957e65619b15f29 1-818
+apps/desktop/runtime/commandRegistry.ts
+  c957e65619b15f29 6-7,9-11,14-17,19-24,30-57,60-62,80-171,191,212-232,236-1391,1395,1397-1406,1408-1529,1659,1677
+apps/desktop/runtime/product/productRuntime.test.ts
+  c957e65619b15f29 1-849
+apps/desktop/package.json
+  c957e65619b15f29 11-13,42
+apps/desktop/runtime/project/technicalReviewRuntime.ts
+  c957e65619b15f29 1-1658
+apps/desktop/runtime/artifactRegistry.ts
+  c957e65619b15f29 2-24,26-27,36-98,110-114,116,121-152,185-216,244,246-316,329-337,349-419,422-432,436-439,442-461,476-479,503-506,508-512,522-541,543-548,550-556,558-565,568-588,590-1679,1681-1992,2252-2287,2289-2298,2305
+apps/desktop/renderer/styles.css
+  0c9d5c72c1684277 2786-3525,3544-3876
+  35d0072754811d76 1907-1909,3526-3543
+apps/desktop/runtime/entry.ts
+  57740ea0eefefad0 21-26
+.changeset/t08-model-only-consultation.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/v1CompletionE2E.test.ts
+  c957e65619b15f29 11,16-73,181,345
+apps/desktop/scripts/build-preload.mjs
+  c957e65619b15f29 1-16
+plans/v1-ai-software-company-prd.md
+  35d0072754811d76 9,13,15,17-19,23,27,29-37,43-46,49-57,61-70,74,76,80,82,84,88-92,94-101,108-110,113-119,122-128,133,137-149,152-156,158-160,162-164,166-168,170-172,174-177,179-183,185-194,199,204-207,209-210,213-217,219,223-224,226,230,234,238,240,242,244,246,250,252,254,256,258-262,266-272,274,276,278,284-286,291,295-300,304,306,308,312-313,315-316,318,322,324,326-327,330-332,334,336,338-346,348,350-354,357,359-360,362,365-368,370-372,375,381-382,388,390,392,394,396,398-403,405,408-410,412-425,427-428,430-440,443-445,447-464,466,468,470-475,477-478,480-483,485-492,495-519,521-522,524-530,534,543-548,550-553,557,559-560,562-565,567,569,572-573,576,578-581,583,586-587,590-594,601-602,608,614,617,627,630-632,637,639,641-649,651-657,661-662,666-667,670,672-674,676,680-681,683-691,693-699,701-702,705,707-709
+  7a4ea6243bf74139 554-556,558,595,607,636
+  d3487a1528255ca3 5-6,8,47-48,93,150-151,157,161,165,169,173,178,184,195-198,200-203,208,211-212,221-222,228,232,236,248,301,309-311,314,317,320,325,328-329,333,355-356,358,369,378-380,383-385,411,426,429,441-442,446,465,467,469,476,479,484,493-494,520,523,533,535-542,549,561,588-589,596,603-606,609,613,620-622,625,635,658-660,663-665,668-669,671,675,677-679,682,692,700,703-704,706
+apps/desktop/runtime/execution/contract.ts
+  57740ea0eefefad0 3-14,80,87-98,105-127,129-155,157-160,218-220
+  3266f94c8373fba5 1-2,15-79,81-86,99-104,128,156,161-217,221-232
+docs/content/docs/desktop.mdx
+  c957e65619b15f29 35-44
+docs/agents/review-topics.md
+  c957e65619b15f29 1-13
+.changeset/company-runtime-versioned-pipeline-handlers.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/scriptedRuntime.test.ts
+  c957e65619b15f29 16-22,30,100,277-284,421-426,512-517,607-612,622-640,654-655,664-665,751-757,814-821,841,876-881,899-908
+apps/desktop/main/runtimeIpc.ts
+  c957e65619b15f29 58-62,65,86-90,92,95-116,165,200-269,311-563,1141,1181-1185,1189-1202
+plans/v1-ai-software-company-technical-design.md
+  d3487a1528255ca3 5-7,13,53,88,119-128,130-145,147-151,154-157,159-178,184-191,207,217,219-225,245,248-260,262,264-268,270-273,291,304,308-310,322-324,326,330-331,336-344,347-349,351,358,381-383,385-389,391-393,399,401-402,404-406,442,444-445,447,449,454,458,460,462,464,466-469,473,475-477,479,492-495,499-506,510-512,536-544,546-559,565-569,571-575,582,595-596,601,603,605-607,609,613,621,664,668-670,673,675,677,680,683-684,687,696-699,702,711,713-714,719-794,796-799,802-803,810,827,837,843,862-863,870,872,876-882,892-902,909,914-915,917-918,920,926,965-967,974-976,979,984,988,994,996-997,1001-1002,1005,1009,1012-1013,1015,1023,1049,1051-1055,1059,1067-1068,1076-1089,1094-1097,1099-1101,1104,1107-1108,1111-1114,1118,1121-1123,1125,1132,1137-1141,1143-1145,1149,1151-1153,1155-1156,1159,1165-1173,1175,1179,1181-1189,1191,1197-1203,1209,1211,1213-1214,1216-1217,1222,1224-1234,1236-1258,1260-1268,1270-1276,1278-1283,1285-1337,1339,1341,1343,1345,1349-1352,1356,1358,1364,1366,1368,1370,1372-1374,1376,1378,1380,1389-1396,1399,1408,1410-1412,1414,1420,1422,1428-1455,1461,1469-1470,1474,1476-1479,1482-1487,1492,1498-1500,1504,1509-1510,1514,1518,1520,1522,1526,1528,1530,1532,1538-1542,1544-1546,1550,1552,1554,1558-1560,1562,1564,1573,1575-1579,1589-1590,1593-1594,1596,1605,1607-1610,1616-1618,1620-1621,1624-1625
+  1de95b0d62c551cd 9,11,15,17,19-20,22,24,26-43,45-52,54-87,89-116,118,153,158,179-180,182,192-193,195,198-206,208-210,213,215,227-229,232-242,246-247,261,263,269,274-290,292-303,305-307,311-321,325,327-329,332-335,345-346,350,352-354,372-380,384,390,394-398,400,403,407-413,415-430,432,434-438,440,451,453,455-456,471,481,483-491,497,508,513-535,545,560-564,570,576-581,583-587,590-592,594,597-599,611,615-619,623,625-629,631,633,636-642,645,647,650-654,657-661,663,665-667,671-672,674,676,678-679,681-682,685,689,692-695,703-708,712,715-717,804-809,811-825,829,831-833,835,839,841,845-857,860-861,864-867,874-875,883-890,903-908,911-913,916,922,924-925,927-957,960-964,970,972-973,977-978,980,982,986,990,992,995,998-1000,1003-1004,1006-1008,1010-1011,1014,1016-1021,1025-1038,1041-1047,1057,1061,1063,1069-1071,1074,1091,1093,1098,1102,1109-1110,1115-1117,1119-1120,1124,1126,1134,1142,1146-1148,1150,1154,1161,1163,1177,1193,1195,1205,1207,1212,1215,1218,1220,1347,1354,1357,1359-1360,1362,1382,1384-1387,1401,1403,1405-1407,1409,1413,1416,1418,1424,1456-1457,1463,1465,1468,1471-1473,1475,1480-1481,1488-1489,1494,1496,1502,1505,1507,1512,1516,1524,1534,1536,1543,1551,1553,1555-1557,1561,1563,1565-1572,1574,1580-1588,1591-1592,1595,1597-1604,1606,1611-1615,1619,1622-1623
+  7a4ea6243bf74139 355-357,359-371,1426-1427,1458,1462,1466-1467,1490
+.changeset/t12-technical-baseline-promotion.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/adapters/interactionExecutionAdapter.ts
+  c957e65619b15f29 1,3-13,15-23,25,28-82,84-91,93-114,117-125,127,130-141,143-238
+apps/desktop/index.html
+  c957e65619b15f29 6-9
+apps/desktop/runtime/adapters/configuredExecutionAdapter.ts
+  c957e65619b15f29 8-11,29-49
+plans/desktop-shell-ux-refresh-prd.md
+  c957e65619b15f29 5-9
+apps/desktop/runtime/pipeline/pipelineRuntime.test.ts
+  c957e65619b15f29 10-14,16,106-232,317,319,505-545,672,1230-1232,1234-1237,1380,1539-1541,1545,1704,1721-1740,1763-1786,1795-1810,1816,1855,1857,1860-1867,1881-1936,2029-2039,3193-3275,3277-3399,3407,3412,3414-3426,3433-3462,3464-3470,3472-3474,3479,3481,3483-3489,3496-3525,3527-3528,3533,3535-3537,3542-3554,3557-3560,3567-3583,3585-3595,3598-3601,3607,3609-3610,3612-3614,3616-3618,3623,3625-3626,3632,3634-3636,3639-3641,3647-3678,3680-3681,3685,3689-3690,3695,3698-3738,3742,3746-3747,3752,3754-3762,3764-3766,3772-5770
+apps/desktop/runtime/server.ts
+  e587c26d27d35f89 916-930
+  3266f94c8373fba5 611-615
+  57740ea0eefefad0 28,37,76-78,238-243,591-597
+  63f34d72eadd945e 236,258-263,278-289,380-381
+  9aa5f08e1b49b301 274-277,330-333
+  1155a86e320cda09 90-92,268-269,324-325,823-826
+  500adcb2efe28bb9 84-85,111-131,134-135,356-363
+  b6feead63165a382 30,179-215,218-231,251-257,290,294,964-965,978-979
+  2c281947f9d56260 264-267,272-273,320-321,328-329
+  45fc69b7c1b76736 270-271,326-327
+apps/desktop/main/main.ts
+  c957e65619b15f29 5,12,54-55,63-69,211-212,216-238,240,242
+apps/desktop/renderer/companyPages.tsx
+  c957e65619b15f29 17-20,22,41,162,302,308,484,490-502,507,512,517,522,529-537,540-557,568-574,595-750,778,901-903,928,934-938,941,948-958,1035-1057,1098,1107,1124-1145,1152-1157,1162-1168,1300,1307-1310,1317-1321,1446,1462,1477,1482-1496,1526,1573,1596,1598-1602,1614,1627,1638,1650,1659-2277,2280,2283,2329-2334,2345-2368,2389-2447,2455-2456,2458,2468-2469,2481-2504,2511-2515,2518,2532-2562,2564-2569,2571-2572,2577-2582,2585,2589-2721,2723-2725,2731-2788,2863-2887,3018,3023,3044,3047,3094,3099-3333,3343-3345,3484,3486,3526,4103-4105,6378,6411-6413,6417-6420,6422,6513,7588-7590,8108-8115,8129-8133,8201-8248,8251,8263,8793-8801,9280,9284,9290-9294
+apps/desktop/runtime/pipeline/pipelineConfiguration.test.ts
+  c957e65619b15f29 7-10,49,269-270,810-884
+docs/adr/0042-product-gate-scope-and-snapshot-promotion.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/interface.ts
+  2c281947f9d56260 224-438,473-475,478,1406-1414,1845-1848,1865-1868,1964-2014,2174-2222,2508-2566,2808-2813,2817-2821,2854-2876
+  e587c26d27d35f89 1028-1031,1046,1113-1124,1140-1141,1151-1152,1425-1426,1564,1605,1607-1615,1618,2477-2481,3018
+  9aa5f08e1b49b301 439-472,476-477,479-578,583-725,779,1849-1857,2678-2714,2716-2796,2832-2838
+  500adcb2efe28bb9 1306,1318,1447-1539,1557,1577,1581,1889-1893,2434
+  1155a86e320cda09 65-189,1392-1398,1548,1844,1858-1859,1864,2225-2255,2580-2617,2675-2677,2797-2800,2823-2826,2984-2989,2991-3004,3006-3017,3019-3021
+  3266f94c8373fba5 1697-1698
+  b6feead63165a382 1948,2072-2079,2504,2567-2579,2814-2816,2822,2842-2853,2877,2884,2887-2891,2925,2942-2950,3024,3031,3033-3046,3048,3050-3059,3061,3065-3084,3091-3110,3112-3131,3207-3217
+  63f34d72eadd945e 805-877,889-896,904-907,921-935,1911-1914,2016-2047,2069-2071,2839-2841,2951-2967,2969-2983,3005,3064
+  57740ea0eefefad0 1701-1730,1737,1749,2627-2629,2669-2674,2831,2968
+  45fc69b7c1b76736 190-223,579-582,726-778,1399-1405,1415-1417,1860-1863,2618-2626,2630-2668,2715,2801-2807,2827-2830
+.changeset/desktop-ai-factory-ui.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/pipeline/nodeHandlerRegistry.ts
+  c957e65619b15f29 1-124
+docs/agents/execution-recovery.md
+  c957e65619b15f29 1-33
+docs/adr/0028-runtime-events-ag-ui-and-acp-facade.md
+  d3487a1528255ca3 39-43,49-61
+.changeset/t10-review-topic-engine.md
+  c957e65619b15f29 1-5
+apps/desktop/runtime/adapters/scriptedExecutionAdapter.ts
+  c957e65619b15f29 2-10,53,56-57,60-89,94,108-113,119-124,126-168,171-177
+docs/adr/0043-application-identity-and-technical-gate-promotion.md
+  c957e65619b15f29 1-3
+apps/desktop/runtime/skill/skillConfiguration.test.ts
+  c957e65619b15f29 115
+apps/desktop/renderer/App.tsx
+  c957e65619b15f29 18,33,35-42,61-67,77-78,89-90
+README.md
+  c957e65619b15f29 1261
+docs/adr/0031-declarative-department-pipeline-engine.md
+  d3487a1528255ca3 3
+  e587c26d27d35f89 4-5
+apps/desktop/runtime/product/productRuntime.ts
+  c957e65619b15f29 1-888
+apps/desktop/runtime/storage/sqlite.test.ts
+  500adcb2efe28bb9 438
+  2c281947f9d56260 441-444,1348-1396,1402,1408-1409,1415-1417,1430,1438,1494,1504,1584
+  57740ea0eefefad0 85-90,212-215,434-437
+  1155a86e320cda09 21-27,29-45,430-431
+  3266f94c8373fba5 91,216-219,244-281,433,447-460,463-482
+  45fc69b7c1b76736 141-161,440,585-631
+  9aa5f08e1b49b301 110-140,439,539-581
+  e587c26d27d35f89 432
+  63f34d72eadd945e 2,14,20,28,46-63,65,162-184,186,209-210,387,425-429,489,639,657,691-826,889,951,995,1034,1070,1111,1159,1239,1290,1327,1462,1473
+docs/adr/0037-pipeline-runtime-durable-node-leases.md
+  500adcb2efe28bb9 5,8-9
+  3266f94c8373fba5 6-7
+  d3487a1528255ca3 1,3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "fa715587d14a0bd691259681207b33b3036811c9",
+  "prompts": {
+    "060d9b2b15d0e1bd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f42-f512-7460-804d-3d14679561d6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1939,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/0717523dae00b1cc85542dd0910d6009d1eb3d46afeb8227b8d0d445b030c961"
+    },
+    "0c9d5c72c1684277": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8796-3da1-72e0-8d25-ee885e5d1d71",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3018,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ac0ff1967e6ed5d32314469bb129dadc2ca81681cd282c5ed12e628b4ba873d5"
+    },
+    "1155a86e320cda09": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8e2d-cc02-7301-93a4-fa4c28118078",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3614,
+      "total_deletions": 240,
+      "accepted_lines": 3770,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/1fd5b269a2a00f35932db9b82213639ec95dc4170f1d98603b4f48c0c5c7ce51"
+    },
+    "1de95b0d62c551cd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f89c3-2edf-7993-9ac4-d0861a5b2227",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 652,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/6ae2710c2bb9ff64a95af82e924916160bb8972ed2a3545fe0e89ac92606677b"
+    },
+    "2c281947f9d56260": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa284-0aa1-7e02-8370-a28b134119ca",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 5656,
+      "total_deletions": 254,
+      "accepted_lines": 5602,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/c98929b277d2e792c97805d88cf82c0c7089c360577a2f41ac40270313290d0f"
+    },
+    "2f216cc364d192a6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f64c4-0d0a-7af1-a93d-3c7cc4285d46",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 7655,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/575c1de6367b98ef15b9a57f6148deb348de5ef8f70c49e94f07c6a5197d34ee"
+    },
+    "3266f94c8373fba5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f9304-db54-7bb3-bf49-af4e0ff8516d",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3591,
+      "total_deletions": 103,
+      "accepted_lines": 3493,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/5726ed89fc9e7356ab4bece778d11f612215ba7489d453d039404ec7805dd56c"
+    },
+    "35d0072754811d76": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f87d7-ead6-7c00-bbe9-a0403e9b7eca",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 8266,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/326851346d140587dc8b0079d6e64c970c25e0b5e913ee2e94e3518f7ccd376b"
+    },
+    "45fc69b7c1b76736": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa248-4929-7710-ab6a-577453ed4616",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2742,
+      "total_deletions": 109,
+      "accepted_lines": 2617,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/8ab39438fb36531595c6d35753486cccc524625ffac17dc7490d0d5867524b0a"
+    },
+    "498e7d96370dbff2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8396-cc3a-7aa3-b57f-d104dcaed741",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1261,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/77442ce364f74fecc8ed6ed3e1eeaa27e123e98ed21d813138a01f6aff5e3c7c"
+    },
+    "500adcb2efe28bb9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa153-28ec-7030-90e1-9bc4ca965c1b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3567,
+      "total_deletions": 188,
+      "accepted_lines": 3502,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/dc760868be55e6830778544b9018e37abddbb43c78176af4ed3a8189bdf089b9"
+    },
+    "57740ea0eefefad0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f936c-0cf3-7063-a8b3-381b0f779226",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2648,
+      "total_deletions": 778,
+      "accepted_lines": 2446,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/162fb0f487811337122ee7e0d6cbe82ad6d532ae9ba33116f87197358fc93f90"
+    },
+    "63f34d72eadd945e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8dec-35ab-7262-87f6-834b52c13ff4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3493,
+      "total_deletions": 230,
+      "accepted_lines": 3346,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/71cda02e90a1a934c3a2f2110ba71fbdb691bdc15e2ac77732cd73259c824968"
+    },
+    "79963d9b40328cb4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5ebb-448e-70b2-b163-9d463a65f6e6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 664,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a75314f4e1df1a2578a75e7caf385e7e4bc0eabfe13ef50266da5293fd4a7f8d"
+    },
+    "7a4ea6243bf74139": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d77-f1e4-75c2-b29e-0cb22108b81c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 913,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/bf7db6ec7eb4a5d62032e15863843bacb0b1641b264e97544c56700089f047ad"
+    },
+    "88775a0d3c079fb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f600e-6c1a-7533-b6fb-b57c49e689c0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2798,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/6d95a5639de9cbffbea9c9ff28aeed12dbe991fd8b9043295b39f2196221c226"
+    },
+    "8a212f450d89d609": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5a93-68a9-79b1-939d-b2957afe7c81",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 213,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/f87cb6672125133be6b4310f3680ff2ec163d0637d243fcc12863bc1896a93af"
+    },
+    "9aa5f08e1b49b301": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa1b4-8b57-7562-bdf2-22db53346736",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 3718,
+      "total_deletions": 118,
+      "accepted_lines": 3584,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2ecd6ccca279b23616168b0069e750d0caa1cf519aac40f600eb090c69156eaf"
+    },
+    "a07242b1664fed01": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6f5e-5269-7be3-ac69-673a531a5a52",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1483,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e2436db558025662b83089a66e60610c6489b9dccab3508ebd4cd14801cb83e5"
+    },
+    "ac4a74c4aa6a79d9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6382-4929-77d0-accf-1ba7e413a375",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1913,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/7ddaf15e1eaace93e2b850c88d8c7e716be77f93af419f32c6b6ea8366e2cb34"
+    },
+    "b6feead63165a382": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8d98-a2e0-7252-ab00-38ad1c996ead",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2147,
+      "total_deletions": 264,
+      "accepted_lines": 1940,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/8a1a345977d0e8ba3bfebcbb1df45a75bd15ca56091b7ed5d04e8ec42b31a93b"
+    },
+    "b87914d610c1ce70": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f407d-7899-7963-81ae-a02c5a839144",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 226,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/229effee2547afe24033b65bc0d8e3c950a0b75b8ddccc43852f719c66c862cb"
+    },
+    "bbb62571d08f96c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f45fb-d631-7fb2-907c-2f0239a5ae7c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 83,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a8add38c40e063dd7def8a5baf99bcca9d603358781b0694749f03f144512edc"
+    },
+    "c711e4c34d08d863": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5faf-b80b-74b3-b198-38dea949a7f3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3156,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ba0dd600c95033e355a5d2b9d47a7fee1732fe529121a38ab238690aac093ca5"
+    },
+    "c957e65619b15f29": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fa336-b543-79e2-b81b-359dd65a02e0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 26254,
+      "total_deletions": 1168,
+      "accepted_lines": 26254,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/1eca31933684313c64deb470e778019ed1ae692811a152f4e99af3369caf1332"
+    },
+    "ca73052e0401f67e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f29-174c-7460-8361-39f77918f40a",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 655,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/2982a74b6f840de7aecbed4f892eee0d23253ae9249f392aa4ab6bd24f0f22ec"
+    },
+    "d3487a1528255ca3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "a22d0678-5f06-47c1-82db-94f8447bd47b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1022,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/396278a4d229e5bedee19f01632a045e7bf14edcb7faebc716185c559def2365"
+    },
+    "d4d36a89d5d281c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e57-d121-7b00-8de4-c4a99c99607f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 597,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/02fde493b2dcb79b593cc005f21c71ad732aa6dd5d4679109b307f35ed35f827"
+    },
+    "dce84874ab6fd00c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f7a-d3d9-7e83-9fb7-f7e4dc251c23",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 449,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/a236692bd82c4158b7b26a2ab23a92daf15fd672b02cac152ecf49b26a23d025"
+    },
+    "e587c26d27d35f89": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f92c4-7334-7743-862b-c19ac9fd0473",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 2516,
+      "total_deletions": 111,
+      "accepted_lines": 2489,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/e9bb9017c184d04829ed601149997b322d34f79062683989b9bd1bd48a5184de"
+    },
+    "ea1bab22598a95f9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f63be-2293-7ca2-a773-e7dba19e70cd",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3047,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/ed89462e6099cb05d092e401e56fe0d6172af25a25e4c5b004d415d524fcea0f"
+    },
+    "fa087aafc721337b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f68dd-e025-7bc0-b939-bcb81215d240",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 5438,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/4bd541a63443a80d555b5cbcfd19cf5ae594f7f28249b243f29ff1ee86db6351"
+    },
+    "fa8017a2497d75ca": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8dc0-99ae-7340-8f52-df662a30bd18",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Sandcastle Dogfood",
+      "messages": [],
+      "total_additions": 1822,
+      "total_deletions": 380,
+      "accepted_lines": 1788,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/5ca03325639e7fab16487aabce2f004cc68a4f9b8f6dfd7c80d027fe875ef7a1"
+    }
+  }
+}
