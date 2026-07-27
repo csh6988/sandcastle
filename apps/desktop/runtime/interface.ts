@@ -62,6 +62,721 @@ export const ProjectEditorViewSchema = z.object({
 
 export type ProjectEditorView = z.infer<typeof ProjectEditorViewSchema>;
 
+export const ActorRefSchema = z.object({
+  type: z.enum([
+    "human",
+    "electron-main",
+    "acp-client",
+    "runtime-worker",
+    "test-driver",
+  ]),
+  id: z.string().trim().min(1),
+  authenticatedBy: z.enum([
+    "local-session",
+    "ipc-token",
+    "acp-connection",
+    "runtime",
+  ]),
+});
+
+export type ActorRef = z.infer<typeof ActorRefSchema>;
+
+export const ProductProposalContentSchema = z
+  .object({
+    goal: z.string().trim().min(1),
+    users: z.array(z.string().trim().min(1)),
+    scope: z.array(z.string().trim().min(1)),
+    nonGoals: z.array(z.string().trim().min(1)),
+    acceptanceCriteria: z.array(z.string().trim().min(1)),
+    constraints: z.array(z.string().trim().min(1)),
+    risks: z.array(z.string().trim().min(1)),
+    openQuestions: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export type ProductProposalContent = z.infer<
+  typeof ProductProposalContentSchema
+>;
+
+export const ProductProposalRevisionViewSchema = z.object({
+  id: z.string(),
+  revision: z.number().int().positive(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  content: ProductProposalContentSchema,
+  producer: z.object({
+    aiMemberId: z.string(),
+    positionId: z.string(),
+    sessionId: z.string(),
+  }),
+  editedBy: z.object({
+    type: z.enum([
+      "human",
+      "electron-main",
+      "acp-client",
+      "runtime-worker",
+      "test-driver",
+    ]),
+    id: z.string().trim().min(1),
+    authenticatedBy: z.enum([
+      "local-session",
+      "ipc-token",
+      "acp-connection",
+      "runtime",
+    ]),
+  }),
+  createdAt: z.string().datetime(),
+});
+
+export const ProductProposalViewSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  status: z.enum([
+    "draft",
+    "clarifying",
+    "awaiting-confirmation",
+    "confirmed",
+    "rejected",
+    "needs-rework",
+  ]),
+  revision: z.number().int().nonnegative(),
+  currentRevision: ProductProposalRevisionViewSchema,
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+
+export const ProductBaselineViewSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  sourceProposalRevisionId: z.string(),
+  sourceProposalHash: z.string().regex(/^[a-f0-9]{64}$/),
+  content: ProductProposalContentSchema,
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  confirmedBy: ActorRefSchema,
+  confirmationCommandId: z.string(),
+  confirmedAt: z.string().datetime(),
+  runId: z.string(),
+  snapshotRevisionId: z.string(),
+});
+
+export const ProductDiscoveryViewSchema = z.object({
+  project: z.object({
+    id: z.string(),
+    name: z.string(),
+    goal: z.string(),
+    revision: z.number().int().nonnegative(),
+  }),
+  proposal: ProductProposalViewSchema.nullable(),
+  baselines: ProductBaselineViewSchema.array(),
+  formalRuns: z.array(
+    z.object({
+      runId: z.string(),
+      productBaselineId: z.string(),
+      snapshotRevisionId: z.string(),
+      parentRunId: z.string().nullable(),
+      forkedFromSnapshotRevisionId: z.string().nullable(),
+      status: z.string(),
+      createdAt: z.string().datetime(),
+    }),
+  ),
+});
+
+export type ProductProposalRevisionView = z.infer<
+  typeof ProductProposalRevisionViewSchema
+>;
+export type ProductProposalView = z.infer<typeof ProductProposalViewSchema>;
+export type ProductBaselineView = z.infer<typeof ProductBaselineViewSchema>;
+export type ProductDiscoveryView = z.infer<typeof ProductDiscoveryViewSchema>;
+
+export const ProjectSpecContentSchema = z
+  .object({
+    outcome: z.string().trim().min(1),
+    acceptanceCriteria: z.array(z.string().trim().min(1)).min(1),
+    applicationBoundaries: z.array(z.string().trim().min(1)),
+    crossApplicationContracts: z.array(z.string().trim().min(1)),
+    deliveryConstraints: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const ProjectSpecRevisionViewSchema = z.object({
+  id: z.string(),
+  projectSpecId: z.string(),
+  projectId: z.string(),
+  runId: z.string(),
+  productBaselineId: z.string(),
+  productBaselineHash: z.string().regex(/^[a-f0-9]{64}$/),
+  revision: z.number().int().positive(),
+  supersedesRevisionId: z.string().nullable(),
+  content: ProjectSpecContentSchema,
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  producer: z.object({
+    aiMemberId: z.string(),
+    positionId: z.string(),
+    sessionId: z.string(),
+  }),
+  createdAt: z.string().datetime(),
+});
+
+export type ProjectSpecContent = z.infer<typeof ProjectSpecContentSchema>;
+export type ProjectSpecRevisionView = z.infer<
+  typeof ProjectSpecRevisionViewSchema
+>;
+
+const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const ApplicationViewSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  repositoryReference: z.string(),
+  applicationKey: z.string(),
+  ownership: z.string(),
+  buildCommand: z.string(),
+  testCommand: z.string(),
+  revision: z.literal(1),
+  createdAt: z.string().datetime(),
+});
+
+export type ApplicationView = z.infer<typeof ApplicationViewSchema>;
+
+export const ApplicationContractRefSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    version: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ApplicationSpecContentSchema = z
+  .object({
+    design: z.string().trim().min(1),
+    acceptanceCriteria: z.array(z.string().trim().min(1)).min(1),
+    workPackageConstraints: z.array(z.string().trim().min(1)),
+    integrationObligations: z.array(z.string().trim().min(1)),
+    contractRefs: z.array(ApplicationContractRefSchema),
+  })
+  .strict();
+
+export const ApplicationSpecRevisionViewSchema = z.object({
+  id: z.string(),
+  applicationSpecId: z.string(),
+  applicationId: z.string(),
+  projectId: z.string(),
+  runId: z.string(),
+  promotedProjectSpecRevisionId: z.string(),
+  promotedProjectSpecHash: Sha256Schema,
+  revision: z.number().int().positive(),
+  supersedesRevisionId: z.string().nullable(),
+  content: ApplicationSpecContentSchema,
+  hash: Sha256Schema,
+  producer: z.object({
+    aiMemberId: z.string(),
+    positionId: z.string(),
+    sessionId: z.string(),
+  }),
+  createdAt: z.string().datetime(),
+});
+
+export const CrossApplicationContractInputSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    version: z.string().trim().min(1),
+    producerApplicationId: z.string().trim().min(1),
+    consumerApplicationId: z.string().trim().min(1),
+    kind: z.enum(["api", "data", "event"]),
+    schema: z.string().trim().min(1),
+    compatibilityPolicy: z.enum(["exact", "backward-compatible"]),
+    compatibility: z.enum(["compatible", "incompatible"]),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+    testCommands: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const TechnicalBaselineProposalContentSchema = z
+  .object({
+    architecture: z.string().trim().min(1),
+    dependencyGraph: z.array(z.string().trim().min(1)),
+    contracts: z.array(CrossApplicationContractInputSchema),
+    riskPolicy: z.array(z.string().trim().min(1)),
+    permissionPolicy: z.array(z.string().trim().min(1)),
+    testStrategy: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const CrossApplicationContractRevisionViewSchema =
+  CrossApplicationContractInputSchema.extend({ hash: Sha256Schema });
+
+const ExactApplicationSpecRefSchema = z
+  .object({
+    applicationId: z.string().trim().min(1),
+    id: z.string().trim().min(1),
+    hash: Sha256Schema,
+  })
+  .strict();
+
+const ExactReadinessEvidenceRefSchema = z
+  .object({ id: z.string().trim().min(1), hash: Sha256Schema })
+  .strict();
+
+const ExactContractRefSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    version: z.string().trim().min(1),
+    hash: Sha256Schema,
+  })
+  .strict();
+
+export const TechnicalBaselineProposalRevisionViewSchema = z.object({
+  id: z.string(),
+  technicalBaselineProposalId: z.string(),
+  projectId: z.string(),
+  runId: z.string(),
+  promotedProjectSpecRevisionId: z.string(),
+  promotedProjectSpecHash: Sha256Schema,
+  readinessEvidence: ExactReadinessEvidenceRefSchema.array(),
+  applicationSpecRevisions: ExactApplicationSpecRefSchema.array(),
+  revision: z.number().int().positive(),
+  supersedesRevisionId: z.string().nullable(),
+  content: TechnicalBaselineProposalContentSchema,
+  hash: Sha256Schema,
+  producer: z.object({
+    aiMemberId: z.string(),
+    positionId: z.string(),
+    sessionId: z.string(),
+  }),
+  createdAt: z.string().datetime(),
+});
+
+export const TechnicalBaselineManifestSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    promotedProjectSpecRevisionId: z.string().trim().min(1),
+    promotedProjectSpecHash: Sha256Schema,
+    readinessEvidence: ExactReadinessEvidenceRefSchema.array(),
+    applicationSpecRevisions: ExactApplicationSpecRefSchema.array(),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalRevisionHash: Sha256Schema,
+    crossApplicationContracts: ExactContractRefSchema.array(),
+    architecture: z.string().trim().min(1),
+    dependencyGraph: z.array(z.string().trim().min(1)),
+    riskPolicy: z.array(z.string().trim().min(1)),
+    permissionPolicy: z.array(z.string().trim().min(1)),
+    testStrategy: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const TechnicalBaselineViewSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  runId: z.string(),
+  proposalRevisionId: z.string(),
+  manifest: TechnicalBaselineManifestSchema,
+  hash: Sha256Schema,
+  createdAt: z.string().datetime(),
+});
+
+export const TechnicalGatePromotionViewSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  qualityGateResultId: z.string(),
+  technicalBaselineId: z.string(),
+  technicalBaselineHash: Sha256Schema,
+  proposalRevisionId: z.string(),
+  proposalRevisionHash: Sha256Schema,
+  sourceSnapshotRevisionId: z.string(),
+  snapshotRevisionId: z.string(),
+  snapshotHash: Sha256Schema,
+  createdAt: z.string().datetime(),
+});
+
+export const TechnicalReviewStateViewSchema = z.object({
+  projectId: z.string(),
+  runId: z.string(),
+  applications: ApplicationViewSchema.array(),
+  applicationSpecRevisions: ApplicationSpecRevisionViewSchema.array(),
+  technicalBaselineProposals:
+    TechnicalBaselineProposalRevisionViewSchema.array(),
+  applicationContracts: CrossApplicationContractRevisionViewSchema.array(),
+  reviewTopics: z.lazy(() => ReviewTopicViewSchema.array()),
+  conditionalObligations: z.array(
+    z.object({
+      qualityGateResultId: z.string(),
+      conditions: z.array(z.string()),
+      nextTopicId: z.string().nullable(),
+    }),
+  ),
+  acceptedBaseline: TechnicalBaselineViewSchema.nullable(),
+  promotion: TechnicalGatePromotionViewSchema.nullable(),
+  snapshotLineage: z.array(
+    z.object({
+      id: z.string(),
+      revision: z.number().int().positive(),
+      parentRevision: z.number().int().positive().nullable(),
+      hash: Sha256Schema,
+    }),
+  ),
+});
+
+export type ApplicationSpecContent = z.infer<
+  typeof ApplicationSpecContentSchema
+>;
+export type ApplicationSpecRevisionView = z.infer<
+  typeof ApplicationSpecRevisionViewSchema
+>;
+export type TechnicalReviewStateView = z.infer<
+  typeof TechnicalReviewStateViewSchema
+>;
+export type TechnicalBaselineProposalContent = z.infer<
+  typeof TechnicalBaselineProposalContentSchema
+>;
+export type TechnicalBaselineProposalRevisionView = z.infer<
+  typeof TechnicalBaselineProposalRevisionViewSchema
+>;
+export type TechnicalBaselineManifest = z.infer<
+  typeof TechnicalBaselineManifestSchema
+>;
+export type TechnicalBaselineView = z.infer<typeof TechnicalBaselineViewSchema>;
+export type TechnicalGatePromotionView = z.infer<
+  typeof TechnicalGatePromotionViewSchema
+>;
+
+const ReviewInputManifestBaseShape = {
+  topicId: z.string().trim().min(1),
+  supportingArtifactVersionIds: z.array(z.string().trim().min(1)),
+  supportingSpecRevisionIds: z.array(z.string().trim().min(1)),
+  harnessSnapshotIds: z.array(z.string().trim().min(1)),
+  acceptanceCriteria: z.array(z.string().trim().min(1)).min(1),
+  excludedContext: z.array(
+    z.enum([
+      "hidden-prompts",
+      "prior-reviewer-opinions",
+      "private-transcripts",
+      "provider-session-history",
+      "credential-values",
+    ]),
+  ),
+};
+
+export const ReviewInputManifestSchema = z.discriminatedUnion("scope", [
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("product"),
+      productBaselineId: z.string().trim().min(1),
+      productBaselineHash: Sha256Schema,
+      projectSpecRevisionId: z.string().trim().min(1),
+      projectSpecHash: Sha256Schema,
+    })
+    .strict(),
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("technical"),
+      promotedProjectSpecRevisionId: z.string().trim().min(1),
+      promotedProjectSpecHash: Sha256Schema,
+      readinessEvidence: ExactReadinessEvidenceRefSchema.array(),
+      applicationSpecRevisions: ExactApplicationSpecRefSchema.array(),
+      technicalBaselineProposalId: z.string().trim().min(1),
+      technicalBaselineProposalHash: Sha256Schema,
+      crossApplicationContracts: ExactContractRefSchema.array(),
+    })
+    .strict(),
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("code"),
+      workPackageVersionId: z.string().trim().min(1),
+      repositoryId: z.string().trim().min(1),
+      sourceCommit: z.string().trim().min(1),
+      diffArtifactVersionId: z.string().trim().min(1),
+      diffHash: Sha256Schema,
+    })
+    .strict(),
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("aggregate"),
+      integrationGenerationId: z.string().trim().min(1),
+      integrationManifestHash: Sha256Schema,
+      repositoryCommits: z.array(
+        z
+          .object({
+            repositoryId: z.string().trim().min(1),
+            commit: z.string().trim().min(1),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("verification"),
+      verificationSubject: z.discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("test"),
+            integrationGenerationId: z.string().trim().min(1),
+            repositoryCommits: z.array(
+              z
+                .object({
+                  repositoryId: z.string().trim().min(1),
+                  commit: z.string().trim().min(1),
+                })
+                .strict(),
+            ),
+            testCaseRevisionIds: z.array(z.string().trim().min(1)),
+            testRunIds: z.array(z.string().trim().min(1)),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("candidate-final"),
+            deliveryCandidateInputId: z.string().trim().min(1),
+            deliveryCandidateInputHash: Sha256Schema,
+          })
+          .strict(),
+      ]),
+      evidenceIds: z.array(z.string().trim().min(1)),
+    })
+    .strict(),
+]);
+
+export const ReviewParticipantRoleSchema = z.enum([
+  "owner-participant",
+  "reviewer-participant",
+  "moderator",
+]);
+
+export const ReviewParticipantInputSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    role: ReviewParticipantRoleSchema,
+    aiMemberId: z.string().trim().min(1),
+    positionId: z.string().trim().min(1),
+    sessionId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ReviewBudgetSchema = z
+  .object({
+    maxRounds: z.number().int().positive(),
+    maxDurationSeconds: z.number().int().positive(),
+    maxTokens: z.number().int().nonnegative(),
+    maxCostCents: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const ReviewFindingSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  reviewerParticipantId: z.string(),
+  reviewerSessionId: z.string(),
+  severity: z.enum(["info", "low", "medium", "high", "critical"]),
+  summary: z.string(),
+  rationale: z.string(),
+  impact: z.string(),
+  evidenceRefs: z.array(z.string()),
+  suggestedOwner: z.string(),
+  blocking: z.boolean(),
+  scopeImpact: z
+    .enum(["scope-preserving", "scope-changing"])
+    .nullable()
+    .optional(),
+  createdAt: z.string().datetime(),
+});
+
+export const ReviewResolutionSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  findingId: z.string(),
+  participantId: z.string(),
+  disposition: z.enum(["accepted", "disputed", "resolved", "rejected"]),
+  response: z.string(),
+  evidenceRefs: z.array(z.string()),
+  revisedSubjectId: z.string().nullable(),
+  revisedSubjectHash: Sha256Schema.nullable(),
+  createdAt: z.string().datetime(),
+});
+
+export const ReviewDiscussionSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  round: z.number().int().positive(),
+  status: z.enum(["open", "closed"]),
+  conflictFindingIds: z.array(z.string()),
+  boundedPrompt: z.string(),
+  tokensUsed: z.number().int().nonnegative(),
+  costCentsUsed: z.number().int().nonnegative(),
+  durationSeconds: z.number().int().nonnegative(),
+  stopReason: z.string().nullable(),
+  openedAt: z.string().datetime(),
+  closedAt: z.string().datetime().nullable(),
+});
+
+export const ReviewRevisionSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  subjectKind: z.string(),
+  subjectId: z.string(),
+  subjectHash: Sha256Schema,
+  producerAiMemberId: z.string(),
+  producerPositionId: z.string(),
+  producerSessionId: z.string(),
+  evidenceRefs: z.array(z.string()),
+  createdAt: z.string().datetime(),
+});
+
+export const ReviewRecheckSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  revisionId: z.string(),
+  reviewerParticipantId: z.string(),
+  reviewerSessionId: z.string(),
+  result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
+  conditions: z.array(z.string()),
+  evidenceRefs: z.array(z.string()),
+  eligibilitySnapshotHash: Sha256Schema,
+  createdAt: z.string().datetime(),
+});
+
+export const QualityGateResultViewSchema = z.object({
+  id: z.string(),
+  topicId: z.string(),
+  kind: z.enum(["product", "technical", "code", "aggregate", "verification"]),
+  manifest: ReviewInputManifestSchema,
+  manifestHash: Sha256Schema,
+  revisionId: z.string().nullable(),
+  result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
+  satisfiesProductionContract: z.boolean(),
+  conditions: z.array(z.string()),
+  recheckIds: z.array(z.string()),
+  evidenceRefs: z.array(z.string()),
+  createdAt: z.string().datetime(),
+});
+
+export const ReviewTopicViewSchema = z.object({
+  topic: z.object({
+    id: z.string(),
+    projectId: z.string(),
+    title: z.string(),
+    kind: z.enum(["product", "technical", "code", "aggregate", "verification"]),
+    status: z.enum([
+      "scheduled",
+      "independent-review",
+      "discussion",
+      "revision",
+      "re-review",
+      "blocked",
+      "PASS",
+      "CONDITIONAL_PASS",
+      "FAIL",
+    ]),
+    revision: z.number().int().positive(),
+    manifest: ReviewInputManifestSchema,
+    manifestHash: Sha256Schema,
+    producer: z.object({
+      aiMemberId: z.string(),
+      positionId: z.string(),
+      sessionId: z.string(),
+    }),
+    quorum: z.number().int().positive(),
+    budget: ReviewBudgetSchema,
+    budgetUsed: z.object({
+      rounds: z.number().int().nonnegative(),
+      durationSeconds: z.number().int().nonnegative(),
+      tokens: z.number().int().nonnegative(),
+      costCents: z.number().int().nonnegative(),
+    }),
+    stopCondition: z.literal("blocking-findings-dispositioned"),
+    escalationPolicy: z.literal("fail-with-evidence"),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+  participants: z.array(
+    ReviewParticipantInputSchema.extend({
+      eligibility: z.object({
+        eligible: z.boolean(),
+        reasons: z.array(
+          z.enum([
+            "role-excluded",
+            "producer-ai-member",
+            "producer-position",
+            "producer-session",
+            "session-not-independent",
+            "session-not-found",
+            "session-project-mismatch",
+            "position-member-mismatch",
+          ]),
+        ),
+        snapshotHash: Sha256Schema,
+      }),
+    }),
+  ),
+  findings: z.array(ReviewFindingSchema),
+  resolutions: z.array(ReviewResolutionSchema),
+  discussions: z.array(ReviewDiscussionSchema),
+  revisions: z.array(ReviewRevisionSchema),
+  rechecks: z.array(ReviewRecheckSchema),
+  gateResult: QualityGateResultViewSchema.nullable(),
+});
+
+export type ReviewInputManifest = z.infer<typeof ReviewInputManifestSchema>;
+export type ReviewParticipantInput = z.infer<
+  typeof ReviewParticipantInputSchema
+>;
+export type ReviewTopicView = z.infer<typeof ReviewTopicViewSchema>;
+
+export const ProductReviewStateViewSchema = z.object({
+  projectId: z.string(),
+  runId: z.string(),
+  productBaselineId: z.string(),
+  productBaselineHash: z.string().regex(/^[a-f0-9]{64}$/),
+  specRevisions: ProjectSpecRevisionViewSchema.array(),
+  reviewTopics: ReviewTopicViewSchema.array(),
+  readinessEvidence: z.array(
+    z.object({
+      id: z.string(),
+      checkKey: z.string(),
+      status: z.enum(["ready", "blocked"]),
+      summary: z.string(),
+      evidenceRefs: z.array(z.string()),
+      projectSpecRevisionId: z.string(),
+      projectSpecHash: Sha256Schema,
+      producer: z.object({
+        aiMemberId: z.string(),
+        positionId: z.string(),
+        sessionId: z.string(),
+      }),
+      createdAt: z.string().datetime(),
+    }),
+  ),
+  readinessBlockers: z.array(z.string()),
+  promotion: z
+    .object({
+      id: z.string(),
+      topicId: z.string(),
+      qualityGateResultId: z.string(),
+      projectSpecRevisionId: z.string(),
+      projectSpecHash: Sha256Schema,
+      readinessEvidenceIds: z.array(z.string()),
+      sourceSnapshotRevisionId: z.string(),
+      snapshotRevisionId: z.string(),
+      snapshotHash: Sha256Schema,
+      createdAt: z.string().datetime(),
+    })
+    .nullable(),
+  snapshotLineage: z.array(
+    z.object({
+      id: z.string(),
+      revision: z.number().int().positive(),
+      parentRevision: z.number().int().positive().nullable(),
+      hash: Sha256Schema,
+    }),
+  ),
+});
+
+export type ProductReviewStateView = z.infer<
+  typeof ProductReviewStateViewSchema
+>;
+
 export const CompanyDepartmentSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,6 +802,79 @@ export const ArtifactContractSchema = z.object({
 
 export type ArtifactContract = z.infer<typeof ArtifactContractSchema>;
 
+export const ArtifactContentKindSchema = z.enum([
+  "managed-file",
+  "repository-object",
+  "external-reference",
+]);
+
+export const ArtifactIntegrityStatusSchema = z.enum([
+  "verified",
+  "unavailable",
+  "failed",
+]);
+
+export const ArtifactProducerContextSchema = z.object({
+  projectId: z.string().trim().min(1),
+  runId: z.string().trim().min(1),
+  snapshotRevisionId: z.string().trim().min(1),
+  nodeRunId: z.string().trim().min(1),
+  nodeAttemptId: z.string().trim().min(1),
+  aiMemberId: z.string().trim().min(1),
+  positionId: z.string().trim().min(1).optional(),
+  sessionId: z.string().trim().min(1).optional(),
+  workPackageId: z.string().trim().min(1).optional(),
+  interactionTurnId: z.string().trim().min(1).optional(),
+});
+
+export const ArtifactRegistrationContentSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("managed-file"),
+    encoding: z.literal("base64"),
+    data: z.string(),
+    mediaType: z.string().trim().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("repository-object"),
+    repositoryRef: z.string().trim().min(1),
+    commitId: z.string().regex(/^[a-f0-9]{40,64}$/),
+    objectId: z.string().regex(/^[a-f0-9]{40,64}$/),
+    objectKind: z.enum(["commit", "tree", "blob", "tag"]),
+  }),
+  z.object({
+    kind: z.literal("external-reference"),
+    provider: z.string().trim().min(1),
+    namespace: z.string().trim().min(1),
+    objectId: z.string().trim().min(1),
+    providerVersion: z.string().trim().min(1).optional(),
+    etag: z.string().trim().min(1).optional(),
+    digest: z.string().trim().min(1).optional(),
+    retrievalRef: z.string().trim().min(1),
+    verifierMetadata: z.unknown().optional(),
+  }),
+]);
+
+export const ArtifactRegistrationViewSchema = z.object({
+  registrationId: z.string(),
+  versionId: z.string(),
+  artifactId: z.string(),
+  projectId: z.string(),
+  version: z.number().int().positive(),
+  contentKind: ArtifactContentKindSchema,
+  journalState: z.enum([
+    "prepared",
+    "written",
+    "renamed",
+    "finalized",
+    "failed",
+  ]),
+  finalized: z.boolean(),
+});
+
+export type ArtifactRegistrationView = z.infer<
+  typeof ArtifactRegistrationViewSchema
+>;
+
 export const ArtifactVersionViewSchema = z.object({
   id: z.string(),
   artifactId: z.string(),
@@ -98,6 +886,14 @@ export const ArtifactVersionViewSchema = z.object({
   contentRef: z.string(),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   byteSize: z.number().int().nonnegative(),
+  contentKind: ArtifactContentKindSchema.optional(),
+  integrityStatus: ArtifactIntegrityStatusSchema.optional(),
+  lifecycle: z.enum(["finalized", "superseded"]).optional(),
+  identityHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  integrityDescriptor: z.unknown().optional(),
   status: z.enum(["draft", "produced", "accepted", "rejected", "superseded"]),
   producer: z.object({
     runId: z.string(),
@@ -105,6 +901,10 @@ export const ArtifactVersionViewSchema = z.object({
     nodeAttemptId: z.string(),
     snapshotRevisionId: z.string(),
     aiMemberId: z.string(),
+    positionId: z.string().optional(),
+    sessionId: z.string().optional(),
+    workPackageId: z.string().optional(),
+    interactionTurnId: z.string().optional(),
   }),
   createdAt: z.string().datetime(),
 });
@@ -117,6 +917,22 @@ export const ArtifactLineageViewSchema = z.object({
 });
 
 export type ArtifactLineageView = z.infer<typeof ArtifactLineageViewSchema>;
+
+export const ArtifactLineageGraphViewSchema = z.object({
+  rootVersionId: z.string(),
+  versions: z.array(ArtifactVersionViewSchema),
+  edges: z.array(
+    z.object({
+      fromVersionId: z.string(),
+      toVersionId: z.string(),
+      relation: z.string(),
+    }),
+  ),
+});
+
+export type ArtifactLineageGraphView = z.infer<
+  typeof ArtifactLineageGraphViewSchema
+>;
 
 export const SecretReferenceSchema = z.object({
   id: z.string(),
@@ -209,6 +1025,10 @@ export const DepartmentPipelineNodeSchema = z.object({
     "complete",
   ]),
   name: z.string(),
+  handlerKindId: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]*@[1-9][0-9]*$/)
+    .optional(),
   positionId: z.string().optional(),
   skillFlowId: z.string().optional(),
   skillFlowSnapshot: SkillFlowSnapshotSchema.optional(),
@@ -223,6 +1043,7 @@ export const DepartmentPipelineNodeSchema = z.object({
   approvalTitle: z.string().optional(),
   approvalPolicy: z.enum(["any", "all", "named"]).optional(),
   approverReference: z.string().optional(),
+  approvalExpiresAfterSeconds: z.number().int().positive().optional(),
   condition: z
     .object({
       leftReference: z.string(),
@@ -289,6 +1110,18 @@ export type PipelineValidationResult = z.infer<
   typeof PipelineValidationResultSchema
 >;
 
+export const NodeHandlerBindingSchema = z.object({
+  nodeId: z.string(),
+  handlerKindId: z.string().regex(/^[a-z][a-z0-9-]*@[1-9][0-9]*$/),
+  inputSchemaHash: z.string().regex(/^[a-f0-9]{64}$/),
+  outputSchemaHash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+export const NodeHandlerRegistrySnapshotSchema = z.object({
+  version: z.number().int().positive(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
 export const DepartmentPipelineEditorViewSchema = z.object({
   department: z.object({ id: z.string(), name: z.string() }),
   positions: z.array(z.object({ id: z.string(), name: z.string() })),
@@ -304,6 +1137,8 @@ export const DepartmentPipelineEditorViewSchema = z.object({
       version: z.number().int().positive(),
       graph: DepartmentPipelineGraphSchema,
       hash: z.string().regex(/^[a-f0-9]{64}$/),
+      handlerRegistry: NodeHandlerRegistrySnapshotSchema,
+      handlers: NodeHandlerBindingSchema.array(),
       publishedAt: z.string().datetime(),
     })
     .nullable(),
@@ -313,6 +1148,8 @@ export const DepartmentPipelineEditorViewSchema = z.object({
       version: z.number().int().positive(),
       graph: DepartmentPipelineGraphSchema,
       hash: z.string().regex(/^[a-f0-9]{64}$/),
+      handlerRegistry: NodeHandlerRegistrySnapshotSchema,
+      handlers: NodeHandlerBindingSchema.array(),
       publishedAt: z.string().datetime(),
       nodeCount: z.number().int().nonnegative(),
       edgeCount: z.number().int().nonnegative(),
@@ -466,6 +1303,7 @@ export const DepartmentRunStatusSchema = z.enum([
   "completed",
   "paused",
   "cancelled",
+  "superseded",
 ]);
 
 export type DepartmentRunStatus = z.infer<typeof DepartmentRunStatusSchema>;
@@ -477,6 +1315,7 @@ export const NodeRunStatusSchema = z.enum([
   "waiting-permission",
   "waiting-approval",
   "paused",
+  "blocked",
   "succeeded",
   "failed",
   "skipped",
@@ -550,6 +1389,32 @@ const RunSnapshotExecutionProfileSchema = z.object({
 
 export const RunSnapshotPayloadSchema = z.object({
   schemaVersion: z.literal(1),
+  productBaseline: z
+    .object({
+      id: z.string(),
+      sourceProposalRevisionId: z.string(),
+      hash: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .optional(),
+  productGatePromotion: z
+    .object({
+      topicId: z.string(),
+      qualityGateResultId: z.string(),
+      acceptedProjectSpecRevisionId: z.string(),
+      acceptedProjectSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
+      readinessEvidenceIds: z.array(z.string()),
+      promotedAt: z.string().datetime(),
+    })
+    .optional(),
+  technicalGatePromotion: z
+    .object({
+      qualityGateResultId: z.string(),
+      acceptedTechnicalBaselineId: z.string(),
+      acceptedTechnicalBaselineHash: Sha256Schema,
+      acceptedApplicationSpecRevisions: ExactApplicationSpecRefSchema.array(),
+      promotedAt: z.string().datetime(),
+    })
+    .optional(),
   project: RunSnapshotProjectSchema,
   department: RunSnapshotDepartmentSchema,
   pipelineVersion: z.object({
@@ -557,6 +1422,8 @@ export const RunSnapshotPayloadSchema = z.object({
     version: z.number().int().positive(),
     hash: z.string().regex(/^[a-f0-9]{64}$/),
     graph: DepartmentPipelineGraphSchema,
+    handlerRegistry: NodeHandlerRegistrySnapshotSchema.optional(),
+    handlers: NodeHandlerBindingSchema.array().optional(),
   }),
   skillFlows: SkillFlowSnapshotSchema.array(),
   positions: RunSnapshotPositionSchema.array(),
@@ -577,6 +1444,100 @@ export const RunSnapshotSchema = z.object({
 
 export type RunSnapshot = z.infer<typeof RunSnapshotSchema>;
 
+export const ContinuationPlanSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["recovery", "fork"]),
+  sourceRunId: z.string(),
+  targetRunId: z.string(),
+  sourceSnapshotRevisionId: z.string(),
+  targetSnapshotRevisionId: z.string(),
+  targetNodeRunId: z.string().nullable(),
+  mode: z.enum(["recovery", "replay", "reconfigure"]),
+  runRevision: z.number().int().nonnegative(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  createdAt: z.string().datetime(),
+  items: z.array(
+    z.object({
+      ordinal: z.number().int().nonnegative(),
+      pipelineNodeId: z.string(),
+      sourceNodeRunId: z.string().nullable(),
+      targetNodeRunId: z.string(),
+      disposition: z.enum(["rerun", "reuse-evidence", "skip", "blocked"]),
+      evidenceRefs: z.array(z.string()),
+      reason: z.string(),
+    }),
+  ),
+});
+
+export type ContinuationPlan = z.infer<typeof ContinuationPlanSchema>;
+
+export const ExecutionInspectionViewSchema = z.object({
+  operationKey: z.string(),
+  target: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("node-attempt"), id: z.string() }),
+    z.object({ kind: z.literal("interaction-turn"), id: z.string() }),
+  ]),
+  terminalFactId: z.string().nullable(),
+  leases: z.array(
+    z.object({
+      leaseId: z.string(),
+      leaseKind: z.enum(["execution", "reconciliation"]),
+      executionEpoch: z.number().int().positive(),
+      fenceToken: z.string(),
+      workerId: z.string(),
+      issuedAt: z.string().datetime(),
+      expiresAt: z.string().datetime(),
+      renewedAt: z.string().datetime().nullable(),
+      releasedAt: z.string().datetime().nullable(),
+      cancelRequested: z.boolean(),
+    }),
+  ),
+  facts: z.array(
+    z.object({
+      id: z.string(),
+      operationKey: z.string(),
+      target: z.discriminatedUnion("kind", [
+        z.object({ kind: z.literal("node-attempt"), id: z.string() }),
+        z.object({ kind: z.literal("interaction-turn"), id: z.string() }),
+      ]),
+      leaseId: z.string(),
+      leaseKind: z.enum(["execution", "reconciliation"]),
+      executionEpoch: z.number().int().positive(),
+      fenceToken: z.string(),
+      adapterSchemaVersion: z.number().int().positive(),
+      factId: z.string(),
+      ordinal: z.number().int().positive(),
+      kind: z.enum([
+        "provider-started",
+        "agent-session",
+        "message",
+        "tool-call",
+        "tool-result",
+        "permission-request",
+        "checkpoint",
+        "artifact",
+        "commit",
+        "usage",
+        "not-started",
+        "completed",
+        "failed",
+        "cancelled",
+      ]),
+      schemaVersion: z.number().int().positive(),
+      payload: z.unknown(),
+      evidenceRefs: z.array(z.string()),
+      canonicalPayloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+      status: z.enum(["accepted", "duplicate", "stale", "conflict"]),
+      effectIds: z.array(z.string()),
+      createdAt: z.string().datetime(),
+    }),
+  ),
+});
+
+export type ExecutionInspectionView = z.infer<
+  typeof ExecutionInspectionViewSchema
+>;
+
 export const DepartmentRunViewSchema = z.object({
   run: z.object({
     id: z.string(),
@@ -584,6 +1545,7 @@ export const DepartmentRunViewSchema = z.object({
     departmentId: z.string(),
     pipelineVersionId: z.string(),
     snapshotRevisionId: z.string(),
+    productBaselineId: z.string().nullable(),
     parentRunId: z.string().nullable(),
     forkedFromSnapshotRevisionId: z.string().nullable(),
     status: DepartmentRunStatusSchema,
@@ -592,12 +1554,14 @@ export const DepartmentRunViewSchema = z.object({
     updatedAt: z.string().datetime(),
   }),
   snapshot: RunSnapshotSchema,
+  continuationPlan: ContinuationPlanSchema.nullable(),
   nodes: z.array(
     z.object({
       id: z.string(),
       runId: z.string(),
       pipelineNodeId: z.string(),
       nodeType: DepartmentPipelineNodeSchema.shape.type,
+      handler: NodeHandlerBindingSchema.optional(),
       status: NodeRunStatusSchema,
       attemptCount: z.number().int().nonnegative(),
       attempts: z.array(
@@ -610,9 +1574,11 @@ export const DepartmentRunViewSchema = z.object({
           status: z.enum([
             "ready",
             "running",
+            "reconciling",
             "succeeded",
             "failed",
             "cancelled",
+            "interrupted",
           ]),
           result: z.unknown().nullable(),
           failure: z
@@ -636,10 +1602,20 @@ export const DepartmentRunViewSchema = z.object({
         z.object({
           id: z.string(),
           cycle: z.number().int().positive(),
-          status: z.enum(["pending", "decided"]),
+          status: z.enum(["pending", "decided", "expired", "cancelled"]),
           decision: z.enum(["approve", "request-changes", "reject"]).nullable(),
+          requestedAction: z.string(),
+          inputManifestHash: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .nullable(),
+          eligibleHumanPolicy: z.unknown(),
+          expiresAt: z.string().datetime().nullable(),
+          decisionActor: ActorRefSchema.nullable(),
+          decisionCommandId: z.string().nullable(),
           createdAt: z.string().datetime(),
           decidedAt: z.string().datetime().nullable(),
+          expiredAt: z.string().datetime().nullable(),
         }),
       ),
       requiredDependencyIds: z.array(z.string()),
@@ -718,12 +1694,47 @@ export const PermissionRequestViewSchema = z.object({
   expiresAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
   decidedAt: z.string().datetime().nullable(),
+  decisionActor: ActorRefSchema.nullable().optional(),
+  decisionCommandId: z.string().nullable().optional(),
+});
+
+export const InteractionTurnViewSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  inputMessageId: z.string(),
+  outputMessageId: z.string().nullable(),
+  status: z.enum([
+    "queued",
+    "running",
+    "reconciling",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+  ]),
+  commandId: z.string(),
+  executionOperationKey: z.string(),
+  executionLeaseId: z.string().nullable(),
+  executionEpoch: z.number().int().positive().nullable(),
+  fenceToken: z.string().nullable(),
+  mechanism: z.literal("model-only"),
+  mechanismVersion: z.string(),
+  contextHash: z.string().regex(/^[a-f0-9]{64}$/),
+  contextSchemaHash: z.string().regex(/^[a-f0-9]{64}$/),
+  terminalExecutionFactId: z.string().nullable(),
+  providerExecutionRef: z.string().nullable(),
+  failureCode: z.string().nullable(),
+  failureMessage: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  startedAt: z.string().datetime().nullable(),
+  completedAt: z.string().datetime().nullable(),
 });
 
 export const InteractionViewSchema = z.object({
   session: InteractionSessionViewSchema,
   participants: z.array(SessionParticipantViewSchema),
   messages: z.array(SessionMessageViewSchema),
+  turns: z.array(InteractionTurnViewSchema),
   permissions: z.array(PermissionRequestViewSchema),
 });
 
@@ -735,6 +1746,7 @@ export type SessionParticipantView = z.infer<
   typeof SessionParticipantViewSchema
 >;
 export type SessionMessageView = z.infer<typeof SessionMessageViewSchema>;
+export type InteractionTurnView = z.infer<typeof InteractionTurnViewSchema>;
 export type PermissionRequestView = z.infer<typeof PermissionRequestViewSchema>;
 
 export const AgUiEventSchema = z.object({
@@ -829,6 +1841,31 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("company.overview") }),
   z.object({ type: z.literal("projects.list") }),
   z.object({ type: z.literal("project.inspect"), projectId: z.string() }),
+  z.object({
+    type: z.literal("applications.list"),
+    projectId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("review.topic.inspect"),
+    topicId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("review.topics.list"),
+    projectId: z.string().trim().min(1).optional(),
+    runId: z.string().trim().min(1).optional(),
+  }),
+  z.object({
+    type: z.literal("product.discovery.inspect"),
+    projectId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("product-review.inspect"),
+    runId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("technical-review.inspect"),
+    runId: z.string().trim().min(1),
+  }),
   z.object({ type: z.literal("departments.list") }),
   z.object({ type: z.literal("department.inspect"), departmentId: z.string() }),
   z.object({
@@ -850,6 +1887,11 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("run.inspect"), runId: z.string() }),
   z.object({
+    type: z.literal("execution.inspect"),
+    targetKind: z.enum(["node-attempt", "interaction-turn"]),
+    targetId: z.string().trim().min(1),
+  }),
+  z.object({
     type: z.literal("runtime.audit"),
     runId: z.string().optional(),
     limit: z.number().int().positive().max(1_000).optional(),
@@ -866,6 +1908,10 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("artifacts.list"), projectId: z.string() }),
   z.object({ type: z.literal("artifact.inspect"), versionId: z.string() }),
+  z.object({
+    type: z.literal("artifact.lineage.inspect"),
+    versionId: z.string(),
+  }),
   z.object({ type: z.literal("interactions.list"), projectId: z.string() }),
   z.object({ type: z.literal("interaction.inspect"), sessionId: z.string() }),
   z.object({
@@ -883,25 +1929,6 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
 
 export type CompanyQuery = z.infer<typeof CompanyQuerySchema>;
 
-export const ActorRefSchema = z.object({
-  type: z.enum([
-    "human",
-    "electron-main",
-    "acp-client",
-    "runtime-worker",
-    "test-driver",
-  ]),
-  id: z.string().trim().min(1),
-  authenticatedBy: z.enum([
-    "local-session",
-    "ipc-token",
-    "acp-connection",
-    "runtime",
-  ]),
-});
-
-export type ActorRef = z.infer<typeof ActorRefSchema>;
-
 export const QueryEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
   requestId: z.string().trim().min(1),
@@ -918,6 +1945,7 @@ export type QueryEnvelope<Query extends CompanyQuery = CompanyQuery> = Omit<
 export interface QueryResult<View> {
   readonly view: View;
   readonly asOfSequence: number;
+  readonly viewSyncToken?: string;
 }
 
 export type CompanyQueryResult<Query extends CompanyQuery> =
@@ -933,41 +1961,90 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
             ? readonly CompanyProject[]
             : Query["type"] extends "project.inspect"
               ? ProjectEditorView
-              : Query["type"] extends "departments.list"
-                ? readonly CompanyDepartment[]
-                : Query["type"] extends "department.inspect"
-                  ? DepartmentInspect
-                  : Query["type"] extends "department.skill-configuration.inspect"
-                    ? SkillConfigurationView
-                    : Query["type"] extends "department.pipeline.inspect"
-                      ? DepartmentPipelineEditorView
-                      : Query["type"] extends "department.pipeline.validate"
-                        ? PipelineValidationResult
-                        : Query["type"] extends "runs.list"
-                          ? readonly DepartmentRunView[]
-                          : Query["type"] extends "runtime.audit"
-                            ? readonly RuntimeAuditRecord[]
-                            : Query["type"] extends
-                                  | "runtime.events"
-                                  | "runtime.events.consumer"
-                              ? readonly RuntimeEventRecord[]
-                              : Query["type"] extends "artifacts.list"
-                                ? readonly ArtifactVersionView[]
-                                : Query["type"] extends "artifact.inspect"
-                                  ? ArtifactLineageView
-                                  : Query["type"] extends "interactions.list"
-                                    ? readonly InteractionView[]
-                                    : Query["type"] extends "interaction.inspect"
-                                      ? InteractionView
-                                      : Query["type"] extends "ag-ui.events"
-                                        ? AgUiReplayView
-                                        : Query["type"] extends "memory.candidates.list"
-                                          ? readonly MemoryCandidateView[]
-                                          : Query["type"] extends "memory.records.list"
-                                            ? readonly MemoryRecordView[]
-                                            : Query["type"] extends "runtime.diagnostics"
-                                              ? RuntimeDiagnosticsView
-                                              : DepartmentRunView;
+              : Query["type"] extends "applications.list"
+                ? readonly ApplicationView[]
+                : Query["type"] extends "review.topic.inspect"
+                  ? ReviewTopicView
+                  : Query["type"] extends "review.topics.list"
+                    ? readonly ReviewTopicView[]
+                    : Query["type"] extends "product.discovery.inspect"
+                      ? ProductDiscoveryView
+                      : Query["type"] extends "product-review.inspect"
+                        ? ProductReviewStateView
+                        : Query["type"] extends "technical-review.inspect"
+                          ? TechnicalReviewStateView
+                          : Query["type"] extends "departments.list"
+                            ? readonly CompanyDepartment[]
+                            : Query["type"] extends "department.inspect"
+                              ? DepartmentInspect
+                              : Query["type"] extends "department.skill-configuration.inspect"
+                                ? SkillConfigurationView
+                                : Query["type"] extends "department.pipeline.inspect"
+                                  ? DepartmentPipelineEditorView
+                                  : Query["type"] extends "department.pipeline.validate"
+                                    ? PipelineValidationResult
+                                    : Query["type"] extends "runs.list"
+                                      ? readonly DepartmentRunView[]
+                                      : Query["type"] extends "execution.inspect"
+                                        ? ExecutionInspectionView
+                                        : Query["type"] extends "runtime.audit"
+                                          ? readonly RuntimeAuditRecord[]
+                                          : Query["type"] extends
+                                                | "runtime.events"
+                                                | "runtime.events.consumer"
+                                            ? readonly RuntimeEventRecord[]
+                                            : Query["type"] extends "artifacts.list"
+                                              ? readonly ArtifactVersionView[]
+                                              : Query["type"] extends "artifact.inspect"
+                                                ? ArtifactLineageView
+                                                : Query["type"] extends "artifact.lineage.inspect"
+                                                  ? ArtifactLineageGraphView
+                                                  : Query["type"] extends "interactions.list"
+                                                    ? readonly InteractionView[]
+                                                    : Query["type"] extends "interaction.inspect"
+                                                      ? InteractionView
+                                                      : Query["type"] extends "ag-ui.events"
+                                                        ? AgUiReplayView
+                                                        : Query["type"] extends "memory.candidates.list"
+                                                          ? readonly MemoryCandidateView[]
+                                                          : Query["type"] extends "memory.records.list"
+                                                            ? readonly MemoryRecordView[]
+                                                            : Query["type"] extends "runtime.diagnostics"
+                                                              ? RuntimeDiagnosticsView
+                                                              : DepartmentRunView;
+
+export const ArtifactRegisterEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("artifact.version.register"),
+    projectId: z.string().trim().min(1),
+    artifactType: z.string().trim().min(1),
+    artifactSchemaVersion: z.string().trim().min(1),
+    logicalName: z.string().trim().min(1),
+    content: ArtifactRegistrationContentSchema,
+    producer: ArtifactProducerContextSchema,
+    inputVersionIds: z.array(z.string().trim().min(1)).default([]),
+  })
+  .strict();
+
+export const ArtifactFinalizeEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("artifact.version.finalize"),
+    registrationId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ArtifactSupersedeEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("artifact.version.supersede"),
+    versionId: z.string().trim().min(1),
+    supersededByVersionId: z.string().trim().min(1),
+  })
+  .strict();
+
+export type ArtifactEnvelopeCommand =
+  | z.infer<typeof ArtifactRegisterEnvelopeCommandSchema>
+  | z.infer<typeof ArtifactFinalizeEnvelopeCommandSchema>
+  | z.infer<typeof ArtifactSupersedeEnvelopeCommandSchema>;
 
 export const CompanyCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("runtime.shutdown") }),
@@ -989,6 +2066,17 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     skillId: z.string().trim().min(1),
   }),
   z.object({ type: z.literal("runtime.backup") }),
+  ArtifactRegisterEnvelopeCommandSchema,
+  ArtifactFinalizeEnvelopeCommandSchema,
+  ArtifactSupersedeEnvelopeCommandSchema,
+  z
+    .object({
+      type: z.literal("ack-runtime-events"),
+      sequence: z.number().int().nonnegative(),
+      subscriptionGeneration: z.number().int().positive().optional(),
+      viewSyncToken: z.string().trim().min(1).optional(),
+    })
+    .strict(),
   z.object({
     type: z.literal("artifact.version.status"),
     versionId: z.string().trim().min(1),
@@ -1082,6 +2170,88 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     goal: z.string().trim().min(1),
     sharedContext: z.string(),
     repositoryReferences: z.array(z.string().trim().min(1)),
+  }),
+  z.object({
+    type: z.literal("application.register"),
+    applicationId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    repositoryReference: z.string().trim().min(1),
+    applicationKey: z.string().trim().min(1),
+    ownership: z.string().trim().min(1),
+    buildCommand: z.string().trim().min(1),
+    testCommand: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("application-spec.revise"),
+    runId: z.string().trim().min(1),
+    applicationId: z.string().trim().min(1),
+    promotedProjectSpecRevisionId: z.string().trim().min(1),
+    promotedProjectSpecHash: Sha256Schema,
+    producerSessionId: z.string().trim().min(1),
+    content: ApplicationSpecContentSchema,
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("technical-baseline-proposal.revise"),
+    runId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    applicationSpecRevisions: z
+      .array(z.object({ id: z.string(), hash: Sha256Schema }).strict())
+      .min(1),
+    content: TechnicalBaselineProposalContentSchema,
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("technical-review.start"),
+    runId: z.string().trim().min(1),
+    topicId: z.string().trim().min(1),
+    technicalBaselineProposalId: z.string().trim().min(1),
+    technicalBaselineProposalHash: Sha256Schema,
+    priorQualityGateResultId: z.string().trim().min(1).optional(),
+    participants: z.array(ReviewParticipantInputSchema).min(3),
+    quorum: z.number().int().positive().optional(),
+    budget: ReviewBudgetSchema,
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("technical-gate.promote"),
+    runId: z.string().trim().min(1),
+    parentSnapshotRevisionId: z.string().trim().min(1),
+    gateResultId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("product.proposal.revise"),
+    projectId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+    content: ProductProposalContentSchema,
+  }),
+  z.object({
+    type: z.literal("product.proposal.mark-awaiting-confirmation"),
+    projectId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
+  z.object({
+    type: z.literal("confirm-product-baseline"),
+    projectId: z.string().trim().min(1),
+    departmentId: z.string().trim().min(1),
+    agentOverrideId: z.string().trim().min(1).optional(),
+    forkSourceRunId: z.string().trim().min(1).optional(),
+    forkSourceSnapshotRevisionId: z.string().trim().min(1).optional(),
+    expectedRevision: z.number().int().nonnegative(),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
+  z.object({
+    type: z.literal("fork-department-run"),
+    sourceRunId: z.string().trim().min(1),
+    sourceSnapshotRevisionId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+    reason: z.string().trim().min(1),
   }),
   z.object({
     type: z.literal("project.archive"),
@@ -1261,6 +2431,7 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     runId: z.string().trim().min(1),
     snapshotRevisionId: z.string().trim().min(1),
     fromNodeRunId: z.string().trim().min(1),
+    mode: z.enum(["replay", "reconfigure"]).optional(),
   }),
   z.object({
     type: z.literal("run.pause"),
@@ -1303,6 +2474,12 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     feedback: z.string().optional(),
   }),
   z.object({
+    type: z.literal("run.approval.retry"),
+    runId: z.string().trim().min(1),
+    nodeRunId: z.string().trim().min(1),
+    expectedRevision: z.number().int().nonnegative(),
+  }),
+  z.object({
     type: z.literal("run.node.retry"),
     runId: z.string().trim().min(1),
     nodeRunId: z.string().trim().min(1),
@@ -1324,9 +2501,379 @@ export const ProjectUpdateEnvelopeCommandSchema = z
   })
   .strict();
 
-export type EnvelopeCommand = z.infer<
+export type ProjectUpdateEnvelopeCommand = z.infer<
   typeof ProjectUpdateEnvelopeCommandSchema
 >;
+
+export const ApplicationRegisterEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("application.register"),
+    applicationId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    repositoryReference: z.string().trim().min(1),
+    applicationKey: z.string().trim().min(1),
+    ownership: z.string().trim().min(1),
+    buildCommand: z.string().trim().min(1),
+    testCommand: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ApplicationSpecReviseEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("application-spec.revise"),
+    runId: z.string().trim().min(1),
+    applicationId: z.string().trim().min(1),
+    promotedProjectSpecRevisionId: z.string().trim().min(1),
+    promotedProjectSpecHash: Sha256Schema,
+    producerSessionId: z.string().trim().min(1),
+    content: ApplicationSpecContentSchema,
+  })
+  .strict();
+
+export const TechnicalBaselineProposalReviseEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("technical-baseline-proposal.revise"),
+    runId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    applicationSpecRevisions: z
+      .array(z.object({ id: z.string(), hash: Sha256Schema }).strict())
+      .min(1),
+    content: TechnicalBaselineProposalContentSchema,
+  })
+  .strict();
+
+export const TechnicalReviewStartEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("technical-review.start"),
+    runId: z.string().trim().min(1),
+    topicId: z.string().trim().min(1),
+    technicalBaselineProposalId: z.string().trim().min(1),
+    technicalBaselineProposalHash: Sha256Schema,
+    priorQualityGateResultId: z.string().trim().min(1).optional(),
+    participants: z.array(ReviewParticipantInputSchema).min(3),
+    quorum: z.number().int().positive().optional(),
+    budget: ReviewBudgetSchema,
+  })
+  .strict();
+
+export const TechnicalGatePromoteEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("technical-gate.promote"),
+    runId: z.string().trim().min(1),
+    parentSnapshotRevisionId: z.string().trim().min(1),
+    gateResultId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const AckRuntimeEventsEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("ack-runtime-events"),
+    sequence: z.number().int().nonnegative(),
+    subscriptionGeneration: z.number().int().positive().optional(),
+    viewSyncToken: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export type AckRuntimeEventsEnvelopeCommand = z.infer<
+  typeof AckRuntimeEventsEnvelopeCommandSchema
+>;
+
+export const ProductProposalReviseEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("product.proposal.revise"),
+    projectId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    content: ProductProposalContentSchema,
+  })
+  .strict();
+
+export const ProductProposalMarkAwaitingEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("product.proposal.mark-awaiting-confirmation"),
+    projectId: z.string().trim().min(1),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+export const ConfirmProductBaselineEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("confirm-product-baseline"),
+    projectId: z.string().trim().min(1),
+    departmentId: z.string().trim().min(1),
+    agentOverrideId: z.string().trim().min(1).optional(),
+    forkSourceRunId: z.string().trim().min(1).optional(),
+    forkSourceSnapshotRevisionId: z.string().trim().min(1).optional(),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+export const ForkDepartmentRunEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("fork-department-run"),
+    sourceRunId: z.string().trim().min(1),
+    sourceSnapshotRevisionId: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ProjectSpecReviseEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("project-spec.revise"),
+    runId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    content: ProjectSpecContentSchema,
+  })
+  .strict();
+
+export const ProductReviewStartEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("product-review.start"),
+    runId: z.string().trim().min(1),
+    topicId: z.string().trim().min(1),
+    projectSpecRevisionId: z.string().trim().min(1),
+    projectSpecHash: Sha256Schema,
+    participants: z.array(ReviewParticipantInputSchema).min(3),
+    quorum: z.number().int().positive().optional(),
+    budget: ReviewBudgetSchema,
+  })
+  .strict();
+
+export const ProductReadinessRecordEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("product-readiness.record"),
+    runId: z.string().trim().min(1),
+    evidenceId: z.string().trim().min(1),
+    projectSpecRevisionId: z.string().trim().min(1),
+    projectSpecHash: Sha256Schema,
+    producerSessionId: z.string().trim().min(1),
+    checkKey: z.string().trim().min(1),
+    status: z.enum(["ready", "blocked"]),
+    summary: z.string().trim().min(1),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const ProductGatePromoteEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("product-gate.promote"),
+    runId: z.string().trim().min(1),
+    topicId: z.string().trim().min(1),
+    projectSpecRevisionId: z.string().trim().min(1),
+    projectSpecHash: Sha256Schema,
+    readinessEvidenceIds: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const InteractionPromptEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("interaction.prompt"),
+    sessionId: z.string().trim().min(1),
+    participantId: z.string().trim().min(1),
+    content: z.string().trim().min(1).max(100_000),
+  })
+  .strict();
+
+export const ReviewTopicCreateEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.topic.create"),
+    topicId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    runId: z.string().trim().min(1).optional(),
+    title: z.string().trim().min(1),
+    manifest: ReviewInputManifestSchema,
+    producer: z
+      .object({
+        aiMemberId: z.string().trim().min(1),
+        positionId: z.string().trim().min(1),
+        sessionId: z.string().trim().min(1),
+      })
+      .strict(),
+    participants: z.array(ReviewParticipantInputSchema).min(3),
+    quorum: z.number().int().positive().optional(),
+    budget: ReviewBudgetSchema,
+    stopCondition: z.literal("blocking-findings-dispositioned"),
+    escalationPolicy: z.literal("fail-with-evidence"),
+  })
+  .strict();
+
+export const ReviewFindingSubmitEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.finding.submit"),
+    topicId: z.string().trim().min(1),
+    findingId: z.string().trim().min(1),
+    reviewerParticipantId: z.string().trim().min(1),
+    reviewerSessionId: z.string().trim().min(1),
+    severity: z.enum(["info", "low", "medium", "high", "critical"]),
+    summary: z.string().trim().min(1),
+    rationale: z.string().trim().min(1),
+    impact: z.string().trim().min(1),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+    suggestedOwner: z.string().trim().min(1),
+    blocking: z.boolean(),
+    scopeImpact: z.enum(["scope-preserving", "scope-changing"]).optional(),
+  })
+  .strict();
+
+export const ReviewFindingDispositionEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.finding.disposition"),
+    topicId: z.string().trim().min(1),
+    resolutionId: z.string().trim().min(1),
+    findingId: z.string().trim().min(1),
+    participantId: z.string().trim().min(1),
+    disposition: z.enum(["accepted", "disputed", "resolved", "rejected"]),
+    response: z.string().trim().min(1),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+    revisedSubjectId: z.string().trim().min(1).optional(),
+    revisedSubjectHash: Sha256Schema.optional(),
+  })
+  .strict();
+
+export const ReviewDiscussionOpenEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.discussion.open"),
+    topicId: z.string().trim().min(1),
+    discussionId: z.string().trim().min(1),
+    moderatorParticipantId: z.string().trim().min(1),
+    conflictFindingIds: z.array(z.string().trim().min(1)).min(1),
+    boundedPrompt: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ReviewDiscussionCloseEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.discussion.close"),
+    topicId: z.string().trim().min(1),
+    discussionId: z.string().trim().min(1),
+    moderatorParticipantId: z.string().trim().min(1),
+    durationSeconds: z.number().int().nonnegative(),
+    tokensUsed: z.number().int().nonnegative(),
+    costCentsUsed: z.number().int().nonnegative(),
+    stopReason: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export const ReviewRevisionSubmitEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.revision.submit"),
+    topicId: z.string().trim().min(1),
+    revisionId: z.string().trim().min(1),
+    ownerParticipantId: z.string().trim().min(1),
+    subjectKind: z.string().trim().min(1),
+    subjectId: z.string().trim().min(1),
+    subjectHash: Sha256Schema,
+    producerAiMemberId: z.string().trim().min(1),
+    producerPositionId: z.string().trim().min(1),
+    producerSessionId: z.string().trim().min(1),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export const ReviewRecheckSubmitEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("review.recheck.submit"),
+    topicId: z.string().trim().min(1),
+    recheckId: z.string().trim().min(1),
+    revisionId: z.string().trim().min(1),
+    reviewerParticipantId: z.string().trim().min(1),
+    reviewerSessionId: z.string().trim().min(1),
+    result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
+    conditions: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export type ReviewEnvelopeCommand =
+  | z.infer<typeof ReviewTopicCreateEnvelopeCommandSchema>
+  | z.infer<typeof ReviewFindingSubmitEnvelopeCommandSchema>
+  | z.infer<typeof ReviewFindingDispositionEnvelopeCommandSchema>
+  | z.infer<typeof ReviewDiscussionOpenEnvelopeCommandSchema>
+  | z.infer<typeof ReviewDiscussionCloseEnvelopeCommandSchema>
+  | z.infer<typeof ReviewRevisionSubmitEnvelopeCommandSchema>
+  | z.infer<typeof ReviewRecheckSubmitEnvelopeCommandSchema>;
+
+export type ProductEnvelopeCommand =
+  | z.infer<typeof ProductProposalReviseEnvelopeCommandSchema>
+  | z.infer<typeof ProductProposalMarkAwaitingEnvelopeCommandSchema>
+  | z.infer<typeof ConfirmProductBaselineEnvelopeCommandSchema>
+  | z.infer<typeof ForkDepartmentRunEnvelopeCommandSchema>;
+
+export type ProductReviewEnvelopeCommand =
+  | z.infer<typeof ProjectSpecReviseEnvelopeCommandSchema>
+  | z.infer<typeof ProductReviewStartEnvelopeCommandSchema>
+  | z.infer<typeof ProductReadinessRecordEnvelopeCommandSchema>
+  | z.infer<typeof ProductGatePromoteEnvelopeCommandSchema>;
+
+export type TechnicalReviewEnvelopeCommand =
+  | z.infer<typeof ApplicationSpecReviseEnvelopeCommandSchema>
+  | z.infer<typeof TechnicalBaselineProposalReviseEnvelopeCommandSchema>
+  | z.infer<typeof TechnicalReviewStartEnvelopeCommandSchema>
+  | z.infer<typeof TechnicalGatePromoteEnvelopeCommandSchema>;
+
+export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
+  ProjectUpdateEnvelopeCommandSchema,
+  ApplicationRegisterEnvelopeCommandSchema,
+  ApplicationSpecReviseEnvelopeCommandSchema,
+  TechnicalBaselineProposalReviseEnvelopeCommandSchema,
+  TechnicalReviewStartEnvelopeCommandSchema,
+  TechnicalGatePromoteEnvelopeCommandSchema,
+  AckRuntimeEventsEnvelopeCommandSchema,
+  ProductProposalReviseEnvelopeCommandSchema,
+  ProductProposalMarkAwaitingEnvelopeCommandSchema,
+  ConfirmProductBaselineEnvelopeCommandSchema,
+  ForkDepartmentRunEnvelopeCommandSchema,
+  ProjectSpecReviseEnvelopeCommandSchema,
+  ProductReviewStartEnvelopeCommandSchema,
+  ProductReadinessRecordEnvelopeCommandSchema,
+  ProductGatePromoteEnvelopeCommandSchema,
+  InteractionPromptEnvelopeCommandSchema,
+  ReviewTopicCreateEnvelopeCommandSchema,
+  ReviewFindingSubmitEnvelopeCommandSchema,
+  ReviewFindingDispositionEnvelopeCommandSchema,
+  ReviewDiscussionOpenEnvelopeCommandSchema,
+  ReviewDiscussionCloseEnvelopeCommandSchema,
+  ReviewRevisionSubmitEnvelopeCommandSchema,
+  ReviewRecheckSubmitEnvelopeCommandSchema,
+  ArtifactRegisterEnvelopeCommandSchema,
+  ArtifactFinalizeEnvelopeCommandSchema,
+  ArtifactSupersedeEnvelopeCommandSchema,
+]);
+
+export type EnvelopeCommand = z.infer<typeof EnvelopeCommandSchema>;
+
+export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
+  Command["type"] extends "ack-runtime-events"
+    ? {
+        readonly acknowledged: true;
+        readonly subscriptionGeneration: number;
+        readonly barrierSequence: number;
+        readonly auditId: string;
+      }
+    : Command["type"] extends "application.register"
+      ? ApplicationView
+      : Command["type"] extends
+            | "application-spec.revise"
+            | "technical-baseline-proposal.revise"
+            | "technical-review.start"
+            | "technical-gate.promote"
+        ? TechnicalReviewStateView
+        : Command["type"] extends "interaction.prompt"
+          ? InteractionTurnView
+          : Command["type"] extends ReviewEnvelopeCommand["type"]
+            ? ReviewTopicView
+            : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+              ? ProductReviewStateView
+              : Command["type"] extends ProductEnvelopeCommand["type"]
+                ? ProductDiscoveryView
+                : Command["type"] extends "artifact.version.register"
+                  ? ArtifactRegistrationView
+                  : Command["type"] extends
+                        | "artifact.version.finalize"
+                        | "artifact.version.supersede"
+                    ? ArtifactVersionView
+                    : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
@@ -1334,13 +2881,14 @@ export const CommandEnvelopeSchema = z.object({
   actor: ActorRefSchema,
   consumerId: z.string().trim().min(1).optional(),
   expectedRevision: z.number().int().nonnegative().optional(),
-  command: ProjectUpdateEnvelopeCommandSchema,
+  command: EnvelopeCommandSchema,
 });
 
-export type CommandEnvelope<Command extends EnvelopeCommand = EnvelopeCommand> =
-  Omit<z.infer<typeof CommandEnvelopeSchema>, "command"> & {
-    readonly command: Command;
-  };
+export type CommandEnvelope<
+  Command extends EnvelopeCommand = ProjectUpdateEnvelopeCommand,
+> = Omit<z.infer<typeof CommandEnvelopeSchema>, "command"> & {
+  readonly command: Command;
+};
 
 export interface CommandSucceeded<Value> {
   readonly status: "succeeded";
@@ -1374,6 +2922,7 @@ export const CommandResultSchema = z.discriminatedUnion("status", [
 export const QueryResultSchema = z.object({
   view: z.unknown(),
   asOfSequence: z.number().int().nonnegative(),
+  viewSyncToken: z.string().optional(),
 });
 
 export type CompanyCommandResult<Command extends CompanyCommand> =
@@ -1390,87 +2939,196 @@ export type CompanyCommandResult<Command extends CompanyCommand> =
           ? SkillCatalogView
           : Command["type"] extends "runtime.backup"
             ? RuntimeBackupView
-            : Command["type"] extends "artifact.version.status"
-              ? ArtifactVersionView
-              : Command["type"] extends "runtime.events.ack"
-                ? { readonly acknowledged: true }
-                : Command["type"] extends "interaction.session.create"
-                  ? InteractionSessionView
-                  : Command["type"] extends "interaction.session.close"
-                    ? InteractionSessionView
-                    : Command["type"] extends "interaction.participant.add"
-                      ? SessionParticipantView
-                      : Command["type"] extends "interaction.message.add"
-                        ? SessionMessageView
-                        : Command["type"] extends "interaction.prompt"
-                          ? SessionMessageView
-                          : Command["type"] extends
-                                | "permission.request"
-                                | "permission.decide"
-                            ? PermissionRequestView
-                            : Command["type"] extends "memory.candidate.create"
-                              ? MemoryCandidateView
-                              : Command["type"] extends "memory.candidate.review"
-                                ? MemoryReviewView
-                                : Command["type"] extends "runtime.events.compact"
-                                  ? {
-                                      readonly deleted: number;
-                                      readonly retained: number;
-                                    }
-                                  : Command["type"] extends "project.create"
-                                    ? CompanyProject
-                                    : Command["type"] extends
-                                          | "project.update"
-                                          | "project.archive"
-                                      ? ProjectEditorView
-                                      : Command["type"] extends "department.create"
-                                        ? CompanyDepartment
-                                        : Command["type"] extends
-                                              | "skill.catalog.save"
-                                              | "skill.catalog.archive"
-                                              | "position.skills.set"
-                                              | "skill-flow.save"
-                                              | "skill-flow.archive"
-                                          ? SkillConfigurationView
-                                          : Command["type"] extends "position.configure"
-                                            ? PositionConfigurationResult
+            : Command["type"] extends "ack-runtime-events"
+              ? {
+                  readonly acknowledged: true;
+                  readonly subscriptionGeneration: number;
+                  readonly barrierSequence: number;
+                  readonly auditId: string;
+                }
+              : Command["type"] extends "artifact.version.status"
+                ? ArtifactVersionView
+                : Command["type"] extends "artifact.version.register"
+                  ? ArtifactRegistrationView
+                  : Command["type"] extends
+                        | "artifact.version.finalize"
+                        | "artifact.version.supersede"
+                    ? ArtifactVersionView
+                    : Command["type"] extends "runtime.events.ack"
+                      ? { readonly acknowledged: true }
+                      : Command["type"] extends "interaction.session.create"
+                        ? InteractionSessionView
+                        : Command["type"] extends "interaction.session.close"
+                          ? InteractionSessionView
+                          : Command["type"] extends "interaction.participant.add"
+                            ? SessionParticipantView
+                            : Command["type"] extends "interaction.message.add"
+                              ? SessionMessageView
+                              : Command["type"] extends "interaction.prompt"
+                                ? InteractionTurnView
+                                : Command["type"] extends
+                                      | "permission.request"
+                                      | "permission.decide"
+                                  ? PermissionRequestView
+                                  : Command["type"] extends "memory.candidate.create"
+                                    ? MemoryCandidateView
+                                    : Command["type"] extends "memory.candidate.review"
+                                      ? MemoryReviewView
+                                      : Command["type"] extends "runtime.events.compact"
+                                        ? {
+                                            readonly deleted: number;
+                                            readonly retained: number;
+                                          }
+                                        : Command["type"] extends "project.create"
+                                          ? CompanyProject
+                                          : Command["type"] extends
+                                                | "product.proposal.revise"
+                                                | "product.proposal.mark-awaiting-confirmation"
+                                                | "confirm-product-baseline"
+                                                | "fork-department-run"
+                                            ? ProductDiscoveryView
                                             : Command["type"] extends
-                                                  | "department.pipeline.draft.save"
-                                                  | "department.pipeline.publish"
-                                              ? DepartmentPipelineEditorView
-                                              : Command["type"] extends
-                                                    | "run.start"
-                                                    | "run.execute-ready"
-                                                    | "run.fork"
-                                                    | "run.pause"
-                                                    | "run.resume"
-                                                    | "run.cancel"
-                                                    | "run.recover"
-                                                    | "run.approval.decide"
-                                                    | "run.node.retry"
-                                                ? DepartmentRunView
-                                                : DepartmentInspect;
+                                                  | "project.update"
+                                                  | "project.archive"
+                                              ? ProjectEditorView
+                                              : Command["type"] extends "department.create"
+                                                ? CompanyDepartment
+                                                : Command["type"] extends
+                                                      | "skill.catalog.save"
+                                                      | "skill.catalog.archive"
+                                                      | "position.skills.set"
+                                                      | "skill-flow.save"
+                                                      | "skill-flow.archive"
+                                                  ? SkillConfigurationView
+                                                  : Command["type"] extends "position.configure"
+                                                    ? PositionConfigurationResult
+                                                    : Command["type"] extends
+                                                          | "department.pipeline.draft.save"
+                                                          | "department.pipeline.publish"
+                                                      ? DepartmentPipelineEditorView
+                                                      : Command["type"] extends
+                                                            | "run.start"
+                                                            | "run.execute-ready"
+                                                            | "run.fork"
+                                                            | "run.pause"
+                                                            | "run.resume"
+                                                            | "run.cancel"
+                                                            | "run.recover"
+                                                            | "run.approval.decide"
+                                                            | "run.approval.retry"
+                                                            | "run.node.retry"
+                                                        ? DepartmentRunView
+                                                        : DepartmentInspect;
 
 export const EventEnvelopeSchema = z.object({
+  registryVersion: z.number().int().positive().optional(),
   schemaVersion: z.literal(1),
   sequence: z.number().int().nonnegative(),
   eventId: z.string(),
   type: z.string(),
   companyId: z.string(),
   projectId: z.string().optional(),
+  applicationId: z.string().optional(),
   departmentId: z.string().optional(),
+  positionId: z.string().optional(),
+  aiMemberId: z.string().optional(),
+  companyAgentAdapterId: z.string().optional(),
+  skillId: z.string().optional(),
+  skillFlowId: z.string().optional(),
+  executionProfileId: z.string().optional(),
+  repositoryReferenceId: z.string().optional(),
+  productProposalId: z.string().optional(),
+  productBaselineId: z.string().optional(),
+  projectSpecRevisionId: z.string().optional(),
+  applicationSpecRevisionId: z.string().optional(),
+  technicalBaselineProposalId: z.string().optional(),
+  technicalBaselineId: z.string().optional(),
+  pipelineVersionId: z.string().optional(),
   runId: z.string().optional(),
+  snapshotRevisionId: z.string().optional(),
   nodeRunId: z.string().optional(),
+  nodeAttemptId: z.string().optional(),
+  nodeLeaseId: z.string().optional(),
+  executionLeaseId: z.string().optional(),
+  executionOperationKey: z.string().optional(),
+  executionFactId: z.string().optional(),
+  workPackageId: z.string().optional(),
+  workPackageVersionId: z.string().optional(),
+  workspaceAllocationId: z.string().optional(),
+  integrationGenerationId: z.string().optional(),
+  integrationOperationId: z.string().optional(),
   sessionId: z.string().optional(),
+  interactionTurnId: z.string().optional(),
   participantId: z.string().optional(),
   topicId: z.string().optional(),
+  artifactId: z.string().optional(),
+  reviewFindingId: z.string().optional(),
+  qualityGateResultId: z.string().optional(),
+  artifactVersionId: z.string().optional(),
+  defectId: z.string().optional(),
+  permissionRequestId: z.string().optional(),
+  nodeApprovalRequestId: z.string().optional(),
+  nodeApprovalDecisionId: z.string().optional(),
+  testCaseRevisionId: z.string().optional(),
+  testRunId: z.string().optional(),
+  securityReviewId: z.string().optional(),
+  operabilityReviewId: z.string().optional(),
+  deliveryCandidateInputId: z.string().optional(),
+  deliveryCandidateId: z.string().optional(),
+  releaseDecisionId: z.string().optional(),
+  releaseOperationId: z.string().optional(),
+  memoryCandidateId: z.string().optional(),
+  memoryEntryId: z.string().optional(),
+  improvementProposalId: z.string().optional(),
+  improvementApplicationOperationId: z.string().optional(),
+  commandId: z.string().optional(),
   timestamp: z.string().datetime(),
   payload: z.unknown(),
 });
 
 export type EventEnvelope = z.infer<typeof EventEnvelopeSchema>;
 
+export const RuntimeSubscriptionHandleSchema = z.object({
+  subscriptionId: z.string().trim().min(1),
+  subscriptionGeneration: z.number().int().positive(),
+  barrierSequence: z.number().int().nonnegative(),
+});
+
+export type RuntimeSubscriptionHandle = z.infer<
+  typeof RuntimeSubscriptionHandleSchema
+>;
+
+export const RuntimeSubscriptionBatchSchema = z.object({
+  events: z.array(EventEnvelopeSchema),
+  nextSequence: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+});
+
+export type RuntimeSubscriptionBatch = z.infer<
+  typeof RuntimeSubscriptionBatchSchema
+>;
+
 export const RuntimeRequestSchema = z.union([
+  z.object({
+    id: z.string(),
+    token: z.string().min(1),
+    kind: z.literal("subscription.open"),
+  }),
+  z.object({
+    id: z.string(),
+    token: z.string().min(1),
+    kind: z.literal("subscription.read"),
+    subscriptionId: z.string().trim().min(1),
+    subscriptionGeneration: z.number().int().positive(),
+    limit: z.number().int().positive().max(1_000),
+  }),
+  z.object({
+    id: z.string(),
+    token: z.string().min(1),
+    kind: z.literal("subscription.close"),
+    subscriptionId: z.string().trim().min(1),
+    subscriptionGeneration: z.number().int().positive(),
+  }),
   z
     .object({
       id: z.string(),
@@ -1546,5 +3204,15 @@ export interface CompanyRuntimeClient {
   ): Promise<QueryResult<CompanyQueryResult<Query>>>;
   executeEnvelope<Command extends EnvelopeCommand>(
     envelope: CommandEnvelope<Command>,
-  ): Promise<CommandResult<ProjectEditorView>>;
+  ): Promise<CommandResult<EnvelopeCommandResult<Command>>>;
+  openSubscription(): Promise<RuntimeSubscriptionHandle>;
+  readSubscription(input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+    readonly limit: number;
+  }): Promise<RuntimeSubscriptionBatch>;
+  closeSubscription(input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+  }): Promise<void>;
 }

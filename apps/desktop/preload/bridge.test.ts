@@ -51,11 +51,13 @@ import {
   AGENT_CATALOG_INSPECT_CHANNEL,
   AGENT_CATALOG_DISCOVER_CHANNEL,
   AGENT_TEST_CHANNEL,
-  INTERACTION_PROMPT_CHANNEL,
   SKILL_DISCOVERY_INSPECT_CHANNEL,
   SKILL_DISCOVERY_REFRESH_CHANNEL,
   SKILL_DISCOVERY_ENABLE_CHANNEL,
   SKILL_DISCOVERY_ARCHIVE_CHANNEL,
+  RUNTIME_TUNNEL_CHANNEL,
+  RUNTIME_EVENT_PORT_CHANNEL,
+  type RuntimeEventFrame,
 } from "./bridge.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
@@ -67,12 +69,31 @@ describe("Sandcastle preload bridge", () => {
     const bridge = createSandcastleBridge(async (channel, payload) => {
       calls.push({ channel, payload });
       return {
-        id: "message-1",
-        sessionId: "session-1",
-        participantId: "human-1",
-        kind: "text",
-        content: "你好",
-        createdAt: "2026-07-15T00:00:00.000Z",
+        status: "succeeded",
+        value: {
+          id: "turn-1",
+          sessionId: "session-1",
+          inputMessageId: "message-1",
+          outputMessageId: null,
+          status: "queued",
+          commandId: "command-1",
+          executionOperationKey: "interaction-turn:turn-1",
+          executionLeaseId: null,
+          executionEpoch: null,
+          fenceToken: null,
+          mechanism: "model-only",
+          mechanismVersion: "1",
+          contextHash: "a".repeat(64),
+          contextSchemaHash: "b".repeat(64),
+          terminalExecutionFactId: null,
+          providerExecutionRef: null,
+          failureCode: null,
+          failureMessage: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
+        },
+        effectIds: [],
       };
     });
 
@@ -82,16 +103,29 @@ describe("Sandcastle preload bridge", () => {
       content: "你好",
     });
 
-    assert.deepEqual(calls, [
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.channel, RUNTIME_TUNNEL_CHANNEL);
+    const payload = calls[0]?.payload as {
+      readonly commandId?: unknown;
+      readonly command?: unknown;
+      readonly operation?: unknown;
+      readonly schemaVersion?: unknown;
+    };
+    assert.equal(typeof payload.commandId, "string");
+    assert.deepEqual(
+      { ...payload, commandId: "stable-command-id" },
       {
-        channel: INTERACTION_PROMPT_CHANNEL,
-        payload: {
+        schemaVersion: 1,
+        operation: "execute",
+        commandId: "stable-command-id",
+        command: {
+          type: "interaction.prompt",
           sessionId: "session-1",
           participantId: "human-1",
           content: "你好",
         },
       },
-    ]);
+    );
   });
 
   it("exposes Agent and independent Skill Catalog commands through preload", async () => {
@@ -216,7 +250,13 @@ describe("Sandcastle preload bridge", () => {
       pid: 42,
       startedAt: "2026-07-13T00:00:00.000Z",
     });
-    assert.deepEqual(Object.keys(bridge), ["runtime"]);
+    assert.deepEqual(Object.keys(bridge), [
+      "execute",
+      "query",
+      "openEventStream",
+      "closeEventStream",
+      "runtime",
+    ]);
     assert.equal(overview.company.name, "Acme");
     assert.deepEqual(Object.keys(bridge.runtime), [
       "health",
@@ -231,6 +271,15 @@ describe("Sandcastle preload bridge", () => {
       "projects",
       "createProject",
       "inspectProject",
+      "applications",
+      "inspectProductDiscovery",
+      "inspectProductReview",
+      "executeProductReviewCommand",
+      "inspectTechnicalReview",
+      "executeTechnicalReviewCommand",
+      "reviewTopics",
+      "inspectReviewTopic",
+      "executeReviewCommand",
       "updateProject",
       "archiveProject",
       "departments",
@@ -291,6 +340,7 @@ describe("Sandcastle preload bridge", () => {
       "cancelRun",
       "recoverRun",
       "decideApproval",
+      "retryApproval",
       "retryNode",
     ]);
   });
@@ -389,12 +439,24 @@ describe("Sandcastle preload bridge", () => {
     const calls: Array<{ channel: string; payload: unknown }> = [];
     const bridge = createSandcastleBridge(async (channel, payload) => {
       calls.push({ channel, payload });
-      if (channel === PROJECT_UPDATE_CHANNEL) {
+      if (channel === RUNTIME_TUNNEL_CHANNEL) {
+        const request = payload as { readonly operation: string };
+        if (request.operation === "query") {
+          return {
+            view: project,
+            asOfSequence: 0,
+            viewSyncToken: "token-1",
+          };
+        }
         return {
-          ...project,
-          revision: 1,
-          sharedContext: "Preserve the payment-provider contract.",
-          repositoryReferences: ["/work/checkout-web"],
+          status: "succeeded",
+          value: {
+            ...project,
+            revision: 1,
+            sharedContext: "Preserve the payment-provider contract.",
+            repositoryReferences: ["/work/checkout-web"],
+          },
+          effectIds: ["effect-1"],
         };
       }
       if (channel === PROJECT_ARCHIVE_CHANNEL) {
@@ -419,11 +481,7 @@ describe("Sandcastle preload bridge", () => {
 
     assert.deepEqual(
       calls.map((call) => call.channel),
-      [
-        PROJECT_INSPECT_CHANNEL,
-        PROJECT_UPDATE_CHANNEL,
-        PROJECT_ARCHIVE_CHANNEL,
-      ],
+      [RUNTIME_TUNNEL_CHANNEL, RUNTIME_TUNNEL_CHANNEL, PROJECT_ARCHIVE_CHANNEL],
     );
   });
 
@@ -800,5 +858,416 @@ describe("Sandcastle preload bridge", () => {
       EXECUTION_PROFILE_ARCHIVE_CHANNEL,
     ]);
     assert.equal(department.pipeline?.version, 2);
+  });
+
+  it("routes the migrated project slice through the single typed tunnel", async () => {
+    const calls: Array<{ channel: string; payload: unknown }> = [];
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship it",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "",
+      repositoryReferences: [],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      calls.push({ channel, payload });
+      if (channel !== RUNTIME_TUNNEL_CHANNEL) {
+        throw new Error(`Unexpected channel ${channel}`);
+      }
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: unknown;
+        readonly command?: unknown;
+      };
+      if (request.operation === "query") {
+        return {
+          view: project,
+          asOfSequence: 7,
+          viewSyncToken: "token-1",
+        };
+      }
+      return {
+        status: "succeeded",
+        value: project,
+        effectIds: ["effect-1"],
+      };
+    });
+
+    const query = await bridge.query({
+      type: "project.inspect",
+      projectId: "project-1",
+    });
+    const result = await bridge.execute({
+      commandId: "command-1",
+      expectedRevision: 0,
+      command: {
+        type: "project.update",
+        projectId: "project-1",
+        name: "Checkout",
+        goal: "Ship it",
+        sharedContext: "updated",
+        repositoryReferences: [],
+      },
+    });
+    await bridge.runtime.inspectProject("project-1");
+
+    assert.equal(query.view.id, "project-1");
+    assert.equal(query.asOfSequence, 7);
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(
+      calls.map((call) => call.channel),
+      [RUNTIME_TUNNEL_CHANNEL, RUNTIME_TUNNEL_CHANNEL, RUNTIME_TUNNEL_CHANNEL],
+    );
+    for (const call of calls) {
+      const payload = call.payload as Record<string, unknown>;
+      assert.equal("actor" in payload, false);
+      assert.equal("principal" in payload, false);
+      assert.equal("consumerId" in payload, false);
+    }
+  });
+
+  it("routes Product Review Query and Command envelopes through typed IPC", async () => {
+    const calls: unknown[] = [];
+    const state = {
+      projectId: "project-1",
+      runId: "run-1",
+      productBaselineId: "baseline-1",
+      productBaselineHash: "a".repeat(64),
+      specRevisions: [],
+      reviewTopics: [],
+      readinessEvidence: [],
+      readinessBlockers: [],
+      promotion: null,
+      snapshotLineage: [
+        {
+          id: "snapshot-r1",
+          revision: 1,
+          parentRevision: null,
+          hash: "b".repeat(64),
+        },
+      ],
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      const request = payload as { operation: "query" | "execute" };
+      return request.operation === "query"
+        ? { view: state, asOfSequence: 9 }
+        : { status: "succeeded", value: state, effectIds: ["audit-1"] };
+    });
+
+    assert.equal(
+      (await bridge.runtime.inspectProductReview("run-1")).runId,
+      "run-1",
+    );
+    assert.equal(
+      (
+        await bridge.runtime.executeProductReviewCommand({
+          commandId: "spec-r1",
+          expectedRevision: 0,
+          command: {
+            type: "project-spec.revise",
+            runId: "run-1",
+            producerSessionId: "product-session",
+            content: {
+              outcome: "Ship checkout",
+              acceptanceCriteria: ["One order"],
+              applicationBoundaries: ["checkout-web"],
+              crossApplicationContracts: ["checkout-v1"],
+              deliveryConstraints: ["Local-first"],
+            },
+          },
+        })
+      ).runId,
+      "run-1",
+    );
+    assert.equal(calls.length, 2);
+  });
+
+  it("routes Technical Review Query and Command envelopes through typed IPC", async () => {
+    const calls: unknown[] = [];
+    const state = {
+      projectId: "project-1",
+      runId: "run-1",
+      applications: [],
+      applicationSpecRevisions: [],
+      technicalBaselineProposals: [],
+      applicationContracts: [],
+      reviewTopics: [],
+      conditionalObligations: [],
+      acceptedBaseline: null,
+      promotion: null,
+      snapshotLineage: [
+        {
+          id: "snapshot-r2",
+          revision: 2,
+          parentRevision: 1,
+          hash: "b".repeat(64),
+        },
+      ],
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      const request = payload as {
+        operation: "query" | "execute";
+        query?: { type?: string };
+      };
+      return request.operation === "query"
+        ? {
+            view: request.query?.type === "applications.list" ? [] : state,
+            asOfSequence: 10,
+          }
+        : { status: "succeeded", value: state, effectIds: ["audit-technical"] };
+    });
+
+    assert.deepEqual(await bridge.runtime.applications("project-1"), []);
+    assert.equal(
+      (await bridge.runtime.inspectTechnicalReview("run-1")).runId,
+      "run-1",
+    );
+    assert.equal(
+      (
+        await bridge.runtime.executeTechnicalReviewCommand({
+          commandId: "technical-promote-1",
+          expectedRevision: 2,
+          command: {
+            type: "technical-gate.promote",
+            runId: "run-1",
+            parentSnapshotRevisionId: "snapshot-r2",
+            gateResultId: "technical-gate-1",
+          },
+        })
+      ).runId,
+      "run-1",
+    );
+    assert.equal(calls.length, 3);
+  });
+
+  it("recovers with Query View, View-sync Ack, then a new stream generation", async () => {
+    const operations: string[] = [];
+    let attachPort!: (attachment: {
+      readonly streamRequestId: string;
+      readonly port: {
+        onmessage: ((event: { data: unknown }) => void) | null;
+        start(): void;
+        close(): void;
+        postMessage(value: unknown): void;
+      };
+    }) => void;
+    const port = {
+      onmessage: null,
+      start: () => undefined,
+      close: () => undefined,
+      postMessage: () => undefined,
+    };
+    const bridge = createSandcastleBridge(
+      async (_channel, payload) => {
+        const request = payload as {
+          readonly operation: string;
+          readonly streamRequestId?: string;
+          readonly command?: {
+            readonly type?: string;
+            readonly consumerId?: string;
+          };
+        };
+        operations.push(request.operation);
+        if (request.operation === "query") {
+          return {
+            view: {
+              id: "project-1",
+              name: "Checkout",
+              goal: "Ship it",
+              status: "active",
+              revision: 1,
+              sharedContext: "",
+              repositoryReferences: [],
+              departmentRuns: [],
+              createdAt: "2026-07-14T00:00:00.000Z",
+            },
+            asOfSequence: 12,
+            viewSyncToken: "view-token-12",
+          };
+        }
+        if (request.operation === "execute") {
+          assert.equal(request.command?.type, "ack-runtime-events");
+          assert.equal("consumerId" in (request.command ?? {}), false);
+          return {
+            status: "succeeded",
+            value: {
+              acknowledged: true,
+              subscriptionGeneration: 5,
+              barrierSequence: 12,
+              auditId: "audit-12",
+            },
+            effectIds: ["audit-12"],
+          };
+        }
+        queueMicrotask(() => {
+          attachPort({ streamRequestId: request.streamRequestId!, port });
+        });
+        return {
+          subscriptionId: "subscription-5",
+          subscriptionGeneration: 5,
+          barrierSequence: 12,
+        };
+      },
+      {
+        onPort(listener) {
+          attachPort = listener as typeof attachPort;
+        },
+      },
+    );
+
+    const query = await bridge.query({
+      type: "project.inspect",
+      projectId: "project-1",
+    });
+    const ack = await bridge.execute({
+      commandId: "ack-12",
+      command: {
+        type: "ack-runtime-events",
+        sequence: query.asOfSequence,
+        viewSyncToken: query.viewSyncToken!,
+      },
+    });
+    const handle = await bridge.openEventStream(() => undefined);
+
+    assert.equal(ack.status, "succeeded");
+    assert.equal(handle.barrierSequence, query.asOfSequence);
+    assert.deepEqual(operations, ["query", "execute", "open-event-stream"]);
+  });
+
+  it("drops stale MessagePort frames and waits for callback barriers before crediting", async () => {
+    type FakePort = {
+      onmessage: ((event: { data: unknown }) => void) | null;
+      readonly sent: unknown[];
+      start(): void;
+      close(): void;
+      postMessage(value: unknown): void;
+    };
+    const ports: FakePort[] = [];
+    let attachPort!: (attachment: {
+      readonly streamRequestId: string;
+      readonly port: FakePort;
+    }) => void;
+    let resolveFrame!: () => void;
+    let frameStarted = false;
+    const makePort = (): FakePort => {
+      const port: FakePort = {
+        onmessage: null,
+        sent: [],
+        start: () => undefined,
+        close: () => undefined,
+        postMessage(value) {
+          port.sent.push(value);
+        },
+      };
+      ports.push(port);
+      return port;
+    };
+    const bridge = createSandcastleBridge(
+      async (_channel, payload) => {
+        const request = payload as { readonly operation: string };
+        if (request.operation === "open-event-stream") {
+          const port = makePort();
+          queueMicrotask(() => {
+            attachPort({
+              streamRequestId: (payload as { streamRequestId: string })
+                .streamRequestId,
+              port,
+            });
+          });
+          return {
+            subscriptionId: ports.length.toString(),
+            subscriptionGeneration: ports.length,
+            barrierSequence: 0,
+          };
+        }
+        return { closed: true };
+      },
+      {
+        onPort(listener) {
+          attachPort = listener as typeof attachPort;
+        },
+      },
+    );
+    const received: RuntimeEventFrame[] = [];
+    const first = bridge.openEventStream(async (frame) => {
+      received.push(frame);
+      if (!frameStarted) {
+        frameStarted = true;
+        await new Promise<void>((resolve) => {
+          resolveFrame = resolve;
+        });
+      }
+    });
+    const firstHandle = await first;
+    const firstPort = ports[0]!;
+    firstPort.onmessage?.({
+      data: {
+        subscriptionId: firstHandle.subscriptionId,
+        subscriptionGeneration: firstHandle.subscriptionGeneration,
+        barrierSequence: 0,
+        value: {
+          kind: "event",
+          event: {
+            registryVersion: 1,
+            schemaVersion: 1,
+            sequence: 1,
+            eventId: "event-1",
+            type: "project.updated",
+            companyId: "company-1",
+            timestamp: "2026-07-14T00:00:00.000Z",
+            payload: {},
+          },
+        },
+      },
+    });
+    await Promise.resolve();
+    assert.equal(firstPort.sent.length, 1);
+    const closing = bridge.closeEventStream(firstHandle);
+    firstPort.onmessage?.({
+      data: {
+        subscriptionId: firstHandle.subscriptionId,
+        subscriptionGeneration: firstHandle.subscriptionGeneration,
+        barrierSequence: 0,
+        value: { kind: "event", event: { sequence: 2 } },
+      },
+    });
+    resolveFrame();
+    await closing;
+    assert.equal(received.length, 1);
+
+    const secondHandle = await bridge.openEventStream(async (frame) => {
+      received.push(frame);
+    });
+    const secondPort = ports[1]!;
+    secondPort.onmessage?.({
+      data: {
+        subscriptionId: firstHandle.subscriptionId,
+        subscriptionGeneration: firstHandle.subscriptionGeneration,
+        barrierSequence: 0,
+        value: { kind: "event", event: { sequence: 3 } },
+      },
+    });
+    secondPort.onmessage?.({
+      data: {
+        subscriptionId: secondHandle.subscriptionId,
+        subscriptionGeneration: secondHandle.subscriptionGeneration,
+        barrierSequence: 0,
+        value: {
+          kind: "control",
+          control: { type: "cursor.accepted", barrierSequence: 0 },
+        },
+      },
+    });
+    await Promise.resolve();
+    assert.equal(received.length, 2);
+    assert.equal(received[1]?.value.kind, "control");
   });
 });

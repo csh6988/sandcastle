@@ -1,188 +1,147 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
+import type {
+  AdapterExecutionFact,
+  ExecutionEventSink,
+  InteractionExecutionRequest,
+} from "../execution/contract.js";
 import {
-  createSandcastleInteractionExecutionAdapter,
-  type InteractionExecutionInput,
+  createModelOnlyInteractionExecutionAdapter,
+  type TrustedModelTransport,
 } from "./interactionExecutionAdapter.js";
-import type { SandcastleExecutionRuntime } from "./sandcastleExecutionPort.js";
 
-const input = (): InteractionExecutionInput => ({
-  session: {
-    id: "session-1",
-    mode: "consultation",
-    projectId: "project-1",
-    runId: null,
-    nodeRunId: null,
-    status: "active",
-    createdAt: "2026-07-15T00:00:00.000Z",
-    closedAt: null,
+const request = (): InteractionExecutionRequest => ({
+  operationKey: "interaction-turn:turn-1",
+  target: { kind: "interaction-turn", id: "turn-1" },
+  lease: {
+    leaseId: "lease-1",
+    leaseKind: "execution",
+    operationKey: "interaction-turn:turn-1",
+    target: { kind: "interaction-turn", id: "turn-1" },
+    executionEpoch: 1,
+    fenceToken: "fence-1",
   },
-  project: {
-    id: "project-1",
-    name: "Checkout",
-    goal: "Ship checkout",
-    status: "active",
-    revision: 0,
-    sharedContext: "Preserve payments.",
-    repositoryReferences: ["/workspace/checkout"],
-    departmentRuns: [],
-    createdAt: "2026-07-15T00:00:00.000Z",
-  },
-  aiParticipant: {
-    id: "participant-1",
-    sessionId: "session-1",
-    participantType: "ai-member",
-    participantRef: "member-1",
-    role: "consulted-member",
-    createdAt: "2026-07-15T00:00:00.000Z",
-  },
-  position: {
-    id: "position-1",
-    name: "Product Planner",
-    responsibility: "Aligns goals.",
-    defaultAgentId: "codex",
+  agentAdapterId: "model-only:test",
+  model: "test-model",
+  permissionScope: "none",
+  sideEffectPolicy: "none",
+  completionSignal: "execution-fact",
+  timeoutSeconds: 60,
+  immutableContext: {
+    schemaVersion: 1,
+    schemaHash: "a".repeat(64),
+    contextHash: "b".repeat(64),
+    mechanism: "model-only",
+    mechanismVersion: "1",
+    session: { id: "session-1", mode: "consultation" },
+    project: {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship checkout",
+      sharedContext: "Preserve payments.",
+    },
     aiMember: {
       id: "member-1",
       displayName: "Ada",
       profile: "Careful planner.",
     },
+    position: {
+      id: "position-1",
+      name: "Product manager",
+      responsibility: "Clarify product goals.",
+    },
+    history: [{ role: "user", content: "What is the main risk?" }],
+    prompt: "How should we reduce it?",
   },
-  executionProfile: {
-    providerRef: "default-agent",
-    model: "gpt-test",
-    sandboxRef: "no-sandbox",
-    limits: { timeoutSeconds: 60 },
-  },
-  prompt: "你好",
 });
 
-describe("Sandcastle interaction execution adapter", () => {
-  it("invokes the configured Agent through the existing core Runtime seam", async () => {
-    let received: Readonly<Record<string, unknown>> | undefined;
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: (provider, model) => ({ provider, model }),
-      resolveSandbox: (sandbox) => ({ sandbox }),
-      run: async (options) => {
-        received = options;
-        return { stdout: "你好，我是 Ada。" };
+describe("Model-only Interaction Execution Adapter", () => {
+  it("passes only redacted model context to trusted transport and returns its terminal Fact receipt", async () => {
+    let received: Parameters<TrustedModelTransport["complete"]>[0] | undefined;
+    const submitted: AdapterExecutionFact[] = [];
+    const transport: TrustedModelTransport = {
+      complete: async (input) => {
+        received = input;
+        return {
+          providerExecutionRef: "provider-turn-1",
+          response: "Use a smaller first release.",
+          usage: { inputTokens: 12, outputTokens: 7, totalTokens: 19 },
+        };
       },
-      runWorkspaceTask: async () => ({}),
+    };
+    const sink: ExecutionEventSink = {
+      record: async (fact) => {
+        submitted.push(fact);
+        return {
+          status: "accepted",
+          executionFactId: `persisted:${fact.factId}`,
+          effectIds: [],
+          canonicalPayloadHash: "c".repeat(64),
+        };
+      },
     };
 
-    const result =
-      await createSandcastleInteractionExecutionAdapter(runtime).execute(
-        input(),
-      );
-
-    assert.deepEqual(result, { response: "你好，我是 Ada。" });
-    assert.deepEqual(received?.agent, { provider: "codex", model: "gpt-test" });
-    assert.deepEqual(received?.branchStrategy, {
-      type: "branch",
-      branch: "sandcastle/interaction/session-1",
-    });
-    assert.equal(received?.maxIterations, 1);
-    assert.match(String(received?.prompt), /Preserve payments/);
-    assert.match(String(received?.prompt), /你好/);
-  });
-
-  it("fails clearly when the Agent returns no response text", async () => {
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: () => ({}),
-      resolveSandbox: () => ({}),
-      run: async () => ({}),
-      runWorkspaceTask: async () => ({}),
-    };
-
-    await assert.rejects(
-      () =>
-        createSandcastleInteractionExecutionAdapter(runtime).execute(input()),
-      /Agent returned no response text/,
+    const adapter = createModelOnlyInteractionExecutionAdapter(transport);
+    const completion = await adapter.execute(
+      request(),
+      sink,
+      new AbortController().signal,
     );
-  });
 
-  it("resolves a nested Project repository reference to its Git root", async () => {
-    const repository = mkdtempSync(
-      join(tmpdir(), "sandcastle-interaction-repo-"),
+    assert.equal(
+      adapter.capabilities.enforceNoSideEffects?.mechanism,
+      "model-only",
     );
-    const nested = join(repository, "apps", "desktop");
-    mkdirSync(join(repository, ".git"));
-    mkdirSync(nested, { recursive: true });
-    let received: Readonly<Record<string, unknown>> | undefined;
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: () => ({}),
-      resolveSandbox: () => ({}),
-      run: async (options) => {
-        received = options;
-        return { stdout: "ok" };
-      },
-      runWorkspaceTask: async () => ({}),
-    };
-
-    await createSandcastleInteractionExecutionAdapter(runtime).execute({
-      ...input(),
-      project: { ...input().project, repositoryReferences: [nested] },
+    assert.equal(received?.model, "test-model");
+    assert.equal(received?.context.prompt, "How should we reduce it?");
+    assert.equal("cwd" in (received ?? {}), false);
+    assert.equal("sandbox" in (received ?? {}), false);
+    assert.equal("worktree" in (received ?? {}), false);
+    assert.equal("toolRegistry" in (received ?? {}), false);
+    assert.deepEqual(
+      submitted.map((fact) => fact.kind),
+      ["provider-started", "message", "usage", "completed"],
+    );
+    assert.deepEqual(completion, {
+      operationKey: "interaction-turn:turn-1",
+      terminalExecutionFactId: "persisted:completed",
+      status: "succeeded",
+      evidenceRefs: [],
     });
-
-    assert.equal(received?.cwd, repository);
   });
 
-  it("falls back to the Runtime Git root when Project repository references are empty", async () => {
-    let received: Readonly<Record<string, unknown>> | undefined;
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: () => ({}),
-      resolveSandbox: () => ({}),
-      run: async (options) => {
-        received = options;
-        return { stdout: "ok" };
-      },
-      runWorkspaceTask: async () => ({}),
-    };
-
-    await createSandcastleInteractionExecutionAdapter(runtime).execute({
-      ...input(),
-      project: { ...input().project, repositoryReferences: [] },
+  it("turns transport cancellation into a terminal cancelled Fact", async () => {
+    const submitted: AdapterExecutionFact[] = [];
+    const adapter = createModelOnlyInteractionExecutionAdapter({
+      complete: ({ signal }) =>
+        new Promise<never>((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        }),
     });
-
-    assert.equal(received?.cwd, join(process.cwd(), "..", ".."));
-  });
-
-  it("does not pass the catalog placeholder model default to Codex", async () => {
-    let receivedAgent: unknown;
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: (provider, model) => {
-        receivedAgent = { provider, model };
-        return receivedAgent;
+    const completion = adapter.execute(
+      request(),
+      {
+        record: async (fact) => {
+          submitted.push(fact);
+          return {
+            status: "accepted",
+            executionFactId: `persisted:${fact.factId}`,
+            effectIds: [],
+            canonicalPayloadHash: "c".repeat(64),
+          };
+        },
       },
-      resolveSandbox: () => ({}),
-      run: async () => ({ stdout: "ok" }),
-      runWorkspaceTask: async () => ({}),
-    };
-
-    await createSandcastleInteractionExecutionAdapter(runtime).execute({
-      ...input(),
-      executionProfile: { ...input().executionProfile, model: "default" },
-    });
-
-    assert.deepEqual(receivedAgent, { provider: "codex", model: "x5/gpt-5.5" });
-  });
-
-  it("disables resumable Session capture for one-shot consultation replies", async () => {
-    let receivedOptions: { readonly captureSessions?: boolean } | undefined;
-    const runtime: SandcastleExecutionRuntime = {
-      resolveAgent: (_provider, _model, options) => {
-        receivedOptions = options;
-        return {};
-      },
-      resolveSandbox: () => ({}),
-      run: async () => ({ stdout: "ok" }),
-      runWorkspaceTask: async () => ({}),
-    };
-
-    await createSandcastleInteractionExecutionAdapter(runtime).execute(input());
-
-    assert.deepEqual(receivedOptions, { captureSessions: false });
+      new AbortController().signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(await adapter.cancel(request().operationKey), "cancelled");
+    const result = await completion;
+    assert.equal(result.status, "cancelled");
+    assert.deepEqual(
+      submitted.map((fact) => fact.kind),
+      ["cancelled"],
+    );
   });
 });

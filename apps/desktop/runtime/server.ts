@@ -25,18 +25,16 @@ import { acquireCompanyRuntimeLock } from "./runtimeLock.js";
 import { openCompanyDatabase, type CompanyDatabase } from "./storage/sqlite.js";
 import type { LocalAgentHost } from "./agent/agentCatalog.js";
 import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
-import type {
-  InteractionExecutionAdapter,
-  InteractionExecutionInput,
-} from "./adapters/interactionExecutionAdapter.js";
+import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import { CompanyCommandError } from "./commandRegistry.js";
+import { RuntimeEventCursorError } from "./events/cursor.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
   readonly companyDir: string;
   readonly token: string;
   readonly executionAdapter?: ExecutionAdapter;
-  readonly interactionExecutionAdapter?: InteractionExecutionAdapter;
+  readonly interactionExecutionAdapter?: ModelOnlyInteractionExecutionAdapter;
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
@@ -75,18 +73,23 @@ export const startCompanyRuntimeServer = async (
     database = openCompanyDatabase(options.companyDir, {
       executionAdapter: options.executionAdapter,
       agentHost: options.agentHost,
+      ...(options.interactionExecutionAdapter
+        ? { interactionExecutionAdapter: options.interactionExecutionAdapter }
+        : {}),
     });
   } catch (error) {
     releaseLock();
     throw error;
   }
+  await database.pipelineRuntime.reconcilePendingExecutions();
+  await database.interaction.reconcilePendingTurns();
   const startedAt = new Date().toISOString();
   const principal =
     options.principal ??
     ({
-      type: "electron-main",
-      id: "desktop-main",
-      authenticatedBy: "ipc-token",
+      type: "human",
+      id: "local-desktop-user",
+      authenticatedBy: "local-session",
     } satisfies ActorRef);
   const consumerId = options.consumerId ?? "desktop-window-1";
   let server: Server | null = null;
@@ -95,191 +98,6 @@ export const startCompanyRuntimeServer = async (
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
-
-  const startInteractionPrompt = (input: {
-    readonly sessionId: string;
-    readonly participantId: string;
-    readonly content: string;
-  }): ReturnType<CompanyDatabase["interaction"]["addMessage"]> => {
-    const before = database.interaction.inspectSession(input.sessionId);
-    const humanParticipant = before.participants.find(
-      (participant) => participant.id === input.participantId,
-    );
-    if (humanParticipant?.participantType !== "human") {
-      throw new RuntimeInteractionError(
-        "SESSION_MESSAGE_INVALID",
-        "Interaction Prompt requires a human participant in the same Session.",
-      );
-    }
-    const aiParticipant = before.participants.find(
-      (participant) => participant.participantType === "ai-member",
-    );
-    if (!aiParticipant) {
-      throw new RuntimeInteractionError(
-        "SESSION_PARTICIPANT_NOT_FOUND",
-        `Interaction Session ${input.sessionId} has no AI Member participant.`,
-      );
-    }
-    const statusParticipant =
-      before.participants.find(
-        (participant) =>
-          participant.participantType === "system" &&
-          participant.role === "runtime-status",
-      ) ??
-      database.interaction.addParticipant({
-        sessionId: input.sessionId,
-        participantType: "system",
-        participantRef: "company-runtime",
-        role: "runtime-status",
-      });
-    const humanMessage = database.interaction.addMessage({
-      sessionId: input.sessionId,
-      participantId: input.participantId,
-      kind: "text",
-      content: input.content,
-    });
-    database.interaction.addMessage({
-      sessionId: input.sessionId,
-      participantId: statusParticipant.id,
-      kind: "status",
-      content: "Agent is processing this message.",
-    });
-
-    const adapter = options.interactionExecutionAdapter;
-    if (!adapter) {
-      database.interaction.addMessage({
-        sessionId: input.sessionId,
-        participantId: statusParticipant.id,
-        kind: "status",
-        content: "Agent execution is unavailable in this Runtime.",
-      });
-      return humanMessage;
-    }
-
-    let project = database.projectConfiguration.inspect(
-      before.session.projectId,
-    );
-    const department = database.catalog
-      .departments()
-      .map((item) => database.catalog.inspectDepartment(item.id))
-      .find((item) =>
-        item.positions.some(
-          (position) => position.aiMember.id === aiParticipant.participantRef,
-        ),
-      );
-    let position: InteractionExecutionInput["position"] | undefined =
-      department?.positions.find(
-        (candidate) => candidate.aiMember.id === aiParticipant.participantRef,
-      );
-    let executionProfile:
-      | InteractionExecutionInput["executionProfile"]
-      | undefined = department?.executionProfiles.find(
-      (profile) => profile.id === department.defaultExecutionProfileId,
-    );
-
-    if (before.session.mode === "run-collaboration") {
-      const run = before.session.runId
-        ? database.pipelineRuntime.inspectRun(before.session.runId)
-        : undefined;
-      const nodeRun = run?.nodes.find(
-        (candidate) => candidate.id === before.session.nodeRunId,
-      );
-      const pipelineNode =
-        run?.snapshot.payload.pipelineVersion.graph.nodes.find(
-          (candidate) => candidate.id === nodeRun?.pipelineNodeId,
-        );
-      const snapshotPosition = run?.snapshot.payload.positions.find(
-        (candidate) => candidate.id === pipelineNode?.positionId,
-      );
-      const profileId =
-        pipelineNode?.executionProfileId ??
-        run?.snapshot.payload.department.defaultExecutionProfileId;
-      const snapshotProfile = run?.snapshot.payload.executionProfiles.find(
-        (candidate) => candidate.id === profileId,
-      );
-      if (
-        !run ||
-        !nodeRun ||
-        !pipelineNode ||
-        !snapshotPosition ||
-        snapshotPosition.aiMember.id !== aiParticipant.participantRef ||
-        !snapshotProfile
-      ) {
-        position = undefined;
-        executionProfile = undefined;
-      } else {
-        project = {
-          ...project,
-          revision: run.snapshot.payload.project.revision,
-          name: run.snapshot.payload.project.name,
-          goal: run.snapshot.payload.project.goal,
-          sharedContext: run.snapshot.payload.project.sharedContext,
-          repositoryReferences:
-            run.snapshot.payload.project.repositoryReferences,
-        };
-        position = {
-          ...snapshotPosition,
-          defaultAgentId: snapshotPosition.resolvedAgentId,
-        };
-        executionProfile = snapshotProfile;
-      }
-    }
-    if (!position || !executionProfile) {
-      database.interaction.addMessage({
-        sessionId: input.sessionId,
-        participantId: statusParticipant.id,
-        kind: "status",
-        content:
-          "Agent execution failed because the AI Member has no active Position or Execution Profile.",
-      });
-      return humanMessage;
-    }
-
-    const addBackgroundMessage = (message: {
-      readonly participantId: string;
-      readonly kind: "text" | "status";
-      readonly content: string;
-    }): void => {
-      try {
-        database.interaction.addMessage({
-          sessionId: input.sessionId,
-          ...message,
-        });
-      } catch {
-        // The Session or Runtime may have closed while the Agent was running.
-      }
-    };
-
-    void adapter
-      .execute({
-        session: before.session,
-        project,
-        aiParticipant,
-        position,
-        executionProfile,
-        prompt: input.content,
-      })
-      .then((result) => {
-        addBackgroundMessage({
-          participantId: aiParticipant.id,
-          kind: "text",
-          content: result.response,
-        });
-        addBackgroundMessage({
-          participantId: statusParticipant.id,
-          kind: "status",
-          content: "Agent response completed.",
-        });
-      })
-      .catch((error: unknown) => {
-        addBackgroundMessage({
-          participantId: statusParticipant.id,
-          kind: "status",
-          content: `Agent execution failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      });
-    return humanMessage;
-  };
 
   const cleanup = (): void => {
     database.close();
@@ -290,21 +108,31 @@ export const startCompanyRuntimeServer = async (
 
   const close = (): Promise<void> => {
     if (closing) return closing;
-    closing = new Promise<void>((resolve, reject) => {
-      if (!server) {
-        cleanup();
-        resolve();
-        return;
-      }
-      server.close((error) => {
-        cleanup();
-        if (error) {
-          reject(error);
-          return;
+    closing = (async () => {
+      let closeError: Error | undefined;
+      try {
+        await Promise.all([
+          database.pipelineRuntime.prepareForShutdown(),
+          database.interaction.prepareForShutdown(),
+        ]);
+        if (server) {
+          await new Promise<void>((resolve, reject) => {
+            server!.close((error) => {
+              if (error) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
+          });
         }
-        resolve();
-      });
-    });
+      } catch (error) {
+        closeError = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        cleanup();
+      }
+      if (closeError) throw closeError;
+    })();
     return closing;
   };
 
@@ -348,13 +176,71 @@ export const startCompanyRuntimeServer = async (
             });
             return;
           }
+          if (request.kind === "subscription.open") {
+            sendResponse(socket, {
+              id: request.id,
+              ok: true,
+              result: database.events.openSubscription({
+                principal,
+                consumerId,
+              }),
+            });
+            return;
+          }
+          if (request.kind === "subscription.read") {
+            sendResponse(socket, {
+              id: request.id,
+              ok: true,
+              result: database.events.readSubscription({
+                principal,
+                subscriptionId: request.subscriptionId,
+                subscriptionGeneration: request.subscriptionGeneration,
+                limit: request.limit,
+              }),
+            });
+            return;
+          }
+          if (request.kind === "subscription.close") {
+            database.events.closeSubscription({
+              principal,
+              subscriptionId: request.subscriptionId,
+              subscriptionGeneration: request.subscriptionGeneration,
+            });
+            sendResponse(socket, {
+              id: request.id,
+              ok: true,
+              result: { closed: true },
+            });
+            return;
+          }
           if ("envelope" in request) {
             if (request.kind === "command") {
+              if (request.envelope.command.type === "ack-runtime-events") {
+                const result = database.events.executeAck({
+                  ...request.envelope,
+                  actor: principal,
+                  consumerId,
+                  command: request.envelope.command,
+                });
+                sendResponse(socket, {
+                  id: request.id,
+                  ok: true,
+                  result,
+                });
+                return;
+              }
               const result = database.commandRegistry.execute({
                 ...request.envelope,
                 actor: principal,
                 consumerId,
+                command: request.envelope.command,
               });
+              if (
+                request.envelope.command.type === "interaction.prompt" &&
+                result.status === "succeeded"
+              ) {
+                void database.interaction.executeTurn(result.value.id);
+              }
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
@@ -362,21 +248,50 @@ export const startCompanyRuntimeServer = async (
               });
               return;
             }
-            if (request.envelope.query.type !== "project.inspect") {
-              throw new Error(
-                `Verified QueryEnvelope does not support ${request.envelope.query.type} in T01.`,
-              );
-            }
-            const view = database.projectConfiguration.inspect(
-              request.envelope.query.projectId,
-            );
+            const query = request.envelope.query;
+            const result = database.events.querySnapshot({
+              principal,
+              consumerId,
+              queryHash: createHash("sha256")
+                .update(JSON.stringify(query))
+                .digest("hex"),
+              read: () => {
+                switch (query.type) {
+                  case "project.inspect":
+                    return database.projectConfiguration.inspect(
+                      query.projectId,
+                    );
+                  case "applications.list":
+                    return database.technicalReview.listApplications(
+                      query.projectId,
+                    );
+                  case "product.discovery.inspect":
+                    return database.product.inspect(query.projectId);
+                  case "product-review.inspect":
+                    return database.productReview.inspect(query.runId);
+                  case "technical-review.inspect":
+                    return database.technicalReview.inspect(query.runId);
+                  case "review.topic.inspect":
+                    return database.review.inspect(query.topicId);
+                  case "review.topics.list":
+                    return database.review.list(query);
+                  case "artifact.inspect":
+                    return database.artifactRegistry.inspect(query.versionId);
+                  case "artifact.lineage.inspect":
+                    return database.artifactRegistry.inspectLineage(
+                      query.versionId,
+                    );
+                  default:
+                    throw new Error(
+                      `Verified QueryEnvelope does not support ${query.type}.`,
+                    );
+                }
+              },
+            });
             sendResponse(socket, {
               id: request.id,
               ok: true,
-              result: {
-                view,
-                asOfSequence: database.eventSequence(),
-              },
+              result,
             });
             return;
           }
@@ -402,6 +317,20 @@ export const startCompanyRuntimeServer = async (
                   return database.projectConfiguration.inspect(
                     request.query.projectId,
                   );
+                case "applications.list":
+                  return database.technicalReview.listApplications(
+                    request.query.projectId,
+                  );
+                case "product.discovery.inspect":
+                  return database.product.inspect(request.query.projectId);
+                case "product-review.inspect":
+                  return database.productReview.inspect(request.query.runId);
+                case "technical-review.inspect":
+                  return database.technicalReview.inspect(request.query.runId);
+                case "review.topic.inspect":
+                  return database.review.inspect(request.query.topicId);
+                case "review.topics.list":
+                  return database.review.list(request.query);
                 case "departments.list":
                   return database.catalog.departments();
                 case "department.inspect":
@@ -424,6 +353,14 @@ export const startCompanyRuntimeServer = async (
                   return database.pipelineRuntime.inspectRun(
                     request.query.runId,
                   );
+                case "execution.inspect":
+                  return request.query.targetKind === "node-attempt"
+                    ? database.pipelineRuntime.inspectExecution({
+                        attemptId: request.query.targetId,
+                      })
+                    : database.interaction.inspectTurnExecution(
+                        request.query.targetId,
+                      );
                 case "runtime.audit":
                   return database.pipelineRuntime.auditRecords(request.query);
                 case "runtime.events":
@@ -438,6 +375,10 @@ export const startCompanyRuntimeServer = async (
                   );
                 case "artifact.inspect":
                   return database.artifactRegistry.inspect(
+                    request.query.versionId,
+                  );
+                case "artifact.lineage.inspect":
+                  return database.artifactRegistry.inspectLineage(
                     request.query.versionId,
                   );
                 case "interactions.list":
@@ -647,8 +588,13 @@ export const startCompanyRuntimeServer = async (
             case "interaction.prompt":
               sendResponse(socket, {
                 id: request.id,
-                ok: true,
-                result: startInteractionPrompt(request.command),
+                ok: false,
+                error: {
+                  name: "CompanyCommandError",
+                  code: "COMMAND_ENVELOPE_REQUIRED",
+                  message:
+                    "Interaction Prompt requires the verified command envelope tunnel.",
+                },
               });
               return;
             case "permission.request":
@@ -662,7 +608,11 @@ export const startCompanyRuntimeServer = async (
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
-                result: database.interaction.decidePermission(request.command),
+                result: database.pipelineRuntime.decidePermission({
+                  ...request.command,
+                  actor: principal,
+                  commandId: request.id,
+                }),
               });
               return;
             case "memory.candidate.create":
@@ -870,7 +820,10 @@ export const startCompanyRuntimeServer = async (
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
-                result: database.pipelineRuntime.startRun(request.command),
+                result: database.pipelineRuntime.startFormalizedRun({
+                  projectId: request.command.projectId,
+                  departmentId: request.command.departmentId,
+                }),
               });
               return;
             case "run.fork":
@@ -960,9 +913,21 @@ export const startCompanyRuntimeServer = async (
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
-                result: database.pipelineRuntime.decideApproval(
-                  request.command,
-                ),
+                result: database.pipelineRuntime.decideApproval({
+                  ...request.command,
+                  actor: principal,
+                  commandId: request.id,
+                }),
+              });
+              return;
+            case "run.approval.retry":
+              sendResponse(socket, {
+                id: request.id,
+                ok: true,
+                result: database.pipelineRuntime.retryApproval({
+                  ...request.command,
+                  actor: principal,
+                }),
               });
               return;
             case "run.node.retry":
@@ -996,7 +961,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
                 error instanceof RuntimeMemoryError ||
-                error instanceof CompanyCommandError
+                error instanceof CompanyCommandError ||
+                error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
               message:
@@ -1009,7 +975,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
                 error instanceof RuntimeMemoryError ||
-                error instanceof CompanyCommandError
+                error instanceof CompanyCommandError ||
+                error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,
             },

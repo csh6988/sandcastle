@@ -3,14 +3,33 @@ import {
   canonicalPipelineJson,
   pipelineHash,
 } from "../pipeline/canonicalPipeline.js";
+import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 24;
+export const CURRENT_SCHEMA_VERSION = 38;
 
 interface CompanyMigration {
   readonly version: number;
   readonly name: string;
   readonly migrate: (database: DatabaseSync) => void;
 }
+
+const tableExists = (database: DatabaseSync, table: string): boolean =>
+  database
+    .prepare(
+      "SELECT 1 AS present FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    )
+    .get(table) !== undefined;
+
+const columnExists = (
+  database: DatabaseSync,
+  table: string,
+  column: string,
+): boolean =>
+  tableExists(database, table) &&
+  database
+    .prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`)
+    .all()
+    .some((entry) => (entry as { readonly name?: unknown }).name === column);
 
 const migrations: readonly CompanyMigration[] = [
   {
@@ -1461,6 +1480,1696 @@ const migrations: readonly CompanyMigration[] = [
       }
     },
   },
+  {
+    version: 25,
+    name: "durable_runtime_event_subscriptions",
+    migrate: (database) => {
+      database.exec(`
+        ALTER TABLE runtime_event_outbox
+          ADD COLUMN registry_version INTEGER NOT NULL DEFAULT 1
+          CHECK (registry_version > 0);
+        ALTER TABLE runtime_event_outbox
+          ADD COLUMN event_schema_version INTEGER NOT NULL DEFAULT 1
+          CHECK (event_schema_version > 0);
+        ALTER TABLE runtime_event_outbox
+          ADD COLUMN company_id TEXT NOT NULL DEFAULT 'company';
+        ALTER TABLE runtime_event_outbox ADD COLUMN project_id TEXT;
+        ALTER TABLE runtime_event_outbox ADD COLUMN scope_json TEXT;
+
+        ALTER TABLE runtime_event_cursors ADD COLUMN owner_principal_json TEXT;
+        ALTER TABLE runtime_event_cursors ADD COLUMN active_subscription_id TEXT;
+        ALTER TABLE runtime_event_cursors
+          ADD COLUMN subscription_generation INTEGER NOT NULL DEFAULT 0
+          CHECK (subscription_generation >= 0);
+        ALTER TABLE runtime_event_cursors
+          ADD COLUMN last_delivered_sequence INTEGER NOT NULL DEFAULT 0
+          CHECK (last_delivered_sequence >= 0);
+        ALTER TABLE runtime_event_cursors
+          ADD COLUMN barrier_sequence INTEGER NOT NULL DEFAULT 0
+          CHECK (barrier_sequence >= 0);
+        ALTER TABLE runtime_event_cursors ADD COLUMN last_seen_at TEXT;
+        ALTER TABLE runtime_event_cursors ADD COLUMN expires_at TEXT;
+        ALTER TABLE runtime_event_cursors ADD COLUMN retired_at TEXT;
+
+        CREATE UNIQUE INDEX runtime_event_cursors_active_subscription_idx
+          ON runtime_event_cursors(active_subscription_id)
+          WHERE active_subscription_id IS NOT NULL;
+
+        CREATE TABLE consumed_view_sync_tokens (
+          token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+          nonce_hash TEXT NOT NULL UNIQUE CHECK (length(nonce_hash) = 64),
+          consumer_id TEXT NOT NULL,
+          principal_hash TEXT NOT NULL CHECK (length(principal_hash) = 64),
+          query_hash TEXT NOT NULL,
+          view_hash TEXT NOT NULL CHECK (length(view_hash) = 64),
+          sequence INTEGER NOT NULL CHECK (sequence >= 0),
+          expires_at TEXT NOT NULL,
+          consumed_at TEXT NOT NULL,
+          command_id TEXT
+        ) STRICT;
+
+        CREATE INDEX consumed_view_sync_tokens_expiry_idx
+          ON consumed_view_sync_tokens(expires_at);
+      `);
+
+      for (const operation of ["created", "updated", "deleted"] as const) {
+        database.exec(`DROP TRIGGER IF EXISTS runtime_projects_${operation}`);
+        const timing =
+          operation === "created"
+            ? "INSERT"
+            : operation === "updated"
+              ? "UPDATE"
+              : "DELETE";
+        const row = operation === "deleted" ? "OLD" : "NEW";
+        const payload = `json_object(
+          'projectId', ${row}.id,
+          'entityId', ${row}.id,
+          'operation', '${operation}',
+          'revision', ${row}.revision
+        )`;
+        database.exec(`
+          CREATE TRIGGER runtime_projects_${operation}
+          AFTER ${timing} ON projects
+          BEGIN
+            INSERT INTO runtime_audit_records(
+              id, action, entity_type, entity_id, run_id, node_run_id,
+              before_json, after_json, created_at, command_id, actor_type,
+              actor_id, authenticated_by, consumer_id
+            ) VALUES (
+              lower(hex(randomblob(16))),
+              'catalog.project.${operation}',
+              'project',
+              ${row}.id,
+              NULL,
+              NULL,
+              ${operation === "created" ? "NULL" : payload},
+              ${operation === "deleted" ? "NULL" : payload},
+              strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+              (SELECT command_id FROM runtime_unit_of_work_context WHERE slot = 1),
+              (SELECT actor_type FROM runtime_unit_of_work_context WHERE slot = 1),
+              (SELECT actor_id FROM runtime_unit_of_work_context WHERE slot = 1),
+              (SELECT authenticated_by FROM runtime_unit_of_work_context WHERE slot = 1),
+              (SELECT consumer_id FROM runtime_unit_of_work_context WHERE slot = 1)
+            );
+            INSERT INTO runtime_event_outbox(
+              event_id, type, registry_version, event_schema_version,
+              company_id, project_id, run_id, node_run_id, scope_json,
+              payload_json, created_at
+            ) VALUES (
+              lower(hex(randomblob(16))),
+              'project.${operation}',
+              1,
+              1,
+              ${row}.company_id,
+              ${row}.id,
+              NULL,
+              NULL,
+              json_object('companyId', ${row}.company_id, 'projectId', ${row}.id),
+              ${payload},
+              strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            );
+          END;
+        `);
+      }
+    },
+  },
+  {
+    version: 26,
+    name: "immutable_artifact_content_kinds",
+    migrate: (database) => {
+      database.exec(`
+        ALTER TABLE artifact_versions
+          ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'managed-file'
+          CHECK (content_kind IN ('managed-file', 'repository-object', 'external-reference'));
+        ALTER TABLE artifact_versions
+          ADD COLUMN canonical_identity_json TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE artifact_versions
+          ADD COLUMN identity_hash TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+          CHECK (length(identity_hash) = 64);
+        ALTER TABLE artifact_versions
+          ADD COLUMN producer_context_json TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE artifact_versions
+          ADD COLUMN producer_context_hash TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+          CHECK (length(producer_context_hash) = 64);
+        ALTER TABLE artifact_versions
+          ADD COLUMN integrity_descriptor_json TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE artifact_versions ADD COLUMN registration_id TEXT;
+        ALTER TABLE artifact_versions ADD COLUMN finalized_at TEXT;
+
+        CREATE TABLE artifact_registrations (
+          id TEXT PRIMARY KEY,
+          version_id TEXT NOT NULL UNIQUE,
+          artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          version INTEGER NOT NULL CHECK (version > 0),
+          content_kind TEXT NOT NULL CHECK (
+            content_kind IN ('managed-file', 'repository-object', 'external-reference')
+          ),
+          canonical_identity_json TEXT NOT NULL,
+          identity_hash TEXT NOT NULL CHECK (length(identity_hash) = 64),
+          producer_context_json TEXT NOT NULL,
+          producer_context_hash TEXT NOT NULL CHECK (length(producer_context_hash) = 64),
+          lineage_json TEXT NOT NULL DEFAULT '[]',
+          integrity_descriptor_json TEXT NOT NULL,
+          content_ref TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+          state TEXT NOT NULL CHECK (state IN ('registered', 'ready', 'finalized', 'failed')),
+          failure_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finalized_at TEXT,
+          UNIQUE (artifact_id, version)
+        ) STRICT;
+
+        CREATE INDEX artifact_registrations_dedup_idx
+          ON artifact_registrations(artifact_id, identity_hash, producer_context_hash);
+
+        CREATE TABLE artifact_write_journal (
+          registration_id TEXT PRIMARY KEY REFERENCES artifact_registrations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK (
+            state IN ('prepared', 'written', 'renamed', 'finalized', 'failed')
+          ),
+          expected_hash TEXT NOT NULL CHECK (length(expected_hash) = 64),
+          expected_size INTEGER NOT NULL CHECK (expected_size >= 0),
+          temp_ref TEXT NOT NULL,
+          final_ref TEXT NOT NULL,
+          quarantine_ref TEXT,
+          reconcile_evidence_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE artifact_integrity_observations (
+          id TEXT PRIMARY KEY,
+          artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK (status IN ('verified', 'unavailable', 'failed')),
+          verifier_metadata_json TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          observed_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX artifact_integrity_observations_version_idx
+          ON artifact_integrity_observations(artifact_version_id, observed_at, id);
+
+        CREATE TABLE artifact_supersessions (
+          superseded_version_id TEXT PRIMARY KEY REFERENCES artifact_versions(id),
+          superseding_version_id TEXT NOT NULL REFERENCES artifact_versions(id),
+          created_at TEXT NOT NULL,
+          CHECK (superseded_version_id <> superseding_version_id)
+        ) STRICT;
+
+        CREATE INDEX artifact_links_to_idx
+          ON artifact_links(to_version_id, created_at, from_version_id);
+      `);
+
+      const existingVersions = database
+        .prepare(
+          `SELECT id, content_ref AS contentRef, content_hash AS contentHash,
+                  byte_size AS byteSize, producing_run_id AS runId,
+                  producing_node_run_id AS nodeRunId,
+                  producing_node_attempt_id AS nodeAttemptId,
+                  snapshot_revision_id AS snapshotRevisionId,
+                  ai_member_id AS aiMemberId, created_at AS createdAt
+             FROM artifact_versions`,
+        )
+        .all() as Array<{
+        readonly id: string;
+        readonly contentRef: string;
+        readonly contentHash: string;
+        readonly byteSize: number;
+        readonly runId: string | null;
+        readonly nodeRunId: string | null;
+        readonly nodeAttemptId: string | null;
+        readonly snapshotRevisionId: string | null;
+        readonly aiMemberId: string | null;
+        readonly createdAt: string;
+      }>;
+      const updateVersion = database.prepare(
+        `UPDATE artifact_versions
+            SET canonical_identity_json = ?, identity_hash = ?,
+                producer_context_json = ?, producer_context_hash = ?,
+                integrity_descriptor_json = ?, finalized_at = ?
+          WHERE id = ?`,
+      );
+      const insertObservation = database.prepare(
+        `INSERT INTO artifact_integrity_observations(
+           id, artifact_version_id, status, verifier_metadata_json,
+           evidence_json, observed_at
+         ) VALUES (?, ?, 'verified', '{}', ?, ?)`,
+      );
+      for (const version of existingVersions) {
+        const identityJson = JSON.stringify({
+          kind: "managed-file",
+          contentHash: version.contentHash,
+          byteSize: Number(version.byteSize),
+          storageRef: version.contentRef,
+        });
+        const producerJson = JSON.stringify({
+          ...(version.runId ? { runId: version.runId } : {}),
+          ...(version.snapshotRevisionId
+            ? { snapshotRevisionId: version.snapshotRevisionId }
+            : {}),
+          ...(version.nodeRunId ? { nodeRunId: version.nodeRunId } : {}),
+          ...(version.nodeAttemptId
+            ? { nodeAttemptId: version.nodeAttemptId }
+            : {}),
+          ...(version.aiMemberId ? { aiMemberId: version.aiMemberId } : {}),
+        });
+        const identityHash = pipelineHash(JSON.parse(identityJson));
+        const producerHash = pipelineHash(JSON.parse(producerJson));
+        updateVersion.run(
+          identityJson,
+          identityHash,
+          producerJson,
+          producerHash,
+          JSON.stringify({
+            algorithm: "sha256",
+            digest: version.contentHash,
+            byteSize: Number(version.byteSize),
+          }),
+          version.createdAt,
+          version.id,
+        );
+        insertObservation.run(
+          `migration-26-${version.id}`,
+          version.id,
+          JSON.stringify({ source: "schema-migration-26" }),
+          version.createdAt,
+        );
+      }
+    },
+  },
+  {
+    version: 27,
+    name: "product_proposal_lifecycle",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE product_proposals (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'draft', 'clarifying', 'awaiting-confirmation',
+              'confirmed', 'rejected', 'needs-rework'
+            )
+          ),
+          revision INTEGER NOT NULL CHECK (revision >= 0),
+          current_revision_id TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE product_proposal_revisions (
+          id TEXT PRIMARY KEY,
+          proposal_id TEXT NOT NULL REFERENCES product_proposals(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          content_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          edited_by_type TEXT NOT NULL,
+          edited_by_id TEXT NOT NULL,
+          edited_by_authenticated_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE (proposal_id, revision)
+        ) STRICT;
+
+        CREATE INDEX product_proposal_revisions_proposal_idx
+          ON product_proposal_revisions(proposal_id, revision DESC);
+      `);
+    },
+  },
+  {
+    version: 28,
+    name: "product_baseline_formal_run",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE product_baselines (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          source_proposal_revision_id TEXT NOT NULL
+            REFERENCES product_proposal_revisions(id),
+          source_proposal_hash TEXT NOT NULL CHECK (length(source_proposal_hash) = 64),
+          content_json TEXT NOT NULL,
+          canonical_hash TEXT NOT NULL CHECK (length(canonical_hash) = 64),
+          confirmed_by_type TEXT NOT NULL,
+          confirmed_by_id TEXT NOT NULL,
+          confirmed_by_authenticated_by TEXT NOT NULL,
+          confirmation_command_id TEXT NOT NULL,
+          run_id TEXT NOT NULL UNIQUE,
+          snapshot_revision_id TEXT NOT NULL UNIQUE,
+          confirmed_at TEXT NOT NULL,
+          UNIQUE (project_id, source_proposal_revision_id)
+        ) STRICT;
+
+        CREATE TRIGGER product_baselines_immutable_update
+        BEFORE UPDATE ON product_baselines
+        BEGIN
+          SELECT RAISE(ABORT, 'Product Baseline is immutable');
+        END;
+
+        CREATE TRIGGER product_baselines_immutable_delete
+        BEFORE DELETE ON product_baselines
+        BEGIN
+          SELECT RAISE(ABORT, 'Product Baseline is immutable');
+        END;
+
+        ALTER TABLE department_runs
+          ADD COLUMN product_baseline_id TEXT REFERENCES product_baselines(id);
+        CREATE INDEX department_runs_product_baseline_idx
+          ON department_runs(product_baseline_id, created_at);
+
+        CREATE TABLE runtime_run_quarantines (
+          id TEXT PRIMARY KEY,
+          run_id TEXT,
+          snapshot_revision_id TEXT,
+          reason TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          detected_at TEXT NOT NULL,
+          UNIQUE (run_id, snapshot_revision_id, reason)
+        ) STRICT;
+      `);
+    },
+  },
+  {
+    version: 29,
+    name: "versioned_pipeline_node_handlers",
+    migrate: (database) => {
+      if (
+        !columnExists(database, "pipeline_versions", "handler_registry_version")
+      ) {
+        database.exec(`
+        ALTER TABLE pipeline_versions
+          ADD COLUMN handler_registry_version INTEGER NOT NULL DEFAULT 1
+          CHECK (handler_registry_version > 0);
+        `);
+      }
+      if (
+        !columnExists(database, "pipeline_versions", "handler_registry_hash")
+      ) {
+        database.exec(`
+        ALTER TABLE pipeline_versions
+          ADD COLUMN handler_registry_hash TEXT NOT NULL DEFAULT '';
+        `);
+      }
+
+      database.exec(`
+        DROP TABLE IF EXISTS pipeline_version_handlers;
+        CREATE TABLE pipeline_version_handlers (
+          pipeline_version_id TEXT NOT NULL
+            REFERENCES pipeline_versions(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          node_order INTEGER NOT NULL CHECK (node_order >= 0),
+          handler_kind_id TEXT NOT NULL,
+          input_schema_hash TEXT NOT NULL CHECK (length(input_schema_hash) = 64),
+          output_schema_hash TEXT NOT NULL CHECK (length(output_schema_hash) = 64),
+          PRIMARY KEY (pipeline_version_id, node_id),
+          UNIQUE (pipeline_version_id, node_order)
+        ) STRICT;
+      `);
+
+      if (!columnExists(database, "node_runs", "handler_kind_id")) {
+        database.exec(`
+        ALTER TABLE node_runs ADD COLUMN handler_kind_id TEXT;
+        `);
+      }
+      if (!columnExists(database, "node_runs", "input_schema_hash")) {
+        database.exec(`
+        ALTER TABLE node_runs ADD COLUMN input_schema_hash TEXT;
+        `);
+      }
+      if (!columnExists(database, "node_runs", "output_schema_hash")) {
+        database.exec(`
+        ALTER TABLE node_runs ADD COLUMN output_schema_hash TEXT;
+        `);
+      }
+
+      if (!columnExists(database, "approvals", "requested_action")) {
+        database.exec(`
+        DROP TABLE IF EXISTS approvals_v29;
+        CREATE TABLE approvals_v29 (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          node_run_id TEXT NOT NULL REFERENCES node_runs(id) ON DELETE CASCADE,
+          cycle INTEGER NOT NULL CHECK (cycle > 0),
+          snapshot_revision_id TEXT REFERENCES run_snapshot_revisions(id),
+          status TEXT NOT NULL CHECK (
+            status IN ('pending', 'decided', 'expired', 'cancelled')
+          ),
+          decision TEXT CHECK (
+            decision IS NULL OR
+            decision IN ('approve', 'request-changes', 'reject')
+          ),
+          requested_action TEXT NOT NULL DEFAULT '',
+          input_manifest_hash TEXT CHECK (
+            input_manifest_hash IS NULL OR length(input_manifest_hash) = 64
+          ),
+          eligible_human_policy_json TEXT NOT NULL DEFAULT '{}',
+          expires_at TEXT,
+          created_at TEXT NOT NULL,
+          decided_at TEXT,
+          expired_at TEXT,
+          decision_actor_type TEXT,
+          decision_actor_id TEXT,
+          decision_actor_authenticated_by TEXT,
+          decision_command_id TEXT,
+          decision_hash TEXT CHECK (
+            decision_hash IS NULL OR length(decision_hash) = 64
+          ),
+          CHECK (
+            (status = 'pending' AND decision IS NULL AND decided_at IS NULL AND expired_at IS NULL) OR
+            (status = 'decided' AND decision IS NOT NULL AND decided_at IS NOT NULL AND expired_at IS NULL) OR
+            (status = 'expired' AND decision IS NULL AND decided_at IS NULL AND expired_at IS NOT NULL) OR
+            (status = 'cancelled' AND decision IS NULL)
+          ),
+          UNIQUE (node_run_id, cycle)
+        ) STRICT;
+
+        INSERT INTO approvals_v29(
+          id, run_id, node_run_id, cycle, snapshot_revision_id, status,
+          decision, requested_action, input_manifest_hash,
+          eligible_human_policy_json, expires_at, created_at, decided_at,
+          expired_at, decision_actor_type, decision_actor_id,
+          decision_actor_authenticated_by, decision_command_id, decision_hash
+        )
+        SELECT approvals.id, approvals.run_id, approvals.node_run_id,
+               approvals.cycle, department_runs.snapshot_revision_id,
+               approvals.status, approvals.decision, '', NULL, '{}', NULL,
+               approvals.created_at, approvals.decided_at, NULL,
+               NULL, NULL, NULL, NULL, NULL
+          FROM approvals
+          JOIN department_runs ON department_runs.id = approvals.run_id;
+
+        DROP INDEX IF EXISTS approvals_run_idx;
+        DROP TABLE approvals;
+        ALTER TABLE approvals_v29 RENAME TO approvals;
+        CREATE INDEX approvals_run_idx ON approvals(run_id, node_run_id, cycle);
+        `);
+      }
+
+      const versions = database
+        .prepare("SELECT id, graph_json AS graphJson FROM pipeline_versions")
+        .all() as Array<{ readonly id: string; readonly graphJson: string }>;
+      const updateVersion = database.prepare(
+        `UPDATE pipeline_versions
+            SET handler_registry_version = ?, handler_registry_hash = ?
+          WHERE id = ?`,
+      );
+      const deleteHandlers = database.prepare(
+        "DELETE FROM pipeline_version_handlers WHERE pipeline_version_id = ?",
+      );
+      const insertHandler = database.prepare(
+        `INSERT INTO pipeline_version_handlers(
+           pipeline_version_id, node_id, node_order, handler_kind_id,
+           input_schema_hash, output_schema_hash
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(pipeline_version_id, node_id) DO UPDATE SET
+           node_order = excluded.node_order,
+           handler_kind_id = excluded.handler_kind_id,
+           input_schema_hash = excluded.input_schema_hash,
+           output_schema_hash = excluded.output_schema_hash`,
+      );
+      for (const version of versions) {
+        const graph = JSON.parse(version.graphJson) as {
+          readonly nodes: readonly {
+            readonly id: string;
+            readonly type: Parameters<
+              typeof defaultNodeHandlerRegistry.resolve
+            >[0];
+            readonly handlerKindId?: string;
+          }[];
+        };
+        updateVersion.run(
+          defaultNodeHandlerRegistry.version,
+          defaultNodeHandlerRegistry.hash,
+          version.id,
+        );
+        deleteHandlers.run(version.id);
+        graph.nodes.forEach((node, nodeOrder) => {
+          const definition = defaultNodeHandlerRegistry.resolve(
+            node.type,
+            node.handlerKindId,
+          );
+          if (!definition) {
+            throw new Error(
+              `Pipeline Version ${version.id} requires unavailable Handler ${node.handlerKindId ?? node.type}.`,
+            );
+          }
+          insertHandler.run(
+            version.id,
+            node.id,
+            nodeOrder,
+            definition.handlerKindId,
+            definition.inputSchemaHash,
+            definition.outputSchemaHash,
+          );
+        });
+      }
+    },
+  },
+  {
+    version: 30,
+    name: "fenced_execution_facts",
+    migrate: (database) => {
+      if (!columnExists(database, "node_attempts", "execution_operation_key")) {
+        database.exec(`
+          ALTER TABLE node_attempts ADD COLUMN execution_operation_key TEXT;
+        `);
+      }
+      if (
+        !columnExists(database, "node_attempts", "terminal_execution_fact_id")
+      ) {
+        database.exec(`
+          ALTER TABLE node_attempts ADD COLUMN terminal_execution_fact_id TEXT;
+        `);
+      }
+
+      database.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS node_attempts_execution_operation_idx
+          ON node_attempts(execution_operation_key)
+          WHERE execution_operation_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS execution_leases (
+          id TEXT PRIMARY KEY,
+          target_kind TEXT NOT NULL CHECK (target_kind = 'node-attempt'),
+          target_id TEXT NOT NULL REFERENCES node_attempts(id) ON DELETE CASCADE,
+          lease_kind TEXT NOT NULL CHECK (
+            lease_kind IN ('execution', 'reconciliation')
+          ),
+          operation_key TEXT NOT NULL,
+          execution_epoch INTEGER NOT NULL CHECK (execution_epoch > 0),
+          fence_token TEXT NOT NULL,
+          worker_id TEXT NOT NULL,
+          issued_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          renewed_at TEXT,
+          released_at TEXT,
+          cancel_requested INTEGER NOT NULL DEFAULT 0
+            CHECK (cancel_requested IN (0, 1)),
+          UNIQUE (operation_key, execution_epoch),
+          UNIQUE (id, operation_key, execution_epoch, fence_token)
+        ) STRICT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS execution_leases_active_target_idx
+          ON execution_leases(target_kind, target_id)
+          WHERE released_at IS NULL;
+        CREATE INDEX IF NOT EXISTS execution_leases_operation_idx
+          ON execution_leases(operation_key, execution_epoch, expires_at);
+
+        CREATE TABLE IF NOT EXISTS execution_facts (
+          id TEXT PRIMARY KEY,
+          operation_key TEXT NOT NULL,
+          target_kind TEXT NOT NULL CHECK (target_kind = 'node-attempt'),
+          target_id TEXT NOT NULL REFERENCES node_attempts(id) ON DELETE CASCADE,
+          lease_id TEXT NOT NULL REFERENCES execution_leases(id),
+          lease_kind TEXT NOT NULL CHECK (
+            lease_kind IN ('execution', 'reconciliation')
+          ),
+          execution_epoch INTEGER NOT NULL CHECK (execution_epoch > 0),
+          fence_token TEXT NOT NULL,
+          adapter_schema_version INTEGER NOT NULL
+            CHECK (adapter_schema_version > 0),
+          fact_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+          kind TEXT NOT NULL CHECK (
+            kind IN (
+              'provider-started', 'agent-session', 'message', 'tool-call',
+              'tool-result', 'permission-request', 'checkpoint', 'artifact',
+              'commit', 'usage', 'not-started', 'completed', 'failed',
+              'cancelled'
+            )
+          ),
+          schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+          payload_json TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          canonical_payload_hash TEXT NOT NULL
+            CHECK (length(canonical_payload_hash) = 64),
+          status TEXT NOT NULL CHECK (
+            status IN ('accepted', 'duplicate', 'stale', 'conflict')
+          ),
+          effect_ids_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS execution_facts_accepted_identity_idx
+          ON execution_facts(operation_key, fact_id)
+          WHERE status = 'accepted';
+        CREATE UNIQUE INDEX IF NOT EXISTS execution_facts_accepted_ordinal_idx
+          ON execution_facts(operation_key, execution_epoch, ordinal)
+          WHERE status = 'accepted';
+        CREATE UNIQUE INDEX IF NOT EXISTS execution_facts_terminal_idx
+          ON execution_facts(operation_key, execution_epoch)
+          WHERE status = 'accepted'
+            AND kind IN ('completed', 'failed', 'cancelled');
+        CREATE INDEX IF NOT EXISTS execution_facts_target_idx
+          ON execution_facts(target_id, execution_epoch, ordinal, created_at);
+
+        CREATE TABLE IF NOT EXISTS permission_decisions (
+          id TEXT PRIMARY KEY,
+          permission_request_id TEXT NOT NULL UNIQUE
+            REFERENCES permission_requests(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL,
+          decision TEXT NOT NULL CHECK (decision IN ('approved', 'denied')),
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          authenticated_by TEXT NOT NULL,
+          command_id TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          CHECK (
+            (actor_type = 'human' AND authenticated_by = 'local-session') OR
+            (actor_type = 'acp-client' AND authenticated_by = 'acp-connection')
+          )
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS permission_decisions_actor_idx
+          ON permission_decisions(actor_type, actor_id, created_at);
+      `);
+    },
+  },
+  {
+    version: 31,
+    name: "interaction_turns_and_execution_targets",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS interaction_turns (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES interaction_sessions(id) ON DELETE CASCADE,
+          human_participant_id TEXT NOT NULL REFERENCES session_participants(id),
+          ai_participant_id TEXT NOT NULL REFERENCES session_participants(id),
+          input_message_id TEXT NOT NULL REFERENCES session_messages(id),
+          output_message_id TEXT REFERENCES session_messages(id),
+          status TEXT NOT NULL CHECK (
+            status IN ('queued', 'running', 'reconciling', 'completed',
+                       'failed', 'cancelled', 'interrupted')
+          ),
+          command_id TEXT NOT NULL UNIQUE,
+          execution_operation_key TEXT NOT NULL UNIQUE,
+          execution_lease_id TEXT,
+          execution_epoch INTEGER,
+          fence_token TEXT,
+          agent_adapter_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds > 0),
+          mechanism TEXT NOT NULL CHECK (mechanism = 'model-only'),
+          mechanism_version TEXT NOT NULL,
+          context_json TEXT NOT NULL,
+          context_hash TEXT NOT NULL CHECK (length(context_hash) = 64),
+          context_schema_hash TEXT NOT NULL CHECK (length(context_schema_hash) = 64),
+          terminal_execution_fact_id TEXT,
+          provider_execution_ref TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS interaction_turns_session_idx
+          ON interaction_turns(session_id, created_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS interaction_turns_active_session_idx
+          ON interaction_turns(session_id)
+          WHERE status IN ('queued', 'running', 'reconciling');
+
+        ALTER TABLE execution_facts RENAME TO execution_facts_v30;
+        ALTER TABLE execution_leases RENAME TO execution_leases_v30;
+        DROP INDEX execution_leases_active_target_idx;
+        DROP INDEX execution_leases_operation_idx;
+        DROP INDEX execution_facts_accepted_identity_idx;
+        DROP INDEX execution_facts_accepted_ordinal_idx;
+        DROP INDEX execution_facts_terminal_idx;
+        DROP INDEX execution_facts_target_idx;
+
+        CREATE TABLE execution_leases (
+          id TEXT PRIMARY KEY,
+          target_kind TEXT NOT NULL CHECK (
+            target_kind IN ('node-attempt', 'interaction-turn')
+          ),
+          target_id TEXT NOT NULL,
+          lease_kind TEXT NOT NULL CHECK (
+            lease_kind IN ('execution', 'reconciliation')
+          ),
+          operation_key TEXT NOT NULL,
+          execution_epoch INTEGER NOT NULL CHECK (execution_epoch > 0),
+          fence_token TEXT NOT NULL,
+          worker_id TEXT NOT NULL,
+          issued_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          renewed_at TEXT,
+          released_at TEXT,
+          cancel_requested INTEGER NOT NULL DEFAULT 0
+            CHECK (cancel_requested IN (0, 1)),
+          UNIQUE (operation_key, execution_epoch),
+          UNIQUE (
+            id, target_kind, target_id, operation_key,
+            execution_epoch, fence_token
+          )
+        ) STRICT;
+
+        INSERT INTO execution_leases(
+          id, target_kind, target_id, lease_kind, operation_key,
+          execution_epoch, fence_token, worker_id, issued_at, expires_at,
+          renewed_at, released_at, cancel_requested
+        )
+        SELECT id, target_kind, target_id, lease_kind, operation_key,
+               execution_epoch, fence_token, worker_id, issued_at, expires_at,
+               renewed_at, released_at, cancel_requested
+          FROM execution_leases_v30;
+
+        CREATE UNIQUE INDEX execution_leases_active_target_idx
+          ON execution_leases(target_kind, target_id)
+          WHERE released_at IS NULL;
+        CREATE INDEX execution_leases_operation_idx
+          ON execution_leases(operation_key, execution_epoch, expires_at);
+
+        CREATE TRIGGER IF NOT EXISTS execution_leases_target_guard
+        BEFORE INSERT ON execution_leases
+        BEGIN
+          SELECT CASE
+            WHEN NEW.target_kind = 'node-attempt'
+              AND NOT EXISTS (
+                SELECT 1 FROM node_attempts WHERE id = NEW.target_id
+              )
+            THEN RAISE(ABORT, 'execution lease target node attempt not found')
+            WHEN NEW.target_kind = 'interaction-turn'
+              AND NOT EXISTS (
+                SELECT 1 FROM interaction_turns WHERE id = NEW.target_id
+              )
+            THEN RAISE(ABORT, 'execution lease target interaction turn not found')
+          END;
+        END;
+
+        CREATE TABLE execution_facts (
+          id TEXT PRIMARY KEY,
+          operation_key TEXT NOT NULL,
+          target_kind TEXT NOT NULL CHECK (
+            target_kind IN ('node-attempt', 'interaction-turn')
+          ),
+          target_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          lease_kind TEXT NOT NULL CHECK (
+            lease_kind IN ('execution', 'reconciliation')
+          ),
+          execution_epoch INTEGER NOT NULL CHECK (execution_epoch > 0),
+          fence_token TEXT NOT NULL,
+          adapter_schema_version INTEGER NOT NULL
+            CHECK (adapter_schema_version > 0),
+          fact_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+          kind TEXT NOT NULL CHECK (
+            kind IN (
+              'provider-started', 'agent-session', 'message', 'tool-call',
+              'tool-result', 'permission-request', 'checkpoint', 'artifact',
+              'commit', 'usage', 'not-started', 'completed', 'failed',
+              'cancelled'
+            )
+          ),
+          schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+          payload_json TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          canonical_payload_hash TEXT NOT NULL
+            CHECK (length(canonical_payload_hash) = 64),
+          status TEXT NOT NULL CHECK (
+            status IN ('accepted', 'duplicate', 'stale', 'conflict')
+          ),
+          effect_ids_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (
+            lease_id, target_kind, target_id, operation_key,
+            execution_epoch, fence_token
+          ) REFERENCES execution_leases(
+            id, target_kind, target_id, operation_key,
+            execution_epoch, fence_token
+          )
+        ) STRICT;
+
+        INSERT INTO execution_facts(
+          id, operation_key, target_kind, target_id, lease_id, lease_kind,
+          execution_epoch, fence_token, adapter_schema_version, fact_id,
+          ordinal, kind, schema_version, payload_json, evidence_refs_json,
+          canonical_payload_hash, status, effect_ids_json, created_at
+        )
+        SELECT id, operation_key, target_kind, target_id, lease_id, lease_kind,
+               execution_epoch, fence_token, adapter_schema_version, fact_id,
+               ordinal, kind, schema_version, payload_json, evidence_refs_json,
+               canonical_payload_hash, status, effect_ids_json, created_at
+          FROM execution_facts_v30;
+
+        CREATE UNIQUE INDEX execution_facts_accepted_identity_idx
+          ON execution_facts(operation_key, fact_id)
+          WHERE status = 'accepted';
+        CREATE UNIQUE INDEX execution_facts_accepted_ordinal_idx
+          ON execution_facts(operation_key, execution_epoch, ordinal)
+          WHERE status = 'accepted';
+        CREATE UNIQUE INDEX execution_facts_terminal_idx
+          ON execution_facts(operation_key, execution_epoch)
+          WHERE status = 'accepted'
+            AND kind IN ('completed', 'failed', 'cancelled');
+        CREATE INDEX execution_facts_target_idx
+          ON execution_facts(target_kind, target_id, execution_epoch, ordinal, created_at);
+
+        DROP TABLE execution_facts_v30;
+        DROP TABLE execution_leases_v30;
+
+        CREATE TRIGGER IF NOT EXISTS interaction_turn_delete_leases
+        AFTER DELETE ON interaction_turns
+        BEGIN
+          DELETE FROM execution_facts
+           WHERE target_kind = 'interaction-turn' AND target_id = OLD.id;
+          DELETE FROM execution_leases
+           WHERE target_kind = 'interaction-turn' AND target_id = OLD.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS node_attempt_delete_execution_leases
+        AFTER DELETE ON node_attempts
+        BEGIN
+          DELETE FROM execution_facts
+           WHERE target_kind = 'node-attempt' AND target_id = OLD.id;
+          DELETE FROM execution_leases
+           WHERE target_kind = 'node-attempt' AND target_id = OLD.id;
+        END;
+      `);
+    },
+  },
+  {
+    version: 32,
+    name: "execution_reconciliation_states",
+    migrate: (database) => {
+      database.exec(`
+        DROP TRIGGER IF EXISTS execution_leases_target_guard;
+        DROP TRIGGER IF EXISTS node_attempt_delete_execution_leases;
+
+        PRAGMA legacy_alter_table = ON;
+        ALTER TABLE node_attempts RENAME TO node_attempts_v31;
+        ALTER TABLE node_runs RENAME TO node_runs_v31;
+
+        CREATE TABLE node_runs (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          pipeline_node_id TEXT NOT NULL,
+          node_type TEXT NOT NULL CHECK (
+            node_type IN (
+              'start', 'ai-task', 'human-approval', 'condition',
+              'parallel', 'join', 'complete'
+            )
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'queued', 'ready', 'running', 'waiting-permission',
+              'waiting-approval', 'paused', 'blocked', 'succeeded', 'failed',
+              'skipped', 'cancelled'
+            )
+          ),
+          attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+          required_dependency_ids_json TEXT NOT NULL DEFAULT '[]',
+          result_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          source_node_run_id TEXT REFERENCES node_runs(id),
+          handler_kind_id TEXT,
+          input_schema_hash TEXT,
+          output_schema_hash TEXT,
+          UNIQUE (run_id, pipeline_node_id)
+        ) STRICT;
+
+        INSERT INTO node_runs(
+          id, run_id, pipeline_node_id, node_type, status, attempt_count,
+          required_dependency_ids_json, result_json, failure_code,
+          failure_message, created_at, updated_at, source_node_run_id,
+          handler_kind_id, input_schema_hash, output_schema_hash
+        )
+        SELECT
+          id, run_id, pipeline_node_id, node_type, status, attempt_count,
+          required_dependency_ids_json, result_json, failure_code,
+          failure_message, created_at, updated_at, source_node_run_id,
+          handler_kind_id, input_schema_hash, output_schema_hash
+        FROM node_runs_v31;
+
+        CREATE TABLE node_attempts (
+          id TEXT PRIMARY KEY,
+          node_run_id TEXT NOT NULL REFERENCES node_runs(id) ON DELETE CASCADE,
+          attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          reason TEXT NOT NULL CHECK (
+            reason IN ('initial', 'request-changes', 'retry', 'recovery')
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'ready', 'running', 'reconciling', 'succeeded', 'failed',
+              'cancelled', 'interrupted'
+            )
+          ),
+          structured_result_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          lease_id TEXT,
+          lease_owner TEXT,
+          lease_expires_at TEXT,
+          checkpoint_json TEXT,
+          recoverable INTEGER NOT NULL DEFAULT 0 CHECK (recoverable IN (0, 1)),
+          execution_operation_key TEXT,
+          terminal_execution_fact_id TEXT,
+          provider_execution_ref TEXT,
+          UNIQUE (node_run_id, attempt_number)
+        ) STRICT;
+
+        INSERT INTO node_attempts(
+          id, node_run_id, attempt_number, snapshot_revision_id, reason,
+          status, structured_result_json, failure_code, failure_message,
+          created_at, started_at, completed_at, lease_id, lease_owner,
+          lease_expires_at, checkpoint_json, recoverable,
+          execution_operation_key, terminal_execution_fact_id,
+          provider_execution_ref
+        )
+        SELECT
+          id, node_run_id, attempt_number, snapshot_revision_id, reason,
+          status, structured_result_json, failure_code, failure_message,
+          created_at, started_at, completed_at, lease_id, lease_owner,
+          lease_expires_at, checkpoint_json, recoverable,
+          execution_operation_key, terminal_execution_fact_id, NULL
+        FROM node_attempts_v31;
+
+        DROP TABLE node_attempts_v31;
+        DROP TABLE node_runs_v31;
+        PRAGMA legacy_alter_table = OFF;
+
+        CREATE INDEX node_runs_run_status_idx ON node_runs(run_id, status);
+        CREATE INDEX node_attempts_node_run_idx
+          ON node_attempts(node_run_id, attempt_number);
+        CREATE INDEX node_attempts_ready_lease_idx
+          ON node_attempts(node_run_id, status, lease_expires_at);
+        CREATE UNIQUE INDEX node_attempts_execution_operation_idx
+          ON node_attempts(execution_operation_key)
+          WHERE execution_operation_key IS NOT NULL;
+
+        DROP INDEX execution_facts_terminal_idx;
+        CREATE UNIQUE INDEX execution_facts_terminal_idx
+          ON execution_facts(operation_key, execution_epoch)
+          WHERE status = 'accepted'
+            AND kind IN ('not-started', 'completed', 'failed', 'cancelled');
+
+        CREATE TRIGGER execution_leases_target_guard
+        BEFORE INSERT ON execution_leases
+        BEGIN
+          SELECT CASE
+            WHEN NEW.target_kind = 'node-attempt'
+              AND NOT EXISTS (
+                SELECT 1 FROM node_attempts WHERE id = NEW.target_id
+              )
+            THEN RAISE(ABORT, 'execution lease target node attempt not found')
+            WHEN NEW.target_kind = 'interaction-turn'
+              AND NOT EXISTS (
+                SELECT 1 FROM interaction_turns WHERE id = NEW.target_id
+              )
+            THEN RAISE(ABORT, 'execution lease target interaction turn not found')
+          END;
+        END;
+
+        CREATE TRIGGER node_attempt_delete_execution_leases
+        AFTER DELETE ON node_attempts
+        BEGIN
+          DELETE FROM execution_facts
+           WHERE target_kind = 'node-attempt' AND target_id = OLD.id;
+          DELETE FROM execution_leases
+           WHERE target_kind = 'node-attempt' AND target_id = OLD.id;
+        END;
+
+        CREATE TABLE IF NOT EXISTS continuation_plans (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK (kind IN ('recovery', 'fork')),
+          source_run_id TEXT NOT NULL REFERENCES department_runs(id),
+          target_run_id TEXT NOT NULL REFERENCES department_runs(id),
+          source_snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          target_snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          target_node_run_id TEXT REFERENCES node_runs(id),
+          mode TEXT NOT NULL CHECK (mode IN ('recovery', 'replay', 'reconfigure')),
+          run_revision INTEGER NOT NULL CHECK (run_revision >= 0),
+          canonical_json TEXT NOT NULL,
+          hash TEXT NOT NULL CHECK (length(hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS continuation_plan_items (
+          id TEXT PRIMARY KEY,
+          plan_id TEXT NOT NULL REFERENCES continuation_plans(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          pipeline_node_id TEXT NOT NULL,
+          source_node_run_id TEXT REFERENCES node_runs(id),
+          target_node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+          disposition TEXT NOT NULL CHECK (
+            disposition IN ('rerun', 'reuse-evidence', 'skip', 'blocked')
+          ),
+          evidence_refs_json TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          UNIQUE (plan_id, pipeline_node_id),
+          UNIQUE (plan_id, ordinal)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS continuation_plans_target_run_idx
+          ON continuation_plans(target_run_id, created_at, id);
+        CREATE TRIGGER IF NOT EXISTS continuation_plans_immutable_update
+        BEFORE UPDATE ON continuation_plans
+        BEGIN
+          SELECT RAISE(ABORT, 'continuation plan is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuation_plans_immutable_delete
+        BEFORE DELETE ON continuation_plans
+        BEGIN
+          SELECT RAISE(ABORT, 'continuation plan is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuation_plan_items_immutable_update
+        BEFORE UPDATE ON continuation_plan_items
+        BEGIN
+          SELECT RAISE(ABORT, 'continuation plan item is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuation_plan_items_immutable_delete
+        BEFORE DELETE ON continuation_plan_items
+        BEGIN
+          SELECT RAISE(ABORT, 'continuation plan item is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 33,
+    name: "review_topics_and_quality_gates",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS review_topics (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT REFERENCES department_runs(id),
+          title TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (
+            kind IN ('product', 'technical', 'code', 'aggregate', 'verification')
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'scheduled', 'independent-review', 'discussion', 'revision',
+              're-review', 'blocked', 'PASS', 'CONDITIONAL_PASS', 'FAIL'
+            )
+          ),
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          quorum INTEGER NOT NULL CHECK (quorum > 0),
+          budget_json TEXT NOT NULL,
+          rounds_used INTEGER NOT NULL DEFAULT 0 CHECK (rounds_used >= 0),
+          duration_seconds_used INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds_used >= 0),
+          tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+          cost_cents_used INTEGER NOT NULL DEFAULT 0 CHECK (cost_cents_used >= 0),
+          stop_condition TEXT NOT NULL CHECK (
+            stop_condition = 'blocking-findings-dispositioned'
+          ),
+          escalation_policy TEXT NOT NULL CHECK (
+            escalation_policy = 'fail-with-evidence'
+          ),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS review_topics_project_idx
+          ON review_topics(project_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS review_topics_run_idx
+          ON review_topics(run_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS review_participants (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (
+            role IN ('owner-participant', 'reviewer-participant', 'moderator')
+          ),
+          ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          position_id TEXT NOT NULL REFERENCES positions(id),
+          session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          eligible INTEGER NOT NULL CHECK (eligible IN (0, 1)),
+          eligibility_reasons_json TEXT NOT NULL,
+          eligibility_snapshot_json TEXT NOT NULL,
+          eligibility_snapshot_hash TEXT NOT NULL
+            CHECK (length(eligibility_snapshot_hash) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE (topic_id, ai_member_id),
+          UNIQUE (topic_id, position_id),
+          UNIQUE (topic_id, session_id)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS review_participants_topic_role_idx
+          ON review_participants(topic_id, role, eligible);
+
+        CREATE TABLE IF NOT EXISTS review_findings (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          reviewer_participant_id TEXT NOT NULL REFERENCES review_participants(id),
+          reviewer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          severity TEXT NOT NULL CHECK (
+            severity IN ('info', 'low', 'medium', 'high', 'critical')
+          ),
+          summary TEXT NOT NULL,
+          rationale TEXT NOT NULL,
+          impact TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          suggested_owner TEXT NOT NULL,
+          blocking INTEGER NOT NULL CHECK (blocking IN (0, 1)),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS review_findings_topic_idx
+          ON review_findings(topic_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS review_resolutions (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          finding_id TEXT NOT NULL REFERENCES review_findings(id),
+          participant_id TEXT NOT NULL REFERENCES review_participants(id),
+          disposition TEXT NOT NULL CHECK (
+            disposition IN ('accepted', 'disputed', 'resolved', 'rejected')
+          ),
+          response TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          revised_subject_id TEXT,
+          revised_subject_hash TEXT CHECK (
+            revised_subject_hash IS NULL OR length(revised_subject_hash) = 64
+          ),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS review_resolutions_finding_idx
+          ON review_resolutions(finding_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS review_discussions (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          round INTEGER NOT NULL CHECK (round > 0),
+          status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+          conflict_finding_ids_json TEXT NOT NULL,
+          bounded_prompt TEXT NOT NULL,
+          tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+          cost_cents_used INTEGER NOT NULL DEFAULT 0 CHECK (cost_cents_used >= 0),
+          duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0),
+          stop_reason TEXT,
+          opened_at TEXT NOT NULL,
+          closed_at TEXT,
+          UNIQUE (topic_id, round)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS review_revisions (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          subject_kind TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
+          subject_hash TEXT NOT NULL CHECK (length(subject_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          evidence_refs_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS review_revisions_topic_idx
+          ON review_revisions(topic_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS review_rechecks (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id) ON DELETE CASCADE,
+          revision_id TEXT NOT NULL REFERENCES review_revisions(id),
+          reviewer_participant_id TEXT NOT NULL REFERENCES review_participants(id),
+          reviewer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          result TEXT NOT NULL CHECK (
+            result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')
+          ),
+          conditions_json TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          eligibility_snapshot_json TEXT NOT NULL,
+          eligibility_snapshot_hash TEXT NOT NULL
+            CHECK (length(eligibility_snapshot_hash) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE (revision_id, reviewer_participant_id),
+          UNIQUE (revision_id, reviewer_session_id)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS quality_gate_results (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+          kind TEXT NOT NULL CHECK (
+            kind IN ('product', 'technical', 'code', 'aggregate', 'verification')
+          ),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          revision_id TEXT REFERENCES review_revisions(id),
+          result TEXT NOT NULL CHECK (
+            result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')
+          ),
+          conditions_json TEXT NOT NULL,
+          recheck_ids_json TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TRIGGER IF NOT EXISTS review_findings_immutable_update
+        BEFORE UPDATE ON review_findings
+        BEGIN
+          SELECT RAISE(ABORT, 'Review Finding is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_findings_immutable_delete
+        BEFORE DELETE ON review_findings
+        BEGIN
+          SELECT RAISE(ABORT, 'Review Finding is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_resolutions_immutable_update
+        BEFORE UPDATE ON review_resolutions
+        BEGIN
+          SELECT RAISE(ABORT, 'Review resolution is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_resolutions_immutable_delete
+        BEFORE DELETE ON review_resolutions
+        BEGIN
+          SELECT RAISE(ABORT, 'Review resolution is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_revisions_immutable_update
+        BEFORE UPDATE ON review_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Review revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_revisions_immutable_delete
+        BEFORE DELETE ON review_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Review revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_rechecks_immutable_update
+        BEFORE UPDATE ON review_rechecks
+        BEGIN
+          SELECT RAISE(ABORT, 'Review recheck is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS review_rechecks_immutable_delete
+        BEFORE DELETE ON review_rechecks
+        BEGIN
+          SELECT RAISE(ABORT, 'Review recheck is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS quality_gate_results_immutable_update
+        BEFORE UPDATE ON quality_gate_results
+        BEGIN
+          SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS quality_gate_results_immutable_delete
+        BEFORE DELETE ON quality_gate_results
+        BEGIN
+          SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 34,
+    name: "project_spec_revisions",
+    migrate: (database) => {
+      const reviewFindingColumns = database
+        .prepare("PRAGMA table_info(review_findings)")
+        .all() as Array<{ readonly name: string }>;
+      if (
+        !reviewFindingColumns.some((column) => column.name === "scope_impact")
+      ) {
+        database.exec(`
+          ALTER TABLE review_findings ADD COLUMN scope_impact TEXT
+            CHECK (scope_impact IN ('scope-preserving', 'scope-changing'));
+        `);
+      }
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS project_specs (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES department_runs(id) ON DELETE CASCADE,
+          product_baseline_id TEXT NOT NULL REFERENCES product_baselines(id),
+          current_revision_id TEXT,
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS project_spec_revisions (
+          id TEXT PRIMARY KEY,
+          project_spec_id TEXT NOT NULL REFERENCES project_specs(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          product_baseline_id TEXT NOT NULL REFERENCES product_baselines(id),
+          product_baseline_hash TEXT NOT NULL CHECK (length(product_baseline_hash) = 64),
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          supersedes_revision_id TEXT REFERENCES project_spec_revisions(id),
+          content_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (project_spec_id, revision)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS project_spec_revisions_run_idx
+          ON project_spec_revisions(run_id, revision);
+
+        CREATE TRIGGER IF NOT EXISTS project_spec_revisions_immutable_update
+        BEFORE UPDATE ON project_spec_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Project Spec Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS project_spec_revisions_immutable_delete
+        BEFORE DELETE ON project_spec_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Project Spec Revision is immutable');
+        END;
+
+        CREATE TABLE IF NOT EXISTS product_readiness_evidence (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          product_baseline_id TEXT NOT NULL REFERENCES product_baselines(id),
+          product_baseline_hash TEXT NOT NULL CHECK (length(product_baseline_hash) = 64),
+          project_spec_revision_id TEXT NOT NULL REFERENCES project_spec_revisions(id),
+          project_spec_hash TEXT NOT NULL CHECK (length(project_spec_hash) = 64),
+          check_key TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('ready', 'blocked')),
+          summary TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS product_readiness_evidence_run_idx
+          ON product_readiness_evidence(run_id, created_at, id);
+        CREATE TRIGGER IF NOT EXISTS product_readiness_evidence_immutable_update
+        BEFORE UPDATE ON product_readiness_evidence
+        BEGIN
+          SELECT RAISE(ABORT, 'Readiness Evidence is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS product_readiness_evidence_immutable_delete
+        BEFORE DELETE ON product_readiness_evidence
+        BEGIN
+          SELECT RAISE(ABORT, 'Readiness Evidence is immutable');
+        END;
+
+        CREATE TABLE IF NOT EXISTS product_gate_promotions (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES department_runs(id) ON DELETE CASCADE,
+          topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+          quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+          project_spec_revision_id TEXT NOT NULL REFERENCES project_spec_revisions(id),
+          project_spec_hash TEXT NOT NULL CHECK (length(project_spec_hash) = 64),
+          readiness_evidence_ids_json TEXT NOT NULL,
+          source_snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          snapshot_revision_id TEXT NOT NULL UNIQUE REFERENCES run_snapshot_revisions(id),
+          snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TRIGGER IF NOT EXISTS product_gate_promotions_immutable_update
+        BEFORE UPDATE ON product_gate_promotions
+        BEGIN
+          SELECT RAISE(ABORT, 'Product Gate Promotion is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS product_gate_promotions_immutable_delete
+        BEFORE DELETE ON product_gate_promotions
+        BEGIN
+          SELECT RAISE(ABORT, 'Product Gate Promotion is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 35,
+    name: "application_references",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS application_references (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_reference TEXT NOT NULL,
+          application_key TEXT NOT NULL,
+          ownership TEXT NOT NULL,
+          build_command TEXT NOT NULL,
+          test_command TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision = 1),
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, application_key)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS application_references_project_idx
+          ON application_references(project_id, created_at, id);
+        CREATE TRIGGER IF NOT EXISTS application_references_immutable_update
+        BEFORE UPDATE ON application_references
+        BEGIN
+          SELECT RAISE(ABORT, 'Application registration is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS application_references_immutable_delete
+        BEFORE DELETE ON application_references
+        BEGIN
+          SELECT RAISE(ABORT, 'Application registration is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 36,
+    name: "application_spec_revisions",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS application_specs (
+          id TEXT PRIMARY KEY,
+          application_id TEXT NOT NULL REFERENCES application_references(id),
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          current_revision_id TEXT,
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (run_id, application_id)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS application_spec_revisions (
+          id TEXT PRIMARY KEY,
+          application_spec_id TEXT NOT NULL REFERENCES application_specs(id) ON DELETE CASCADE,
+          application_id TEXT NOT NULL REFERENCES application_references(id),
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          promoted_project_spec_revision_id TEXT NOT NULL REFERENCES project_spec_revisions(id),
+          promoted_project_spec_hash TEXT NOT NULL CHECK (length(promoted_project_spec_hash) = 64),
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          supersedes_revision_id TEXT REFERENCES application_spec_revisions(id),
+          content_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (application_spec_id, revision)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS application_spec_revisions_run_idx
+          ON application_spec_revisions(run_id, application_id, revision);
+        CREATE TRIGGER IF NOT EXISTS application_spec_revisions_immutable_update
+        BEFORE UPDATE ON application_spec_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Application Spec Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS application_spec_revisions_immutable_delete
+        BEFORE DELETE ON application_spec_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Application Spec Revision is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 37,
+    name: "technical_baseline_proposals",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS technical_baseline_proposals (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES department_runs(id) ON DELETE CASCADE,
+          current_revision_id TEXT,
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS technical_baseline_proposal_revisions (
+          id TEXT PRIMARY KEY,
+          technical_baseline_proposal_id TEXT NOT NULL
+            REFERENCES technical_baseline_proposals(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          promoted_project_spec_revision_id TEXT NOT NULL
+            REFERENCES project_spec_revisions(id),
+          promoted_project_spec_hash TEXT NOT NULL CHECK (length(promoted_project_spec_hash) = 64),
+          readiness_evidence_json TEXT NOT NULL,
+          application_spec_revisions_json TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          supersedes_revision_id TEXT REFERENCES technical_baseline_proposal_revisions(id),
+          content_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (technical_baseline_proposal_id, revision)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS cross_application_contract_revisions (
+          proposal_revision_id TEXT NOT NULL
+            REFERENCES technical_baseline_proposal_revisions(id) ON DELETE CASCADE,
+          contract_id TEXT NOT NULL,
+          version TEXT NOT NULL,
+          producer_application_id TEXT NOT NULL REFERENCES application_references(id),
+          consumer_application_id TEXT NOT NULL REFERENCES application_references(id),
+          kind TEXT NOT NULL CHECK (kind IN ('api', 'data', 'event')),
+          schema_text TEXT NOT NULL,
+          compatibility_policy TEXT NOT NULL
+            CHECK (compatibility_policy IN ('exact', 'backward-compatible')),
+          compatibility TEXT NOT NULL
+            CHECK (compatibility IN ('compatible', 'incompatible')),
+          evidence_refs_json TEXT NOT NULL,
+          test_commands_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (proposal_revision_id, contract_id, version)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS technical_review_topics (
+          topic_id TEXT PRIMARY KEY REFERENCES review_topics(id),
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          proposal_revision_id TEXT NOT NULL
+            REFERENCES technical_baseline_proposal_revisions(id),
+          prior_quality_gate_result_id TEXT REFERENCES quality_gate_results(id),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS technical_baseline_proposal_revisions_run_idx
+          ON technical_baseline_proposal_revisions(run_id, revision);
+        CREATE INDEX IF NOT EXISTS cross_application_contract_revisions_proposal_idx
+          ON cross_application_contract_revisions(proposal_revision_id, contract_id);
+        CREATE INDEX IF NOT EXISTS technical_review_topics_run_idx
+          ON technical_review_topics(run_id, created_at, topic_id);
+
+        CREATE TRIGGER IF NOT EXISTS technical_baseline_proposal_revisions_immutable_update
+        BEFORE UPDATE ON technical_baseline_proposal_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Baseline Proposal Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_baseline_proposal_revisions_immutable_delete
+        BEFORE DELETE ON technical_baseline_proposal_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Baseline Proposal Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cross_application_contract_revisions_immutable_update
+        BEFORE UPDATE ON cross_application_contract_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Cross-Application Contract Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS cross_application_contract_revisions_immutable_delete
+        BEFORE DELETE ON cross_application_contract_revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'Cross-Application Contract Revision is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_review_topics_immutable_update
+        BEFORE UPDATE ON technical_review_topics
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Review lineage is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_review_topics_immutable_delete
+        BEFORE DELETE ON technical_review_topics
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Review lineage is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 38,
+    name: "accepted_technical_baselines",
+    migrate: (database) => {
+      const installedAt = "2026-07-27T00:00:00.000Z";
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO ai_members(
+             id, department_id, display_name, status, created_at
+           ) VALUES ('delivery-coordinator-member', 'software-rnd',
+                     'Delivery Coordinator', 'active', ?)`,
+        )
+        .run(installedAt);
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO positions(
+             id, department_id, name, responsibility, ai_member_id,
+             sort_order, created_at
+           ) VALUES ('delivery-coordinator', 'software-rnd',
+                     'Delivery Coordinator',
+                     'Orchestrates downstream delivery without approving producer-owned work.',
+                     'delivery-coordinator-member', 5, ?)`,
+        )
+        .run(installedAt);
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS technical_baselines (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES department_runs(id) ON DELETE CASCADE,
+          proposal_revision_id TEXT NOT NULL UNIQUE
+            REFERENCES technical_baseline_proposal_revisions(id),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS technical_gate_promotions (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES department_runs(id) ON DELETE CASCADE,
+          topic_id TEXT NOT NULL REFERENCES review_topics(id),
+          quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+          technical_baseline_id TEXT NOT NULL UNIQUE REFERENCES technical_baselines(id),
+          technical_baseline_hash TEXT NOT NULL CHECK (length(technical_baseline_hash) = 64),
+          proposal_revision_id TEXT NOT NULL REFERENCES technical_baseline_proposal_revisions(id),
+          proposal_revision_hash TEXT NOT NULL CHECK (length(proposal_revision_hash) = 64),
+          source_snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          snapshot_revision_id TEXT NOT NULL UNIQUE REFERENCES run_snapshot_revisions(id),
+          snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TRIGGER IF NOT EXISTS technical_baselines_immutable_update
+        BEFORE UPDATE ON technical_baselines
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Baseline is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_baselines_immutable_delete
+        BEFORE DELETE ON technical_baselines
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Baseline is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_gate_promotions_immutable_update
+        BEFORE UPDATE ON technical_gate_promotions
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Gate Promotion is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS technical_gate_promotions_immutable_delete
+        BEFORE DELETE ON technical_gate_promotions
+        BEGIN
+          SELECT RAISE(ABORT, 'Technical Gate Promotion is immutable');
+        END;
+      `);
+    },
+  },
 ];
 
 const schemaMetadataExists = (database: DatabaseSync): boolean =>
@@ -1502,6 +3211,8 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   }
 
   const rebuildsNodeAttempts = existingVersion < 18;
+  const rebuildsApprovals = existingVersion < 29;
+  const rebuildsExecutionStates = existingVersion < 32;
   const foreignKeysEnabled = Number(
     (
       database.prepare("PRAGMA foreign_keys").get() as
@@ -1509,7 +3220,10 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
         | undefined
     )?.foreign_keys,
   );
-  if (rebuildsNodeAttempts && foreignKeysEnabled === 1) {
+  if (
+    (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
+    foreignKeysEnabled === 1
+  ) {
     database.exec("PRAGMA foreign_keys = OFF");
   }
   database.exec("BEGIN IMMEDIATE");
@@ -1533,7 +3247,7 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
       )
       .run(String(CURRENT_SCHEMA_VERSION));
     if (
-      rebuildsNodeAttempts &&
+      (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
       database.prepare("PRAGMA foreign_key_check").all().length > 0
     ) {
       throw new Error("Company database migration violated foreign keys.");
@@ -1545,7 +3259,10 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
     database.exec("ROLLBACK");
     throw error;
   } finally {
-    if (rebuildsNodeAttempts && foreignKeysEnabled === 1) {
+    if (
+      (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
+      foreignKeysEnabled === 1
+    ) {
       database.exec("PRAGMA foreign_keys = ON");
     }
   }

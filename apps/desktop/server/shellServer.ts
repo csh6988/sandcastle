@@ -25,6 +25,13 @@ export const startShellServer = async (
   options: ShellServerOptions,
 ): Promise<ShellServerHandle> => {
   const app = express();
+  app.use((_req, res, next) => {
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+    );
+    next();
+  });
   const boardProxy = createProxyMiddleware({
     target: options.boardUrl ?? "http://127.0.0.1:9",
     changeOrigin: true,

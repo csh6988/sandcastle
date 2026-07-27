@@ -13,6 +13,13 @@ import {
   assertSkillConfigurationContract,
   scriptedSkillConfiguration,
 } from "./testing/skillConfigurationContract.js";
+import type { RuntimeRequest } from "./interface.js";
+
+const runtimeRequestType = (request: RuntimeRequest): string => {
+  if (request.kind === "query") return request.query.type;
+  if (request.kind === "command") return request.command.type;
+  return request.kind;
+};
 
 const scriptedRun = {
   run: {
@@ -20,6 +27,7 @@ const scriptedRun = {
     projectId: "project-1",
     departmentId: "department-1",
     pipelineVersionId: "pipeline-1",
+    productBaselineId: null,
     snapshotRevisionId: "snapshot-1",
     parentRunId: null,
     forkedFromSnapshotRevisionId: null,
@@ -89,6 +97,7 @@ const scriptedRun = {
       runLimits: { maxActiveNodes: 1 },
     },
   },
+  continuationPlan: null,
   nodes: [
     {
       id: "node-run-start",
@@ -265,19 +274,14 @@ describe("Scripted Runtime transport", () => {
       defaultAgentId: "codex",
       skillIds: ["tdd"],
     });
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "query" ? request.query.type : request.command.type,
-      ),
-      [
-        "agent.catalog.inspect",
-        "agent.catalog.discover",
-        "agent.test",
-        "skill.discovery.inspect",
-        "skill.discovery.refresh",
-        "position.configure",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "agent.catalog.inspect",
+      "agent.catalog.discover",
+      "agent.test",
+      "skill.discovery.inspect",
+      "skill.discovery.refresh",
+      "position.configure",
+    ]);
   });
 
   it("serves the same typed department.inspect contract as the real Runtime", async () => {
@@ -414,17 +418,12 @@ describe("Scripted Runtime transport", () => {
       ).status,
       "archived",
     );
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "command" ? request.command.type : request.query.type,
-      ),
-      [
-        "department.update",
-        "position.update",
-        "department.copy",
-        "department.archive",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "department.update",
+      "position.update",
+      "department.copy",
+      "department.archive",
+    ]);
   });
 
   it("serves the same Phase 1 Position and Execution Profile command seam as the real Runtime", async () => {
@@ -510,17 +509,12 @@ describe("Scripted Runtime transport", () => {
       expectedRevision: 1,
     });
     assert.equal(archivedResult.positions[0]?.status, "archived");
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "command" ? request.command.type : request.query.type,
-      ),
-      [
-        "position.create",
-        "position.update",
-        "execution-profile.save",
-        "position.archive",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "position.create",
+      "position.update",
+      "execution-profile.save",
+      "position.archive",
+    ]);
   });
 
   it("serves the same Project Configuration contract as the real Runtime", async () => {
@@ -610,17 +604,12 @@ describe("Scripted Runtime transport", () => {
       ).status,
       "archived",
     );
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "command" ? request.command.type : request.query.type,
-      ),
-      [
-        "project.inspect",
-        "project.update",
-        "project.update",
-        "project.archive",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "project.inspect",
+      "project.update",
+      "project.update",
+      "project.archive",
+    ]);
   });
 
   it("serves the same Pipeline Configuration command/query seam as the real Runtime", async () => {
@@ -630,6 +619,25 @@ describe("Scripted Runtime transport", () => {
           edges: scriptedSoftwareRndDepartment.pipeline.edges,
         }
       : { nodes: [], edges: [] };
+    const handlers = graph.nodes.map((node) => ({
+      nodeId: node.id,
+      handlerKindId:
+        node.type === "start"
+          ? "run-start@1"
+          : node.type === "ai-task"
+            ? "ai-task@1"
+            : node.type === "human-approval"
+              ? "human-approval@1"
+              : node.type === "condition"
+                ? "gate-route@1"
+                : node.type === "parallel"
+                  ? "work-package-fan-out@1"
+                  : node.type === "join"
+                    ? "package-join@1"
+                    : "run-complete@1",
+      inputSchemaHash: "b".repeat(64),
+      outputSchemaHash: "c".repeat(64),
+    }));
     const editor = {
       department: { id: "software-rnd", name: "Software R&D" },
       positions: scriptedSoftwareRndDepartment.positions.map((position) => ({
@@ -643,6 +651,8 @@ describe("Scripted Runtime transport", () => {
         version: 1,
         graph,
         hash: "a".repeat(64),
+        handlerRegistry: { version: 1, hash: "d".repeat(64) },
+        handlers,
         publishedAt: "2026-07-14T00:00:00.000Z",
       },
       history: [
@@ -651,6 +661,8 @@ describe("Scripted Runtime transport", () => {
           version: 1,
           graph,
           hash: "a".repeat(64),
+          handlerRegistry: { version: 1, hash: "d".repeat(64) },
+          handlers,
           publishedAt: "2026-07-14T00:00:00.000Z",
           nodeCount: graph.nodes.length,
           edgeCount: graph.edges.length,
@@ -736,18 +748,13 @@ describe("Scripted Runtime transport", () => {
         error instanceof RuntimeClientError &&
         error.code === "VERSION_CONFLICT",
     );
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "command" ? request.command.type : request.query.type,
-      ),
-      [
-        "department.pipeline.inspect",
-        "department.pipeline.validate",
-        "department.pipeline.draft.save",
-        "department.pipeline.publish",
-        "department.pipeline.draft.save",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "department.pipeline.inspect",
+      "department.pipeline.validate",
+      "department.pipeline.draft.save",
+      "department.pipeline.publish",
+      "department.pipeline.draft.save",
+    ]);
   });
 
   it("serves the same Skill Configuration command/query seam as the real Runtime", async () => {
@@ -804,19 +811,14 @@ describe("Scripted Runtime transport", () => {
       expectedRevision: 0,
     });
 
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "query" ? request.query.type : request.command.type,
-      ),
-      [
-        "department.skill-configuration.inspect",
-        "position.skills.set",
-        "skill.catalog.save",
-        "skill-flow.save",
-        "skill-flow.archive",
-        "skill.catalog.archive",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "department.skill-configuration.inspect",
+      "position.skills.set",
+      "skill.catalog.save",
+      "skill-flow.save",
+      "skill-flow.archive",
+      "skill.catalog.archive",
+    ]);
   });
 
   it("serves the same Department Run command/query seam as the real Runtime", async () => {
@@ -831,6 +833,7 @@ describe("Scripted Runtime transport", () => {
     const transport = createScriptedRuntimeTransport({
       responses: [
         { ok: true, result: [scriptedRun] },
+        { ok: true, result: scriptedRun },
         { ok: true, result: scriptedRun },
         { ok: true, result: scriptedRun },
         { ok: true, result: scriptedRun },
@@ -871,6 +874,12 @@ describe("Scripted Runtime transport", () => {
       feedback: "Try a different approach.",
     });
     await client.execute({
+      type: "run.approval.retry",
+      runId: "run-1",
+      nodeRunId: "node-run-approval",
+      expectedRevision: 2,
+    });
+    await client.execute({
       type: "run.node.retry",
       runId: "run-1",
       nodeRunId: "node-run-ai-task",
@@ -887,19 +896,15 @@ describe("Scripted Runtime transport", () => {
       ).run.status,
       "completed",
     );
-    assert.deepEqual(
-      transport.requests.map((request) =>
-        request.kind === "query" ? request.query.type : request.command.type,
-      ),
-      [
-        "runs.list",
-        "run.inspect",
-        "run.start",
-        "run.approval.decide",
-        "run.approval.decide",
-        "run.node.retry",
-        "run.execute-ready",
-      ],
-    );
+    assert.deepEqual(transport.requests.map(runtimeRequestType), [
+      "runs.list",
+      "run.inspect",
+      "run.start",
+      "run.approval.decide",
+      "run.approval.decide",
+      "run.approval.retry",
+      "run.node.retry",
+      "run.execute-ready",
+    ]);
   });
 });

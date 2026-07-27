@@ -7,8 +7,13 @@ import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 import type { DepartmentPipelineDraftGraph } from "../interface.js";
-import { createScriptedExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
+import type { ExecutionEventSink } from "../execution/contract.js";
+import {
+  createScriptedExecutionAdapter,
+  type ExecutionAdapterInput,
+} from "../adapters/scriptedExecutionAdapter.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
+import { createNodeHandlerRegistry } from "./nodeHandlerRegistry.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-pipeline-runtime-"));
@@ -98,6 +103,133 @@ const setup = (
   };
 };
 
+const projectSpecGraph = (
+  positionId: string,
+): DepartmentPipelineDraftGraph => ({
+  nodes: [
+    {
+      id: "start",
+      type: "start",
+      name: "Start",
+      handlerKindId: "run-start@1",
+    },
+    {
+      id: "project-spec",
+      type: "ai-task",
+      name: "Project Spec",
+      positionId,
+      handlerKindId: "project-spec@1",
+    },
+    {
+      id: "complete",
+      type: "complete",
+      name: "Complete",
+      handlerKindId: "run-complete@1",
+    },
+  ],
+  edges: [
+    { from: "start", to: "project-spec" },
+    { from: "project-spec", to: "complete" },
+  ],
+});
+
+const formalizeAndStart = (input: {
+  readonly database: ReturnType<typeof openCompanyDatabase>;
+  readonly projectId: string;
+  readonly departmentId: string;
+  readonly schedulingCheckpoint?: (point: "before-commit") => void;
+}) => {
+  const actor = {
+    type: "human" as const,
+    id: "pipeline-test-human",
+    authenticatedBy: "local-session" as const,
+  };
+  const session = input.database.interaction.createSession({
+    projectId: input.projectId,
+    mode: "consultation",
+  });
+  input.database.interaction.addParticipant({
+    sessionId: session.id,
+    participantType: "ai-member",
+    participantRef: "product-planner-member",
+    role: "product-manager",
+  });
+  const revised = input.database.commandRegistry.execute({
+    schemaVersion: 1,
+    commandId: `revise:${input.projectId}`,
+    actor,
+    consumerId: "pipeline-runtime-test",
+    expectedRevision: 0,
+    command: {
+      type: "product.proposal.revise",
+      projectId: input.projectId,
+      producerSessionId: session.id,
+      content: {
+        goal: "Execute the deterministic Pipeline",
+        users: ["Delivery operator"],
+        scope: ["The published no-Agent graph"],
+        nonGoals: ["Agent execution"],
+        acceptanceCriteria: ["The Run completes from Snapshot r1"],
+        constraints: ["Pipeline Runtime remains authoritative"],
+        risks: ["Scheduler restart"],
+        openQuestions: [],
+      },
+    },
+  });
+  assert.equal(revised.status, "succeeded");
+  if (revised.status !== "succeeded" || !revised.value.proposal) {
+    throw new Error("Product Proposal was not created.");
+  }
+  const proposal = revised.value.proposal;
+  const awaiting = input.database.commandRegistry.execute({
+    schemaVersion: 1,
+    commandId: `awaiting:${input.projectId}`,
+    actor,
+    consumerId: "pipeline-runtime-test",
+    expectedRevision: proposal.revision,
+    command: {
+      type: "product.proposal.mark-awaiting-confirmation",
+      projectId: input.projectId,
+      proposalRevisionId: proposal.currentRevision.id,
+      proposalHash: proposal.currentRevision.hash,
+    },
+  });
+  assert.equal(awaiting.status, "succeeded");
+  if (awaiting.status !== "succeeded" || !awaiting.value.proposal) {
+    throw new Error("Product Proposal was not marked awaiting confirmation.");
+  }
+  const exact = awaiting.value.proposal;
+  const confirmed = input.database.commandRegistry.execute({
+    schemaVersion: 1,
+    commandId: `confirm:${input.projectId}`,
+    actor,
+    consumerId: "pipeline-runtime-test",
+    expectedRevision: exact.revision,
+    command: {
+      type: "confirm-product-baseline",
+      projectId: input.projectId,
+      departmentId: input.departmentId,
+      proposalRevisionId: exact.currentRevision.id,
+      proposalHash: exact.currentRevision.hash,
+    },
+  });
+  assert.equal(confirmed.status, "succeeded");
+  if (confirmed.status !== "succeeded") {
+    throw new Error("Product Baseline was not confirmed.");
+  }
+  const formalized = confirmed.value.formalRuns.at(-1);
+  assert.ok(formalized);
+  const beforeStart = input.database.pipelineRuntime.inspectRun(
+    formalized.runId,
+  );
+  const started = input.database.pipelineRuntime.startFormalizedRun({
+    projectId: input.projectId,
+    departmentId: input.departmentId,
+    checkpoint: input.schedulingCheckpoint,
+  });
+  return { actor, beforeStart, started };
+};
+
 describe("Pipeline Runtime", () => {
   it("persists Run creation audit and Runtime event records in the start transaction", () => {
     const { database, project, department } = setup();
@@ -182,7 +314,9 @@ describe("Pipeline Runtime", () => {
         new Set([
           "run.created",
           "node.status.changed",
+          "node.succeeded",
           "attempt.ready",
+          "execution.leased",
           "attempt.started",
           "attempt.succeeded",
         ]),
@@ -368,6 +502,47 @@ describe("Pipeline Runtime", () => {
         ),
         false,
       );
+      assert.equal(
+        database.pipelineRuntime.inspectRun(waiting.run.id).run.status,
+        "superseded",
+      );
+      assert.equal(forked.continuationPlan?.kind, "fork");
+      assert.equal(forked.continuationPlan?.mode, "replay");
+      assert.deepEqual(
+        forked.continuationPlan?.items.map((item) => [
+          item.pipelineNodeId,
+          item.disposition,
+        ]),
+        [
+          ["start", "reuse-evidence"],
+          ["plan", "reuse-evidence"],
+          ["approval", "rerun"],
+          ["complete", "blocked"],
+        ],
+      );
+      const continuationPlanId = forked.continuationPlan?.id;
+      assert.ok(continuationPlanId);
+      const persisted = new DatabaseSync(database.path);
+      try {
+        assert.throws(
+          () =>
+            persisted
+              .prepare(
+                "DELETE FROM continuation_plan_items WHERE plan_id = ? AND ordinal = 0",
+              )
+              .run(continuationPlanId),
+          /continuation plan item is immutable/,
+        );
+        assert.throws(
+          () =>
+            persisted
+              .prepare("DELETE FROM continuation_plans WHERE id = ?")
+              .run(continuationPlanId),
+          /continuation plan is immutable/,
+        );
+      } finally {
+        persisted.close();
+      }
     } finally {
       database.close();
     }
@@ -494,7 +669,7 @@ describe("Pipeline Runtime", () => {
         (error: unknown) =>
           error instanceof Error &&
           "code" in error &&
-          error.code === "APPROVAL_STATE_INVALID",
+          error.code === "APPROVAL_DECISION_EXISTS",
       );
       assert.deepEqual(
         database.pipelineRuntime
@@ -1052,11 +1227,14 @@ describe("Pipeline Runtime", () => {
       );
       const recoveredAttempt = recoveredNode?.attempts.at(-1);
 
-      assert.equal(recovered.run.status, "failed");
-      assert.equal(recoveredNode?.status, "failed");
-      assert.equal(recoveredAttempt?.status, "failed");
+      assert.equal(recovered.run.status, "blocked");
+      assert.equal(recoveredNode?.status, "blocked");
+      assert.equal(recoveredAttempt?.status, "reconciling");
       assert.equal(recoveredAttempt?.recoverable, true);
-      assert.equal(recoveredAttempt?.failure?.code, "ATTEMPT_LEASE_EXPIRED");
+      assert.equal(
+        recoveredAttempt?.failure?.code,
+        "EXECUTION_RECONCILIATION_REQUIRED",
+      );
       assert.deepEqual(
         restarted.pipelineRuntime.claimReadyAttempt({
           runId: recovered.run.id,
@@ -1199,7 +1377,7 @@ describe("Pipeline Runtime", () => {
         model: profile.model,
         sandboxRef: profile.sandboxRef,
         branchStrategy: profile.branchStrategy,
-        timeoutSeconds: 1,
+        timeoutSeconds: 2,
         maxIterations: profile.limits.maxIterations,
         maxTokens: profile.limits.maxTokens,
         retryMaxAttempts: profile.retryPolicy.maxAttempts,
@@ -1358,12 +1536,13 @@ describe("Pipeline Runtime", () => {
       const interrupted = recovered.nodes.find(
         (node) => node.pipelineNodeId === "implement",
       );
-      assert.equal(recovered.run.status, "failed");
-      assert.equal(interrupted?.status, "failed");
+      assert.equal(recovered.run.status, "blocked");
+      assert.equal(interrupted?.status, "blocked");
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
       assert.equal(interrupted?.attempts.at(-1)?.recoverable, true);
       assert.equal(
         interrupted?.attempts.at(-1)?.failure?.code,
-        "ATTEMPT_LEASE_EXPIRED",
+        "EXECUTION_RECONCILIATION_REQUIRED",
       );
     } finally {
       restarted.close();
@@ -1522,7 +1701,7 @@ describe("Pipeline Runtime", () => {
     }
   });
 
-  it("aborts an active Node Handler and waits before Cancel returns", async () => {
+  it("keeps an active Node Attempt reconciling when cancellation is unknown", async () => {
     let receivedSignal: AbortSignal | undefined;
     let markStarted!: () => void;
     const startedExecuting = new Promise<void>((resolve) => {
@@ -1538,6 +1717,26 @@ describe("Pipeline Runtime", () => {
           });
         });
         return { kind: "succeeded" };
+      },
+      cancel: async () => "unknown",
+      reconcile: async (_input, sink: ExecutionEventSink) => {
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-cancelled-after-request",
+          ordinal: 1,
+          kind: "cancelled",
+          schemaVersion: 1,
+          payload: {
+            code: "EXECUTION_CANCELLED",
+            message: "Provider confirmed cancellation.",
+          },
+          evidenceRefs: ["provider-receipt:cancelled"],
+        });
+        return {
+          status: "cancelled" as const,
+          terminalExecutionFactId: receipt.executionFactId,
+          evidenceRefs: ["provider-receipt:cancelled"],
+        };
       },
     });
     try {
@@ -1561,11 +1760,30 @@ describe("Pipeline Runtime", () => {
       });
 
       assert.equal(receivedSignal?.aborted, true);
-      assert.equal(cancelled.run.status, "cancelled");
-      assert.equal(
-        cancelled.nodes.find((node) => node.pipelineNodeId === "implement")
-          ?.status,
-        "cancelled",
+      assert.equal(cancelled.run.status, "blocked");
+      const interrupted = cancelled.nodes.find(
+        (node) => node.pipelineNodeId === "implement",
+      );
+      assert.equal(interrupted?.status, "blocked");
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
+      const attemptId = interrupted?.attempts.at(-1)?.id;
+      assert.ok(attemptId);
+      const execution = database.pipelineRuntime.inspectExecution({
+        attemptId,
+      });
+      assert.equal(execution.leases.at(-1)?.cancelRequested, true);
+      assert.equal(execution.leases.at(-1)?.releasedAt !== null, true);
+      assert.throws(
+        () =>
+          database.pipelineRuntime.retryNode({
+            runId: cancelled.run.id,
+            nodeRunId: interrupted.id,
+            expectedRevision: cancelled.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "RETRY_STATE_INVALID",
       );
       const executionResult = await executing;
       assert.equal(
@@ -1574,12 +1792,28 @@ describe("Pipeline Runtime", () => {
           executionResult.code,
         "LEASE_OWNERSHIP_INVALID",
       );
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      const settled = database.pipelineRuntime.inspectRun(cancelled.run.id);
+      const settledNode = settled.nodes.find(
+        (node) => node.pipelineNodeId === "implement",
+      );
+      assert.equal(settled.run.status, "cancelled");
+      assert.equal(settledNode?.status, "cancelled");
+      assert.equal(settledNode?.attempts.at(-1)?.status, "cancelled");
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId }).facts.at(-1)
+          ?.kind,
+        "cancelled",
+      );
     } finally {
       database.close();
     }
   });
 
-  it("pauses an active Node Handler into explicit recoverable evidence", async () => {
+  it("keeps an unproven paused Node Attempt in reconciliation", async () => {
     let markStarted!: () => void;
     const startedExecuting = new Promise<void>((resolve) => {
       markStarted = resolve;
@@ -1618,11 +1852,19 @@ describe("Pipeline Runtime", () => {
         (node) => node.pipelineNodeId === "implement",
       );
       assert.equal(paused.run.status, "paused");
-      assert.equal(interrupted?.status, "failed");
+      assert.equal(interrupted?.status, "blocked");
       assert.equal(interrupted?.attempts.at(-1)?.recoverable, true);
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
       assert.equal(
         interrupted?.attempts.at(-1)?.failure?.code,
-        "ATTEMPT_PAUSED",
+        "EXECUTION_PAUSE_RECONCILIATION_REQUIRED",
+      );
+      const attemptId = interrupted?.attempts.at(-1)?.id;
+      assert.ok(attemptId);
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId }).leases.at(-1)
+          ?.releasedAt !== null,
+        true,
       );
       const executionResult = await executing;
       assert.equal(
@@ -1636,7 +1878,62 @@ describe("Pipeline Runtime", () => {
         expectedRevision: paused.run.revision,
         action: "resume",
       });
-      assert.equal(resumed.run.status, "recovering");
+      assert.equal(resumed.run.status, "blocked");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("drains an unproven active Node Attempt into reconciliation", async () => {
+    let markStarted!: () => void;
+    const startedExecuting = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const { database, project, department } = setup({
+      execute: async (input) => {
+        markStarted();
+        await new Promise<void>((resolve) => {
+          input.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        throw new Error("external execution state remains unproven");
+      },
+    });
+    try {
+      const started = database.pipelineRuntime.startRun({
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const executing = database.pipelineRuntime
+        .executeReady({
+          runId: started.run.id,
+          expectedRevision: started.run.revision,
+        })
+        .catch((error: unknown) => error);
+      await startedExecuting;
+
+      await database.pipelineRuntime.prepareForShutdown();
+
+      const drained = database.pipelineRuntime.inspectRun(started.run.id);
+      const interrupted = drained.nodes.find(
+        (node) => node.pipelineNodeId === "implement",
+      );
+      assert.equal(drained.run.status, "blocked");
+      assert.equal(interrupted?.status, "blocked");
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
+      assert.equal(
+        interrupted?.attempts.at(-1)?.failure?.code,
+        "RUNTIME_SHUTDOWN",
+      );
+      const attemptId = interrupted?.attempts.at(-1)?.id;
+      assert.ok(attemptId);
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId }).leases.at(-1)
+          ?.releasedAt !== null,
+        true,
+      );
+      assert.equal((await executing) instanceof Error, true);
     } finally {
       database.close();
     }
@@ -1728,6 +2025,17 @@ describe("Pipeline Runtime", () => {
           .find((node) => node.id === failedNode.id)
           ?.attempts.at(-1)?.reason,
         "recovery",
+      );
+      assert.equal(recovered.continuationPlan?.kind, "recovery");
+      assert.equal(
+        recovered.continuationPlan?.targetSnapshotRevisionId,
+        recovered.snapshot.id,
+      );
+      assert.equal(
+        recovered.continuationPlan?.items.find(
+          (item) => item.pipelineNodeId === failedNode.pipelineNodeId,
+        )?.disposition,
+        "rerun",
       );
     } finally {
       database.close();
@@ -2882,6 +3190,1714 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("runs one project-spec AI Task through fenced Scripted Execution Facts", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "scripted-started",
+            ordinal: 1,
+            kind: "provider-started",
+            schemaVersion: 1,
+            payload: { providerExecutionRef: "scripted:project-spec" },
+            evidenceRefs: ["receipt:scripted:project-spec"],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "scripted-message",
+            ordinal: 2,
+            kind: "message",
+            schemaVersion: 1,
+            payload: { text: "Project specification prepared." },
+            evidenceRefs: [],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "scripted-started",
+            ordinal: 1,
+            kind: "provider-started",
+            schemaVersion: 1,
+            payload: { providerExecutionRef: "scripted:project-spec" },
+            evidenceRefs: ["receipt:scripted:project-spec"],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "scripted-completed",
+            ordinal: 3,
+            kind: "completed",
+            schemaVersion: 1,
+            payload: {
+              structuredResult: { summary: "Project specification prepared." },
+              artifacts: [
+                {
+                  type: "project-spec",
+                  schemaVersion: "1",
+                  logicalName: "checkout-project-spec",
+                  content: "Project specification prepared.",
+                },
+              ],
+            },
+            evidenceRefs: ["receipt:scripted:project-spec"],
+          },
+        ],
+      },
+    });
+    const { database, project, department, position } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const completed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+
+      assert.equal(completed.run.status, "completed");
+      assert.deepEqual(
+        completed.nodes.find((node) => node.pipelineNodeId === "project-spec")
+          ?.result,
+        { summary: "Project specification prepared." },
+      );
+      const attempt = completed.nodes
+        .find((node) => node.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.ok(attempt);
+      const execution = database.pipelineRuntime.inspectExecution({
+        attemptId: attempt.id,
+      });
+      assert.equal(execution.operationKey, `node-attempt:${attempt.id}`);
+      assert.equal(execution.facts.length, 3);
+      assert.equal(execution.facts[0]?.target.id, attempt.id);
+      assert.equal(execution.facts[0]?.leaseId, execution.leases[0]?.leaseId);
+      assert.equal(execution.facts[0]?.executionEpoch, 1);
+      assert.equal(execution.facts[0]?.fenceToken.length > 0, true);
+      assert.equal(
+        execution.facts[0]?.canonicalPayloadHash,
+        "ffc380e751000aff1a9ca7a6e8db42adcb06eec0686e8cde463169f335432c1f",
+      );
+      assert.deepEqual(
+        execution.facts.map((fact) => [fact.ordinal, fact.kind, fact.status]),
+        [
+          [1, "provider-started", "accepted"],
+          [2, "message", "accepted"],
+          [3, "completed", "accepted"],
+        ],
+      );
+      assert.equal(execution.leases[0]?.leaseKind, "execution");
+      assert.equal(execution.leases[0]?.releasedAt !== null, true);
+      assert.equal(execution.terminalFactId, execution.facts.at(-1)?.id);
+      const artifact = database.artifactRegistry.listVersions(project.id)[0];
+      assert.ok(artifact);
+      assert.deepEqual(artifact.producer, {
+        runId: completed.run.id,
+        nodeRunId: completed.nodes.find(
+          (node) => node.pipelineNodeId === "project-spec",
+        )?.id,
+        nodeAttemptId: attempt.id,
+        snapshotRevisionId: completed.snapshot.id,
+        aiMemberId: completed.snapshot.payload.positions.find(
+          (candidate) => candidate.id === position.id,
+        )?.aiMember.id,
+      });
+      assert.deepEqual(execution.facts.at(-1)?.effectIds, [artifact.id]);
+      assert.equal(position.id.length > 0, true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a conflicting Execution Fact identity without overwriting the Attempt", async () => {
+    let attemptId = "";
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "same-fact",
+            ordinal: 1,
+            kind: "provider-started",
+            schemaVersion: 1,
+            payload: { providerExecutionRef: "scripted:first" },
+            evidenceRefs: [],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "same-fact",
+            ordinal: 1,
+            kind: "provider-started",
+            schemaVersion: 1,
+            payload: { providerExecutionRef: "scripted:conflict" },
+            evidenceRefs: [],
+          },
+        ],
+      },
+      onExecute: (input) => {
+        attemptId = input.attempt.id;
+      },
+    });
+    const { database, project, department } = setup(adapter, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "project-spec",
+          type: "ai-task",
+          name: "Project Spec",
+          positionId,
+          handlerKindId: "project-spec@1",
+        },
+        {
+          id: "complete",
+          type: "complete",
+          name: "Complete",
+          handlerKindId: "run-complete@1",
+        },
+      ],
+      edges: [
+        { from: "start", to: "project-spec" },
+        { from: "project-spec", to: "complete" },
+      ],
+    }));
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      await assert.rejects(
+        () =>
+          database.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_FACT_CONFLICT",
+      );
+
+      const failed = database.pipelineRuntime.inspectRun(started.run.id);
+      const attempt = failed.nodes
+        .find((node) => node.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.equal(failed.run.status, "failed");
+      assert.equal(attempt?.id, attemptId);
+      assert.equal(attempt?.failure?.code, "EXECUTION_FACT_CONFLICT");
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId })
+          .facts.map((fact) => fact.status),
+        ["accepted", "conflict"],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a conflicting Execution Fact ordinal with a different fact identity", async () => {
+    let attemptId = "";
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "first-fact",
+            ordinal: 1,
+            kind: "provider-started",
+            schemaVersion: 1,
+            payload: { providerExecutionRef: "scripted:first" },
+            evidenceRefs: [],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "different-fact",
+            ordinal: 1,
+            kind: "message",
+            schemaVersion: 1,
+            payload: { text: "Conflicting ordinal." },
+            evidenceRefs: [],
+          },
+        ],
+      },
+      onExecute: (input) => {
+        attemptId = input.attempt.id;
+      },
+    });
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+
+      await assert.rejects(
+        () =>
+          database.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_FACT_CONFLICT",
+      );
+
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId })
+          .facts.map((fact) => [fact.factId, fact.ordinal, fact.status]),
+        [
+          ["first-fact", 1, "accepted"],
+          ["different-fact", 1, "conflict"],
+        ],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a second terminal Execution Fact through terminal CAS", async () => {
+    let attemptId = "";
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "completed-first",
+            ordinal: 1,
+            kind: "completed",
+            schemaVersion: 1,
+            payload: { structuredResult: { accepted: true } },
+            evidenceRefs: [],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "failed-second",
+            ordinal: 2,
+            kind: "failed",
+            schemaVersion: 1,
+            payload: { code: "LATE_FAILURE", message: "Too late." },
+            evidenceRefs: [],
+          },
+        ],
+      },
+      onExecute: (input) => {
+        attemptId = input.attempt.id;
+      },
+    });
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+
+      await assert.rejects(
+        () =>
+          database.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_FACT_CONFLICT",
+      );
+
+      const execution = database.pipelineRuntime.inspectExecution({
+        attemptId,
+      });
+      assert.equal(execution.terminalFactId, execution.facts[0]?.id);
+      assert.deepEqual(
+        execution.facts.map((fact) => [fact.factId, fact.status]),
+        [
+          ["completed-first", "accepted"],
+          ["failed-second", "conflict"],
+        ],
+      );
+      assert.equal(
+        database.pipelineRuntime
+          .inspectRun(started.run.id)
+          .nodes.find((node) => node.pipelineNodeId === "project-spec")?.status,
+        "succeeded",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("applies a cancelled terminal Execution Fact as a cancelled Attempt and Run", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "cancelled",
+            ordinal: 1,
+            kind: "cancelled",
+            schemaVersion: 1,
+            payload: { code: "USER_CANCELLED", message: "Cancelled by user." },
+            evidenceRefs: ["provider-receipt:cancelled"],
+          },
+        ],
+      },
+    });
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const cancelled = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const node = cancelled.nodes.find(
+        (candidate) => candidate.pipelineNodeId === "project-spec",
+      );
+
+      assert.equal(cancelled.run.status, "cancelled");
+      assert.equal(node?.status, "cancelled");
+      assert.equal(node?.attempts.at(-1)?.status, "cancelled");
+      assert.equal(node?.attempts.at(-1)?.failure?.code, "USER_CANCELLED");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("applies a failed terminal Execution Fact as a recoverable failed Attempt", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "failed",
+            ordinal: 1,
+            kind: "failed",
+            schemaVersion: 1,
+            payload: { code: "SCRIPTED_FAILURE", message: "Scripted failure." },
+            evidenceRefs: ["provider-receipt:failed"],
+          },
+        ],
+      },
+    });
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const attempt = failed.nodes
+        .find((candidate) => candidate.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+
+      assert.equal(failed.run.status, "failed");
+      assert.equal(attempt?.status, "failed");
+      assert.equal(attempt?.recoverable, true);
+      assert.equal(attempt?.failure?.code, "SCRIPTED_FAILURE");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects an Adapter completion whose status disagrees with the accepted terminal Fact", async () => {
+    let attemptId = "";
+    const adapter = {
+      execute: async (
+        input: Parameters<
+          ReturnType<typeof createScriptedExecutionAdapter>["execute"]
+        >[0],
+        sink: Parameters<
+          ReturnType<typeof createScriptedExecutionAdapter>["execute"]
+        >[1],
+      ) => {
+        assert.ok(input.request);
+        assert.ok(sink);
+        attemptId = input.attempt.id;
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "completed",
+          ordinal: 1,
+          kind: "completed",
+          schemaVersion: 1,
+          payload: { structuredResult: { authoritative: true } },
+          evidenceRefs: [],
+        });
+        return {
+          operationKey: input.request.operationKey,
+          terminalExecutionFactId: receipt.executionFactId,
+          status: "failed" as const,
+          evidenceRefs: [],
+        };
+      },
+    };
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+
+      await assert.rejects(
+        () =>
+          database.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_ADAPTER_PROTOCOL",
+      );
+
+      const authoritative = database.pipelineRuntime.inspectRun(started.run.id);
+      const attempt = authoritative.nodes
+        .find((candidate) => candidate.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.equal(attempt?.id, attemptId);
+      assert.equal(attempt?.status, "succeeded");
+      assert.deepEqual(attempt?.result, { authoritative: true });
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId }).terminalFactId,
+        attempt?.id === attemptId
+          ? database.pipelineRuntime.inspectExecution({ attemptId }).facts[0]
+              ?.id
+          : null,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("fails a Running Attempt recoverably when Adapter completion has no persisted terminal Fact", async () => {
+    let attemptId = "";
+    const adapter = {
+      execute: async (
+        input: Parameters<
+          ReturnType<typeof createScriptedExecutionAdapter>["execute"]
+        >[0],
+      ) => {
+        assert.ok(input.request);
+        attemptId = input.attempt.id;
+        return {
+          operationKey: input.request.operationKey,
+          terminalExecutionFactId: "missing-terminal-fact",
+          status: "succeeded" as const,
+          evidenceRefs: [],
+        };
+      },
+    };
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+
+      await assert.rejects(
+        () =>
+          database.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_ADAPTER_PROTOCOL",
+      );
+
+      const failed = database.pipelineRuntime.inspectRun(started.run.id);
+      const attempt = failed.nodes
+        .find((candidate) => candidate.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.equal(attempt?.id, attemptId);
+      assert.equal(attempt?.status, "failed");
+      assert.equal(attempt?.recoverable, true);
+      assert.equal(attempt?.failure?.code, "EXECUTION_ADAPTER_PROTOCOL");
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId }).leases[0]
+          ?.releasedAt !== null,
+        true,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("pauses an ask-scoped Execution on an exact Permission and resumes only after a verified decision", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "permission",
+            ordinal: 1,
+            kind: "permission-request",
+            schemaVersion: 1,
+            payload: { scope: "repository.write" },
+            evidenceRefs: [],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: "completed",
+            ordinal: 2,
+            kind: "completed",
+            schemaVersion: 1,
+            payload: { structuredResult: { permitted: true } },
+            evidenceRefs: [],
+          },
+        ],
+      },
+    });
+    const { database, project, department, profile } = setup(
+      adapter,
+      projectSpecGraph,
+    );
+    try {
+      database.catalog.saveExecutionProfile({
+        departmentId: department.id,
+        executionProfileId: profile.id,
+        expectedRevision: profile.revision,
+        name: profile.name,
+        providerRef: profile.providerRef,
+        model: profile.model,
+        sandboxRef: profile.sandboxRef,
+        branchStrategy: profile.branchStrategy,
+        timeoutSeconds: profile.limits.timeoutSeconds,
+        maxIterations: profile.limits.maxIterations,
+        maxTokens: profile.limits.maxTokens,
+        retryMaxAttempts: profile.retryPolicy.maxAttempts,
+        permissionPolicy: "ask",
+        secretReferenceIds: profile.secretReferenceIds,
+      });
+      const { actor, started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const waiting = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const waitingNode = waiting.nodes.find(
+        (candidate) => candidate.pipelineNodeId === "project-spec",
+      );
+      const permission = database.interaction
+        .listSessions(project.id)
+        .flatMap((session) => session.permissions)
+        .at(-1);
+      assert.ok(permission);
+      assert.equal(waiting.run.status, "running");
+      assert.equal(waitingNode?.status, "waiting-permission");
+      assert.equal(permission.scope, "repository.write");
+      assert.equal(permission.status, "pending");
+      const waitingAttempt = waitingNode?.attempts.at(-1);
+      assert.ok(waitingAttempt);
+      const waitingExecution = database.pipelineRuntime.inspectExecution({
+        attemptId: waitingAttempt.id,
+      });
+      assert.deepEqual(waitingExecution.facts[0]?.effectIds, [permission.id]);
+      assert.equal(
+        database.pipelineRuntime
+          .auditRecords({ runId: started.run.id })
+          .some((record) => record.action === "permission.request"),
+        true,
+      );
+      assert.equal(
+        database.pipelineRuntime
+          .runtimeEvents({ afterSequence: 0, limit: 1_000 })
+          .some(
+            (event) =>
+              event.runId === started.run.id &&
+              event.type === "execution.fact.accepted",
+          ),
+        true,
+      );
+      assert.throws(
+        () =>
+          database.pipelineRuntime.decidePermission({
+            permissionId: permission.id,
+            expectedStatus: "pending",
+            decision: "approved",
+            actor: {
+              type: "test-driver",
+              id: "forged-human",
+              authenticatedBy: "runtime",
+            },
+            commandId: "permission:forged",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "PERMISSION_ACTOR_INVALID",
+      );
+
+      const decision = database.pipelineRuntime.decidePermission({
+        permissionId: permission.id,
+        expectedStatus: "pending",
+        decision: "approved",
+        actor,
+        commandId: "permission:approved",
+      });
+      assert.equal(decision.status, "approved");
+      const ready = database.pipelineRuntime.inspectRun(started.run.id);
+      assert.equal(
+        ready.nodes.find(
+          (candidate) => candidate.pipelineNodeId === "project-spec",
+        )?.status,
+        "ready",
+      );
+
+      const completed = await database.pipelineRuntime.executeReady({
+        runId: ready.run.id,
+        expectedRevision: ready.run.revision,
+      });
+      const attempt = completed.nodes
+        .find((candidate) => candidate.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.equal(completed.run.status, "completed");
+      assert.deepEqual(attempt?.result, { permitted: true });
+      assert.ok(attempt);
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: attempt.id })
+          .facts.map((fact) => [fact.kind, fact.status, fact.executionEpoch]),
+        [
+          ["permission-request", "accepted", 1],
+          ["completed", "accepted", 2],
+        ],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("denies a scripted Permission Fact when the frozen Execution Profile policy is deny", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      facts: {
+        "project-spec": [
+          {
+            adapterSchemaVersion: 1,
+            factId: "permission",
+            ordinal: 1,
+            kind: "permission-request",
+            schemaVersion: 1,
+            payload: { scope: "repository.write" },
+            evidenceRefs: [],
+          },
+        ],
+      },
+    });
+    const { database, project, department } = setup(adapter, projectSpecGraph);
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const denied = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const attempt = denied.nodes
+        .find((candidate) => candidate.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+
+      assert.equal(denied.run.status, "failed");
+      assert.equal(attempt?.failure?.code, "PERMISSION_DENIED");
+      assert.equal(
+        database.interaction
+          .listSessions(project.id)
+          .flatMap((session) => session.permissions).length,
+        0,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("records an old-fence terminal Fact as stale after lease loss", async () => {
+    let now = new Date("2026-07-24T00:00:00.000Z");
+    const clock = () => new Date(now);
+    let releaseAdapter!: () => void;
+    let adapterStarted!: () => void;
+    const startedByAdapter = new Promise<void>((resolve) => {
+      adapterStarted = resolve;
+    });
+    const adapterRelease = new Promise<void>((resolve) => {
+      releaseAdapter = resolve;
+    });
+    const adapter = {
+      execute: async (
+        input: Parameters<
+          ReturnType<typeof createScriptedExecutionAdapter>["execute"]
+        >[0],
+        sink: Parameters<
+          ReturnType<typeof createScriptedExecutionAdapter>["execute"]
+        >[1],
+      ) => {
+        adapterStarted();
+        await adapterRelease;
+        assert.ok(input.request);
+        assert.ok(sink);
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "late-terminal",
+          ordinal: 1,
+          kind: "completed",
+          schemaVersion: 1,
+          payload: { structuredResult: { late: true } },
+          evidenceRefs: [],
+        });
+        assert.equal(receipt.status, "stale");
+        return {
+          operationKey: input.request.operationKey,
+          terminalExecutionFactId: receipt.executionFactId,
+          status: "succeeded" as const,
+          evidenceRefs: [],
+        };
+      },
+    };
+    const { database, project, department } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const executing = database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      await startedByAdapter;
+      now = new Date("2026-07-24T00:01:01.000Z");
+      assert.equal(database.pipelineRuntime.recoverExpiredLeases(), 1);
+      releaseAdapter();
+      await assert.rejects(
+        () => executing,
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EXECUTION_ADAPTER_PROTOCOL",
+      );
+
+      const failed = database.pipelineRuntime.inspectRun(started.run.id);
+      const attempt = failed.nodes
+        .find((node) => node.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.ok(attempt);
+      assert.equal(attempt.failure?.code, "EXECUTION_RECONCILIATION_REQUIRED");
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: attempt.id })
+          .facts.map((fact) => [fact.kind, fact.status]),
+        [["completed", "stale"]],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("reconciles an expired Node execution as not-started before allowing replacement work", async () => {
+    let now = new Date("2026-07-24T00:00:00.000Z");
+    const clock = () => new Date(now);
+    let reconciliationCalls = 0;
+    const adapter = {
+      execute: async () => ({
+        kind: "failed" as const,
+        code: "SCRIPTED_PREPARE_RETRY",
+        message: "Prepare a Retry Attempt for lease reconciliation.",
+      }),
+      reconcile: async (
+        input: {
+          readonly operationKey: string;
+          readonly reconciliationLease: {
+            readonly operationKey: string;
+            readonly leaseKind: "reconciliation";
+          };
+        },
+        sink: ExecutionEventSink,
+      ) => {
+        reconciliationCalls += 1;
+        assert.equal(input.reconciliationLease.leaseKind, "reconciliation");
+        assert.equal(
+          input.reconciliationLease.operationKey,
+          input.operationKey,
+        );
+        if (reconciliationCalls === 1) {
+          return {
+            status: "unknown" as const,
+            evidenceRefs: ["provider-receipt:unknown"],
+          };
+        }
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-not-started",
+          ordinal: 1,
+          kind: "not-started",
+          schemaVersion: 1,
+          payload: { providerReceipt: "provider-receipt:not-started" },
+          evidenceRefs: ["provider-receipt:not-started"],
+        });
+        return {
+          status: "not-started" as const,
+          terminalExecutionFactId: receipt.executionFactId,
+          evidenceRefs: ["provider-receipt:not-started"],
+        };
+      },
+    };
+    const { database, project, department } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+            retryMaxAttempts: 1,
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const projectSpec = failed.nodes.find(
+        (node) => node.pipelineNodeId === "project-spec",
+      );
+      assert.ok(projectSpec);
+      const retrying = database.pipelineRuntime.retryNode({
+        runId: failed.run.id,
+        nodeRunId: projectSpec.id,
+        expectedRevision: failed.run.revision,
+      });
+      const claim = database.pipelineRuntime.claimReadyAttempt({
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        workerId: "execution-worker",
+        leaseDurationMs: 60_000,
+      });
+      assert.equal(claim.kind, "claimed");
+      if (claim.kind !== "claimed") assert.fail("Attempt was not claimed.");
+
+      now = new Date("2026-07-24T00:01:01.000Z");
+      assert.equal(database.pipelineRuntime.recoverExpiredLeases(), 1);
+      const expired = database.pipelineRuntime.inspectRun(retrying.run.id);
+      const reconcilingAttempt = expired.nodes
+        .find((node) => node.id === projectSpec.id)
+        ?.attempts.at(-1);
+      assert.equal(expired.run.status, "blocked");
+      assert.equal(reconcilingAttempt?.status, "reconciling");
+
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      const unknown = database.pipelineRuntime.inspectRun(retrying.run.id);
+      assert.equal(unknown.run.status, "blocked");
+      assert.equal(
+        unknown.nodes
+          .find((node) => node.id === projectSpec.id)
+          ?.attempts.at(-1)?.status,
+        "reconciling",
+      );
+      assert.throws(
+        () =>
+          database.pipelineRuntime.retryNode({
+            runId: unknown.run.id,
+            nodeRunId: projectSpec.id,
+            expectedRevision: unknown.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "RETRY_STATE_INVALID",
+      );
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      const reconciled = database.pipelineRuntime.inspectRun(retrying.run.id);
+      const interruptedAttempt = reconciled.nodes
+        .find((node) => node.id === projectSpec.id)
+        ?.attempts.at(-1);
+      assert.equal(interruptedAttempt?.id, claim.attemptId);
+      assert.equal(interruptedAttempt?.status, "interrupted");
+      assert.equal(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .facts.at(-1)?.kind,
+        "not-started",
+      );
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .leases.map((lease) => [lease.leaseKind, lease.executionEpoch]),
+        [
+          ["execution", 1],
+          ["reconciliation", 2],
+          ["reconciliation", 3],
+        ],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("registers reconciled completion Artifacts before releasing downstream work", async () => {
+    let now = new Date("2026-07-24T00:30:00.000Z");
+    const clock = () => new Date(now);
+    const adapter = {
+      execute: async () => ({
+        kind: "failed" as const,
+        code: "SCRIPTED_PREPARE_RECONCILIATION",
+        message: "Prepare an expired Attempt for completed reconciliation.",
+      }),
+      reconcile: async (_input: unknown, sink: ExecutionEventSink) => {
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-reconciled-completion",
+          ordinal: 1,
+          kind: "completed",
+          schemaVersion: 1,
+          payload: {
+            structuredResult: { reconciled: true },
+            artifacts: [
+              {
+                type: "project-spec",
+                schemaVersion: "1",
+                logicalName: "checkout-project-spec",
+                content: "Reconciled project specification.",
+              },
+            ],
+          },
+          evidenceRefs: ["provider-receipt:reconciled-completion"],
+        });
+        return {
+          status: "succeeded" as const,
+          terminalExecutionFactId: receipt.executionFactId,
+          evidenceRefs: ["provider-receipt:reconciled-completion"],
+        };
+      },
+    };
+    const { database, project, department, position } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+            retryMaxAttempts: 1,
+          },
+          {
+            id: "verify",
+            type: "ai-task",
+            name: "Verify",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "verify" },
+          { from: "verify", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const projectSpec = failed.nodes.find(
+        (node) => node.pipelineNodeId === "project-spec",
+      );
+      assert.ok(projectSpec);
+      const retrying = database.pipelineRuntime.retryNode({
+        runId: failed.run.id,
+        nodeRunId: projectSpec.id,
+        expectedRevision: failed.run.revision,
+      });
+      const claim = database.pipelineRuntime.claimReadyAttempt({
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        workerId: "execution-worker",
+        leaseDurationMs: 60_000,
+      });
+      assert.equal(claim.kind, "claimed");
+      if (claim.kind !== "claimed") assert.fail("Attempt was not claimed.");
+
+      now = new Date("2026-07-24T00:31:01.000Z");
+      assert.equal(database.pipelineRuntime.recoverExpiredLeases(), 1);
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+
+      const reconciled = database.pipelineRuntime.inspectRun(retrying.run.id);
+      const reconciledNode = reconciled.nodes.find(
+        (node) => node.id === projectSpec.id,
+      );
+      const verifyNode = reconciled.nodes.find(
+        (node) => node.pipelineNodeId === "verify",
+      );
+      assert.equal(reconciled.run.status, "running");
+      assert.equal(reconciledNode?.status, "succeeded");
+      assert.equal(reconciledNode?.attempts.at(-1)?.id, claim.attemptId);
+      assert.equal(reconciledNode?.attempts.at(-1)?.status, "succeeded");
+      assert.deepEqual(reconciledNode?.result, { reconciled: true });
+      assert.equal(verifyNode?.status, "ready");
+
+      const artifact = database.artifactRegistry.listVersions(project.id)[0];
+      assert.ok(artifact);
+      assert.deepEqual(artifact.producer, {
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        nodeAttemptId: claim.attemptId,
+        snapshotRevisionId: retrying.snapshot.id,
+        aiMemberId: position.aiMember.id,
+      });
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .facts.at(-1)?.effectIds,
+        [artifact.id],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("retries reconciliation errors and unsupported reattachment under new fences", async () => {
+    let now = new Date("2026-07-24T00:45:00.000Z");
+    const clock = () => new Date(now);
+    let reconciliationCalls = 0;
+    const adapter = {
+      execute: async () => ({
+        kind: "failed" as const,
+        code: "SCRIPTED_PREPARE_RECONCILIATION",
+        message: "Prepare an expired Attempt for reconciliation retries.",
+      }),
+      reconcile: async (_input: unknown, sink: ExecutionEventSink) => {
+        reconciliationCalls += 1;
+        if (reconciliationCalls === 1) {
+          throw new Error("provider reconciliation temporarily unavailable");
+        }
+        if (reconciliationCalls === 2) {
+          return {
+            status: "running" as const,
+            providerExecutionRef: "provider-execution:unattachable",
+          };
+        }
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-reconciled-failure",
+          ordinal: 1,
+          kind: "failed",
+          schemaVersion: 1,
+          payload: {
+            code: "PROVIDER_EXECUTION_FAILED",
+            message: "Provider confirmed execution failure.",
+          },
+          evidenceRefs: ["provider-receipt:failed"],
+        });
+        return {
+          status: "failed" as const,
+          terminalExecutionFactId: receipt.executionFactId,
+          evidenceRefs: ["provider-receipt:failed"],
+        };
+      },
+    };
+    const { database, project, department } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+            retryMaxAttempts: 1,
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const projectSpec = failed.nodes.find(
+        (node) => node.pipelineNodeId === "project-spec",
+      );
+      assert.ok(projectSpec);
+      const retrying = database.pipelineRuntime.retryNode({
+        runId: failed.run.id,
+        nodeRunId: projectSpec.id,
+        expectedRevision: failed.run.revision,
+      });
+      const claim = database.pipelineRuntime.claimReadyAttempt({
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        workerId: "execution-worker",
+        leaseDurationMs: 60_000,
+      });
+      assert.equal(claim.kind, "claimed");
+      if (claim.kind !== "claimed") assert.fail("Attempt was not claimed.");
+
+      now = new Date("2026-07-24T00:46:01.000Z");
+      assert.equal(database.pipelineRuntime.recoverExpiredLeases(), 1);
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      assert.equal(
+        database.pipelineRuntime
+          .inspectRun(retrying.run.id)
+          .nodes.find((node) => node.id === projectSpec.id)
+          ?.attempts.at(-1)?.status,
+        "reconciling",
+      );
+
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      assert.equal(
+        database.pipelineRuntime
+          .inspectRun(retrying.run.id)
+          .nodes.find((node) => node.id === projectSpec.id)
+          ?.attempts.at(-1)?.status,
+        "reconciling",
+      );
+
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      const settled = database.pipelineRuntime.inspectRun(retrying.run.id);
+      const settledAttempt = settled.nodes
+        .find((node) => node.id === projectSpec.id)
+        ?.attempts.at(-1);
+      assert.equal(settled.run.status, "failed");
+      assert.equal(settledAttempt?.id, claim.attemptId);
+      assert.equal(settledAttempt?.status, "failed");
+      assert.equal(settledAttempt?.failure?.code, "PROVIDER_EXECUTION_FAILED");
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .leases.map((lease) => [
+            lease.leaseKind,
+            lease.executionEpoch,
+            lease.releasedAt !== null,
+          ]),
+        [
+          ["execution", 1, true],
+          ["reconciliation", 2, true],
+          ["reconciliation", 3, true],
+          ["reconciliation", 4, true],
+        ],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("reattaches a proven running Node execution under a new execution fence", async () => {
+    let now = new Date("2026-07-24T01:00:00.000Z");
+    const clock = () => new Date(now);
+    let reattachedProviderRef = "";
+    const adapter = {
+      capabilities: {
+        reattachRunningOperation: true,
+        strongExecutionFence: true,
+        enforceNoSideEffects: false as const,
+      },
+      execute: async () => ({
+        kind: "failed" as const,
+        code: "SCRIPTED_PREPARE_REATTACH",
+        message: "Prepare a Retry Attempt for running reconciliation.",
+      }),
+      reconcile: async () => ({
+        status: "running" as const,
+        providerExecutionRef: "provider-execution:running",
+      }),
+      reattach: async (
+        input: ExecutionAdapterInput,
+        providerExecutionRef: string,
+        sink: ExecutionEventSink,
+      ) => {
+        assert.ok(input.request);
+        assert.equal(input.request.lease.leaseKind, "execution");
+        assert.equal(input.request.lease.executionEpoch, 3);
+        reattachedProviderRef = providerExecutionRef;
+        const receipt = await sink.record({
+          adapterSchemaVersion: 1,
+          factId: "provider-completed-after-reattach",
+          ordinal: 1,
+          kind: "completed",
+          schemaVersion: 1,
+          payload: {
+            structuredResult: { reattached: true },
+            artifacts: [
+              {
+                type: "project-spec",
+                schemaVersion: "1",
+                logicalName: "reattached-project-spec",
+                content: "Reattached project specification.",
+              },
+            ],
+          },
+          evidenceRefs: ["provider-receipt:reattached"],
+        });
+        return {
+          operationKey: input.request.operationKey,
+          terminalExecutionFactId: receipt.executionFactId,
+          status: "succeeded" as const,
+          evidenceRefs: ["provider-receipt:reattached"],
+        };
+      },
+    };
+    const { database, project, department, position } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+            retryMaxAttempts: 1,
+          },
+          {
+            id: "verify",
+            type: "ai-task",
+            name: "Verify",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "verify" },
+          { from: "verify", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const projectSpec = failed.nodes.find(
+        (node) => node.pipelineNodeId === "project-spec",
+      );
+      assert.ok(projectSpec);
+      const retrying = database.pipelineRuntime.retryNode({
+        runId: failed.run.id,
+        nodeRunId: projectSpec.id,
+        expectedRevision: failed.run.revision,
+      });
+      const claim = database.pipelineRuntime.claimReadyAttempt({
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        workerId: "execution-worker",
+        leaseDurationMs: 60_000,
+      });
+      assert.equal(claim.kind, "claimed");
+      if (claim.kind !== "claimed") assert.fail("Attempt was not claimed.");
+
+      now = new Date("2026-07-24T01:01:01.000Z");
+      assert.equal(database.pipelineRuntime.recoverExpiredLeases(), 1);
+      assert.equal(
+        await database.pipelineRuntime.reconcilePendingExecutions(),
+        1,
+      );
+      const reattached = database.pipelineRuntime.inspectRun(retrying.run.id);
+      const attempt = reattached.nodes
+        .find((node) => node.id === projectSpec.id)
+        ?.attempts.at(-1);
+      assert.equal(reattachedProviderRef, "provider-execution:running");
+      assert.equal(attempt?.id, claim.attemptId);
+      assert.equal(attempt?.status, "succeeded");
+      assert.deepEqual(attempt?.result, { reattached: true });
+      assert.equal(
+        reattached.nodes.find((node) => node.pipelineNodeId === "verify")
+          ?.status,
+        "ready",
+      );
+      const artifact = database.artifactRegistry.listVersions(project.id)[0];
+      assert.ok(artifact);
+      assert.deepEqual(artifact.producer, {
+        runId: retrying.run.id,
+        nodeRunId: projectSpec.id,
+        nodeAttemptId: claim.attemptId,
+        snapshotRevisionId: retrying.snapshot.id,
+        aiMemberId: position.aiMember.id,
+      });
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .facts.at(-1)?.effectIds,
+        [artifact.id],
+      );
+      assert.deepEqual(
+        database.pipelineRuntime
+          .inspectExecution({ attemptId: claim.attemptId })
+          .leases.map((lease) => [lease.leaseKind, lease.executionEpoch]),
+        [
+          ["execution", 1],
+          ["reconciliation", 2],
+          ["execution", 3],
+        ],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("recovers a committed terminal Fact without creating a duplicate Attempt", async () => {
+    let adapterCalls = 0;
+    const { companyDir, database, project, department } = setup(
+      {
+        execute: async (input, sink) => {
+          adapterCalls += 1;
+          assert.ok(input.request);
+          assert.ok(sink);
+          await sink.record({
+            adapterSchemaVersion: 1,
+            factId: "committed-terminal",
+            ordinal: 1,
+            kind: "completed",
+            schemaVersion: 1,
+            payload: { structuredResult: { recovered: true } },
+            evidenceRefs: ["provider-receipt:committed"],
+          });
+          throw new Error("simulated crash after terminal commit");
+        },
+      },
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+    );
+    const { started } = formalizeAndStart({
+      database,
+      projectId: project.id,
+      departmentId: department.id,
+    });
+    await assert.rejects(
+      () =>
+        database.pipelineRuntime.executeReady({
+          runId: started.run.id,
+          expectedRevision: started.run.revision,
+        }),
+      /simulated crash after terminal commit/,
+    );
+    const committed = database.pipelineRuntime.inspectRun(started.run.id);
+    assert.equal(
+      committed.nodes.find((node) => node.pipelineNodeId === "project-spec")
+        ?.status,
+      "succeeded",
+    );
+    database.close();
+
+    const reopened = openCompanyDatabase(companyDir, {
+      executionAdapter: {
+        execute: async () => {
+          adapterCalls += 1;
+          throw new Error("The recovered AI Task executed twice.");
+        },
+      },
+    });
+    try {
+      const recovered = reopened.pipelineRuntime.inspectRun(started.run.id);
+      const completed = await reopened.pipelineRuntime.executeReady({
+        runId: recovered.run.id,
+        expectedRevision: recovered.run.revision,
+      });
+      const projectSpec = completed.nodes.find(
+        (node) => node.pipelineNodeId === "project-spec",
+      );
+      assert.equal(completed.run.status, "completed");
+      assert.equal(adapterCalls, 1);
+      assert.equal(projectSpec?.attemptCount, 1);
+      assert.deepEqual(projectSpec?.result, { recovered: true });
+      assert.equal(
+        reopened.pipelineRuntime.inspectExecution({
+          attemptId: projectSpec!.attempts[0]!.id,
+        }).facts.length,
+        1,
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("times out a scripted AI Task and releases its Execution Lease", async () => {
+    const { database, project, department, profile } = setup(
+      {
+        execute: async () => new Promise<never>(() => undefined),
+      },
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "project-spec",
+            type: "ai-task",
+            name: "Project Spec",
+            positionId,
+            handlerKindId: "project-spec@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "project-spec" },
+          { from: "project-spec", to: "complete" },
+        ],
+      }),
+    );
+    try {
+      database.catalog.saveExecutionProfile({
+        departmentId: department.id,
+        executionProfileId: profile.id,
+        expectedRevision: profile.revision,
+        name: profile.name,
+        providerRef: profile.providerRef,
+        model: profile.model,
+        sandboxRef: profile.sandboxRef,
+        branchStrategy: profile.branchStrategy,
+        timeoutSeconds: 1,
+        maxIterations: profile.limits.maxIterations,
+        maxTokens: profile.limits.maxTokens,
+        retryMaxAttempts: profile.retryPolicy.maxAttempts,
+        permissionPolicy: profile.permissionPolicy,
+        secretReferenceIds: profile.secretReferenceIds,
+      });
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const attempt = failed.nodes
+        .find((node) => node.pipelineNodeId === "project-spec")
+        ?.attempts.at(-1);
+      assert.ok(attempt);
+      assert.equal(failed.run.status, "failed");
+      assert.equal(attempt.failure?.code, "EXECUTION_TIMEOUT");
+      assert.equal(attempt.recoverable, true);
+      assert.equal(
+        database.pipelineRuntime.inspectExecution({ attemptId: attempt.id })
+          .leases[0]?.releasedAt !== null,
+        true,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("rejects stale execution without changing the persisted Run", async () => {
     const { database, project, department } = setup();
     try {
@@ -3216,6 +5232,542 @@ describe("Pipeline Runtime", () => {
       );
     } finally {
       database.close();
+    }
+  });
+
+  it("executes a versioned deterministic no-Agent graph from the existing Snapshot r1", async () => {
+    let agentCalls = 0;
+    const adapter = {
+      ...createScriptedExecutionAdapter(),
+      maxConcurrentNodes: 4,
+      execute: async () => {
+        agentCalls += 1;
+        throw new Error("The no-Agent graph invoked the Execution Adapter.");
+      },
+    };
+    const { database, project, department, position } = setup(
+      adapter,
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "route",
+            type: "condition",
+            name: "Route",
+            handlerKindId: "gate-route@1",
+            condition: {
+              leftReference: "snapshot.project.revision",
+              operator: "equals",
+              value: 0,
+              branches: [
+                { id: "selected", label: "Selected", kind: "match" },
+                { id: "fallback", label: "Fallback", kind: "default" },
+              ],
+            },
+          },
+          {
+            id: "parallel",
+            type: "parallel",
+            name: "Parallel",
+            handlerKindId: "work-package-fan-out@1",
+          },
+          {
+            id: "branch-a",
+            type: "join",
+            name: "Branch A",
+            handlerKindId: "package-join@1",
+          },
+          {
+            id: "branch-b",
+            type: "join",
+            name: "Branch B",
+            handlerKindId: "package-join@1",
+          },
+          {
+            id: "not-selected",
+            type: "join",
+            name: "Not selected",
+            handlerKindId: "package-join@1",
+          },
+          {
+            id: "join",
+            type: "join",
+            name: "Join",
+            handlerKindId: "package-join@1",
+          },
+          {
+            id: "approval",
+            type: "human-approval",
+            name: "Approval",
+            positionId,
+            handlerKindId: "human-approval@1",
+            approvalTitle: "Approve deterministic completion",
+            approvalPolicy: "named",
+            approverReference: "pipeline-test-human",
+            approvalExpiresAfterSeconds: 300,
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "route" },
+          { from: "route", to: "parallel", branchId: "selected" },
+          { from: "route", to: "not-selected", branchId: "fallback" },
+          { from: "parallel", to: "branch-a" },
+          { from: "parallel", to: "branch-b" },
+          { from: "branch-a", to: "join" },
+          { from: "branch-b", to: "join" },
+          { from: "not-selected", to: "join" },
+          { from: "join", to: "approval" },
+          { from: "approval", to: "complete" },
+        ],
+      }),
+    );
+
+    try {
+      const { actor, beforeStart, started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      assert.equal(beforeStart.snapshot.revision, 1);
+      assert.equal(beforeStart.nodes.length, 0);
+      assert.equal(started.snapshot.hash, beforeStart.snapshot.hash);
+      assert.equal(
+        started.snapshot.canonicalJson,
+        beforeStart.snapshot.canonicalJson,
+      );
+      assert.equal(
+        started.snapshot.payload.pipelineVersion.handlerRegistry?.version,
+        1,
+      );
+      assert.equal(
+        started.snapshot.payload.pipelineVersion.handlers?.length,
+        9,
+      );
+
+      const waiting = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      assert.equal(waiting.run.status, "waiting-approval");
+      assert.equal(agentCalls, 0);
+      assert.deepEqual(
+        waiting.nodes.find((node) => node.pipelineNodeId === "not-selected")
+          ?.result,
+        {
+          reason: "condition-not-selected",
+          conditionNodeId: "route",
+          selectedBranchId: "selected",
+        },
+      );
+      assert.equal(
+        waiting.nodes.find((node) => node.pipelineNodeId === "join")?.status,
+        "succeeded",
+      );
+      assert.deepEqual(
+        waiting.nodes.find((node) => node.pipelineNodeId === "approval")
+          ?.handler,
+        waiting.snapshot.payload.pipelineVersion.handlers?.find(
+          (handler) => handler.nodeId === "approval",
+        ),
+      );
+
+      const approval = waiting.nodes.find(
+        (node) => node.pipelineNodeId === "approval",
+      );
+      assert.ok(approval);
+      const approved = database.pipelineRuntime.decideApproval({
+        runId: waiting.run.id,
+        nodeRunId: approval.id,
+        expectedRevision: waiting.run.revision,
+        decision: "approve",
+        actor,
+        commandId: "approve:no-agent-graph",
+      });
+      const completed = await database.pipelineRuntime.executeReady({
+        runId: approved.run.id,
+        expectedRevision: approved.run.revision,
+      });
+      assert.equal(completed.run.status, "completed");
+      assert.equal(completed.snapshot.hash, beforeStart.snapshot.hash);
+      assert.equal(agentCalls, 0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("accepts one eligible Human Approval decision and replays it without another mutation", async () => {
+    const { database, project, department } = setup(
+      createScriptedExecutionAdapter(),
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "approval",
+            type: "human-approval",
+            name: "Approval",
+            positionId,
+            handlerKindId: "human-approval@1",
+            approvalTitle: "Approve completion",
+            approvalPolicy: "named",
+            approverReference: "eligible-human",
+            approvalExpiresAfterSeconds: 300,
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "approval" },
+          { from: "approval", to: "complete" },
+        ],
+      }),
+    );
+
+    try {
+      const { started } = formalizeAndStart({
+        database,
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const waiting = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const approval = waiting.nodes.find(
+        (node) => node.pipelineNodeId === "approval",
+      );
+      assert.ok(approval);
+      assert.equal(approval.approvals[0]?.status, "pending");
+      assert.equal(
+        approval.approvals[0]?.requestedAction,
+        "Approve completion",
+      );
+      assert.match(
+        approval.approvals[0]?.inputManifestHash ?? "",
+        /^[a-f0-9]{64}$/,
+      );
+      assert.ok(approval.approvals[0]?.expiresAt);
+
+      assert.throws(
+        () =>
+          database.pipelineRuntime.decideApproval({
+            runId: waiting.run.id,
+            nodeRunId: approval.id,
+            expectedRevision: waiting.run.revision,
+            decision: "approve",
+            actor: {
+              type: "human",
+              id: "ineligible-human",
+              authenticatedBy: "local-session",
+            },
+            commandId: "approval-decision-ineligible",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "APPROVAL_ACTOR_INELIGIBLE",
+      );
+
+      const decision = {
+        runId: waiting.run.id,
+        nodeRunId: approval.id,
+        expectedRevision: waiting.run.revision,
+        decision: "approve" as const,
+        actor: {
+          type: "human" as const,
+          id: "eligible-human",
+          authenticatedBy: "local-session" as const,
+        },
+        commandId: "approval-decision-1",
+      };
+      const approved = database.pipelineRuntime.decideApproval(decision);
+      const replayed = database.pipelineRuntime.decideApproval(decision);
+      assert.deepEqual(replayed, approved);
+      assert.equal(
+        database.pipelineRuntime
+          .runtimeEvents({ afterSequence: 0, limit: 1_000 })
+          .filter(
+            (event) =>
+              event.runId === waiting.run.id &&
+              event.type === "approval.decided",
+          ).length,
+        1,
+      );
+      assert.throws(
+        () =>
+          database.pipelineRuntime.decideApproval({
+            ...decision,
+            expectedRevision: approved.run.revision,
+            decision: "reject",
+            commandId: "approval-decision-2",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "APPROVAL_DECISION_EXISTS",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("expires Human Approval durably on restart and requires an explicit new request", async () => {
+    let currentTime = new Date("2026-07-24T00:00:00.000Z");
+    const clock = () => currentTime;
+    const { companyDir, database, project, department } = setup(
+      createScriptedExecutionAdapter(),
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "approval",
+            type: "human-approval",
+            name: "Approval",
+            positionId,
+            handlerKindId: "human-approval@1",
+            approvalTitle: "Approve completion",
+            approvalPolicy: "named",
+            approverReference: "eligible-human",
+            approvalExpiresAfterSeconds: 60,
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "approval" },
+          { from: "approval", to: "complete" },
+        ],
+      }),
+      clock,
+    );
+
+    const { started } = formalizeAndStart({
+      database,
+      projectId: project.id,
+      departmentId: department.id,
+    });
+    const waiting = await database.pipelineRuntime.executeReady({
+      runId: started.run.id,
+      expectedRevision: started.run.revision,
+    });
+    const approval = waiting.nodes.find(
+      (node) => node.pipelineNodeId === "approval",
+    );
+    assert.ok(approval);
+    database.close();
+
+    currentTime = new Date("2026-07-24T00:01:01.000Z");
+    const reopened = openCompanyDatabase(companyDir, { clock });
+    try {
+      const expired = reopened.pipelineRuntime.inspectRun(waiting.run.id);
+      assert.equal(expired.run.status, "blocked");
+      assert.equal(
+        expired.nodes.find((node) => node.id === approval.id)?.failure?.code,
+        "APPROVAL_EXPIRED",
+      );
+      assert.equal(
+        expired.nodes.find((node) => node.id === approval.id)?.approvals[0]
+          ?.status,
+        "expired",
+      );
+      assert.throws(
+        () =>
+          reopened.pipelineRuntime.decideApproval({
+            runId: expired.run.id,
+            nodeRunId: approval.id,
+            expectedRevision: expired.run.revision,
+            decision: "approve",
+            actor: {
+              type: "human",
+              id: "eligible-human",
+              authenticatedBy: "local-session",
+            },
+            commandId: "late-approval",
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "APPROVAL_EXPIRED",
+      );
+
+      const retried = reopened.pipelineRuntime.retryApproval({
+        runId: expired.run.id,
+        nodeRunId: approval.id,
+        expectedRevision: expired.run.revision,
+        actor: {
+          type: "human",
+          id: "eligible-human",
+          authenticatedBy: "local-session",
+        },
+      });
+      assert.equal(retried.run.status, "waiting-approval");
+      assert.deepEqual(
+        retried.nodes
+          .find((node) => node.id === approval.id)
+          ?.approvals.map((request) => request.status),
+        ["expired", "pending"],
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("blocks a historical Node when its exact Handler version is unavailable", async () => {
+    const { companyDir, database, project, department } = setup(
+      createScriptedExecutionAdapter(),
+      () => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [{ from: "start", to: "complete" }],
+      }),
+    );
+    const { started } = formalizeAndStart({
+      database,
+      projectId: project.id,
+      departmentId: department.id,
+    });
+    database.close();
+
+    const reopened = openCompanyDatabase(companyDir, {
+      pipelineRuntime: {
+        handlerRegistry: createNodeHandlerRegistry(["run-complete@1"]),
+      },
+    });
+    try {
+      await assert.rejects(
+        () =>
+          reopened.pipelineRuntime.executeReady({
+            runId: started.run.id,
+            expectedRevision: started.run.revision,
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "HANDLER_VERSION_UNAVAILABLE",
+      );
+      const blocked = reopened.pipelineRuntime.inspectRun(started.run.id);
+      assert.equal(blocked.run.status, "blocked");
+      assert.equal(
+        blocked.nodes.find((node) => node.pipelineNodeId === "start")?.failure
+          ?.code,
+        "HANDLER_VERSION_UNAVAILABLE",
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("recovers an interrupted formal Run scheduling transaction without duplicate Node Runs", () => {
+    const { companyDir, database, project, department, graph } = setup(
+      createScriptedExecutionAdapter(),
+      () => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "parallel",
+            type: "parallel",
+            name: "Parallel",
+            handlerKindId: "work-package-fan-out@1",
+          },
+          {
+            id: "join",
+            type: "join",
+            name: "Join",
+            handlerKindId: "package-join@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "parallel" },
+          { from: "parallel", to: "join" },
+          { from: "join", to: "complete" },
+        ],
+      }),
+    );
+    assert.throws(
+      () =>
+        formalizeAndStart({
+          database,
+          projectId: project.id,
+          departmentId: department.id,
+          schedulingCheckpoint: () => {
+            throw new Error("scheduler-interrupted-before-commit");
+          },
+        }),
+      /scheduler-interrupted-before-commit/,
+    );
+    database.close();
+
+    const reopened = openCompanyDatabase(companyDir);
+    try {
+      const started = reopened.pipelineRuntime.startFormalizedRun({
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      assert.equal(started.nodes.length, graph.nodes.length);
+      assert.equal(
+        new Set(started.nodes.map((node) => node.pipelineNodeId)).size,
+        graph.nodes.length,
+      );
+      assert.equal(
+        reopened.pipelineRuntime.startFormalizedRun({
+          projectId: project.id,
+          departmentId: department.id,
+        }).nodes.length,
+        graph.nodes.length,
+      );
+    } finally {
+      reopened.close();
     }
   });
 });

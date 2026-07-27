@@ -2,12 +2,14 @@
 // `sandcastle board` for an explicit R&D repository compatibility path, run the
 // shell server (renderer + board proxy), and surface native notifications. No
 // orchestration semantics live here.
+import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BrowserWindow,
   Menu,
+  MessageChannelMain,
   Notification,
   app,
   dialog,
@@ -49,6 +51,8 @@ let shellServer: ShellServerHandle | null = null;
 let window: BrowserWindow | null = null;
 let streamAbort: AbortController | null = null;
 let runtimeRunning = false;
+let rendererOrigin: string | null = null;
+const desktopConsumerId = `desktop-${randomBytes(16).toString("hex")}`;
 
 const log = (line: string): void => {
   process.stdout.write(`[desktop] ${line.trimEnd()}\n`);
@@ -56,8 +60,14 @@ const log = (line: string): void => {
 
 const runtimeSupervisor = createCompanyRuntimeSupervisor({
   onLog: (line) => log(`company runtime: ${line}`),
+  consumerId: desktopConsumerId,
 });
-registerRuntimeIpc(ipcMain, () => runtimeSupervisor);
+const runtimeIpc = registerRuntimeIpc(ipcMain, () => runtimeSupervisor, {
+  getWindow: () => window as never,
+  allowedOrigins: () => (rendererOrigin ? [rendererOrigin] : []),
+  createMessageChannel: () => new MessageChannelMain() as never,
+  consumerId: desktopConsumerId,
+});
 
 const pickCompanyDir = async (): Promise<string | null> => {
   const result = await dialog.showOpenDialog({
@@ -198,14 +208,38 @@ const createWindow = (): void => {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: join(desktopRoot, "dist-electron", "preload", "index.js"),
-      sandbox: false,
+      preload: join(desktopRoot, "dist-electron", "preload", "index.cjs"),
+      sandbox: true,
     },
   });
   const url = devUrl ?? shellServer?.url;
-  if (url) void window.loadURL(url);
+  if (url) {
+    rendererOrigin = new URL(url).origin;
+    void window.loadURL(url);
+  }
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
+  });
+  window.webContents.on("will-redirect", (event) => {
+    event.preventDefault();
+  });
+  window.webContents.on(
+    "did-start-navigation",
+    (_event, _url, _isInPlace, isMainFrame) => {
+      if (isMainFrame) runtimeIpc.revokeWindow();
+    },
+  );
+  window.webContents.on("render-process-gone", () => {
+    runtimeIpc.revokeWindow();
+  });
+  window.webContents.on("destroyed", () => {
+    runtimeIpc.revokeWindow();
+  });
   window.on("closed", () => {
+    runtimeIpc.revokeWindow();
     window = null;
+    rendererOrigin = null;
   });
 };
 

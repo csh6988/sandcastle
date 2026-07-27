@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { CURRENT_SCHEMA_VERSION } from "./storage/migrations.js";
 import { openCompanyDatabase } from "./storage/sqlite.js";
 
 const tempCompanyDir = (): string =>
@@ -36,7 +37,7 @@ describe("Runtime Diagnostics", () => {
       const after = database.diagnostics.inspect();
 
       assert.equal(before.sqliteIntegrity, "ok");
-      assert.equal(before.schemaVersion, 24);
+      assert.equal(before.schemaVersion, CURRENT_SCHEMA_VERSION);
       assert.ok(compacted.deleted >= 1);
       assert.equal(after.runtimeEventCount, 0);
       assert.ok(after.auditRecordCount >= 1);

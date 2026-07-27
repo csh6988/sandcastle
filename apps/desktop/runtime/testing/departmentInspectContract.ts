@@ -125,6 +125,23 @@ export const scriptedSoftwareRndDepartment: DepartmentInspect = {
         positionId: "evaluator",
       },
     },
+    {
+      id: "delivery-coordinator",
+      name: "Delivery Coordinator",
+      responsibility:
+        "Orchestrates downstream delivery without approving producer-owned work.",
+      defaultAgentId: "codex",
+      revision: 0,
+      status: "active",
+      aiMember: {
+        id: "delivery-coordinator-member",
+        displayName: "Delivery Coordinator",
+        profile: "",
+        responsibilityMetadata: {},
+        status: "active",
+        positionId: "delivery-coordinator",
+      },
+    },
   ],
   pipeline: {
     id: "software-rnd-pipeline-production-v1",
@@ -235,6 +252,28 @@ const scriptedPipelineGraph = scriptedSoftwareRndDepartment.pipeline
     }
   : { nodes: [], edges: [] };
 
+const scriptedPipelineHandlerKind = (type: string): string =>
+  type === "start"
+    ? "run-start@1"
+    : type === "ai-task"
+      ? "ai-task@1"
+      : type === "human-approval"
+        ? "human-approval@1"
+        : type === "condition"
+          ? "gate-route@1"
+          : type === "parallel"
+            ? "work-package-fan-out@1"
+            : type === "join"
+              ? "package-join@1"
+              : "run-complete@1";
+
+const scriptedPipelineHandlers = scriptedPipelineGraph.nodes.map((node) => ({
+  nodeId: node.id,
+  handlerKindId: scriptedPipelineHandlerKind(node.type),
+  inputSchemaHash: "b".repeat(64),
+  outputSchemaHash: "c".repeat(64),
+}));
+
 export const scriptedSoftwareRndPipelineEditor: DepartmentPipelineEditorView = {
   department: { id: "software-rnd", name: "Software R&D" },
   positions: scriptedSoftwareRndDepartment.positions.map((position) => ({
@@ -248,6 +287,8 @@ export const scriptedSoftwareRndPipelineEditor: DepartmentPipelineEditorView = {
     version: 2,
     graph: scriptedPipelineGraph,
     hash: "a".repeat(64),
+    handlerRegistry: { version: 1, hash: "d".repeat(64) },
+    handlers: scriptedPipelineHandlers,
     publishedAt: "2026-07-15T00:00:00.000Z",
   },
   history: [
@@ -256,6 +297,8 @@ export const scriptedSoftwareRndPipelineEditor: DepartmentPipelineEditorView = {
       version: 2,
       graph: scriptedPipelineGraph,
       hash: "a".repeat(64),
+      handlerRegistry: { version: 1, hash: "d".repeat(64) },
+      handlers: scriptedPipelineHandlers,
       publishedAt: "2026-07-15T00:00:00.000Z",
       nodeCount: scriptedPipelineGraph.nodes.length,
       edgeCount: scriptedPipelineGraph.edges.length,
@@ -265,6 +308,8 @@ export const scriptedSoftwareRndPipelineEditor: DepartmentPipelineEditorView = {
       version: 1,
       graph: scriptedPipelineGraph,
       hash: "a".repeat(64),
+      handlerRegistry: { version: 1, hash: "d".repeat(64) },
+      handlers: scriptedPipelineHandlers,
       publishedAt: "2026-07-14T00:00:00.000Z",
       nodeCount: scriptedPipelineGraph.nodes.length,
       edgeCount: scriptedPipelineGraph.edges.length,

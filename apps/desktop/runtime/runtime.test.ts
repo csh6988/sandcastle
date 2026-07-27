@@ -9,13 +9,206 @@ import { describe, it } from "node:test";
 import { companyRuntimeAddress } from "./address.js";
 import { createCompanyRuntimeClient, RuntimeClientError } from "./client.js";
 import { startCompanyRuntimeServer } from "./server.js";
+import { openCompanyDatabase } from "./storage/sqlite.js";
+import { CURRENT_SCHEMA_VERSION } from "./storage/migrations.js";
+import { createModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import { assertSoftwareRndDepartmentContract } from "./testing/departmentInspectContract.js";
-import type { DepartmentPipelineDraftGraph } from "./interface.js";
+import type {
+  CompanyRuntimeClient,
+  DepartmentPipelineDraftGraph,
+} from "./interface.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-company-runtime-"));
 
+const startConfirmedRun = async (
+  client: CompanyRuntimeClient,
+  projectId: string,
+  departmentId: string,
+) => {
+  const session = await client.execute({
+    type: "interaction.session.create",
+    projectId,
+    mode: "consultation",
+  });
+  await client.execute({
+    type: "interaction.participant.add",
+    sessionId: session.id,
+    participantType: "ai-member",
+    participantRef: "product-planner-member",
+    role: "product-manager",
+  });
+  const revised = await client.execute({
+    type: "product.proposal.revise",
+    projectId,
+    producerSessionId: session.id,
+    expectedRevision: 0,
+    content: {
+      goal: "Execute the confirmed Project goal",
+      users: ["Project stakeholders"],
+      scope: ["The selected Department Pipeline"],
+      nonGoals: [],
+      acceptanceCriteria: ["The formal Run follows its immutable Snapshot"],
+      constraints: ["Use the authoritative Company Runtime"],
+      risks: ["Execution failure"],
+      openQuestions: [],
+    },
+  });
+  const proposal = revised.proposal!;
+  const awaiting = await client.execute({
+    type: "product.proposal.mark-awaiting-confirmation",
+    projectId,
+    expectedRevision: proposal.revision,
+    proposalRevisionId: proposal.currentRevision.id,
+    proposalHash: proposal.currentRevision.hash,
+  });
+  const exact = awaiting.proposal!;
+  await client.execute({
+    type: "confirm-product-baseline",
+    projectId,
+    departmentId,
+    expectedRevision: exact.revision,
+    proposalRevisionId: exact.currentRevision.id,
+    proposalHash: exact.currentRevision.hash,
+  });
+  return client.execute({ type: "run.start", projectId, departmentId });
+};
+
 describe("Company Runtime", () => {
+  it("revises a Product Proposal and marks it awaiting confirmation through verified Runtime envelopes", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const humanPrincipal = {
+      type: "human" as const,
+      id: "local-user",
+      authenticatedBy: "local-session" as const,
+    };
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+      principal: humanPrincipal,
+    });
+
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const project = await client.execute({
+        type: "project.create",
+        name: "Product discovery",
+        goal: "Confirm an exact product boundary",
+      });
+      const session = await client.execute({
+        type: "interaction.session.create",
+        projectId: project.id,
+        mode: "consultation",
+      });
+      await client.execute({
+        type: "interaction.participant.add",
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: "product-planner-member",
+        role: "product-manager",
+      });
+
+      const revised = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "runtime-product-revise-1",
+        actor: humanPrincipal,
+        consumerId: "desktop-window-1",
+        expectedRevision: 0,
+        command: {
+          type: "product.proposal.revise",
+          projectId: project.id,
+          producerSessionId: session.id,
+          content: {
+            goal: "Confirm an exact product boundary",
+            users: ["Product owner"],
+            scope: ["Product Proposal confirmation"],
+            nonGoals: ["Agent execution"],
+            acceptanceCriteria: ["Confirmation creates one formal Run"],
+            constraints: ["Keep Runtime authoritative"],
+            risks: ["Partial transaction writes"],
+            openQuestions: [],
+          },
+        },
+      });
+      assert.equal(revised.status, "succeeded");
+      if (revised.status !== "succeeded") return;
+
+      const awaiting = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "runtime-product-awaiting-1",
+        actor: humanPrincipal,
+        consumerId: "desktop-window-1",
+        expectedRevision: revised.value.proposal!.revision,
+        command: {
+          type: "product.proposal.mark-awaiting-confirmation",
+          projectId: project.id,
+          proposalRevisionId: revised.value.proposal!.currentRevision.id,
+          proposalHash: revised.value.proposal!.currentRevision.hash,
+        },
+      });
+      assert.equal(awaiting.status, "succeeded");
+      if (awaiting.status !== "succeeded") return;
+
+      const inspected = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "runtime-product-inspect-1",
+        principal: humanPrincipal,
+        consumerId: "desktop-window-1",
+        query: {
+          type: "product.discovery.inspect",
+          projectId: project.id,
+        },
+      });
+      assert.equal(inspected.view.proposal?.status, "awaiting-confirmation");
+      assert.equal(
+        inspected.view.proposal?.currentRevision.hash,
+        revised.value.proposal?.currentRevision.hash,
+      );
+
+      const confirmed = await client.execute({
+        type: "confirm-product-baseline",
+        projectId: project.id,
+        departmentId: "software-rnd",
+        expectedRevision: awaiting.value.proposal!.revision,
+        proposalRevisionId: awaiting.value.proposal!.currentRevision.id,
+        proposalHash: awaiting.value.proposal!.currentRevision.hash,
+      });
+      assert.equal(confirmed.proposal?.status, "confirmed");
+      assert.equal(confirmed.baselines.length, 1);
+      assert.equal(confirmed.formalRuns.length, 1);
+      assert.equal(confirmed.formalRuns[0]?.status, "ready");
+
+      const events = await client.query({
+        type: "runtime.events",
+        afterSequence: 0,
+        limit: 100,
+      });
+      assert.deepEqual(
+        events
+          .filter((event) => event.payload !== null)
+          .map((event) => event.type)
+          .filter(
+            (type) =>
+              type.startsWith("product.") ||
+              type === "department-run.formalized",
+          ),
+        [
+          "product.proposal.revised",
+          "product.proposal.awaiting-confirmation",
+          "product.baseline.confirmed",
+          "department-run.formalized",
+        ],
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("initializes SQLite and answers the typed runtime.health query", async () => {
     const companyDir = tempCompanyDir();
     const address = companyRuntimeAddress(companyDir);
@@ -34,12 +227,141 @@ describe("Company Runtime", () => {
       const health = await client.query({ type: "runtime.health" });
 
       assert.equal(health.status, "ok");
-      assert.equal(health.schemaVersion, 24);
+      assert.equal(health.schemaVersion, CURRENT_SCHEMA_VERSION);
       assert.equal(health.pid, process.pid);
       assert.equal(
         existsSync(join(companyDir, ".sandcastle", "company.sqlite")),
         true,
       );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("registers, finalizes, and inspects an Artifact Version through verified envelopes", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const project = await client.execute({
+        type: "project.create",
+        name: "Artifact Runtime",
+        goal: "Verify Artifact envelopes",
+      });
+      const registration = await client.execute({
+        type: "artifact.version.register",
+        projectId: project.id,
+        artifactType: "runtime-evidence",
+        artifactSchemaVersion: "1",
+        logicalName: "runtime-evidence",
+        content: {
+          kind: "managed-file",
+          encoding: "base64",
+          data: Buffer.from("runtime artifact").toString("base64"),
+        },
+        producer: {
+          projectId: project.id,
+          runId: "run-1",
+          snapshotRevisionId: "snapshot-1",
+          nodeRunId: "node-1",
+          nodeAttemptId: "attempt-1",
+          aiMemberId: "member-1",
+        },
+        inputVersionIds: [],
+      });
+      const version = await client.execute({
+        type: "artifact.version.finalize",
+        registrationId: registration.registrationId,
+      });
+      const inspected = await client.query({
+        type: "artifact.inspect",
+        versionId: version.id,
+      });
+      const lineage = await client.query({
+        type: "artifact.lineage.inspect",
+        versionId: version.id,
+      });
+
+      assert.equal(inspected.version.id, version.id);
+      assert.equal(inspected.version.contentRef.startsWith("/"), false);
+      assert.equal(lineage.rootVersionId, version.id);
+      assert.deepEqual(lineage.edges, []);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("reconciles a partially written managed-file journal when Runtime restarts", async () => {
+    const companyDir = tempCompanyDir();
+    let registrationId = "";
+    const interrupted = openCompanyDatabase(companyDir, {
+      artifactRegistry: {
+        managedFileCrash: (point, currentRegistrationId) => {
+          if (point !== "after-written") return;
+          registrationId = currentRegistrationId;
+          throw new Error("simulated Runtime crash after journal write");
+        },
+      },
+    });
+    const project = interrupted.catalog.createProject({
+      name: "Runtime recovery",
+      goal: "Recover a partially written Artifact",
+    });
+    assert.throws(
+      () =>
+        interrupted.artifactRegistry.register({
+          projectId: project.id,
+          type: "runtime-evidence",
+          schemaVersion: "1",
+          logicalName: "restart-evidence",
+          content: {
+            kind: "managed-file",
+            bytes: Buffer.from("restart payload"),
+          },
+          producer: {
+            projectId: project.id,
+            runId: "run-1",
+            snapshotRevisionId: "snapshot-1",
+            nodeRunId: "node-1",
+            nodeAttemptId: "attempt-1",
+            aiMemberId: "member-1",
+          },
+        }),
+      /simulated Runtime crash/,
+    );
+    interrupted.close();
+
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const version = await client.execute({
+        type: "artifact.version.finalize",
+        registrationId,
+      });
+      const inspected = await client.query({
+        type: "artifact.inspect",
+        versionId: version.id,
+      });
+      assert.equal(inspected.version.integrityStatus, "verified");
+      assert.equal(inspected.version.contentKind, "managed-file");
+      assert.equal(inspected.version.contentRef.startsWith("/"), false);
     } finally {
       await runtime.close();
     }
@@ -251,11 +573,11 @@ describe("Company Runtime", () => {
         name: "Disconnected client",
         goal: "Keep Runtime state authoritative",
       });
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: "software-rnd",
-      });
+      const started = await startConfirmedRun(
+        client,
+        project.id,
+        "software-rnd",
+      );
       const socket = createConnection(address);
       socket.on("error", () => undefined);
       await once(socket, "connect");
@@ -301,7 +623,7 @@ describe("Company Runtime", () => {
         type: "runtime.backup",
       });
 
-      assert.equal(created.schemaVersion, 24);
+      assert.equal(created.schemaVersion, CURRENT_SCHEMA_VERSION);
       assert.equal(existsSync(created.path), true);
       assert.equal(
         created.path.startsWith(join(companyDir, ".sandcastle", "backups")),
@@ -330,11 +652,11 @@ describe("Company Runtime", () => {
         name: "Checkout",
         goal: "Ship checkout",
       });
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: "software-rnd",
-      });
+      const started = await startConfirmedRun(
+        client,
+        project.id,
+        "software-rnd",
+      );
 
       const audit = await client.query({
         type: "runtime.audit",
@@ -346,9 +668,18 @@ describe("Company Runtime", () => {
         limit: 100,
       });
       const runAudit = audit.find((record) => record.runId === started.run.id);
-      const runEvent = events.find((event) => event.runId === started.run.id);
-      assert.equal(runAudit?.action, "run.start");
-      assert.equal(runEvent?.type, "run.created");
+      const formalizedEvent = events.find(
+        (event) =>
+          event.runId === started.run.id &&
+          event.type === "department-run.formalized",
+      );
+      const runEvent = events.find(
+        (event) =>
+          event.runId === started.run.id && event.type === "run.started",
+      );
+      assert.equal(runAudit?.action, "department-run.formalized");
+      assert.equal(formalizedEvent?.type, "department-run.formalized");
+      assert.equal(runEvent?.type, "run.started");
       assert.deepEqual(
         await client.execute({
           type: "runtime.events.ack",
@@ -365,6 +696,186 @@ describe("Company Runtime", () => {
         }),
         [],
       );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("re-delivers unacknowledged project events after restart and resumes after canonical Ack", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    let runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+    try {
+      let client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const subscription = await client.openSubscription();
+      const project = await client.execute({
+        type: "project.create",
+        name: "Durable events",
+        goal: "Verify restart replay",
+      });
+      const firstBatch = await client.readSubscription({
+        ...subscription,
+        limit: 100,
+      });
+      const created = firstBatch.events.find(
+        (event) =>
+          event.type === "project.created" && event.projectId === project.id,
+      );
+      assert.ok(created);
+      await client.execute({
+        type: "ack-runtime-events",
+        sequence: created.sequence,
+        subscriptionGeneration: subscription.subscriptionGeneration,
+      });
+      const updatedProject = await client.execute({
+        type: "project.update",
+        projectId: project.id,
+        expectedRevision: 0,
+        name: "Durable project events",
+        goal: project.goal,
+        sharedContext: "Canonical project.updated",
+        repositoryReferences: [],
+      });
+      const updateBatch = await client.readSubscription({
+        ...subscription,
+        limit: 100,
+      });
+      const updated = updateBatch.events.find(
+        (event) =>
+          event.type === "project.updated" && event.projectId === project.id,
+      );
+      assert.ok(updated);
+      assert.equal(updated.registryVersion, 1);
+      assert.deepEqual(updated.payload, {
+        projectId: project.id,
+        entityId: project.id,
+        operation: "updated",
+        revision: updatedProject.revision,
+      });
+
+      await runtime.close();
+      runtime = await startCompanyRuntimeServer({
+        address,
+        companyDir,
+        token: "valid-token",
+      });
+      client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const replaySubscription = await client.openSubscription();
+      const replay = await client.readSubscription({
+        ...replaySubscription,
+        limit: 100,
+      });
+      assert.equal(
+        replay.events.some((event) => event.eventId === updated.eventId),
+        true,
+      );
+
+      const acknowledged = await client.execute({
+        type: "ack-runtime-events",
+        sequence: updated.sequence,
+        subscriptionGeneration: replaySubscription.subscriptionGeneration,
+      });
+      assert.equal(acknowledged.acknowledged, true);
+      const afterAckSubscription = await client.openSubscription();
+      const afterAck = await client.readSubscription({
+        ...afterAckSubscription,
+        limit: 100,
+      });
+      assert.equal(
+        afterAck.events.some((event) => event.eventId === updated.eventId),
+        false,
+      );
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
+  it("syncs a verified Query view with a one-time View token without appending an Ack event", async () => {
+    const companyDir = tempCompanyDir();
+    const address = companyRuntimeAddress(companyDir);
+    const runtime = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token: "valid-token",
+    });
+    try {
+      const client = createCompanyRuntimeClient({
+        address,
+        token: "valid-token",
+      });
+      const project = await client.execute({
+        type: "project.create",
+        name: "View sync",
+        goal: "Verify one-time token",
+      });
+      const query = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "view-sync-query",
+        principal: {
+          type: "electron-main",
+          id: "desktop-main",
+          authenticatedBy: "ipc-token",
+        },
+        consumerId: "desktop-window-1",
+        query: { type: "project.inspect", projectId: project.id },
+      });
+      assert.ok(query.viewSyncToken);
+      const before = await client.query({
+        type: "runtime.diagnostics",
+      });
+      const envelope = {
+        schemaVersion: 1 as const,
+        commandId: "view-sync-ack-1",
+        actor: {
+          type: "electron-main" as const,
+          id: "desktop-main",
+          authenticatedBy: "ipc-token" as const,
+        },
+        consumerId: "desktop-window-1",
+        command: {
+          type: "ack-runtime-events" as const,
+          sequence: query.asOfSequence,
+          viewSyncToken: query.viewSyncToken,
+        },
+      };
+      const acknowledged = await client.executeEnvelope(envelope);
+      assert.equal(acknowledged.status, "succeeded");
+      const replay = await client.executeEnvelope(envelope);
+      assert.deepEqual(replay, acknowledged);
+      const reusedCommandId = await client.executeEnvelope({
+        ...envelope,
+        command: {
+          ...envelope.command,
+          sequence: query.asOfSequence + 1,
+        },
+      });
+      assert.equal(reusedCommandId.status, "rejected");
+      if (reusedCommandId.status === "rejected") {
+        assert.equal(reusedCommandId.error.code, "COMMAND_ID_REUSE");
+      }
+      const after = await client.query({
+        type: "runtime.diagnostics",
+      });
+      assert.equal(after.runtimeEventCount, before.runtimeEventCount);
+
+      const reusedToken = await client.executeEnvelope({
+        ...envelope,
+        commandId: "view-sync-ack-2",
+      });
+      assert.equal(reusedToken.status, "rejected");
+      if (reusedToken.status === "rejected") {
+        assert.equal(reusedToken.error.code, "VIEW_SYNC_TOKEN_USED");
+      }
     } finally {
       await runtime.close();
     }
@@ -541,12 +1052,15 @@ describe("Company Runtime", () => {
       address,
       companyDir,
       token: "valid-token",
-      interactionExecutionAdapter: {
-        execute: async (input) => {
-          prompts.push(input.prompt);
-          return { response: "你好，我是 Product Planner。" };
+      interactionExecutionAdapter: createModelOnlyInteractionExecutionAdapter({
+        complete: async (input) => {
+          prompts.push(input.context.prompt);
+          return {
+            providerExecutionRef: "provider-turn-1",
+            response: "你好，我是 Product Planner。",
+          };
         },
-      },
+      }),
     });
     try {
       const client = createCompanyRuntimeClient({
@@ -567,7 +1081,7 @@ describe("Company Runtime", () => {
         type: "interaction.participant.add",
         sessionId: session.id,
         participantType: "human",
-        participantRef: "user-local",
+        participantRef: "local-desktop-user",
         role: "requester",
       });
       const aiMember = await client.execute({
@@ -608,14 +1122,7 @@ describe("Company Runtime", () => {
 
       assert.deepEqual(prompts, ["你好"]);
       assert.equal(inspected.messages[0]?.content, "你好");
-      assert.equal(
-        inspected.messages.some(
-          (message) =>
-            message.kind === "status" &&
-            message.content === "Agent is processing this message.",
-        ),
-        true,
-      );
+      assert.equal(inspected.turns[0]?.status, "completed");
       assert.equal(
         inspected.messages.some(
           (message) =>
@@ -965,7 +1472,7 @@ describe("Company Runtime", () => {
         "Delivery Engineer",
       );
       assert.notEqual(copied.id, "software-rnd");
-      assert.equal(copied.positions.length, 5);
+      assert.equal(copied.positions.length, 6);
       assert.notEqual(copied.pipeline?.id, configured.pipeline?.id);
       assert.equal(archived.status, "archived");
       assert.deepEqual(
@@ -981,7 +1488,7 @@ describe("Company Runtime", () => {
             departmentId: "software-rnd",
           })
         ).positions.length,
-        5,
+        6,
       );
     } finally {
       await runtime.close();
@@ -1214,6 +1721,11 @@ describe("Company Runtime", () => {
       address,
       companyDir,
       token: "valid-token",
+      principal: {
+        type: "human",
+        id: "runtime-contract-human",
+        authenticatedBy: "local-session",
+      },
     });
     const client = createCompanyRuntimeClient({
       address,
@@ -1309,11 +1821,11 @@ describe("Company Runtime", () => {
         expectedRevision: saved.draft.revision,
       });
 
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: department.id,
-      });
+      const started = await startConfirmedRun(
+        client,
+        project.id,
+        department.id,
+      );
       const waiting = await client.execute({
         type: "run.execute-ready",
         runId: started.run.id,
@@ -1350,6 +1862,11 @@ describe("Company Runtime", () => {
         expectedRevision: waitingAgain.run.revision,
         decision: "approve",
       });
+      assert.equal(
+        approved.nodes.find((node) => node.id === approval.id)?.approvals.at(-1)
+          ?.decisionActor?.id,
+        "runtime-contract-human",
+      );
       const completed = await client.execute({
         type: "run.execute-ready",
         runId: approved.run.id,
@@ -1357,6 +1874,23 @@ describe("Company Runtime", () => {
       });
 
       assert.equal(completed.run.status, "completed");
+      const completedAttempt = completed.nodes
+        .find((node) => node.pipelineNodeId === "implement")
+        ?.attempts.at(-1);
+      assert.ok(completedAttempt);
+      const execution = await client.query({
+        type: "execution.inspect",
+        targetKind: "node-attempt",
+        targetId: completedAttempt.id,
+      });
+      assert.equal(
+        execution.operationKey,
+        `node-attempt:${completedAttempt.id}`,
+      );
+      assert.deepEqual(execution.target, {
+        kind: "node-attempt",
+        id: completedAttempt.id,
+      });
       assert.equal(
         (await client.query({ type: "run.inspect", runId: started.run.id }))
           .snapshot.hash,
@@ -1411,11 +1945,11 @@ describe("Company Runtime", () => {
         name: "Controlled Run",
         goal: "Verify persistent controls",
       });
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: "software-rnd",
-      });
+      const started = await startConfirmedRun(
+        client,
+        project.id,
+        "software-rnd",
+      );
       const paused = await client.execute({
         type: "run.pause",
         runId: started.run.id,
@@ -1700,12 +2234,13 @@ describe("Company Runtime", () => {
     const sandcastleDir = join(companyDir, ".sandcastle");
     mkdirSync(sandcastleDir, { recursive: true });
     const database = new DatabaseSync(join(sandcastleDir, "company.sqlite"));
+    const unsupportedSchemaVersion = CURRENT_SCHEMA_VERSION + 1;
     database.exec(`
       CREATE TABLE schema_metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '25');
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '${unsupportedSchemaVersion}');
     `);
     database.close();
 
@@ -1716,7 +2251,9 @@ describe("Company Runtime", () => {
           companyDir,
           token: "valid-token",
         }),
-      /Unsupported company database schema version 25/,
+      new RegExp(
+        `Unsupported company database schema version ${unsupportedSchemaVersion}`,
+      ),
     );
 
     assert.equal(

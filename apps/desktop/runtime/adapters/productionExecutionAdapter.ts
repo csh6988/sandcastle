@@ -4,6 +4,11 @@ import type {
   ExecutionAdapterInput,
   ExecutionFact,
 } from "./scriptedExecutionAdapter.js";
+import type {
+  AdapterExecutionFact,
+  ExecutionCompletion,
+  ExecutionEventSink,
+} from "../execution/contract.js";
 
 export type SoftwareDevelopmentHandler =
   | "product-goal-alignment"
@@ -51,9 +56,10 @@ const failure = (code: string, message: string): ExecutionFact => ({
 
 export const createProductionExecutionAdapter = (
   port: SoftwareDevelopmentExecutionPort,
-): ExecutionAdapter => ({
-  maxConcurrentNodes: 4,
-  execute: async (input) => {
+): ExecutionAdapter => {
+  const runPort = async (
+    input: ExecutionAdapterInput,
+  ): Promise<ExecutionFact> => {
     const handler = handlerByNodeId[input.node.id];
     if (!handler) {
       return failure(
@@ -110,5 +116,78 @@ export const createProductionExecutionAdapter = (
         `Software Development handler ${handler} failed without exposing provider output.`,
       );
     }
-  },
-});
+  };
+
+  const persistFact = async (
+    sink: ExecutionEventSink,
+    fact: AdapterExecutionFact,
+  ) => {
+    const receipt = await sink.record(fact);
+    if (receipt.status !== "accepted" && receipt.status !== "duplicate") {
+      throw new Error(
+        `Production Execution Fact ${fact.factId} was ${receipt.status}.`,
+      );
+    }
+    return receipt;
+  };
+
+  return {
+    maxConcurrentNodes: 4,
+    capabilities: {
+      reattachRunningOperation: false,
+      strongExecutionFence: false,
+      enforceNoSideEffects: false,
+    },
+    execute: async (input, sink) => {
+      if (!input.request || !sink) return runPort(input);
+      await persistFact(sink, {
+        adapterSchemaVersion: 1,
+        factId: "provider-started",
+        ordinal: 1,
+        kind: "provider-started",
+        schemaVersion: 1,
+        payload: { providerExecutionRef: input.request.operationKey },
+        evidenceRefs: [],
+      });
+      const result = await runPort(input);
+      const terminal: AdapterExecutionFact =
+        result.kind === "succeeded"
+          ? {
+              adapterSchemaVersion: 1,
+              factId: "terminal",
+              ordinal: 2,
+              kind: "completed",
+              schemaVersion: 1,
+              payload: {
+                structuredResult: result.structuredResult,
+                artifacts: result.artifacts,
+              },
+              evidenceRefs: [],
+            }
+          : {
+              adapterSchemaVersion: 1,
+              factId: "terminal",
+              ordinal: 2,
+              kind: "failed",
+              schemaVersion: 1,
+              payload: { code: result.code, message: result.message },
+              evidenceRefs: [],
+            };
+      const receipt = await persistFact(sink, terminal);
+      return {
+        operationKey: input.request.operationKey,
+        terminalExecutionFactId: receipt.executionFactId,
+        status: result.kind === "succeeded" ? "succeeded" : "failed",
+        evidenceRefs: terminal.evidenceRefs,
+      } satisfies ExecutionCompletion;
+    },
+    cancel: async () => "unknown",
+    fence: async () => ({ status: "unsupported" }),
+    reconcile: async () => ({ status: "unknown", evidenceRefs: [] }),
+    reattach: async () => {
+      throw new Error(
+        "Production execution port does not support reattachment.",
+      );
+    },
+  };
+};

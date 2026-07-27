@@ -2,8 +2,11 @@
 
 ## Status
 
-Draft for approval. This document is design-only and should be approved before
-implementation starts.
+Superseded for v1.0 product direction by
+[`v1-ai-software-company-prd.md`](./v1-ai-software-company-prd.md). Retained as
+historical evidence for the fixed-stage Desktop implementation; do not extend
+its project-first `PRD -> Design -> R&D -> Review -> Artifacts` model without a
+new product decision.
 
 ## Product Positioning
 

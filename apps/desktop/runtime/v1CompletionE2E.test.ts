@@ -8,9 +8,68 @@ import { createAcpStdioFacade } from "./acp.js";
 import { createCompanyRuntimeClient } from "./client.js";
 import { startCompanyRuntimeServer } from "./server.js";
 import { createScriptedExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
+import type { CompanyRuntimeClient } from "./interface.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-v1-e2e-"));
+
+const confirmAndStartRun = async (
+  client: CompanyRuntimeClient,
+  projectId: string,
+  options: { readonly agentOverrideId?: string } = {},
+) => {
+  const session = await client.execute({
+    type: "interaction.session.create",
+    projectId,
+    mode: "consultation",
+  });
+  await client.execute({
+    type: "interaction.participant.add",
+    sessionId: session.id,
+    participantType: "ai-member",
+    participantRef: "product-planner-member",
+    role: "product-manager",
+  });
+  const revised = await client.execute({
+    type: "product.proposal.revise",
+    projectId,
+    producerSessionId: session.id,
+    expectedRevision: 0,
+    content: {
+      goal: "Trace one authoritative Company Runtime Run",
+      users: ["Project stakeholders"],
+      scope: ["The selected Department Pipeline"],
+      nonGoals: [],
+      acceptanceCriteria: ["The Run follows its immutable Snapshot"],
+      constraints: ["Use the authoritative Company Runtime"],
+      risks: ["Execution failure"],
+      openQuestions: [],
+    },
+  });
+  const proposal = revised.proposal!;
+  const awaiting = await client.execute({
+    type: "product.proposal.mark-awaiting-confirmation",
+    projectId,
+    expectedRevision: proposal.revision,
+    proposalRevisionId: proposal.currentRevision.id,
+    proposalHash: proposal.currentRevision.hash,
+  });
+  const exact = awaiting.proposal!;
+  await client.execute({
+    type: "confirm-product-baseline",
+    projectId,
+    departmentId: "software-rnd",
+    expectedRevision: exact.revision,
+    proposalRevisionId: exact.currentRevision.id,
+    proposalHash: exact.currentRevision.hash,
+    ...options,
+  });
+  return client.execute({
+    type: "run.start",
+    projectId,
+    departmentId: "software-rnd",
+  });
+};
 
 describe("Sandcastle v1 Company Runtime E2E", () => {
   it("persists Agent discovery, Skill discovery, Position configuration, and Run override through restart", async () => {
@@ -119,10 +178,7 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         name: "Agent and Skill E2E",
         goal: "Freeze Position configuration and a temporary Agent override.",
       });
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: "software-rnd",
+      const started = await confirmAndStartRun(client, project.id, {
         agentOverrideId: "claude-code",
       });
       const snapshotEngineer = started.snapshot.payload.positions.find(
@@ -286,11 +342,7 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         name: "v1 E2E",
         goal: "Trace one authoritative Company Runtime Run.",
       });
-      const started = await client.execute({
-        type: "run.start",
-        projectId: project.id,
-        departmentId: "software-rnd",
-      });
+      const started = await confirmAndStartRun(client, project.id);
       const paused = await client.execute({
         type: "run.pause",
         runId: started.run.id,

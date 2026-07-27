@@ -1,0 +1,5 @@
+# Product Gate keeps reviewer scope classification and promotes once
+
+Product Review binds one exact Product Baseline and Project Spec Revision. Each eligible reviewer owns an immutable `scope-preserving` or `scope-changing` classification on every Product Finding. An owner or moderator may append a disposition, but cannot downgrade or erase a scope-changing classification; any such Finding permanently blocks Product Gate promotion in the current Run. Continuing that changed requirement boundary requires a new Product Proposal confirmation and child Fork.
+
+The Product Gate has one promotion boundary rather than separate Spec and readiness promotions. Only an immutable `PASS` Product Quality Gate Result may atomically fix the accepted Project Spec Revision/hash and exact ready evidence into one new child Snapshot Revision. `CONDITIONAL_PASS`, `FAIL`, a readiness blocker, a Spec contract mismatch, or a scope-changing Finding creates no promotion Snapshot. This keeps the Product Baseline immutable, prevents owner self-approval from changing reviewer evidence, and gives downstream Technical Review one exact lineage point.

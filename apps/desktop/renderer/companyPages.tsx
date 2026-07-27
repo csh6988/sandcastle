@@ -14,7 +14,12 @@ import type {
   DepartmentPipelineDraftGraph,
   DepartmentPipelineEditorView,
   PipelineValidationResult,
+  ProductDiscoveryView,
+  ProductReviewStateView,
+  TechnicalReviewStateView,
+  ProductProposalContent,
   ProjectEditorView,
+  ReviewTopicView,
   RuntimeDiagnosticsView,
   RuntimeBackupView,
   SkillConfigurationView,
@@ -33,6 +38,7 @@ import {
   saveDepartmentSettings,
   type DepartmentSettingsSaveOperation,
 } from "./departmentSettingsSave.js";
+import { Icon, IconButton, type IconName } from "./icons.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -153,6 +159,7 @@ export function AgentsPage({
           }}
         >
           {t.detectAgents}
+          <Icon name="refresh" size={20} />
         </button>
       </header>
       {error ? <div className="warn">{error}</div> : null}
@@ -292,11 +299,13 @@ export function SkillsPage({
           onClick={() => mutate(window.sandcastle.runtime.discoverSkills())}
         >
           {t.refreshSkills}
+          <Icon name="refresh" size={20} />
         </button>
       </header>
       {error ? <div className="warn">{error}</div> : null}
       <label className="search-field">
         <span>{t.searchSkills}</span>
+        <Icon name="search" size={20} />
         <input
           placeholder={t.searchSkills}
           value={search}
@@ -472,39 +481,80 @@ export function CompanyOverviewPage({ t }: { readonly t: Messages }) {
 
   return (
     <section className="page" data-page="company-overview">
-      <header className="page-heading">
+      <header className="page-heading company-overview-hero">
         <div>
           <span className="eyebrow">{t.overviewEyebrow}</span>
           <h1>{overview?.company.name ?? t.overviewTitle}</h1>
           <p>{t.overviewBody}</p>
         </div>
+        <div className="factory-illustration" aria-hidden="true">
+          <span className="factory-sun" />
+          <div className="factory-hall factory-hall-blue">
+            <Icon name="project" size={24} />
+          </div>
+          <div className="factory-hall factory-hall-violet">
+            <Icon name="department" size={24} />
+          </div>
+          <div className="factory-hall factory-hall-teal">
+            <Icon name="member" size={24} />
+          </div>
+          <div className="factory-track" />
+        </div>
       </header>
       {error ? <div className="warn">{error}</div> : null}
       <div className="metric-row overview-metrics">
         <Metric
+          icon="run"
           label={t.metricActiveRuns}
           value={overview?.metrics.activeRuns ?? 0}
         />
         <Metric
+          icon="approval"
           label={t.metricWaitingApproval}
           value={overview?.metrics.waitingApprovalRuns ?? 0}
         />
         <Metric
+          icon="cancel"
           label={t.metricBlockedRuns}
           value={overview?.metrics.blockedRuns ?? 0}
         />
         <Metric
+          icon="complete"
           label={t.metricCompletedRuns}
           value={overview?.metrics.completedRuns ?? 0}
         />
       </div>
       <div className="project-dashboard">
         <section className="create-panel">
-          <h2>{t.attentionQueue}</h2>
+          <div className="panel-heading-with-icon">
+            <Icon name="approval" size={24} />
+            <div>
+              <h2>{t.attentionQueue}</h2>
+              <p>
+                {t.approvalHistory} · {t.recoveryOverride}
+              </p>
+            </div>
+          </div>
           {overview?.attention.length ? (
             overview.attention.map((item) => (
-              <div className="task-card" key={`${item.kind}:${item.runId}`}>
-                <strong>{item.title}</strong>
+              <div
+                className={`attention-card attention-${item.kind}`}
+                key={`${item.kind}:${item.runId}`}
+              >
+                <Icon
+                  name={item.kind === "approval" ? "approval" : "cancel"}
+                  size={24}
+                />
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>
+                    {item.kind === "approval" ? t.approve : t.recoverRun} ·{" "}
+                    {item.runId}
+                  </span>
+                </div>
+                <span className="attention-action-label">
+                  {item.kind === "approval" ? t.approve : t.recoverRun}
+                </span>
               </div>
             ))
           ) : (
@@ -515,7 +565,13 @@ export function CompanyOverviewPage({ t }: { readonly t: Messages }) {
           )}
         </section>
         <aside className="create-panel">
-          <h2>{t.companyInventory}</h2>
+          <div className="panel-heading-with-icon">
+            <Icon name="member" size={24} />
+            <div>
+              <h2>{t.companyInventory}</h2>
+              <p>{t.currentAiMember}</p>
+            </div>
+          </div>
           <dl className="overview-inventory">
             <div>
               <dt>{t.metricProjects}</dt>
@@ -535,6 +591,162 @@ export function CompanyOverviewPage({ t }: { readonly t: Messages }) {
     </section>
   );
 }
+
+export const projectCreationInputInvalid = (
+  name: string,
+  goal: string,
+): boolean => name.trim() === "" || goal.trim() === "";
+
+type ProjectDepartmentRunRuntime = Pick<
+  (typeof window.sandcastle)["runtime"],
+  "startRun" | "executeReady"
+>;
+
+const pendingProjectDepartmentRuns = new Map<
+  string,
+  Promise<DepartmentRunView>
+>();
+
+export const startProjectDepartmentRun = async (
+  runtime: ProjectDepartmentRunRuntime,
+  projectId: string,
+  departmentId: string,
+  agentOverrideId?: string,
+): Promise<DepartmentRunView> => {
+  const key = `${projectId}:${departmentId}:${agentOverrideId ?? ""}`;
+  const pending = pendingProjectDepartmentRuns.get(key);
+  if (pending) return pending;
+  const start = (async () => {
+    const started = await runtime.startRun({
+      projectId,
+      departmentId,
+      ...(agentOverrideId ? { agentOverrideId } : {}),
+    });
+    return runtime.executeReady({
+      runId: started.run.id,
+      expectedRevision: started.run.revision,
+    });
+  })();
+  pendingProjectDepartmentRuns.set(key, start);
+  try {
+    return await start;
+  } finally {
+    if (pendingProjectDepartmentRuns.get(key) === start) {
+      pendingProjectDepartmentRuns.delete(key);
+    }
+  }
+};
+
+type ProductDiscoveryBridge = Pick<
+  typeof window.sandcastle,
+  "execute" | "query"
+>;
+
+const productCommandId = (): string =>
+  globalThis.crypto?.randomUUID?.() ??
+  `product-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const productCommandSucceeded = <Value,>(result: {
+  readonly status: "succeeded" | "rejected";
+  readonly value?: Value;
+  readonly error?: { readonly code: string; readonly message: string };
+}): Value => {
+  if (result.status === "succeeded") return result.value as Value;
+  const error = new Error(result.error?.message ?? "Product command failed.");
+  Object.assign(error, {
+    code: result.error?.code ?? "PRODUCT_COMMAND_FAILED",
+  });
+  throw error;
+};
+
+export const inspectProjectProductDiscovery = async (
+  bridge: ProductDiscoveryBridge,
+  projectId: string,
+): Promise<ProductDiscoveryView> =>
+  (
+    await bridge.query({
+      type: "product.discovery.inspect",
+      projectId,
+    })
+  ).view;
+
+export const reviseProjectProductProposal = async (
+  bridge: ProductDiscoveryBridge,
+  input: {
+    readonly projectId: string;
+    readonly producerSessionId: string;
+    readonly content: ProductProposalContent;
+  },
+): Promise<ProductDiscoveryView> => {
+  const current = await inspectProjectProductDiscovery(bridge, input.projectId);
+  productCommandSucceeded(
+    await bridge.execute({
+      commandId: productCommandId(),
+      expectedRevision: current.proposal?.revision ?? 0,
+      command: {
+        type: "product.proposal.revise",
+        projectId: input.projectId,
+        producerSessionId: input.producerSessionId,
+        content: input.content,
+      },
+    }),
+  );
+  return inspectProjectProductDiscovery(bridge, input.projectId);
+};
+
+export const markProjectProductProposalAwaiting = async (
+  bridge: ProductDiscoveryBridge,
+  projectId: string,
+): Promise<ProductDiscoveryView> => {
+  const current = await inspectProjectProductDiscovery(bridge, projectId);
+  const proposal = current.proposal;
+  if (!proposal) throw new Error("Product Proposal has not been revised yet.");
+  productCommandSucceeded(
+    await bridge.execute({
+      commandId: productCommandId(),
+      expectedRevision: proposal.revision,
+      command: {
+        type: "product.proposal.mark-awaiting-confirmation",
+        projectId,
+        proposalRevisionId: proposal.currentRevision.id,
+        proposalHash: proposal.currentRevision.hash,
+      },
+    }),
+  );
+  return inspectProjectProductDiscovery(bridge, projectId);
+};
+
+export const confirmProjectProductBaseline = async (
+  bridge: ProductDiscoveryBridge,
+  projectId: string,
+  departmentId: string,
+  options: {
+    readonly agentOverrideId?: string;
+    readonly forkSourceRunId?: string;
+    readonly forkSourceSnapshotRevisionId?: string;
+  } = {},
+): Promise<ProductDiscoveryView> => {
+  const current = await inspectProjectProductDiscovery(bridge, projectId);
+  const proposal = current.proposal;
+  if (!proposal || proposal.status !== "awaiting-confirmation") {
+    throw new Error("Product Proposal is not awaiting confirmation.");
+  }
+  productCommandSucceeded(
+    await bridge.execute({
+      commandId: productCommandId(),
+      expectedRevision: proposal.revision,
+      command: {
+        type: "confirm-product-baseline",
+        projectId,
+        departmentId,
+        ...options,
+        proposalRevisionId: proposal.currentRevision.id,
+        proposalHash: proposal.currentRevision.hash,
+      },
+    }),
+  );
+  return inspectProjectProductDiscovery(bridge, projectId);
+};
 
 export function ProjectsPage({ t }: { readonly t: Messages }) {
   const [projects, setProjects] = useState<readonly CompanyProject[] | null>(
@@ -563,6 +775,7 @@ export function ProjectsPage({ t }: { readonly t: Messages }) {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
+    if (projectCreationInputInvalid(name, goal)) return;
     try {
       const created = await window.sandcastle.runtime.createProject({
         name: name.trim(),
@@ -685,6 +898,9 @@ export function ProjectsPage({ t }: { readonly t: Messages }) {
                 onClick={() => void inspectProject(project.id)}
                 type="button"
               >
+                <span className="card-domain-icon">
+                  <Icon name="project" size={24} />
+                </span>
                 <span className="project-card-top">
                   <strong>{project.name}</strong>
                   <span className="pill primary">
@@ -709,20 +925,37 @@ export function ProjectsPage({ t }: { readonly t: Messages }) {
           <form className="form" onSubmit={(event) => void submit(event)}>
             <label htmlFor="company-project-name">{t.projectName}</label>
             <input
+              aria-invalid={name.length > 0 && name.trim() === ""}
               id="company-project-name"
               value={name}
               onChange={(event) => setName(event.target.value)}
               required
             />
+            {name.length > 0 && name.trim() === "" ? (
+              <span className="field-help invalid" role="alert">
+                {t.completeRequiredFields}
+              </span>
+            ) : null}
             <label htmlFor="company-project-goal">{t.projectSummary}</label>
             <textarea
+              aria-invalid={goal.length > 0 && goal.trim() === ""}
               id="company-project-goal"
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
               rows={5}
               required
             />
-            <button type="submit">{t.createProjectButton}</button>
+            {goal.length > 0 && goal.trim() === "" ? (
+              <span className="field-help invalid" role="alert">
+                {t.completeRequiredFields}
+              </span>
+            ) : null}
+            <button
+              disabled={projectCreationInputInvalid(name, goal)}
+              type="submit"
+            >
+              {t.createProjectButton}
+            </button>
           </form>
         </aside>
       </div>
@@ -799,6 +1032,29 @@ const currentRunNode = (
   return { nodeRun, node, position };
 };
 
+const pipelineIconForType = (type: string): IconName => {
+  if (type === "start") return "start";
+  if (type === "ai-task") return "ai-task";
+  if (type === "human-approval") return "human-approval";
+  if (type === "condition") return "condition";
+  if (type === "parallel" || type === "join") return "parallel";
+  if (type === "complete") return "complete";
+  return "pipeline";
+};
+
+const roleIconForPosition = (name: string): IconName => {
+  const normalized = name.toLowerCase();
+  if (normalized.includes("plan") || normalized.includes("product"))
+    return "planner";
+  if (normalized.includes("architect") || normalized.includes("design"))
+    return "architect";
+  if (normalized.includes("test") || normalized.includes("review"))
+    return "tester";
+  if (normalized.includes("evaluat") || normalized.includes("verif"))
+    return "evaluator";
+  return "builder";
+};
+
 const structuredValueText = (value: unknown): string => {
   if (typeof value === "string") return value;
   try {
@@ -839,17 +1095,7 @@ export const interactionStatusLabel = (
   return content;
 };
 
-export function DepartmentRunDetail({
-  run,
-  t,
-  busy,
-  onDecision,
-  onRetry,
-  onContinue,
-  onControl,
-  onRecover,
-  onFork,
-}: {
+type DepartmentRunDetailProps = {
   readonly run: DepartmentRunView;
   readonly t: Messages;
   readonly busy: boolean;
@@ -858,6 +1104,7 @@ export function DepartmentRunDetail({
     readonly decision: "approve" | "request-changes" | "reject";
     readonly feedback?: string;
   }) => void;
+  readonly onRetryApproval?: (nodeRunId: string) => void;
   readonly onRetry: (input: {
     readonly nodeRunId: string;
     readonly feedback?: string;
@@ -874,16 +1121,50 @@ export function DepartmentRunDetail({
       readonly timeoutSeconds?: number;
     };
   }) => void;
-}) {
+};
+
+export const recoveryOverrideInputProvided = (
+  provider: string,
+  model: string,
+  sandbox: string,
+  timeout: string,
+): boolean =>
+  [provider, model, sandbox, timeout].some((value) => value.trim() !== "");
+
+export function DepartmentRunDetail({
+  run,
+  t,
+  busy,
+  onDecision,
+  onRetryApproval,
+  onRetry,
+  onContinue,
+  onControl,
+  onRecover,
+  onFork,
+}: DepartmentRunDetailProps) {
   const [approvalFeedback, setApprovalFeedback] = useState("");
   const [retryFeedback, setRetryFeedback] = useState("");
   const [recoveryProvider, setRecoveryProvider] = useState("");
   const [recoveryModel, setRecoveryModel] = useState("");
   const [recoverySandbox, setRecoverySandbox] = useState("");
   const [recoveryTimeout, setRecoveryTimeout] = useState("");
+  const hasRecoveryOverride = recoveryOverrideInputProvided(
+    recoveryProvider,
+    recoveryModel,
+    recoverySandbox,
+    recoveryTimeout,
+  );
   const waitingApproval = run.nodes.find(
     (node) =>
       node.nodeType === "human-approval" && node.status === "waiting-approval",
+  );
+  const expiredApproval = run.nodes.find(
+    (node) =>
+      node.nodeType === "human-approval" &&
+      node.status === "failed" &&
+      node.failure?.code === "APPROVAL_EXPIRED" &&
+      node.approvals.at(-1)?.status === "expired",
   );
   const failedAiTask = run.nodes.find(
     (node) => node.nodeType === "ai-task" && node.status === "failed",
@@ -1016,18 +1297,28 @@ export function DepartmentRunDetail({
             <li
               data-node-run-id={nodeRun.id}
               data-node-run-status={nodeRun.status}
+              data-node-handler-kind={nodeRun.handler?.handlerKindId}
               key={nodeRun.id}
             >
               <div
                 className="run-node-summary"
                 data-run-node-summary={nodeRun.id}
               >
+                <Icon
+                  name={node ? pipelineIconForType(node.type) : "pipeline"}
+                  size={24}
+                />
                 <strong>
                   {node ? pipelineNodeName(t, node) : nodeRun.pipelineNodeId}
                 </strong>
                 <span>
                   {t.nodeAttempts}: {nodeRun.attemptCount}
                 </span>
+                {nodeRun.handler ? (
+                  <span data-node-handler-kind-label>
+                    {nodeRun.handler.handlerKindId}
+                  </span>
+                ) : null}
                 {current.nodeRun?.id === nodeRun.id ? (
                   <span className="run-node-active-indicator">
                     {t.currentActivity}: {statusName(t, nodeRun.status)} ·{" "}
@@ -1152,6 +1443,7 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.approve}
+              <Icon name="approval" size={20} />
             </button>
             <button
               className="secondary-button"
@@ -1167,6 +1459,7 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.requestChanges}
+              <Icon name="edit" size={20} />
             </button>
             <button
               className="danger-button"
@@ -1181,8 +1474,24 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.reject}
+              <Icon name="cancel" size={20} />
             </button>
           </div>
+        </div>
+      ) : null}
+      {expiredApproval ? (
+        <div className="run-retry-actions" data-run-approval-expired>
+          <span>{expiredApproval.failure?.message}</span>
+          <button
+            className="primary-button"
+            data-run-approval-retry={expiredApproval.id}
+            disabled={busy}
+            onClick={() => onRetryApproval?.(expiredApproval.id)}
+            type="button"
+          >
+            {t.retryNode}
+            <Icon name="refresh" size={20} />
+          </button>
         </div>
       ) : null}
       {failedAiTask ? (
@@ -1214,6 +1523,7 @@ export function DepartmentRunDetail({
             type="button"
           >
             {t.retryNode}
+            <Icon name="refresh" size={20} />
           </button>
         </div>
       ) : null}
@@ -1260,7 +1570,7 @@ export function DepartmentRunDetail({
           <button
             className="primary-button"
             data-run-recover
-            disabled={busy}
+            disabled={busy || !hasRecoveryOverride}
             onClick={() =>
               onRecover({
                 nodeRunId: failedAiTask.id,
@@ -1283,7 +1593,13 @@ export function DepartmentRunDetail({
             type="button"
           >
             {t.recoverRun}
+            <Icon name="snapshot" size={20} />
           </button>
+          {!hasRecoveryOverride ? (
+            <span className="field-help" data-run-recovery-guidance>
+              {t.completeRequiredFields}
+            </span>
+          ) : null}
         </div>
       ) : null}
       {canContinue ? (
@@ -1295,6 +1611,7 @@ export function DepartmentRunDetail({
           type="button"
         >
           {t.continueRun}
+          <Icon name="resume" size={20} />
         </button>
       ) : null}
       {canPause || canResume || canCancel ? (
@@ -1307,6 +1624,7 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.pauseRun}
+              <Icon name="pause" size={20} />
             </button>
           ) : null}
           {canResume ? (
@@ -1317,6 +1635,7 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.resumeRun}
+              <Icon name="resume" size={20} />
             </button>
           ) : null}
           {canCancel ? (
@@ -1328,6 +1647,7 @@ export function DepartmentRunDetail({
               type="button"
             >
               {t.cancelRun}
+              <Icon name="cancel" size={20} />
             </button>
           ) : null}
         </div>
@@ -1336,10 +1656,631 @@ export function DepartmentRunDetail({
   );
 }
 
+export function RunCollaborationWorkspace({
+  artifacts = [],
+  collaboration,
+  consultation,
+  busy,
+  onDecision,
+  onRetryApproval,
+  onRetry,
+  onContinue,
+  onControl,
+  onRecover,
+  onFork,
+  onSend,
+  onPermissionDecision,
+  onPermissionRequest,
+  run,
+  t,
+}: {
+  readonly artifacts?: readonly ArtifactVersionView[];
+  readonly collaboration: InteractionView;
+  readonly consultation: InteractionView | null;
+  readonly busy: boolean;
+  readonly onDecision: DepartmentRunDetailProps["onDecision"];
+  readonly onRetryApproval?: DepartmentRunDetailProps["onRetryApproval"];
+  readonly onRetry: DepartmentRunDetailProps["onRetry"];
+  readonly onContinue: DepartmentRunDetailProps["onContinue"];
+  readonly onControl: DepartmentRunDetailProps["onControl"];
+  readonly onRecover: DepartmentRunDetailProps["onRecover"];
+  readonly onFork?: DepartmentRunDetailProps["onFork"];
+  readonly onSend: (content: string) => void;
+  readonly onPermissionDecision?: (
+    permissionId: string,
+    decision: "approved" | "denied",
+  ) => void;
+  readonly onPermissionRequest?: (scope: string) => void;
+  readonly run: DepartmentRunView;
+  readonly t: Messages;
+}) {
+  const current = currentRunNode(run);
+  const progress = runProgress(run);
+  const aiMember = current.position?.aiMember;
+  const [message, setMessage] = useState("");
+  const [permissionScope, setPermissionScope] = useState("");
+  const send = () => {
+    if (!message.trim()) return;
+    onSend(message.trim());
+    setMessage("");
+  };
+  const statusIcon: IconName =
+    run.run.status === "failed"
+      ? "cancel"
+      : run.run.status === "completed"
+        ? "complete"
+        : "run";
+  return (
+    <section
+      className="run-collaboration-workspace"
+      data-run-collaboration-workspace
+      data-run-context-run={run.run.id}
+      data-run-context-snapshot={run.snapshot.id}
+      data-run-context-node={current.nodeRun?.id ?? "none"}
+    >
+      <aside
+        className="run-collaboration-sessions"
+        data-run-collaboration-sessions
+      >
+        <div className="run-collaboration-heading">
+          <div>
+            <span className="eyebrow">{t.interactionSessions}</span>
+            <h2>{t.interactionRunCollaboration}</h2>
+          </div>
+          <Icon name="run" size={24} />
+        </div>
+        <div className="run-collaboration-session-card selected">
+          <Icon name="run" size={24} />
+          <div>
+            <strong>{t.interactionRunCollaboration}</strong>
+            <span>{run.snapshot.payload.department.name}</span>
+            <small>
+              Run {run.run.id.slice(0, 8)} · {statusName(t, run.run.status)}
+            </small>
+          </div>
+        </div>
+        {consultation ? (
+          <div
+            className="run-collaboration-session-card is-history"
+            data-consultation-history
+          >
+            <Icon name="member" size={24} />
+            <div>
+              <strong>{t.interactionConsultation}</strong>
+              <span>
+                {consultation.messages.length} {t.messages.toLowerCase()}
+              </span>
+              <small>{t.sessionClosed}</small>
+            </div>
+          </div>
+        ) : null}
+        <div className="run-collaboration-member-card">
+          <Icon
+            name={
+              current.position
+                ? roleIconForPosition(current.position.name)
+                : "member"
+            }
+            size={24}
+          />
+          <div>
+            <span className="eyebrow">{t.currentAiMember}</span>
+            <strong>{aiMember?.displayName ?? t.none}</strong>
+            <small>
+              {current.position ? positionName(t, current.position) : t.none}
+            </small>
+          </div>
+        </div>
+        <div className="run-collaboration-connection">
+          <span className="status-dot status-dot-success" aria-hidden="true" />
+          <div>
+            <strong>{t.runtimeConnected}</strong>
+            <small>
+              {t.runSnapshot} · r{run.snapshot.revision}
+            </small>
+          </div>
+        </div>
+      </aside>
+      <main
+        className="run-collaboration-conversation"
+        data-run-collaboration-conversation
+      >
+        <header className="run-collaboration-conversation-header">
+          <div>
+            <span className="eyebrow">{t.interactionRunCollaboration}</span>
+            <h2>{current.node ? pipelineNodeName(t, current.node) : t.none}</h2>
+            <p>
+              {aiMember?.displayName ?? t.none} ·{" "}
+              {current.position ? positionName(t, current.position) : t.none}
+            </p>
+          </div>
+          <span className={`status-badge status-${run.run.status}`}>
+            <Icon name={statusIcon} size={16} />
+            {statusName(t, run.run.status)}
+          </span>
+        </header>
+        <div className="consultation-boundary" data-consultation-readonly>
+          <div className="consultation-boundary-label">
+            <Icon name="member" size={20} />
+            <strong>{t.interactionConsultation}</strong>
+            <span>{t.sessionClosed}</span>
+          </div>
+          <p>
+            {consultation?.messages.at(-1)?.content ??
+              t.interactionMessagePlaceholder}
+          </p>
+        </div>
+        <div className="run-event-stream" aria-label={t.interactionContext}>
+          {collaboration.messages.map((item) => (
+            <article
+              className={`run-event-card run-event-${item.kind}`}
+              data-session-message={item.id}
+              key={item.id}
+            >
+              <Icon
+                name={
+                  item.kind === "status"
+                    ? "run"
+                    : item.kind === "tool"
+                      ? "artifact"
+                      : "member"
+                }
+                size={20}
+              />
+              <div>
+                <strong>
+                  {item.kind === "status"
+                    ? interactionStatusLabel(t, item.content)
+                    : item.kind === "tool"
+                      ? `Tool Call · ${item.content}`
+                      : item.content}
+                </strong>
+                <span>{formatAgentTimestamp(item.createdAt)}</span>
+              </div>
+            </article>
+          ))}
+          {run.nodes
+            .filter((node) => node.status !== "queued")
+            .slice(-5)
+            .map((node) => {
+              const nodeDefinition =
+                run.snapshot.payload.pipelineVersion.graph.nodes.find(
+                  (candidate) => candidate.id === node.pipelineNodeId,
+                );
+              return (
+                <article
+                  className={`run-event-card run-event-${node.status}`}
+                  data-run-node-event={node.id}
+                  key={`node-${node.id}`}
+                >
+                  <Icon
+                    name={
+                      nodeDefinition
+                        ? pipelineIconForType(nodeDefinition.type)
+                        : "run"
+                    }
+                    size={20}
+                  />
+                  <div>
+                    <strong>
+                      {nodeDefinition
+                        ? pipelineNodeName(t, nodeDefinition)
+                        : node.pipelineNodeId}
+                    </strong>
+                    <span>
+                      {statusName(t, node.status)} · {t.nodeAttempts}:{" "}
+                      {node.attemptCount}
+                    </span>
+                  </div>
+                </article>
+              );
+            })}
+          {collaboration.messages.length === 0 &&
+          run.nodes.every((node) => node.status === "queued") ? (
+            <div className="empty-state">{t.interactionNoMessages}</div>
+          ) : null}
+          {collaboration.permissions.length > 0 ? (
+            <section
+              className="run-permission-queue"
+              aria-label={t.permissions}
+            >
+              <div className="run-permission-heading">
+                <Icon name="approval" size={20} />
+                <strong>{t.permissions}</strong>
+              </div>
+              {collaboration.permissions.map((permission) => (
+                <article
+                  className="run-permission-card"
+                  data-permission-request={permission.id}
+                  key={permission.id}
+                >
+                  <div className="run-permission-status">
+                    <span
+                      className={`run-permission-status-icon status-${permission.status}`}
+                      data-permission-status-icon={permission.status}
+                    >
+                      <Icon
+                        name={
+                          permission.status === "approved"
+                            ? "approval"
+                            : permission.status === "denied"
+                              ? "cancel"
+                              : "run"
+                        }
+                        size={20}
+                      />
+                    </span>
+                    <div>
+                      <strong>{permission.scope}</strong>
+                      <span>{permission.status}</span>
+                    </div>
+                  </div>
+                  {permission.status === "pending" && onPermissionDecision ? (
+                    <div className="action-bar">
+                      <button
+                        onClick={() =>
+                          onPermissionDecision(permission.id, "approved")
+                        }
+                        type="button"
+                      >
+                        {t.approve}
+                      </button>
+                      <button
+                        onClick={() =>
+                          onPermissionDecision(permission.id, "denied")
+                        }
+                        type="button"
+                      >
+                        {t.reject}
+                      </button>
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+            </section>
+          ) : null}
+        </div>
+        <div className="run-collaboration-composer">
+          <textarea
+            aria-label={t.nodeFeedback}
+            placeholder={t.interactionMessagePlaceholder}
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          />
+          <button
+            className="primary-button"
+            disabled={!message.trim() || busy}
+            onClick={send}
+            type="button"
+          >
+            <Icon name="send" size={20} />
+            {t.sendMessage}
+          </button>
+        </div>
+      </main>
+      <aside
+        className="run-collaboration-evidence"
+        data-run-collaboration-evidence
+      >
+        <div className="run-evidence-heading">
+          <div>
+            <span className="eyebrow">{t.runSnapshot}</span>
+            <h2>{t.interactionContext}</h2>
+          </div>
+          <Icon name="snapshot" size={24} />
+        </div>
+        <section className="run-evidence-card run-evidence-progress">
+          <span className="eyebrow">{t.runProgress}</span>
+          <strong>
+            {current.node ? pipelineNodeName(t, current.node) : t.none}
+          </strong>
+          <span>
+            {progress.completed} / {progress.total} · {progress.percentage}%
+          </span>
+          <progress
+            aria-label={t.runProgress}
+            max={Math.max(progress.total, 1)}
+            value={progress.completed}
+          />
+        </section>
+        <section className="run-evidence-card run-evidence-context">
+          <span className="eyebrow">{t.currentNode}</span>
+          <strong>
+            {current.node ? pipelineNodeName(t, current.node) : t.none}
+          </strong>
+          <small className="run-context-identity" title={current.nodeRun?.id}>
+            {current.nodeRun?.id.slice(0, 12) ?? t.none}
+          </small>
+          <dl>
+            <div>
+              <dt>{t.departmentRuns}</dt>
+              <dd title={run.run.id}>{run.run.id.slice(0, 12)}</dd>
+            </div>
+            <div>
+              <dt>{t.runSnapshot}</dt>
+              <dd>
+                r{run.snapshot.revision} · {run.snapshot.hash.slice(0, 12)}
+              </dd>
+            </div>
+            <div>
+              <dt>{t.status}</dt>
+              <dd>{statusName(t, run.run.status)}</dd>
+            </div>
+          </dl>
+        </section>
+        <section className="run-evidence-card run-evidence-artifacts">
+          <span className="eyebrow">{t.artifacts}</span>
+          {artifacts
+            .filter((artifact) => artifact.producer.runId === run.run.id)
+            .map((artifact) => (
+              <div
+                className="run-artifact-row"
+                data-run-artifact={artifact.id}
+                key={artifact.id}
+              >
+                <Icon name="artifact" size={20} />
+                <span>
+                  <strong>{artifact.logicalName}</strong>
+                  <small>
+                    v{artifact.version} · {artifact.status}
+                  </small>
+                </span>
+              </div>
+            ))}
+          {artifacts.every(
+            (artifact) => artifact.producer.runId !== run.run.id,
+          ) ? (
+            <span>{t.none}</span>
+          ) : null}
+        </section>
+        {onPermissionRequest ? (
+          <section className="run-evidence-card run-evidence-permissions">
+            <span className="eyebrow">{t.permissions}</span>
+            <input
+              aria-label={t.requestPermission}
+              placeholder={t.requestPermission}
+              value={permissionScope}
+              onChange={(event) => setPermissionScope(event.target.value)}
+            />
+            <button
+              disabled={!permissionScope.trim()}
+              onClick={() => {
+                onPermissionRequest(permissionScope.trim());
+                setPermissionScope("");
+              }}
+              type="button"
+            >
+              {t.requestPermission}
+            </button>
+          </section>
+        ) : null}
+        <DepartmentRunDetail
+          busy={busy}
+          onDecision={onDecision}
+          onRetryApproval={onRetryApproval}
+          onRetry={onRetry}
+          onContinue={onContinue}
+          onControl={onControl}
+          onRecover={onRecover}
+          onFork={onFork}
+          run={run}
+          t={t}
+        />
+      </aside>
+    </section>
+  );
+}
+
+export function ReviewTopicsPanel({
+  topics,
+}: {
+  readonly topics: readonly ReviewTopicView[];
+}) {
+  return (
+    <section className="review-topics" data-review-topics>
+      <header className="page-heading">
+        <div>
+          <span className="eyebrow">Quality governance</span>
+          <h2>Review Topics</h2>
+          <p>
+            Independent findings, bounded discussion, exact revision evidence,
+            and fresh quorum votes are recorded by the Company Runtime.
+          </p>
+        </div>
+      </header>
+      {topics.length === 0 ? (
+        <div className="empty-state" data-review-topics-empty>
+          No Review Topics have been scheduled for this Project.
+        </div>
+      ) : (
+        <div className="catalog-grid">
+          {topics.map((view) => (
+            <article
+              className="catalog-card review-topic-card"
+              data-review-topic={view.topic.id}
+              key={view.topic.id}
+            >
+              <div className="project-card-top">
+                <div>
+                  <span className="eyebrow">{view.topic.kind}</span>
+                  <strong>{view.topic.title}</strong>
+                </div>
+                <span className="pill" data-review-status>
+                  {view.topic.status}
+                </span>
+              </div>
+              <dl className="catalog-meta">
+                <div>
+                  <dt>Exact manifest</dt>
+                  <dd>
+                    <code>{view.topic.manifestHash}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Reviewer quorum</dt>
+                  <dd data-review-quorum>
+                    {view.rechecks.length}/{view.topic.quorum}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Discussion budget</dt>
+                  <dd>
+                    {view.topic.budgetUsed.rounds}/{view.topic.budget.maxRounds}{" "}
+                    rounds · {view.topic.budgetUsed.tokens}/
+                    {view.topic.budget.maxTokens} tokens
+                  </dd>
+                </div>
+              </dl>
+              <div className="review-participant-list">
+                {view.participants.map((participant) => (
+                  <span
+                    className={`capability-pill${participant.eligibility.eligible ? "" : " is-muted"}`}
+                    data-review-participant={participant.id}
+                    key={participant.id}
+                    title={participant.eligibility.reasons.join(", ")}
+                  >
+                    {participant.role}: {participant.aiMemberId}
+                  </span>
+                ))}
+              </div>
+              <section data-review-findings>
+                <h3>Independent findings</h3>
+                {view.findings.length === 0 ? (
+                  <p>No findings submitted.</p>
+                ) : (
+                  <ul>
+                    {view.findings.map((finding) => (
+                      <li data-review-finding={finding.id} key={finding.id}>
+                        <strong>
+                          {finding.severity.toUpperCase()}: {finding.summary}
+                        </strong>
+                        <span>
+                          {finding.reviewerParticipantId} ·{" "}
+                          {finding.blocking ? "blocking" : "non-blocking"}
+                          {finding.scopeImpact
+                            ? ` · ${finding.scopeImpact}`
+                            : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+              {view.gateResult ? (
+                <section
+                  className="review-gate-result"
+                  data-quality-gate-result={view.gateResult.id}
+                >
+                  <h3>{view.gateResult.result}</h3>
+                  <p>
+                    {view.gateResult.satisfiesProductionContract
+                      ? "Satisfies downstream production contracts."
+                      : "Does not satisfy downstream production contracts."}
+                  </p>
+                  {view.gateResult.conditions.length > 0 ? (
+                    <ul>
+                      {view.gateResult.conditions.map((condition) => (
+                        <li key={condition}>{condition}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function ProductReviewStatePanel({
+  state,
+}: {
+  readonly state: ProductReviewStateView;
+}) {
+  return (
+    <section data-product-review-state>
+      <h4>Product Review &amp; readiness</h4>
+      <p data-project-spec-lineage>
+        {state.specRevisions.length
+          ? `${state.specRevisions.length} immutable Project Spec revision(s) · current ${state.specRevisions.at(-1)!.hash}`
+          : "No Project Spec revision yet"}
+      </p>
+      <p data-product-review-manifest>
+        {state.reviewTopics.length
+          ? state.reviewTopics
+              .map(
+                (topic) =>
+                  `${topic.topic.id}: ${topic.topic.status} · ${topic.topic.manifestHash}`,
+              )
+              .join(" | ")
+          : "Product Review has not started"}
+      </p>
+      <p data-readiness-blockers>
+        {state.readinessBlockers.length
+          ? `Blocked by ${state.readinessBlockers.join(", ")}`
+          : `${state.readinessEvidence.length} readiness evidence record(s), no blocker`}
+      </p>
+      <p data-product-gate-promotion>
+        {state.promotion
+          ? `PASS promoted Snapshot ${state.promotion.snapshotRevisionId} from ${state.promotion.sourceSnapshotRevisionId}`
+          : "No PASS Product Gate promotion"}
+      </p>
+    </section>
+  );
+}
+
+export function TechnicalReviewStatePanel({
+  state,
+}: {
+  readonly state: TechnicalReviewStateView;
+}) {
+  const currentProposal = state.technicalBaselineProposals.at(-1);
+  const incompatibleContracts = state.applicationContracts.filter(
+    (contract) => contract.compatibility === "incompatible",
+  );
+  return (
+    <section data-technical-review-state>
+      <h4>Technical Design &amp; Specs</h4>
+      <p data-application-spec-lineage>
+        {state.applicationSpecRevisions.length
+          ? `${state.applicationSpecRevisions.length} immutable Application Spec revision(s) across ${state.applications.length} Application(s)`
+          : "No Application Spec revision yet"}
+      </p>
+      <p data-technical-proposal-manifest>
+        {currentProposal
+          ? `Proposal r${currentProposal.revision} · ${currentProposal.hash} · ${currentProposal.applicationSpecRevisions.length} exact Application Spec ref(s)`
+          : "No Technical Baseline Proposal revision yet"}
+      </p>
+      <p data-technical-contracts>
+        {incompatibleContracts.length
+          ? `Blocked by incompatible contract evidence: ${incompatibleContracts
+              .flatMap((contract) => contract.evidenceRefs)
+              .join(", ")}`
+          : `${state.applicationContracts.length} compatible Cross-Application Contract revision(s)`}
+      </p>
+      <p data-technical-gate-promotion>
+        {state.promotion && state.acceptedBaseline
+          ? `PASS accepted Technical Baseline ${state.acceptedBaseline.id} · ${state.acceptedBaseline.hash} · Snapshot ${state.promotion.snapshotRevisionId}`
+          : "No PASS Technical Gate promotion"}
+      </p>
+    </section>
+  );
+}
+
 type ProjectDetailTab =
   | "overview"
+  | "consultation"
   | "runs"
   | "artifacts"
+  | "reviews"
   | "memory"
   | "settings";
 
@@ -1385,6 +2326,12 @@ export function ProjectDetailView({
     readonly CompanyDepartment[]
   >([]);
   const [runs, setRuns] = useState<readonly DepartmentRunView[]>([]);
+  const [runArtifacts, setRunArtifacts] = useState<
+    readonly ArtifactVersionView[]
+  >([]);
+  const [reviewTopics, setReviewTopics] = useState<readonly ReviewTopicView[]>(
+    [],
+  );
   const [selectedRun, setSelectedRun] = useState<DepartmentRunView | null>(
     null,
   );
@@ -1395,6 +2342,30 @@ export function ProjectDetailView({
   const [runError, setRunError] = useState<string | null>(null);
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ProjectDetailTab>(initialTab);
+  const [consultation, setConsultation] = useState<InteractionView | null>(
+    null,
+  );
+  const [collaboration, setCollaboration] = useState<InteractionView | null>(
+    null,
+  );
+  const [consultationMessage, setConsultationMessage] = useState("");
+  const [interactionBusy, setInteractionBusy] = useState(false);
+  const [productDiscovery, setProductDiscovery] =
+    useState<ProductDiscoveryView | null>(null);
+  const [productReview, setProductReview] =
+    useState<ProductReviewStateView | null>(null);
+  const [technicalReview, setTechnicalReview] =
+    useState<TechnicalReviewStateView | null>(null);
+  const [proposalDraft, setProposalDraft] = useState<ProductProposalContent>({
+    goal: project.goal,
+    users: [],
+    scope: [],
+    nonGoals: [],
+    acceptanceCriteria: [],
+    constraints: project.sharedContext ? [project.sharedContext] : [],
+    risks: [],
+    openQuestions: [],
+  });
 
   useEffect(() => {
     setName(project.name);
@@ -1415,6 +2386,65 @@ export function ProjectDetailView({
     return nextRuns;
   };
 
+  const refreshProductDiscovery = async (): Promise<ProductDiscoveryView> => {
+    const next = await inspectProjectProductDiscovery(
+      window.sandcastle,
+      project.id,
+    );
+    setProductDiscovery(next);
+    if (next.proposal) setProposalDraft(next.proposal.currentRevision.content);
+    const latestRun = next.formalRuns.at(-1);
+    setProductReview(
+      latestRun
+        ? await window.sandcastle.runtime.inspectProductReview(latestRun.runId)
+        : null,
+    );
+    setTechnicalReview(
+      latestRun
+        ? await window.sandcastle.runtime.inspectTechnicalReview(
+            latestRun.runId,
+          )
+        : null,
+    );
+    return next;
+  };
+
+  useEffect(() => {
+    let active = true;
+    inspectProjectProductDiscovery(window.sandcastle, project.id)
+      .then((next) => {
+        if (!active) return;
+        setProductDiscovery(next);
+        if (next.proposal)
+          setProposalDraft(next.proposal.currentRevision.content);
+        const latestRun = next.formalRuns.at(-1);
+        if (latestRun) {
+          void Promise.all([
+            window.sandcastle.runtime.inspectProductReview(latestRun.runId),
+            window.sandcastle.runtime.inspectTechnicalReview(latestRun.runId),
+          ])
+            .then(([productState, technicalState]) => {
+              if (active) {
+                setProductReview(productState);
+                setTechnicalReview(technicalState);
+              }
+            })
+            .catch((nextError: unknown) => {
+              if (active) setRunError(errorMessage(nextError));
+            });
+        } else {
+          setProductReview(null);
+          setTechnicalReview(null);
+        }
+      })
+      .catch((nextError: unknown) => {
+        if (active) setRunError(errorMessage(nextError));
+      });
+    return () => {
+      active = false;
+    };
+  }, [project.id]);
+
   useEffect(() => {
     let active = true;
     setRunError(null);
@@ -1422,8 +2452,10 @@ export function ProjectDetailView({
       window.sandcastle.runtime.departments(),
       window.sandcastle.runtime.runs(project.id),
       window.sandcastle.runtime.inspectAgentCatalog(),
+      window.sandcastle.runtime.artifacts(project.id),
+      window.sandcastle.runtime.reviewTopics({ projectId: project.id }),
     ])
-      .then(([departments, nextRuns, agents]) => {
+      .then(([departments, nextRuns, agents, artifacts, topics]) => {
         if (!active) return;
         const runnable = departments.filter(
           (department) => department.publishedPipelineVersion !== null,
@@ -1433,6 +2465,8 @@ export function ProjectDetailView({
         setRuns(nextRuns);
         setSelectedRun(nextRuns[0] ?? null);
         setRunAgents(agents.agents);
+        setRunArtifacts(artifacts);
+        setReviewTopics(topics);
       })
       .catch((nextError: unknown) => {
         if (!active) return;
@@ -1445,16 +2479,43 @@ export function ProjectDetailView({
   }, [project.id]);
 
   useEffect(() => {
+    let active = true;
+    window.sandcastle.runtime
+      .interactions(project.id)
+      .then((items) => {
+        if (!active) return;
+        setConsultation(
+          items.find((item) => item.session.mode === "consultation") ?? null,
+        );
+        const nextRunId = selectedRun?.run.id;
+        setCollaboration(
+          items.find(
+            (item) =>
+              item.session.mode === "run-collaboration" &&
+              item.session.runId === nextRunId,
+          ) ?? null,
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [project.id, selectedRun?.run.id]);
+
+  useEffect(() => {
     if (!selectedRun || !activeRunStatuses.has(selectedRun.run.status)) {
       return;
     }
     let active = true;
     const poll = (): void => {
-      void window.sandcastle.runtime
-        .inspectRun(selectedRun.run.id)
-        .then((nextRun) => {
+      void Promise.all([
+        window.sandcastle.runtime.inspectRun(selectedRun.run.id),
+        window.sandcastle.runtime.artifacts(project.id),
+      ])
+        .then(([nextRun, artifacts]) => {
           if (!active) return;
           setSelectedRun(nextRun);
+          setRunArtifacts(artifacts);
           setRuns((current) =>
             current.map((run) =>
               run.run.id === nextRun.run.id ? nextRun : run,
@@ -1470,38 +2531,258 @@ export function ProjectDetailView({
       active = false;
       stopPolling();
     };
-  }, [selectedRun?.run.id, selectedRun?.run.status]);
+  }, [project.id, selectedRun?.run.id, selectedRun?.run.status]);
 
-  const startRun = async (): Promise<void> => {
-    if (!runDepartmentId) return;
+  const currentRunNodeId = selectedRun
+    ? (currentRunNode(selectedRun).nodeRun?.id ?? null)
+    : null;
+  useEffect(() => {
+    if (
+      !selectedRun ||
+      !collaboration ||
+      collaboration.session.runId !== selectedRun.run.id ||
+      !currentRunNodeId ||
+      collaboration.session.nodeRunId === currentRunNodeId
+    ) {
+      return;
+    }
+    let active = true;
+    createRunCollaborationSession(
+      window.sandcastle.runtime,
+      project.id,
+      selectedRun,
+    )
+      .then((nextCollaboration) => {
+        if (active && nextCollaboration) setCollaboration(nextCollaboration);
+      })
+      .catch((nextError: unknown) => {
+        if (active) setRunError(errorMessage(nextError));
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    collaboration?.session.nodeRunId,
+    currentRunNodeId,
+    project.id,
+    selectedRun,
+  ]);
+
+  const startRun = async (): Promise<DepartmentRunView | null> => {
+    if (!runDepartmentId) return null;
     setRunBusy(true);
     setRunError(null);
     setRunErrorCode(null);
-    let started: DepartmentRunView | null = null;
     try {
-      started = await window.sandcastle.runtime.startRun({
-        projectId: project.id,
-        departmentId: runDepartmentId,
-        ...(agentOverrideId ? { agentOverrideId } : {}),
-      });
-      setSelectedRun(started);
-      const advanced = await window.sandcastle.runtime.executeReady({
-        runId: started.run.id,
-        expectedRevision: started.run.revision,
-      });
+      const advanced = await startProjectDepartmentRun(
+        window.sandcastle.runtime,
+        project.id,
+        runDepartmentId,
+        agentOverrideId || undefined,
+      );
       setSelectedRun(advanced);
       await refreshRuns();
+      return advanced;
     } catch (nextError) {
       setRunError(errorMessage(nextError));
       setRunErrorCode(runtimeErrorCode(nextError));
-      if (started) {
-        window.sandcastle.runtime
-          .inspectRun(started.run.id)
-          .then(setSelectedRun)
-          .catch(() => undefined);
-      }
+      void refreshRuns().catch(() => undefined);
     } finally {
       setRunBusy(false);
+    }
+    return null;
+  };
+
+  const startConsultation = async (): Promise<void> => {
+    setInteractionBusy(true);
+    setRunError(null);
+    try {
+      const existing = (
+        await window.sandcastle.runtime.interactions(project.id)
+      ).find((item) => item.session.mode === "consultation");
+      if (existing) {
+        setConsultation(existing);
+        return;
+      }
+      const departmentId = runDepartmentId || runDepartments[0]?.id;
+      if (!departmentId) throw new Error(t.interactionNoMembers);
+      const department =
+        await window.sandcastle.runtime.inspectDepartment(departmentId);
+      const member = department.positions.find(
+        (position) =>
+          position.status === "active" && position.aiMember.status === "active",
+      )?.aiMember;
+      if (!member) throw new Error(t.interactionNoMembers);
+      setConsultation(
+        await createProjectConsultationSession(
+          window.sandcastle.runtime,
+          project.id,
+          member.id,
+        ),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+    } finally {
+      setInteractionBusy(false);
+    }
+  };
+
+  const sendConsultationMessage = async (): Promise<void> => {
+    if (!consultation || !consultationMessage.trim()) return;
+    setInteractionBusy(true);
+    try {
+      setConsultation(
+        await promptInteractionSession(
+          window.sandcastle.runtime,
+          consultation,
+          consultationMessage,
+        ),
+      );
+      setConsultationMessage("");
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+    } finally {
+      setInteractionBusy(false);
+    }
+  };
+
+  const reviseProposal = async (): Promise<void> => {
+    if (!consultation) return;
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      setProductDiscovery(
+        await reviseProjectProductProposal(window.sandcastle, {
+          projectId: project.id,
+          producerSessionId: consultation.session.id,
+          content: proposalDraft,
+        }),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const markProposalAwaiting = async (): Promise<void> => {
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      setProductDiscovery(
+        await markProjectProductProposalAwaiting(window.sandcastle, project.id),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const confirmConsultation = async (): Promise<void> => {
+    if (!runDepartmentId) return;
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      const confirmed = await confirmProjectProductBaseline(
+        window.sandcastle,
+        project.id,
+        runDepartmentId,
+        {
+          ...(agentOverrideId ? { agentOverrideId } : {}),
+          ...(productDiscovery?.formalRuns.at(-1)
+            ? {
+                forkSourceRunId: productDiscovery.formalRuns.at(-1)!.runId,
+                forkSourceSnapshotRevisionId:
+                  productDiscovery.formalRuns.at(-1)!.snapshotRevisionId,
+              }
+            : {}),
+        },
+      );
+      setProductDiscovery(confirmed);
+      const nextRuns = await refreshRuns();
+      const formalRunId = confirmed.formalRuns.at(-1)?.runId;
+      setSelectedRun(
+        nextRuns.find((run) => run.run.id === formalRunId) ??
+          nextRuns[0] ??
+          null,
+      );
+      setActiveTab("runs");
+      if (consultation?.session.status === "active") {
+        await window.sandcastle.runtime.closeInteractionSession(
+          consultation.session.id,
+        );
+        setConsultation(
+          await window.sandcastle.runtime.inspectInteraction(
+            consultation.session.id,
+          ),
+        );
+      }
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const sendCollaborationMessage = async (content: string): Promise<void> => {
+    if (!collaboration) return;
+    setInteractionBusy(true);
+    try {
+      setCollaboration(
+        await promptInteractionSession(
+          window.sandcastle.runtime,
+          collaboration,
+          content,
+        ),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+    } finally {
+      setInteractionBusy(false);
+    }
+  };
+
+  const requestCollaborationPermission = async (
+    scope: string,
+  ): Promise<void> => {
+    if (!collaboration || !scope) return;
+    try {
+      await window.sandcastle.runtime.requestPermission({
+        sessionId: collaboration.session.id,
+        scope,
+      });
+      setCollaboration(
+        await window.sandcastle.runtime.inspectInteraction(
+          collaboration.session.id,
+        ),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+    }
+  };
+
+  const decideCollaborationPermission = async (
+    permissionId: string,
+    decision: "approved" | "denied",
+  ): Promise<void> => {
+    if (!collaboration) return;
+    try {
+      await window.sandcastle.runtime.decidePermission({
+        permissionId,
+        expectedStatus: "pending",
+        decision,
+      });
+      setCollaboration(
+        await window.sandcastle.runtime.inspectInteraction(
+          collaboration.session.id,
+        ),
+      );
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
     }
   };
 
@@ -1566,6 +2847,31 @@ export function ProjectDetailView({
         expectedRevision: recovering.run.revision,
       });
       setSelectedRun(advanced);
+      await refreshRuns();
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+      window.sandcastle.runtime
+        .inspectRun(selectedRun.run.id)
+        .then(setSelectedRun)
+        .catch(() => undefined);
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const retryApproval = async (nodeRunId: string): Promise<void> => {
+    if (!selectedRun) return;
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    try {
+      const waiting = await window.sandcastle.runtime.retryApproval({
+        runId: selectedRun.run.id,
+        nodeRunId,
+        expectedRevision: selectedRun.run.revision,
+      });
+      setSelectedRun(waiting);
       await refreshRuns();
     } catch (nextError) {
       setRunError(errorMessage(nextError));
@@ -1709,10 +3015,12 @@ export function ProjectDetailView({
       data-page="project-detail"
       data-runtime-project-id={project.id}
       data-project-revision={project.revision}
+      data-project-collaboration={collaboration ? "active" : undefined}
     >
       <header className="page-heading department-detail-heading">
         <div>
           <button className="text-button" onClick={onBack} type="button">
+            <Icon name="back" size={20} />
             {t.backToProjects}
           </button>
           <span className="eyebrow">{t.projectWorkbench}</span>
@@ -1733,8 +3041,10 @@ export function ProjectDetailView({
         {(
           [
             ["overview", t.projectOverviewTab],
+            ["consultation", t.interactionConsultation],
             ["runs", t.projectRunsTab],
             ["artifacts", t.projectArtifactsTab],
+            ["reviews", "Reviews"],
             ["memory", t.projectMemoryTab],
             ["settings", t.projectSettingsTab],
           ] as const
@@ -1781,9 +3091,245 @@ export function ProjectDetailView({
               type="button"
             >
               {t.editProjectSettings}
+              <Icon name="edit" size={20} />
             </button>
           </article>
         </section>
+      ) : null}
+      {activeTab === "consultation" ? (
+        <section
+          className="project-consultation"
+          data-consultation-mode="informal"
+          data-project-consultation
+        >
+          <header className="project-consultation-header">
+            <div className="factory-object-icon is-member">
+              <Icon name="member" size={24} />
+            </div>
+            <div>
+              <span className="eyebrow">{t.agentInteraction}</span>
+              <h2>{t.interactionConsultation}</h2>
+              <p>{project.goal}</p>
+            </div>
+            <span className="mode-badge mode-consultation">
+              {t.interactionConsultation}
+            </span>
+          </header>
+          <div className="consultation-mode-boundary">
+            <Icon name="approval" size={24} />
+            <div>
+              <strong>{t.interactionConsultation}</strong>
+              <p>{t.agentInteractionBody}</p>
+            </div>
+          </div>
+          <section className="create-panel" data-product-proposal>
+            <div className="panel-heading-with-icon">
+              <Icon name="artifact" size={24} />
+              <div>
+                <h3>Product Proposal</h3>
+                <p data-product-proposal-identity>
+                  {productDiscovery?.proposal
+                    ? `revision ${productDiscovery.proposal.revision} · ${productDiscovery.proposal.currentRevision.hash}`
+                    : "No authoritative revision yet"}
+                </p>
+              </div>
+            </div>
+            <label>
+              <span>Goal</span>
+              <textarea
+                data-product-proposal-field="goal"
+                value={proposalDraft.goal}
+                onChange={(event) =>
+                  setProposalDraft((current) => ({
+                    ...current,
+                    goal: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            {(
+              [
+                "users",
+                "scope",
+                "nonGoals",
+                "acceptanceCriteria",
+                "constraints",
+                "risks",
+                "openQuestions",
+              ] as const
+            ).map((field) => (
+              <label key={field}>
+                <span>{field}</span>
+                <textarea
+                  data-product-proposal-field={field}
+                  value={proposalDraft[field].join("\n")}
+                  onChange={(event) =>
+                    setProposalDraft((current) => ({
+                      ...current,
+                      [field]: event.target.value
+                        .split("\n")
+                        .map((value) => value.trim())
+                        .filter(Boolean),
+                    }))
+                  }
+                />
+              </label>
+            ))}
+            <div className="action-bar">
+              <button
+                data-product-proposal-revise
+                disabled={runBusy || !consultation}
+                onClick={() => void reviseProposal()}
+                type="button"
+              >
+                Save Product Proposal
+              </button>
+              <button
+                data-product-proposal-awaiting
+                disabled={
+                  runBusy ||
+                  !productDiscovery?.proposal ||
+                  productDiscovery.proposal.status === "awaiting-confirmation"
+                }
+                onClick={() => void markProposalAwaiting()}
+                type="button"
+              >
+                Mark awaiting confirmation
+              </button>
+            </div>
+            {productDiscovery?.baselines.map((baseline) => (
+              <div data-product-baseline={baseline.id} key={baseline.id}>
+                Product Baseline {baseline.hash} · Run {baseline.runId} · r1{" "}
+                {baseline.snapshotRevisionId}
+              </div>
+            ))}
+            {productReview ? (
+              <ProductReviewStatePanel state={productReview} />
+            ) : null}
+            {technicalReview ? (
+              <TechnicalReviewStatePanel state={technicalReview} />
+            ) : null}
+          </section>
+          {consultation ? (
+            <>
+              <div
+                className="project-consultation-history"
+                data-consultation-history
+              >
+                {consultation.messages.length ? (
+                  consultation.messages.map((item) => (
+                    <article
+                      className="consultation-message"
+                      data-session-message={item.id}
+                      key={item.id}
+                    >
+                      <Icon
+                        name={item.kind === "status" ? "run" : "member"}
+                        size={20}
+                      />
+                      <div>
+                        <strong>
+                          {item.kind === "status"
+                            ? interactionStatusLabel(t, item.content)
+                            : item.content}
+                        </strong>
+                        <small>{formatAgentTimestamp(item.createdAt)}</small>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-state">{t.interactionNoMessages}</div>
+                )}
+              </div>
+              <div className="project-consultation-composer">
+                <textarea
+                  aria-label={t.interactionMessagePlaceholder}
+                  disabled={
+                    interactionBusy || consultation.session.status === "closed"
+                  }
+                  placeholder={t.interactionMessagePlaceholder}
+                  value={consultationMessage}
+                  onChange={(event) =>
+                    setConsultationMessage(event.target.value)
+                  }
+                />
+                <button
+                  className="secondary-button"
+                  disabled={interactionBusy || !consultationMessage.trim()}
+                  onClick={() => void sendConsultationMessage()}
+                  type="button"
+                >
+                  <Icon name="send" size={20} />
+                  {t.sendMessage}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="project-consultation-empty">
+              <Icon name="architect" size={24} />
+              <strong>{t.createConsultation}</strong>
+              <span>{t.interactionMessagePlaceholder}</span>
+              <button
+                className="secondary-button"
+                data-consultation-start
+                disabled={interactionBusy}
+                onClick={() => void startConsultation()}
+                type="button"
+              >
+                <Icon name="member" size={20} />
+                {t.createConsultation}
+              </button>
+            </div>
+          )}
+          <div className="consultation-confirm-bar">
+            <div>
+              <span className="eyebrow">{t.departmentRuns}</span>
+              <strong>{t.startDepartmentRun}</strong>
+              <small>
+                {productDiscovery?.proposal?.status ?? "draft"} · Runtime Query
+              </small>
+            </div>
+            <button
+              className="primary-button"
+              data-consultation-confirm
+              disabled={
+                runBusy ||
+                runDepartmentId === "" ||
+                !consultation ||
+                productDiscovery?.proposal?.status !== "awaiting-confirmation"
+              }
+              onClick={() => void confirmConsultation()}
+              type="button"
+            >
+              <Icon name="run" size={20} />
+              Confirm Product Baseline
+            </button>
+          </div>
+        </section>
+      ) : null}
+      {collaboration && selectedRun && activeTab === "runs" ? (
+        <RunCollaborationWorkspace
+          artifacts={runArtifacts}
+          collaboration={collaboration}
+          consultation={consultation}
+          busy={runBusy || interactionBusy}
+          onDecision={(input) => void decideApproval(input)}
+          onRetryApproval={(nodeRunId) => void retryApproval(nodeRunId)}
+          onRetry={(input) => void retryNode(input)}
+          onContinue={() => void continueRun()}
+          onControl={(action) => void controlRun(action)}
+          onRecover={(input) => void recoverRun(input)}
+          onFork={(nodeRunId) => void forkRun(nodeRunId)}
+          onPermissionDecision={(permissionId, decision) =>
+            void decideCollaborationPermission(permissionId, decision)
+          }
+          onPermissionRequest={(scope) =>
+            void requestCollaborationPermission(scope)
+          }
+          onSend={(content) => void sendCollaborationMessage(content)}
+          run={selectedRun}
+          t={t}
+        />
       ) : null}
       {activeTab === "artifacts" ? (
         <section className="create-panel" data-project-artifacts>
@@ -1793,6 +3339,9 @@ export function ProjectDetailView({
             <span>{t.noProjectArtifactsBody}</span>
           </div>
         </section>
+      ) : null}
+      {activeTab === "reviews" ? (
+        <ReviewTopicsPanel topics={reviewTopics} />
       ) : null}
       {activeTab === "memory" ? (
         <section className="create-panel" data-project-memory>
@@ -1932,8 +3481,9 @@ export function ProjectDetailView({
               <button
                 className="primary-button"
                 data-start-department-run
+                data-open-consultation
                 disabled={runBusy || runDepartmentId === ""}
-                onClick={() => void startRun()}
+                onClick={() => setActiveTab("consultation")}
                 type="button"
               >
                 {t.startDepartmentRun}
@@ -1973,6 +3523,7 @@ export function ProjectDetailView({
                 <DepartmentRunDetail
                   busy={runBusy}
                   onDecision={(input) => void decideApproval(input)}
+                  onRetryApproval={(nodeRunId) => void retryApproval(nodeRunId)}
                   onRetry={(input) => void retryNode(input)}
                   onContinue={() => void continueRun()}
                   onControl={(action) => void controlRun(action)}
@@ -2549,6 +4100,9 @@ export function DepartmentsPage({ t }: { readonly t: Messages }) {
                 onClick={() => void inspectDepartment(department.id)}
                 type="button"
               >
+                <span className="card-domain-icon is-department">
+                  <Icon name="department" size={24} />
+                </span>
                 <span className="project-card-top">
                   <strong>{departmentName(t, department)}</strong>
                   <span className="pill primary">
@@ -4821,7 +6375,7 @@ function PipelineVisualEditor({
             }
             type="button"
           >
-            <span className="pipeline-library-dot" />
+            <Icon name={pipelineIconForType(type)} size={24} />
             {pipelineNodeTypeLabel(t, type)}
           </button>
         ))}
@@ -4854,22 +6408,18 @@ function PipelineVisualEditor({
             >
               {t.panTool}
             </button>
-            <button
-              aria-label={t.zoomOut}
+            <IconButton
+              icon="zoom-out"
+              label={t.zoomOut}
               onClick={() =>
                 setZoom((current) => Math.max(0.55, current - 0.1))
               }
-              type="button"
-            >
-              −
-            </button>
-            <button
-              aria-label={t.zoomIn}
+            />
+            <IconButton
+              icon="zoom-in"
+              label={t.zoomIn}
               onClick={() => setZoom((current) => Math.min(1.5, current + 0.1))}
-              type="button"
-            >
-              +
-            </button>
+            />
           </div>
           <div className="pipeline-toolbar-group">
             <button onClick={autoLayout} type="button">
@@ -4960,6 +6510,7 @@ function PipelineVisualEditor({
                   type="button"
                 />
                 <div className="pipeline-node-type-label">
+                  <Icon name={pipelineIconForType(node.type)} size={20} />
                   {pipelineNodeTypeLabel(t, node.type)}
                 </div>
                 <strong>{node.name}</strong>
@@ -6034,14 +7585,9 @@ export function PositionDrawerEditor({
           type="button"
           onClick={requestClose}
         >
-          <svg
-            aria-hidden="true"
-            className="drawer-close-icon"
-            data-drawer-close-icon
-            viewBox="0 0 20 20"
-          >
-            <path d="m6 6 8 8M14 6l-8 8" />
-          </svg>
+          <span className="drawer-close-icon" data-drawer-close-icon>
+            <Icon name="close" size={20} />
+          </span>
         </button>
       </div>
       <section className="drawer-section">
@@ -6560,6 +8106,14 @@ type InteractionRuntime = Pick<
 
 type RunCollaborationRuntime = Pick<
   (typeof window.sandcastle)["runtime"],
+  | "interactions"
+  | "createInteractionSession"
+  | "addInteractionParticipant"
+  | "inspectInteraction"
+>;
+
+type ProjectConsultationRuntime = Pick<
+  (typeof window.sandcastle)["runtime"],
   | "createInteractionSession"
   | "addInteractionParticipant"
   | "inspectInteraction"
@@ -6571,6 +8125,11 @@ type InteractionPromptRuntime = Pick<
 >;
 
 export const RUN_PROGRESS_POLL_INTERVAL_MS = 2_500;
+
+const pendingRunCollaborationSessions = new Map<
+  string,
+  Promise<InteractionView>
+>();
 
 export const loadInteractionProjectContext = async (
   runtime: InteractionRuntime,
@@ -6639,12 +8198,57 @@ export const createRunCollaborationSession = async (
 ): Promise<InteractionView | null> => {
   const current = currentRunNode(run);
   const aiMemberId = current.position?.aiMember.id;
-  if (!current.nodeRun || !aiMemberId) return null;
+  const nodeRun = current.nodeRun;
+  if (!nodeRun || !aiMemberId) return null;
+  const key = `${projectId}:${run.run.id}:${nodeRun.id}`;
+  const pending = pendingRunCollaborationSessions.get(key);
+  if (pending) return pending;
+  const creation = (async (): Promise<InteractionView> => {
+    const existing = (await runtime.interactions(projectId)).find(
+      (item) =>
+        item.session.mode === "run-collaboration" &&
+        item.session.runId === run.run.id &&
+        item.session.nodeRunId === nodeRun.id,
+    );
+    if (existing) return existing;
+    const session = await runtime.createInteractionSession({
+      projectId,
+      mode: "run-collaboration",
+      runId: run.run.id,
+      nodeRunId: nodeRun.id,
+    });
+    await runtime.addInteractionParticipant({
+      sessionId: session.id,
+      participantType: "human",
+      participantRef: "user-local",
+      role: "requester",
+    });
+    await runtime.addInteractionParticipant({
+      sessionId: session.id,
+      participantType: "ai-member",
+      participantRef: aiMemberId,
+      role: "current-node-agent",
+    });
+    return runtime.inspectInteraction(session.id);
+  })();
+  pendingRunCollaborationSessions.set(key, creation);
+  try {
+    return await creation;
+  } finally {
+    if (pendingRunCollaborationSessions.get(key) === creation) {
+      pendingRunCollaborationSessions.delete(key);
+    }
+  }
+};
+
+export const createProjectConsultationSession = async (
+  runtime: ProjectConsultationRuntime,
+  projectId: string,
+  aiMemberId: string,
+): Promise<InteractionView> => {
   const session = await runtime.createInteractionSession({
     projectId,
-    mode: "run-collaboration",
-    runId: run.run.id,
-    nodeRunId: current.nodeRun.id,
+    mode: "consultation",
   });
   await runtime.addInteractionParticipant({
     sessionId: session.id,
@@ -6656,7 +8260,7 @@ export const createRunCollaborationSession = async (
     sessionId: session.id,
     participantType: "ai-member",
     participantRef: aiMemberId,
-    role: "current-node-agent",
+    role: "product-manager",
   });
   return runtime.inspectInteraction(session.id);
 };
@@ -7186,9 +8790,15 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                   onClick={() => setSelectedMemberId(member.id)}
                   type="button"
                 >
-                  <strong>{member.displayName}</strong>
-                  <span>{member.positionName}</span>
-                  <small>{member.departmentName}</small>
+                  <Icon
+                    name={roleIconForPosition(member.positionName)}
+                    size={24}
+                  />
+                  <span>
+                    <strong>{member.displayName}</strong>
+                    <span>{member.positionName}</span>
+                    <small>{member.departmentName}</small>
+                  </span>
                 </button>
               ))
             )}
@@ -7667,16 +9277,21 @@ export function RuntimeDiagnosticsPanel({
 }
 
 function Metric({
+  icon,
   label,
   value,
 }: {
+  readonly icon: IconName;
   readonly label: string;
   readonly value: number;
 }) {
   return (
     <div className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
+      <Icon name={icon} size={24} />
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </div>
     </div>
   );
 }

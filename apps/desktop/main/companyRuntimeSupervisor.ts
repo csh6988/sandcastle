@@ -14,6 +14,7 @@ import type {
   InteractionSessionView,
   SessionParticipantView,
   SessionMessageView,
+  InteractionTurnView,
   PermissionRequestView,
   AgUiReplayView,
   MemoryCandidateView,
@@ -26,6 +27,14 @@ import type {
   CompanyQuery,
   CompanyQueryResult,
   CompanyRuntimeClient,
+  CommandEnvelope,
+  CommandResult,
+  EnvelopeCommand,
+  EnvelopeCommandResult,
+  QueryEnvelope,
+  QueryResult,
+  RuntimeSubscriptionBatch,
+  RuntimeSubscriptionHandle,
   DepartmentRunView,
   DepartmentInspect,
   DepartmentPipelineDraftGraph,
@@ -227,7 +236,7 @@ export interface CompanyRuntimeSupervisor {
     readonly sessionId: string;
     readonly participantId: string;
     readonly content: string;
-  }): Promise<SessionMessageView>;
+  }): Promise<InteractionTurnView>;
   requestPermission(input: {
     readonly sessionId: string;
     readonly scope: string;
@@ -272,6 +281,7 @@ export interface CompanyRuntimeSupervisor {
     readonly runId: string;
     readonly snapshotRevisionId: string;
     readonly fromNodeRunId: string;
+    readonly mode?: "replay" | "reconfigure";
   }): Promise<DepartmentRunView>;
   executeReady(input: {
     readonly runId: string;
@@ -309,6 +319,11 @@ export interface CompanyRuntimeSupervisor {
     readonly expectedRevision: number;
     readonly decision: "approve" | "request-changes" | "reject";
     readonly feedback?: string;
+  }): Promise<DepartmentRunView>;
+  retryApproval(input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly expectedRevision: number;
   }): Promise<DepartmentRunView>;
   retryNode(input: {
     readonly runId: string;
@@ -354,6 +369,22 @@ export interface CompanyRuntimeSupervisor {
     readonly skillFlowId: string;
     readonly expectedRevision: number;
   }): Promise<SkillConfigurationView>;
+  queryEnvelope<Query extends CompanyQuery>(
+    envelope: QueryEnvelope<Query>,
+  ): Promise<QueryResult<CompanyQueryResult<Query>>>;
+  executeEnvelope<Command extends EnvelopeCommand>(
+    envelope: CommandEnvelope<Command>,
+  ): Promise<CommandResult<EnvelopeCommandResult<Command>>>;
+  openSubscription(): Promise<RuntimeSubscriptionHandle>;
+  readSubscription(input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+    readonly limit: number;
+  }): Promise<RuntimeSubscriptionBatch>;
+  closeSubscription(input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+  }): Promise<void>;
   diagnostics(): CompanyRuntimeSupervisorDiagnostics;
   stop(): Promise<void>;
 }
@@ -382,6 +413,7 @@ export interface CompanyRuntimeSupervisorOptions {
   readonly shutdownTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
   readonly onLog?: (line: string) => void;
+  readonly consumerId?: string;
 }
 
 interface RunningRuntime {
@@ -504,6 +536,9 @@ export const createCompanyRuntimeSupervisor = (
           SANDCASTLE_COMPANY_DIR: companyDir,
           SANDCASTLE_COMPANY_RUNTIME_ADDRESS: address,
           SANDCASTLE_COMPANY_RUNTIME_TOKEN: token,
+          ...(options.consumerId
+            ? { SANDCASTLE_COMPANY_RUNTIME_CONSUMER_ID: options.consumerId }
+            : {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -823,6 +858,7 @@ export const createCompanyRuntimeSupervisor = (
       }),
     decideApproval: (input) =>
       execute({ type: "run.approval.decide", ...input }),
+    retryApproval: (input) => execute({ type: "run.approval.retry", ...input }),
     retryNode: (input) => execute({ type: "run.node.retry", ...input }),
     inspectSkillConfiguration: (departmentId) =>
       query({
@@ -846,6 +882,31 @@ export const createCompanyRuntimeSupervisor = (
       }),
     archiveSkillFlow: (input) =>
       execute({ type: "skill-flow.archive", ...input }),
+    queryEnvelope: async (envelope) => {
+      if (restartPromise) await restartPromise;
+      if (!running) throw new Error("Company Runtime is not running.");
+      return running.client.queryEnvelope(envelope);
+    },
+    executeEnvelope: async (envelope) => {
+      if (restartPromise) await restartPromise;
+      if (!running) throw new Error("Company Runtime is not running.");
+      return running.client.executeEnvelope(envelope);
+    },
+    openSubscription: async () => {
+      if (restartPromise) await restartPromise;
+      if (!running) throw new Error("Company Runtime is not running.");
+      return running.client.openSubscription();
+    },
+    readSubscription: async (input) => {
+      if (restartPromise) await restartPromise;
+      if (!running) throw new Error("Company Runtime is not running.");
+      return running.client.readSubscription(input);
+    },
+    closeSubscription: async (input) => {
+      if (restartPromise) await restartPromise;
+      if (!running) throw new Error("Company Runtime is not running.");
+      await running.client.closeSubscription(input);
+    },
     diagnostics,
     stop,
   };

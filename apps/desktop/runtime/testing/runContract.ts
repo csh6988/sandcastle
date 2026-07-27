@@ -7,6 +7,7 @@ export const scriptedDepartmentRun: DepartmentRunView = {
     departmentId: "department-1",
     pipelineVersionId: "pipeline-1",
     snapshotRevisionId: "snapshot-1",
+    productBaselineId: null,
     parentRunId: null,
     forkedFromSnapshotRevisionId: null,
     status: "ready",
@@ -75,6 +76,7 @@ export const scriptedDepartmentRun: DepartmentRunView = {
       runLimits: { maxActiveNodes: 1 },
     },
   },
+  continuationPlan: null,
   nodes: [
     {
       id: "node-run-start",

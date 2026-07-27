@@ -2,12 +2,16 @@ import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import {
   CompanyDepartmentSchema,
+  ApplicationViewSchema,
   ArtifactVersionViewSchema,
   ArtifactLineageViewSchema,
+  ArtifactLineageGraphViewSchema,
+  ArtifactRegistrationViewSchema,
   InteractionViewSchema,
   InteractionSessionViewSchema,
   SessionParticipantViewSchema,
   SessionMessageViewSchema,
+  InteractionTurnViewSchema,
   PermissionRequestViewSchema,
   AgUiReplayViewSchema,
   MemoryCandidateViewSchema,
@@ -18,10 +22,15 @@ import {
   CompanyOverviewSchema,
   CompanyProjectSchema,
   DepartmentRunViewSchema,
+  ExecutionInspectionViewSchema,
   DepartmentPipelineEditorViewSchema,
   DepartmentInspectSchema,
   PipelineValidationResultSchema,
   ProjectEditorViewSchema,
+  ProductDiscoveryViewSchema,
+  ProductReviewStateViewSchema,
+  TechnicalReviewStateViewSchema,
+  ReviewTopicViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
   AgentTestResultSchema,
@@ -32,7 +41,13 @@ import {
   RuntimeResponseSchema,
   CommandResultSchema,
   QueryResultSchema,
+  RuntimeSubscriptionBatchSchema,
+  RuntimeSubscriptionHandleSchema,
   ProjectUpdateEnvelopeCommandSchema,
+  ProductProposalReviseEnvelopeCommandSchema,
+  ProductProposalMarkAwaitingEnvelopeCommandSchema,
+  ConfirmProductBaselineEnvelopeCommandSchema,
+  ForkDepartmentRunEnvelopeCommandSchema,
   SkillConfigurationViewSchema,
   type ActorRef,
   type CommandEnvelope,
@@ -43,6 +58,7 @@ import {
   type CompanyQueryResult,
   type CompanyRuntimeClient,
   type EnvelopeCommand,
+  type EnvelopeCommandResult,
   type QueryEnvelope,
   type QueryResult,
   type RuntimeRequestInput,
@@ -180,7 +196,15 @@ export const createCompanyRuntimeClientFromTransport = (
   ): Promise<CompanyQueryResult<Query>> => {
     const result = await requestResult(
       transport,
-      query.type === "project.inspect"
+      query.type === "project.inspect" ||
+        query.type === "applications.list" ||
+        query.type === "product.discovery.inspect" ||
+        query.type === "product-review.inspect" ||
+        query.type === "technical-review.inspect" ||
+        query.type === "review.topic.inspect" ||
+        query.type === "review.topics.list" ||
+        query.type === "artifact.inspect" ||
+        query.type === "artifact.lineage.inspect"
         ? {
             id: randomUUID(),
             token,
@@ -231,6 +255,30 @@ export const createCompanyRuntimeClientFromTransport = (
         return ProjectEditorViewSchema.parse(
           queryValue,
         ) as CompanyQueryResult<Query>;
+      case "applications.list":
+        return ApplicationViewSchema.array().parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "product.discovery.inspect":
+        return ProductDiscoveryViewSchema.parse(
+          queryValue,
+        ) as CompanyQueryResult<Query>;
+      case "product-review.inspect":
+        return ProductReviewStateViewSchema.parse(
+          queryValue,
+        ) as CompanyQueryResult<Query>;
+      case "technical-review.inspect":
+        return TechnicalReviewStateViewSchema.parse(
+          queryValue,
+        ) as CompanyQueryResult<Query>;
+      case "review.topic.inspect":
+        return ReviewTopicViewSchema.parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "review.topics.list":
+        return ReviewTopicViewSchema.array().parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
       case "departments.list":
         return CompanyDepartmentSchema.array().parse(
           result,
@@ -259,6 +307,10 @@ export const createCompanyRuntimeClientFromTransport = (
         return DepartmentRunViewSchema.parse(
           result,
         ) as CompanyQueryResult<Query>;
+      case "execution.inspect":
+        return ExecutionInspectionViewSchema.parse(
+          result,
+        ) as CompanyQueryResult<Query>;
       case "runtime.audit":
         return RuntimeAuditRecordSchema.array().parse(
           result,
@@ -274,7 +326,11 @@ export const createCompanyRuntimeClientFromTransport = (
         ) as unknown as CompanyQueryResult<Query>;
       case "artifact.inspect":
         return ArtifactLineageViewSchema.parse(
-          result,
+          queryValue,
+        ) as CompanyQueryResult<Query>;
+      case "artifact.lineage.inspect":
+        return ArtifactLineageGraphViewSchema.parse(
+          queryValue,
         ) as CompanyQueryResult<Query>;
       case "interactions.list":
         return InteractionViewSchema.array().parse(
@@ -301,6 +357,13 @@ export const createCompanyRuntimeClientFromTransport = (
   execute: async <Command extends CompanyCommand>(
     command: Command,
   ): Promise<CompanyCommandResult<Command>> => {
+    const verifiedActor =
+      context.actor ??
+      ({
+        type: "test-driver",
+        id: "runtime-client",
+        authenticatedBy: "ipc-token",
+      } satisfies ActorRef);
     const rawResult = await requestResult(
       transport,
       command.type === "project.update"
@@ -311,13 +374,7 @@ export const createCompanyRuntimeClientFromTransport = (
             envelope: {
               schemaVersion: 1,
               commandId: randomUUID(),
-              actor:
-                context.actor ??
-                ({
-                  type: "test-driver",
-                  id: "runtime-client",
-                  authenticatedBy: "ipc-token",
-                } satisfies ActorRef),
+              actor: verifiedActor,
               consumerId: context.consumerId ?? "runtime-client",
               expectedRevision: command.expectedRevision,
               command: ProjectUpdateEnvelopeCommandSchema.parse({
@@ -330,12 +387,103 @@ export const createCompanyRuntimeClientFromTransport = (
               }),
             },
           }
-        : {
-            id: randomUUID(),
-            token,
-            kind: "command",
-            command,
-          },
+        : command.type === "interaction.prompt"
+          ? {
+              id: randomUUID(),
+              token,
+              kind: "command",
+              envelope: {
+                schemaVersion: 1,
+                commandId: randomUUID(),
+                actor: verifiedActor,
+                consumerId: context.consumerId ?? "runtime-client",
+                command,
+              },
+            }
+          : command.type === "product.proposal.revise" ||
+              command.type === "product.proposal.mark-awaiting-confirmation" ||
+              command.type === "confirm-product-baseline" ||
+              command.type === "fork-department-run"
+            ? {
+                id: randomUUID(),
+                token,
+                kind: "command",
+                envelope: {
+                  schemaVersion: 1,
+                  commandId: randomUUID(),
+                  actor: verifiedActor,
+                  consumerId: context.consumerId ?? "runtime-client",
+                  expectedRevision: command.expectedRevision,
+                  command:
+                    command.type === "product.proposal.revise"
+                      ? ProductProposalReviseEnvelopeCommandSchema.parse({
+                          type: command.type,
+                          projectId: command.projectId,
+                          producerSessionId: command.producerSessionId,
+                          content: command.content,
+                        })
+                      : command.type ===
+                          "product.proposal.mark-awaiting-confirmation"
+                        ? ProductProposalMarkAwaitingEnvelopeCommandSchema.parse(
+                            {
+                              type: command.type,
+                              projectId: command.projectId,
+                              proposalRevisionId: command.proposalRevisionId,
+                              proposalHash: command.proposalHash,
+                            },
+                          )
+                        : command.type === "confirm-product-baseline"
+                          ? ConfirmProductBaselineEnvelopeCommandSchema.parse({
+                              type: command.type,
+                              projectId: command.projectId,
+                              departmentId: command.departmentId,
+                              agentOverrideId: command.agentOverrideId,
+                              forkSourceRunId: command.forkSourceRunId,
+                              forkSourceSnapshotRevisionId:
+                                command.forkSourceSnapshotRevisionId,
+                              proposalRevisionId: command.proposalRevisionId,
+                              proposalHash: command.proposalHash,
+                            })
+                          : ForkDepartmentRunEnvelopeCommandSchema.parse({
+                              type: command.type,
+                              sourceRunId: command.sourceRunId,
+                              sourceSnapshotRevisionId:
+                                command.sourceSnapshotRevisionId,
+                              reason: command.reason,
+                            }),
+                },
+              }
+            : command.type === "ack-runtime-events" ||
+                command.type === "artifact.version.register" ||
+                command.type === "artifact.version.finalize" ||
+                command.type === "artifact.version.supersede"
+              ? {
+                  id: randomUUID(),
+                  token,
+                  kind: "command",
+                  envelope: {
+                    schemaVersion: 1,
+                    commandId: randomUUID(),
+                    actor: verifiedActor,
+                    consumerId: context.consumerId ?? "runtime-client",
+                    command:
+                      command.type === "artifact.version.register"
+                        ? {
+                            ...command,
+                            content:
+                              command.content.kind === "managed-file"
+                                ? command.content
+                                : command.content,
+                          }
+                        : command,
+                  },
+                }
+              : {
+                  id: randomUUID(),
+                  token,
+                  kind: "command",
+                  command,
+                },
     );
     const parsedCommandResult = CommandResultSchema.safeParse(rawResult);
     if (
@@ -357,6 +505,28 @@ export const createCompanyRuntimeClientFromTransport = (
     if (command.type === "project.create") {
       return CompanyProjectSchema.parse(
         result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (
+      command.type === "product.proposal.revise" ||
+      command.type === "product.proposal.mark-awaiting-confirmation" ||
+      command.type === "confirm-product-baseline" ||
+      command.type === "fork-department-run"
+    ) {
+      if (!parsedCommandResult.success) {
+        throw new RuntimeClientError(
+          "PROTOCOL_ERROR",
+          "Product Runtime command response was invalid.",
+        );
+      }
+      if (parsedCommandResult.data.status === "rejected") {
+        throw new RuntimeClientError(
+          parsedCommandResult.data.error.code,
+          parsedCommandResult.data.error.message,
+        );
+      }
+      return ProductDiscoveryViewSchema.parse(
+        parsedCommandResult.data.value,
       ) as CompanyCommandResult<Command>;
     }
     if (command.type === "position.configure") {
@@ -388,9 +558,61 @@ export const createCompanyRuntimeClientFromTransport = (
         result,
       ) as CompanyCommandResult<Command>;
     }
+    if (command.type === "ack-runtime-events") {
+      if (!parsedCommandResult.success) {
+        throw new RuntimeClientError(
+          "PROTOCOL_ERROR",
+          "Runtime event acknowledgement response was invalid.",
+        );
+      }
+      if (parsedCommandResult.data.status === "rejected") {
+        throw new RuntimeClientError(
+          parsedCommandResult.data.error.code,
+          parsedCommandResult.data.error.message,
+        );
+      }
+      return parsedCommandResult.data.value as CompanyCommandResult<Command>;
+    }
     if (command.type === "artifact.version.status") {
       return ArtifactVersionViewSchema.parse(
         result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (command.type === "artifact.version.register") {
+      if (!parsedCommandResult.success) {
+        throw new RuntimeClientError(
+          "PROTOCOL_ERROR",
+          "Artifact registration response was invalid.",
+        );
+      }
+      if (parsedCommandResult.data.status === "rejected") {
+        throw new RuntimeClientError(
+          parsedCommandResult.data.error.code,
+          parsedCommandResult.data.error.message,
+        );
+      }
+      return ArtifactRegistrationViewSchema.parse(
+        parsedCommandResult.data.value,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (
+      command.type === "artifact.version.finalize" ||
+      command.type === "artifact.version.supersede"
+    ) {
+      if (!parsedCommandResult.success) {
+        throw new RuntimeClientError(
+          "PROTOCOL_ERROR",
+          "Artifact Version command response was invalid.",
+        );
+      }
+      if (parsedCommandResult.data.status === "rejected") {
+        throw new RuntimeClientError(
+          parsedCommandResult.data.error.code,
+          parsedCommandResult.data.error.message,
+        );
+      }
+      return ArtifactVersionViewSchema.parse(
+        parsedCommandResult.data.value,
       ) as CompanyCommandResult<Command>;
     }
     if (command.type === "runtime.events.ack") {
@@ -411,12 +633,26 @@ export const createCompanyRuntimeClientFromTransport = (
         result,
       ) as CompanyCommandResult<Command>;
     }
-    if (
-      command.type === "interaction.message.add" ||
-      command.type === "interaction.prompt"
-    ) {
+    if (command.type === "interaction.message.add") {
       return SessionMessageViewSchema.parse(
         result,
+      ) as CompanyCommandResult<Command>;
+    }
+    if (command.type === "interaction.prompt") {
+      if (!parsedCommandResult.success) {
+        throw new RuntimeClientError(
+          "PROTOCOL_ERROR",
+          "Interaction Prompt command response was invalid.",
+        );
+      }
+      if (parsedCommandResult.data.status === "rejected") {
+        throw new RuntimeClientError(
+          parsedCommandResult.data.error.code,
+          parsedCommandResult.data.error.message,
+        );
+      }
+      return InteractionTurnViewSchema.parse(
+        parsedCommandResult.data.value,
       ) as CompanyCommandResult<Command>;
     }
     if (
@@ -482,6 +718,7 @@ export const createCompanyRuntimeClientFromTransport = (
         command.type === "run.cancel" ||
         command.type === "run.recover" ||
         command.type === "run.approval.decide" ||
+        command.type === "run.approval.retry" ||
         command.type === "run.node.retry"
       ) {
         return DepartmentRunViewSchema.parse(
@@ -515,22 +752,36 @@ export const createCompanyRuntimeClientFromTransport = (
       envelope,
     });
     const parsed = QueryResultSchema.parse(raw);
-    if (envelope.query.type !== "project.inspect") {
-      throw new RuntimeClientError(
-        "PROTOCOL_ERROR",
-        "T01 only supports project.inspect QueryEnvelope reads.",
-      );
-    }
+    const view =
+      envelope.query.type === "project.inspect"
+        ? ProjectEditorViewSchema.parse(parsed.view)
+        : envelope.query.type === "applications.list"
+          ? ApplicationViewSchema.array().parse(parsed.view)
+          : envelope.query.type === "product.discovery.inspect"
+            ? ProductDiscoveryViewSchema.parse(parsed.view)
+            : envelope.query.type === "product-review.inspect"
+              ? ProductReviewStateViewSchema.parse(parsed.view)
+              : envelope.query.type === "technical-review.inspect"
+                ? TechnicalReviewStateViewSchema.parse(parsed.view)
+                : envelope.query.type === "review.topic.inspect"
+                  ? ReviewTopicViewSchema.parse(parsed.view)
+                  : envelope.query.type === "review.topics.list"
+                    ? ReviewTopicViewSchema.array().parse(parsed.view)
+                    : (() => {
+                        throw new RuntimeClientError(
+                          "PROTOCOL_ERROR",
+                          `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                        );
+                      })();
     return {
-      view: ProjectEditorViewSchema.parse(
-        parsed.view,
-      ) as CompanyQueryResult<Query>,
+      view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,
+      ...(parsed.viewSyncToken ? { viewSyncToken: parsed.viewSyncToken } : {}),
     };
   },
   executeEnvelope: async <Command extends EnvelopeCommand>(
     envelope: CommandEnvelope<Command>,
-  ): Promise<CommandResult<import("./interface.js").ProjectEditorView>> => {
+  ): Promise<CommandResult<EnvelopeCommandResult<Command>>> => {
     const raw = await requestResult(transport, {
       id: randomUUID(),
       token,
@@ -539,15 +790,46 @@ export const createCompanyRuntimeClientFromTransport = (
     });
     const parsed = CommandResultSchema.safeParse(raw);
     if (parsed.success) {
-      return parsed.data as CommandResult<
-        import("./interface.js").ProjectEditorView
-      >;
+      return parsed.data as CommandResult<EnvelopeCommandResult<Command>>;
+    }
+    if (envelope.command.type === "ack-runtime-events") {
+      throw new RuntimeClientError(
+        "PROTOCOL_ERROR",
+        "Runtime event acknowledgement response was invalid.",
+      );
     }
     return {
       status: "succeeded",
-      value: ProjectEditorViewSchema.parse(raw),
+      value: ProjectEditorViewSchema.parse(
+        raw,
+      ) as EnvelopeCommandResult<Command>,
       effectIds: [],
     };
+  },
+  openSubscription: async () =>
+    RuntimeSubscriptionHandleSchema.parse(
+      await requestResult(transport, {
+        id: randomUUID(),
+        token,
+        kind: "subscription.open",
+      }),
+    ),
+  readSubscription: async (input) =>
+    RuntimeSubscriptionBatchSchema.parse(
+      await requestResult(transport, {
+        id: randomUUID(),
+        token,
+        kind: "subscription.read",
+        ...input,
+      }),
+    ),
+  closeSubscription: async (input) => {
+    await requestResult(transport, {
+      id: randomUUID(),
+      token,
+      kind: "subscription.close",
+      ...input,
+    });
   },
 });
 

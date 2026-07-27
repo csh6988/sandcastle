@@ -15,6 +15,7 @@ import {
   savePreferredLanguage,
   type Language,
 } from "./i18n.js";
+import { Icon, type IconName } from "./icons.js";
 
 type CompanyNav =
   | "overview"
@@ -29,15 +30,16 @@ type CompanyNav =
 const NAV_ITEMS: ReadonlyArray<{
   id: CompanyNav;
   labelKey: keyof typeof messages.en;
+  icon: IconName;
 }> = [
-  { id: "overview", labelKey: "navOverview" },
-  { id: "projects", labelKey: "navProjects" },
-  { id: "departments", labelKey: "navDepartments" },
-  { id: "agents", labelKey: "navAgents" },
-  { id: "skills", labelKey: "navSkills" },
-  { id: "artifacts", labelKey: "navArtifacts" },
-  { id: "interaction", labelKey: "navInteraction" },
-  { id: "settings", labelKey: "navSettings" },
+  { id: "overview", labelKey: "navOverview", icon: "overview" },
+  { id: "projects", labelKey: "navProjects", icon: "project" },
+  { id: "departments", labelKey: "navDepartments", icon: "department" },
+  { id: "agents", labelKey: "navAgents", icon: "member" },
+  { id: "skills", labelKey: "navSkills", icon: "skill" },
+  { id: "artifacts", labelKey: "navArtifacts", icon: "artifact" },
+  { id: "interaction", labelKey: "navInteraction", icon: "run" },
+  { id: "settings", labelKey: "navSettings", icon: "settings" },
 ];
 
 export function App() {
@@ -56,8 +58,13 @@ export function App() {
     <div className="shell">
       <nav className="company-nav">
         <div className="brand">
-          <div className="brand-name">Sandcastle</div>
-          <div className="brand-sub">{t.appSubtitle}</div>
+          <div className="brand-mark">
+            <Icon name="pipeline" size={24} />
+          </div>
+          <div>
+            <div className="brand-name">Sandcastle</div>
+            <div className="brand-sub">{t.appSubtitle}</div>
+          </div>
         </div>
         {NAV_ITEMS.map((item) => (
           <button
@@ -67,7 +74,8 @@ export function App() {
             onClick={() => setNav(item.id)}
             type="button"
           >
-            {t[item.labelKey]}
+            <Icon name={item.icon} size={20} />
+            <span>{t[item.labelKey]}</span>
           </button>
         ))}
       </nav>
@@ -78,7 +86,8 @@ export function App() {
             <strong>{t.appTitle}</strong>
           </div>
           <div className="topbar-status">
-            <span>
+            <span className="runtime-connection">
+              <i aria-hidden="true" />
               {t.runtimeStatus} <strong>{t.runtimeConnected}</strong>
             </span>
           </div>

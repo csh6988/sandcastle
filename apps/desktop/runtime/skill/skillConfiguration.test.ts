@@ -112,6 +112,7 @@ describe("Skill Configuration", () => {
           },
           { id: "reviewer", skillIds: ["code-review"] },
           { id: "evaluator", skillIds: ["pre-release"] },
+          { id: "delivery-coordinator", skillIds: [] },
         ],
       );
       assert.deepEqual(

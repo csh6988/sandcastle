@@ -24,16 +24,442 @@ import {
   promptInteractionSession,
   startRunProgressPolling,
   RuntimeDiagnosticsPanel,
+  ReviewTopicsPanel,
+  ProductReviewStatePanel,
+  TechnicalReviewStatePanel,
   isAgentTestDisabled,
+  RunCollaborationWorkspace,
+  projectCreationInputInvalid,
+  startProjectDepartmentRun,
+  confirmProjectProductBaseline,
+  recoveryOverrideInputProvided,
 } from "./companyPages.js";
+import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
-import type { DepartmentRunView } from "../runtime/interface.js";
+import type {
+  DepartmentRunView,
+  ProductReviewStateView,
+  TechnicalReviewStateView,
+  ReviewTopicView,
+} from "../runtime/interface.js";
 import type {
   AgentCatalogView,
   SkillCatalogView,
 } from "../runtime/interface.js";
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
+
+describe("Review Topics", () => {
+  it("renders exact manifest, individual findings, quorum, and PASS-only gate state", () => {
+    const manifest = {
+      scope: "code" as const,
+      topicId: "topic-1",
+      supportingArtifactVersionIds: ["evidence-1"],
+      supportingSpecRevisionIds: ["spec-1"],
+      harnessSnapshotIds: ["harness-1"],
+      acceptanceCriteria: ["Exact diff is verified"],
+      excludedContext: ["hidden-prompts" as const],
+      workPackageVersionId: "package-v1",
+      repositoryId: "repo-1",
+      sourceCommit: "abc123",
+      diffArtifactVersionId: "diff-v1",
+      diffHash:
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
+    const view = {
+      topic: {
+        id: "topic-1",
+        projectId: "project-1",
+        title: "Independent code review",
+        kind: "code" as const,
+        status: "PASS" as const,
+        revision: 8,
+        manifest,
+        manifestHash:
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        producer: {
+          aiMemberId: "developer",
+          positionId: "software-engineer",
+          sessionId: "producer-session",
+        },
+        quorum: 2,
+        budget: {
+          maxRounds: 2,
+          maxDurationSeconds: 600,
+          maxTokens: 8_000,
+          maxCostCents: 250,
+        },
+        budgetUsed: {
+          rounds: 1,
+          durationSeconds: 90,
+          tokens: 900,
+          costCents: 25,
+        },
+        stopCondition: "blocking-findings-dispositioned" as const,
+        escalationPolicy: "fail-with-evidence" as const,
+        createdAt: "2026-07-27T00:00:00.000Z",
+        updatedAt: "2026-07-27T00:10:00.000Z",
+      },
+      participants: [
+        {
+          id: "owner",
+          role: "owner-participant" as const,
+          aiMemberId: "owner-member",
+          positionId: "owner-position",
+          sessionId: "owner-session",
+          eligibility: {
+            eligible: false,
+            reasons: ["role-excluded" as const],
+            snapshotHash:
+              "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          },
+        },
+        {
+          id: "reviewer",
+          role: "reviewer-participant" as const,
+          aiMemberId: "reviewer-member",
+          positionId: "reviewer-position",
+          sessionId: "reviewer-session",
+          eligibility: {
+            eligible: true,
+            reasons: [],
+            snapshotHash:
+              "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          },
+        },
+      ],
+      findings: [
+        {
+          id: "finding-1",
+          topicId: "topic-1",
+          reviewerParticipantId: "reviewer",
+          reviewerSessionId: "reviewer-session",
+          severity: "high" as const,
+          summary: "Recovery evidence was missing",
+          rationale: "Crash behavior was unverified",
+          impact: "Ambiguous operation state",
+          evidenceRefs: ["test-before"],
+          suggestedOwner: "owner",
+          blocking: true,
+          createdAt: "2026-07-27T00:01:00.000Z",
+        },
+      ],
+      resolutions: [],
+      discussions: [],
+      revisions: [],
+      rechecks: [
+        {
+          id: "recheck-1",
+          topicId: "topic-1",
+          revisionId: "revision-1",
+          reviewerParticipantId: "reviewer",
+          reviewerSessionId: "fresh-session-1",
+          result: "PASS" as const,
+          conditions: [],
+          evidenceRefs: ["test-after"],
+          eligibilitySnapshotHash:
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          createdAt: "2026-07-27T00:08:00.000Z",
+        },
+        {
+          id: "recheck-2",
+          topicId: "topic-1",
+          revisionId: "revision-1",
+          reviewerParticipantId: "fresh-reviewer",
+          reviewerSessionId: "fresh-session-2",
+          result: "PASS" as const,
+          conditions: [],
+          evidenceRefs: ["independent-check"],
+          eligibilitySnapshotHash:
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          createdAt: "2026-07-27T00:09:00.000Z",
+        },
+      ],
+      gateResult: {
+        id: "gate-1",
+        topicId: "topic-1",
+        kind: "code" as const,
+        manifest,
+        manifestHash:
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        revisionId: "revision-1",
+        result: "PASS" as const,
+        satisfiesProductionContract: true,
+        conditions: [],
+        recheckIds: ["recheck-1", "recheck-2"],
+        evidenceRefs: ["test-after", "independent-check"],
+        createdAt: "2026-07-27T00:10:00.000Z",
+      },
+    } satisfies ReviewTopicView;
+
+    const markup = renderToStaticMarkup(<ReviewTopicsPanel topics={[view]} />);
+    assert.match(markup, /data-review-topic="topic-1"/);
+    assert.match(markup, new RegExp(view.topic.manifestHash));
+    assert.match(markup, /data-review-quorum="true">2\/2/);
+    assert.match(markup, /Recovery evidence was missing/);
+    assert.match(markup, /Satisfies downstream production contracts/);
+  });
+});
+
+describe("Product Review state", () => {
+  it("renders immutable Spec lineage, readiness blockers, and PASS Snapshot promotion", () => {
+    const state = {
+      projectId: "project-1",
+      runId: "run-1",
+      productBaselineId: "baseline-1",
+      productBaselineHash: "a".repeat(64),
+      specRevisions: [
+        {
+          id: "spec-r1",
+          projectSpecId: "spec-1",
+          projectId: "project-1",
+          runId: "run-1",
+          productBaselineId: "baseline-1",
+          productBaselineHash: "a".repeat(64),
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            outcome: "Ship checkout",
+            acceptanceCriteria: ["One order"],
+            applicationBoundaries: ["checkout-web"],
+            crossApplicationContracts: ["checkout-v1"],
+            deliveryConstraints: ["Local-first"],
+          },
+          hash: "b".repeat(64),
+          producer: {
+            aiMemberId: "product-planner-member",
+            positionId: "product-planner",
+            sessionId: "session-1",
+          },
+          createdAt: "2026-07-27T00:00:00.000Z",
+        },
+      ],
+      reviewTopics: [],
+      readinessEvidence: [],
+      readinessBlockers: ["readiness-blocker-1"],
+      promotion: {
+        id: "promotion-1",
+        topicId: "topic-1",
+        qualityGateResultId: "gate-1",
+        projectSpecRevisionId: "spec-r1",
+        projectSpecHash: "b".repeat(64),
+        readinessEvidenceIds: ["readiness-1"],
+        sourceSnapshotRevisionId: "snapshot-r1",
+        snapshotRevisionId: "snapshot-r2",
+        snapshotHash: "c".repeat(64),
+        createdAt: "2026-07-27T00:10:00.000Z",
+      },
+      snapshotLineage: [
+        {
+          id: "snapshot-r1",
+          revision: 1,
+          parentRevision: null,
+          hash: "d".repeat(64),
+        },
+        {
+          id: "snapshot-r2",
+          revision: 2,
+          parentRevision: 1,
+          hash: "c".repeat(64),
+        },
+      ],
+    } satisfies ProductReviewStateView;
+
+    const markup = renderToStaticMarkup(
+      <ProductReviewStatePanel state={state} />,
+    );
+    assert.match(markup, /data-product-review-state/);
+    assert.match(markup, /1 immutable Project Spec revision/);
+    assert.match(markup, /Blocked by readiness-blocker-1/);
+    assert.match(markup, /PASS promoted Snapshot snapshot-r2 from snapshot-r1/);
+  });
+});
+
+describe("Technical Review state", () => {
+  it("renders exact Application Specs, proposal, contracts, and accepted baseline", () => {
+    const applicationSpecRef = {
+      applicationId: "checkout-web",
+      id: "application-spec-r1",
+      hash: "b".repeat(64),
+    };
+    const contractRef = {
+      id: "checkout-submit",
+      version: "1",
+      hash: "c".repeat(64),
+    };
+    const state = {
+      projectId: "project-1",
+      runId: "run-1",
+      applications: [
+        {
+          id: "checkout-web",
+          projectId: "project-1",
+          repositoryReference: "/work/checkout-web",
+          applicationKey: "web",
+          ownership: "checkout-team",
+          buildCommand: "npm run build:web",
+          testCommand: "npm run test:web",
+          revision: 1 as const,
+          createdAt: "2026-07-27T00:00:00.000Z",
+        },
+      ],
+      applicationSpecRevisions: [
+        {
+          id: applicationSpecRef.id,
+          applicationSpecId: "application-spec-1",
+          applicationId: applicationSpecRef.applicationId,
+          projectId: "project-1",
+          runId: "run-1",
+          promotedProjectSpecRevisionId: "project-spec-r1",
+          promotedProjectSpecHash: "a".repeat(64),
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            design: "Submit checkout commands.",
+            acceptanceCriteria: ["One order is created."],
+            workPackageConstraints: ["Isolated execution."],
+            integrationObligations: ["Produce checkout-submit."],
+            contractRefs: [{ id: "checkout-submit", version: "1" }],
+          },
+          hash: applicationSpecRef.hash,
+          producer: {
+            aiMemberId: "software-architect-member",
+            positionId: "software-architect",
+            sessionId: "architect-session",
+          },
+          createdAt: "2026-07-27T00:01:00.000Z",
+        },
+      ],
+      technicalBaselineProposals: [
+        {
+          id: "proposal-r1",
+          technicalBaselineProposalId: "proposal-1",
+          projectId: "project-1",
+          runId: "run-1",
+          promotedProjectSpecRevisionId: "project-spec-r1",
+          promotedProjectSpecHash: "a".repeat(64),
+          readinessEvidence: [{ id: "readiness-1", hash: "d".repeat(64) }],
+          applicationSpecRevisions: [applicationSpecRef],
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            architecture: "Web calls Orders API.",
+            dependencyGraph: ["web -> api"],
+            contracts: [
+              {
+                id: contractRef.id,
+                version: contractRef.version,
+                producerApplicationId: "checkout-web",
+                consumerApplicationId: "orders-api",
+                kind: "api" as const,
+                schema: "POST /orders",
+                compatibilityPolicy: "exact" as const,
+                compatibility: "compatible" as const,
+                evidenceRefs: ["contract-pass"],
+                testCommands: ["npm run test:contract"],
+              },
+            ],
+            riskPolicy: ["Reject duplicates."],
+            permissionPolicy: ["No production credentials."],
+            testStrategy: ["Run contract tests."],
+          },
+          hash: "e".repeat(64),
+          producer: {
+            aiMemberId: "software-architect-member",
+            positionId: "software-architect",
+            sessionId: "architect-session",
+          },
+          createdAt: "2026-07-27T00:02:00.000Z",
+        },
+      ],
+      applicationContracts: [
+        {
+          id: contractRef.id,
+          version: contractRef.version,
+          producerApplicationId: "checkout-web",
+          consumerApplicationId: "orders-api",
+          kind: "api" as const,
+          schema: "POST /orders",
+          compatibilityPolicy: "exact" as const,
+          compatibility: "compatible" as const,
+          evidenceRefs: ["contract-pass"],
+          testCommands: ["npm run test:contract"],
+          hash: contractRef.hash,
+        },
+      ],
+      reviewTopics: [],
+      conditionalObligations: [],
+      acceptedBaseline: {
+        id: "technical-baseline-1",
+        projectId: "project-1",
+        runId: "run-1",
+        proposalRevisionId: "proposal-r1",
+        manifest: {
+          schemaVersion: 1 as const,
+          promotedProjectSpecRevisionId: "project-spec-r1",
+          promotedProjectSpecHash: "a".repeat(64),
+          readinessEvidence: [{ id: "readiness-1", hash: "d".repeat(64) }],
+          applicationSpecRevisions: [applicationSpecRef],
+          proposalRevisionId: "proposal-r1",
+          proposalRevisionHash: "e".repeat(64),
+          crossApplicationContracts: [contractRef],
+          architecture: "Web calls Orders API.",
+          dependencyGraph: ["web -> api"],
+          riskPolicy: ["Reject duplicates."],
+          permissionPolicy: ["No production credentials."],
+          testStrategy: ["Run contract tests."],
+        },
+        hash: "f".repeat(64),
+        createdAt: "2026-07-27T00:05:00.000Z",
+      },
+      promotion: {
+        id: "technical-promotion-1",
+        topicId: "technical-topic-1",
+        qualityGateResultId: "technical-gate-1",
+        technicalBaselineId: "technical-baseline-1",
+        technicalBaselineHash: "f".repeat(64),
+        proposalRevisionId: "proposal-r1",
+        proposalRevisionHash: "e".repeat(64),
+        sourceSnapshotRevisionId: "snapshot-r2",
+        snapshotRevisionId: "snapshot-r3",
+        snapshotHash: "1".repeat(64),
+        createdAt: "2026-07-27T00:05:00.000Z",
+      },
+      snapshotLineage: [
+        {
+          id: "snapshot-r1",
+          revision: 1,
+          parentRevision: null,
+          hash: "2".repeat(64),
+        },
+        {
+          id: "snapshot-r2",
+          revision: 2,
+          parentRevision: 1,
+          hash: "3".repeat(64),
+        },
+        {
+          id: "snapshot-r3",
+          revision: 3,
+          parentRevision: 2,
+          hash: "1".repeat(64),
+        },
+      ],
+    } satisfies TechnicalReviewStateView;
+
+    const markup = renderToStaticMarkup(
+      <TechnicalReviewStatePanel state={state} />,
+    );
+    assert.match(markup, /data-technical-review-state/);
+    assert.match(markup, /1 immutable Application Spec revision/);
+    assert.match(markup, /Proposal r1/);
+    assert.match(markup, /1 compatible Cross-Application Contract revision/);
+    assert.match(
+      markup,
+      /PASS accepted Technical Baseline technical-baseline-1/,
+    );
+  });
+});
 
 describe("Artifact lineage", () => {
   it("renders exact producer and input Artifact Version identities", () => {
@@ -407,7 +833,7 @@ describe("Department detail", () => {
     assert.match(overview, /Software R&amp;D/);
     assert.match(overview, /Built-in department/);
     assert.match(overview, /Published Pipeline v2/);
-    assert.match(overview, /5 positions/);
+    assert.match(overview, /6 positions/);
     assert.match(positions, /Product Planner/);
     assert.match(positions, /Software Architect/);
     assert.match(positions, /Software Engineer/);
@@ -843,6 +1269,22 @@ describe("Department detail", () => {
 });
 
 describe("Project detail", () => {
+  it("requires at least one non-empty Recovery Override input", () => {
+    assert.equal(recoveryOverrideInputProvided("", "", "", ""), false);
+    assert.equal(recoveryOverrideInputProvided(" ", "  ", "", " "), false);
+    assert.equal(
+      recoveryOverrideInputProvided("", "scripted-model", "", ""),
+      true,
+    );
+  });
+
+  it("blocks blank and whitespace-only Project creation input", () => {
+    assert.equal(projectCreationInputInvalid("", "Goal"), true);
+    assert.equal(projectCreationInputInvalid("Project", ""), true);
+    assert.equal(projectCreationInputInvalid("   ", "  "), true);
+    assert.equal(projectCreationInputInvalid("Project", "Goal"), false);
+  });
+
   it("renders Approve and Reject actions for a waiting Human Approval", () => {
     const waitingRun = {
       ...scriptedDepartmentRun,
@@ -891,8 +1333,15 @@ describe("Project detail", () => {
               cycle: 1,
               status: "pending" as const,
               decision: null,
+              requestedAction: "Approve completion",
+              inputManifestHash: null,
+              eligibleHumanPolicy: { policy: "any" },
+              expiresAt: null,
+              decisionActor: null,
+              decisionCommandId: null,
               createdAt: "2026-07-15T00:00:00.000Z",
               decidedAt: null,
+              expiredAt: null,
             },
           ],
           requiredDependencyIds: ["start"],
@@ -933,6 +1382,43 @@ describe("Project detail", () => {
     assert.match(markup, />Approve</);
     assert.match(markup, />Request changes</);
     assert.match(markup, />Reject</);
+
+    const expiredRun: DepartmentRunView = {
+      ...waitingRun,
+      run: { ...waitingRun.run, status: "blocked", revision: 3 },
+      nodes: waitingRun.nodes.map((node) =>
+        node.id === "node-run-approval"
+          ? {
+              ...node,
+              status: "failed",
+              failure: {
+                code: "APPROVAL_EXPIRED",
+                message: "The Approval request expired.",
+              },
+              approvals: node.approvals.map((approval) => ({
+                ...approval,
+                status: "expired",
+                expiredAt: "2026-07-15T00:01:00.000Z",
+              })),
+            }
+          : node,
+      ),
+    };
+    const expiredMarkup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onDecision={() => undefined}
+        onRetryApproval={() => undefined}
+        onRetry={() => undefined}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        run={expiredRun}
+        t={messages.en}
+      />,
+    );
+    assert.match(expiredMarkup, /data-run-approval-expired/);
+    assert.match(expiredMarkup, /data-run-approval-retry="node-run-approval"/);
   });
 
   it("renders structured run progress and separated node timeline regions", () => {
@@ -990,6 +1476,12 @@ describe("Project detail", () => {
           runId: "run-1",
           pipelineNodeId: "implement",
           nodeType: "ai-task",
+          handler: {
+            nodeId: "implement",
+            handlerKindId: "ai-task@1",
+            inputSchemaHash: "c".repeat(64),
+            outputSchemaHash: "d".repeat(64),
+          },
           status: "running",
           attemptCount: 1,
           attempts: [
@@ -1041,6 +1533,8 @@ describe("Project detail", () => {
     assert.match(markup, /data-run-current-activity/);
     assert.match(markup, /data-run-node-timeline/);
     assert.match(markup, /data-run-node-summary="node-run-implement"/);
+    assert.match(markup, /data-node-handler-kind="ai-task@1"/);
+    assert.match(markup, />ai-task@1</);
     assert.match(markup, /class="run-node-status"/);
     assert.match(markup, /class="run-node-attempts"/);
     assert.match(markup, /class="run-node-evidence"/);
@@ -1235,6 +1729,7 @@ describe("Project detail", () => {
     assert.match(markup, /data-project-run-detail/);
     assert.match(markup, /class="primary-button"/);
     assert.match(markup, /data-start-department-run/);
+    assert.match(markup, /data-open-consultation/);
     assert.match(markup, /Start Department Run/);
     assert.match(markup, /class="run-start-field"/);
     assert.match(markup, /data-run-start-submit/);
@@ -1270,6 +1765,336 @@ describe("Project detail", () => {
 });
 
 describe("Agent Interaction workspace", () => {
+  it("confirms the exact Runtime Product Proposal and re-queries authoritative Baseline/Run state", async () => {
+    const awaiting = {
+      project: { id: "project-1", name: "Checkout", goal: "Ship", revision: 1 },
+      proposal: {
+        id: "proposal-1",
+        projectId: "project-1",
+        status: "awaiting-confirmation" as const,
+        revision: 2,
+        currentRevision: {
+          id: "proposal-r1",
+          revision: 1,
+          hash: "a".repeat(64),
+          content: {
+            goal: "Ship",
+            users: ["Customers"],
+            scope: ["Checkout"],
+            nonGoals: [],
+            acceptanceCriteria: ["One order"],
+            constraints: ["Local-first"],
+            risks: ["Retries"],
+            openQuestions: [],
+          },
+          producer: {
+            aiMemberId: "product-planner-member",
+            positionId: "product-planner",
+            sessionId: "session-1",
+          },
+          editedBy: {
+            type: "human" as const,
+            id: "local-user",
+            authenticatedBy: "local-session" as const,
+          },
+          createdAt: "2026-07-15T00:00:00.000Z",
+        },
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:01:00.000Z",
+      },
+      baselines: [],
+      formalRuns: [],
+    };
+    const confirmed = {
+      ...awaiting,
+      proposal: { ...awaiting.proposal, status: "confirmed" as const },
+      baselines: [
+        {
+          id: "baseline-1",
+          projectId: "project-1",
+          sourceProposalRevisionId: "proposal-r1",
+          sourceProposalHash: "a".repeat(64),
+          content: awaiting.proposal.currentRevision.content,
+          hash: "a".repeat(64),
+          confirmedBy: {
+            type: "human" as const,
+            id: "local-user",
+            authenticatedBy: "local-session" as const,
+          },
+          confirmationCommandId: "confirm-1",
+          confirmedAt: "2026-07-15T00:02:00.000Z",
+          runId: "run-1",
+          snapshotRevisionId: "snapshot-r1",
+        },
+      ],
+      formalRuns: [
+        {
+          runId: "run-1",
+          productBaselineId: "baseline-1",
+          snapshotRevisionId: "snapshot-r1",
+          parentRunId: null,
+          forkedFromSnapshotRevisionId: null,
+          status: "ready",
+          createdAt: "2026-07-15T00:02:00.000Z",
+        },
+      ],
+    };
+    const queries: unknown[] = [];
+    const commands: unknown[] = [];
+    const bridge = {
+      query: async (query: unknown) => {
+        queries.push(query);
+        return {
+          view: queries.length === 1 ? awaiting : confirmed,
+          asOfSequence: queries.length,
+        };
+      },
+      execute: async (command: unknown) => {
+        commands.push(command);
+        return { status: "succeeded", value: confirmed, effectIds: [] };
+      },
+    } as unknown as Parameters<typeof confirmProjectProductBaseline>[0];
+
+    const result = await confirmProjectProductBaseline(
+      bridge,
+      "project-1",
+      "software-rnd",
+      {
+        agentOverrideId: "claude-code",
+        forkSourceRunId: "run-0",
+        forkSourceSnapshotRevisionId: "snapshot-r0",
+      },
+    );
+
+    assert.equal(result.baselines[0]?.runId, "run-1");
+    assert.equal(queries.length, 2);
+    assert.equal(commands.length, 1);
+    assert.deepEqual(
+      (commands[0] as { readonly expectedRevision: number }).expectedRevision,
+      2,
+    );
+    assert.deepEqual((commands[0] as { readonly command: unknown }).command, {
+      type: "confirm-product-baseline",
+      projectId: "project-1",
+      departmentId: "software-rnd",
+      agentOverrideId: "claude-code",
+      forkSourceRunId: "run-0",
+      forkSourceSnapshotRevisionId: "snapshot-r0",
+      proposalRevisionId: "proposal-r1",
+      proposalHash: "a".repeat(64),
+    });
+  });
+
+  it("coalesces concurrent Project confirmation into one Department Run start", async () => {
+    let startCalls = 0;
+    let executeCalls = 0;
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const startedRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, id: "run-confirm", revision: 0 },
+    };
+    const advancedRun: DepartmentRunView = {
+      ...startedRun,
+      run: { ...startedRun.run, revision: 6, status: "waiting-approval" },
+    };
+    const runtime = {
+      startRun: async () => {
+        startCalls += 1;
+        await startGate;
+        return startedRun;
+      },
+      executeReady: async () => {
+        executeCalls += 1;
+        return advancedRun;
+      },
+    } as unknown as Parameters<typeof startProjectDepartmentRun>[0];
+
+    const first = startProjectDepartmentRun(
+      runtime,
+      "project-confirm",
+      "software-rnd",
+    );
+    const second = startProjectDepartmentRun(
+      runtime,
+      "project-confirm",
+      "software-rnd",
+    );
+    releaseStart();
+
+    assert.equal((await first).run.id, "run-confirm");
+    assert.equal((await second).run.id, "run-confirm");
+    assert.equal(startCalls, 1);
+    assert.equal(executeCalls, 1);
+  });
+
+  it("keeps Project Consultation informal and prevents a formal Run before explicit confirmation", () => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const markup = renderToStaticMarkup(
+      <ProjectDetailView
+        project={project}
+        t={messages.en}
+        initialTab="consultation"
+        onBack={() => undefined}
+        onSave={async () => project}
+        onArchive={async () => project}
+      />,
+    );
+
+    assert.match(markup, /data-project-consultation/);
+    assert.match(markup, /data-consultation-mode="informal"/);
+    assert.match(markup, /data-consultation-start/);
+    assert.match(markup, /data-consultation-confirm/);
+    assert.doesNotMatch(markup, /data-run-collaboration-workspace/);
+  });
+
+  it("renders formal collaboration with Department Run, Snapshot, and Current Node context", () => {
+    const interaction = {
+      session: {
+        id: "session-1",
+        mode: "run-collaboration" as const,
+        projectId: "project-1",
+        runId: "run-1",
+        nodeRunId: "node-run-1",
+        status: "active" as const,
+        createdAt: "2026-07-15T00:00:00.000Z",
+        closedAt: null,
+      },
+      participants: [],
+      messages: [],
+      turns: [],
+      permissions: [
+        {
+          id: "permission-1",
+          sessionId: "session-1",
+          runId: "run-1",
+          nodeRunId: "node-run-start",
+          scope: "artifact:write",
+          status: "pending" as const,
+          expiresAt: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          decidedAt: null,
+        },
+        {
+          id: "permission-2",
+          sessionId: "session-1",
+          runId: "run-1",
+          nodeRunId: "node-run-start",
+          scope: "repository.read",
+          status: "approved" as const,
+          expiresAt: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          decidedAt: "2026-07-15T00:01:00.000Z",
+        },
+        {
+          id: "permission-3",
+          sessionId: "session-1",
+          runId: "run-1",
+          nodeRunId: "node-run-start",
+          scope: "repository.delete",
+          status: "denied" as const,
+          expiresAt: null,
+          createdAt: "2026-07-15T00:00:00.000Z",
+          decidedAt: "2026-07-15T00:02:00.000Z",
+        },
+      ],
+    };
+    const markup = renderToStaticMarkup(
+      <RunCollaborationWorkspace
+        artifacts={[
+          {
+            id: "artifact-version-1",
+            artifactId: "artifact-1",
+            projectId: "project-1",
+            type: "technical-plan",
+            schemaVersion: "1",
+            logicalName: "technical-plan.md",
+            version: 1,
+            contentRef: ".sandcastle/artifacts/technical-plan.md",
+            contentHash: "a".repeat(64),
+            byteSize: 128,
+            status: "produced",
+            producer: {
+              runId: "run-1",
+              nodeRunId: "node-run-start",
+              nodeAttemptId: "attempt-1",
+              snapshotRevisionId: "snapshot-1",
+              aiMemberId: "member-1",
+            },
+            createdAt: "2026-07-15T00:00:00.000Z",
+          },
+        ]}
+        collaboration={interaction}
+        consultation={{
+          ...interaction,
+          session: {
+            ...interaction.session,
+            id: "consultation-1",
+            mode: "consultation",
+            runId: null,
+            nodeRunId: null,
+            status: "closed",
+          },
+        }}
+        busy={false}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onDecision={() => undefined}
+        onRetryApproval={() => undefined}
+        onRetry={() => undefined}
+        onFork={() => undefined}
+        onPermissionDecision={() => undefined}
+        onPermissionRequest={() => undefined}
+        onSend={() => undefined}
+        run={scriptedDepartmentRun}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-run-collaboration-workspace/);
+    assert.match(markup, /data-run-collaboration-sessions/);
+    assert.match(markup, /data-run-collaboration-conversation/);
+    assert.match(markup, /data-run-collaboration-evidence/);
+    assert.match(markup, /data-consultation-readonly/);
+    assert.match(markup, /data-permission-request="permission-1"/);
+    assert.match(markup, /data-permission-status-icon="pending"/);
+    assert.match(markup, /data-permission-status-icon="approved"/);
+    assert.match(markup, /data-permission-status-icon="denied"/);
+    assert.match(markup, /data-run-artifact="artifact-version-1"/);
+    assert.match(markup, /data-run-context-run="run-1"/);
+    assert.match(markup, /data-run-context-snapshot="snapshot-1"/);
+    assert.match(markup, /data-run-context-node="node-run-start"/);
+  });
+
+  it("uses accessible local SVG icons for domain and utility actions", () => {
+    const markup = renderToStaticMarkup(
+      <>
+        <Icon name="project" size={24} />
+        <Icon name="approval" size={20} />
+        <IconButton label="Refresh runs" icon="refresh" />
+      </>,
+    );
+    assert.match(markup, /data-icon="project"/);
+    assert.match(markup, /data-icon="approval"/);
+    assert.match(markup, /aria-label="Refresh runs"/);
+    assert.match(markup, /data-icon-button/);
+    assert.match(markup, /<svg/);
+    assert.doesNotMatch(markup, /[🔍✕⟳✅]/u);
+  });
+
   it("localizes persisted Agent execution status outside the chat transcript", () => {
     assert.equal(
       interactionStatusLabel(messages.zh, "Agent is processing this message."),
@@ -1308,18 +2133,34 @@ describe("Agent Interaction workspace", () => {
         },
       ],
       messages: [],
+      turns: [],
       permissions: [],
     };
     const runtime = {
       promptInteraction: async (input: Record<string, string>) => {
         calls.push(input);
         return {
-          id: "message-1",
+          id: "turn-1",
           sessionId: "session-1",
-          participantId: "human-1",
-          kind: "text" as const,
-          content: "你好",
+          inputMessageId: "message-1",
+          outputMessageId: null,
+          status: "queued" as const,
+          commandId: "command-1",
+          executionOperationKey: "interaction-turn:turn-1",
+          executionLeaseId: null,
+          executionEpoch: null,
+          fenceToken: null,
+          mechanism: "model-only" as const,
+          mechanismVersion: "1",
+          contextHash: "a".repeat(64),
+          contextSchemaHash: "b".repeat(64),
+          terminalExecutionFactId: null,
+          providerExecutionRef: null,
+          failureCode: null,
+          failureMessage: null,
           createdAt: "2026-07-15T00:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
         };
       },
       inspectInteraction: async () => interaction,
@@ -1394,7 +2235,7 @@ describe("Agent Interaction workspace", () => {
     assert.equal(cleared, 42);
   });
 
-  it("binds Run Collaboration to the current node with human and AI participants", async () => {
+  it("coalesces concurrent Run Collaboration rebinds and reuses the restored current-node Session", async () => {
     const collaborationRun: DepartmentRunView = {
       ...scriptedDepartmentRun,
       run: { ...scriptedDepartmentRun.run, status: "running" },
@@ -1444,19 +2285,29 @@ describe("Agent Interaction workspace", () => {
       ],
     };
     const participantInputs: Array<Record<string, string>> = [];
+    let sessionCreated = false;
+    const existingInteraction = {
+      session: {
+        id: "session-1",
+        mode: "run-collaboration" as const,
+        projectId: "project-1",
+        runId: "run-1",
+        nodeRunId: "node-run-start",
+        status: "active" as const,
+        createdAt: "2026-07-15T00:00:00.000Z",
+        closedAt: null,
+      },
+      participants: [],
+      messages: [],
+      turns: [],
+      permissions: [],
+    };
     const runtime = {
+      interactions: async () => (sessionCreated ? [existingInteraction] : []),
       createInteractionSession: async (input: Record<string, string>) => {
         participantInputs.push({ session: "create", ...input });
-        return {
-          id: "session-1",
-          mode: "run-collaboration" as const,
-          projectId: "project-1",
-          runId: "run-1",
-          nodeRunId: "node-run-start",
-          status: "active" as const,
-          createdAt: "2026-07-15T00:00:00.000Z",
-          closedAt: null,
-        };
+        sessionCreated = true;
+        return existingInteraction.session;
       },
       addInteractionParticipant: async (input: Record<string, string>) => {
         participantInputs.push(input);
@@ -1469,24 +2320,22 @@ describe("Agent Interaction workspace", () => {
           createdAt: "2026-07-15T00:00:00.000Z",
         };
       },
-      inspectInteraction: async () => ({
-        session: {
-          id: "session-1",
-          mode: "run-collaboration" as const,
-          projectId: "project-1",
-          runId: "run-1",
-          nodeRunId: "node-run-start",
-          status: "active" as const,
-          createdAt: "2026-07-15T00:00:00.000Z",
-          closedAt: null,
-        },
-        participants: [],
-        messages: [],
-        permissions: [],
-      }),
+      inspectInteraction: async () => existingInteraction,
     } as unknown as Parameters<typeof createRunCollaborationSession>[0];
 
-    await createRunCollaborationSession(runtime, "project-1", collaborationRun);
+    const [first, second] = await Promise.all([
+      createRunCollaborationSession(runtime, "project-1", collaborationRun),
+      createRunCollaborationSession(runtime, "project-1", collaborationRun),
+    ]);
+
+    assert.equal(first?.session.id, "session-1");
+    assert.equal(second?.session.id, "session-1");
+    const restored = await createRunCollaborationSession(
+      runtime,
+      "project-1",
+      collaborationRun,
+    );
+    assert.equal(restored?.session.id, "session-1");
 
     assert.deepEqual(participantInputs, [
       {

@@ -18,6 +18,12 @@ const main = async (): Promise<void> => {
     address: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_ADDRESS"),
     companyDir: requiredEnvironment("SANDCASTLE_COMPANY_DIR"),
     token: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_TOKEN"),
+    consumerId: process.env.SANDCASTLE_COMPANY_RUNTIME_CONSUMER_ID,
+    principal: {
+      type: "human",
+      id: "local-desktop-user",
+      authenticatedBy: "local-session",
+    },
     executionAdapter,
     interactionExecutionAdapter,
   });

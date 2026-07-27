@@ -9,6 +9,10 @@ import {
 } from "../interface.js";
 import type { SkillConfiguration } from "../skill/skillConfiguration.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
+import {
+  defaultNodeHandlerRegistry,
+  type NodeHandlerDefinition,
+} from "./nodeHandlerRegistry.js";
 
 export class PipelineConfigurationError extends Error {
   constructor(
@@ -96,6 +100,19 @@ export const openPipelineConfiguration = (
           "pipeline.validation.nodeTypeUnsupported",
           { nodeId: node.id },
         );
+      }
+      if (allowedTypes.has(node.type)) {
+        const definition = defaultNodeHandlerRegistry.resolve(
+          node.type as NodeHandlerDefinition["nodeType"],
+          node.handlerKindId,
+        );
+        if (!definition) {
+          addIssue(
+            "HANDLER_VERSION_UNAVAILABLE",
+            "pipeline.validation.handlerVersionUnavailable",
+            { nodeId: node.id },
+          );
+        }
       }
       if (node.skillFlowId && node.type !== "ai-task") {
         addIssue(
@@ -524,7 +541,10 @@ export const openPipelineConfiguration = (
     const versions = (
       database
         .prepare(
-          `SELECT id, version, graph_json AS graphJson, hash, published_at AS publishedAt
+          `SELECT id, version, graph_json AS graphJson, hash,
+                  handler_registry_version AS handlerRegistryVersion,
+                  handler_registry_hash AS handlerRegistryHash,
+                  published_at AS publishedAt
              FROM pipeline_versions
             WHERE department_id = ?
          ORDER BY version DESC`,
@@ -534,12 +554,40 @@ export const openPipelineConfiguration = (
         readonly version: number;
         readonly graphJson: string;
         readonly hash: string;
+        readonly handlerRegistryVersion: number;
+        readonly handlerRegistryHash: string;
         readonly publishedAt: string;
       }>
-    ).map((version) => ({
-      ...version,
-      graph: DepartmentPipelineGraphSchema.parse(JSON.parse(version.graphJson)),
-    }));
+    ).map((version) => {
+      const handlers = (
+        database
+          .prepare(
+            `SELECT node_id AS nodeId, handler_kind_id AS handlerKindId,
+                  input_schema_hash AS inputSchemaHash,
+                  output_schema_hash AS outputSchemaHash
+             FROM pipeline_version_handlers
+            WHERE pipeline_version_id = ?
+         ORDER BY node_order`,
+          )
+          .all(version.id) as Array<{
+          readonly nodeId: string;
+          readonly handlerKindId: string;
+          readonly inputSchemaHash: string;
+          readonly outputSchemaHash: string;
+        }>
+      ).map((binding) => ({ ...binding }));
+      return {
+        ...version,
+        graph: DepartmentPipelineGraphSchema.parse(
+          JSON.parse(version.graphJson),
+        ),
+        handlerRegistry: {
+          version: Number(version.handlerRegistryVersion),
+          hash: version.handlerRegistryHash,
+        },
+        handlers,
+      };
+    });
     const current = versions.find(
       (version) => version.id === department.activePipelineVersionId,
     );
@@ -574,6 +622,8 @@ export const openPipelineConfiguration = (
             version: Number(current.version),
             graph: current.graph,
             hash: current.hash,
+            handlerRegistry: current.handlerRegistry,
+            handlers: current.handlers,
             publishedAt: current.publishedAt,
           }
         : null,
@@ -582,6 +632,8 @@ export const openPipelineConfiguration = (
         version: Number(version.version),
         graph: version.graph,
         hash: version.hash,
+        handlerRegistry: version.handlerRegistry,
+        handlers: version.handlers,
         publishedAt: version.publishedAt,
         nodeCount: version.graph.nodes.length,
         edgeCount: version.graph.edges.length,
@@ -685,6 +737,19 @@ export const openPipelineConfiguration = (
       });
       const graphJson = canonicalPipelineJson(graph);
       const hash = pipelineHash(graph);
+      const handlers = graph.nodes.map((node, nodeOrder) => {
+        const definition = defaultNodeHandlerRegistry.resolve(
+          node.type,
+          node.handlerKindId,
+        );
+        if (!definition) {
+          throw new PipelineConfigurationError(
+            "HANDLER_VERSION_UNAVAILABLE",
+            `Node ${node.id} requires unavailable Handler ${node.handlerKindId ?? "default"}.`,
+          );
+        }
+        return { nodeId: node.id, nodeOrder, ...definition };
+      });
       const id = randomUUID();
       const publishedAt = new Date().toISOString();
 
@@ -714,10 +779,36 @@ export const openPipelineConfiguration = (
         database
           .prepare(
             `INSERT INTO pipeline_versions(
-               id, department_id, version, status, graph_json, published_at, hash
-             ) VALUES (?, ?, ?, 'published', ?, ?, ?)`,
+               id, department_id, version, status, graph_json, published_at, hash,
+               handler_registry_version, handler_registry_hash
+             ) VALUES (?, ?, ?, 'published', ?, ?, ?, ?, ?)`,
           )
-          .run(id, departmentId, nextVersion, graphJson, publishedAt, hash);
+          .run(
+            id,
+            departmentId,
+            nextVersion,
+            graphJson,
+            publishedAt,
+            hash,
+            defaultNodeHandlerRegistry.version,
+            defaultNodeHandlerRegistry.hash,
+          );
+        const insertHandler = database.prepare(
+          `INSERT INTO pipeline_version_handlers(
+             pipeline_version_id, node_id, node_order, handler_kind_id,
+             input_schema_hash, output_schema_hash
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        for (const binding of handlers) {
+          insertHandler.run(
+            id,
+            binding.nodeId,
+            binding.nodeOrder,
+            binding.handlerKindId,
+            binding.inputSchemaHash,
+            binding.outputSchemaHash,
+          );
+        }
         database
           .prepare(
             "UPDATE departments SET active_pipeline_version_id = ? WHERE id = ?",

@@ -55,8 +55,14 @@ import {
   RUNTIME_EVENTS_CHANNEL,
   RUNTIME_EVENTS_CONSUMER_CHANNEL,
   RUNTIME_EVENTS_ACK_CHANNEL,
+  RUNTIME_TUNNEL_CHANNEL,
+  RUNTIME_EVENT_PORT_CHANNEL,
+  RuntimeEventFrameSchema,
+  RuntimeTunnelRequestSchema,
+  type RuntimeEventPort,
   RUNS_LIST_CHANNEL,
   RUN_APPROVAL_DECIDE_CHANNEL,
+  RUN_APPROVAL_RETRY_CHANNEL,
   RUN_CANCEL_CHANNEL,
   RUN_NODE_RETRY_CHANNEL,
   RUN_EXECUTE_READY_CHANNEL,
@@ -77,9 +83,37 @@ import {
 import {
   CompanyCommandSchema,
   DepartmentPipelineDraftGraphSchema,
+  type ActorRef,
+  type CompanyQuery,
+  type EnvelopeCommand,
+  type QueryEnvelope,
+  type CommandEnvelope,
 } from "../runtime/interface.js";
+import { z } from "zod";
 
 interface RuntimeHealthSource {
+  queryEnvelope?: (envelope: QueryEnvelope<CompanyQuery>) => Promise<unknown>;
+  executeEnvelope?: (
+    envelope: CommandEnvelope<EnvelopeCommand>,
+  ) => Promise<unknown>;
+  openSubscription?: () => Promise<{
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+    readonly barrierSequence: number;
+  }>;
+  readSubscription?: (input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+    readonly limit: number;
+  }) => Promise<{
+    readonly events: readonly unknown[];
+    readonly nextSequence: number;
+    readonly hasMore: boolean;
+  }>;
+  closeSubscription?: (input: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+  }) => Promise<void>;
   health(): ReturnType<SandcastleBridge["runtime"]["health"]>;
   inspectAgentCatalog: SandcastleBridge["runtime"]["inspectAgentCatalog"];
   discoverAgents: SandcastleBridge["runtime"]["discoverAgents"];
@@ -128,6 +162,7 @@ interface RuntimeHealthSource {
   cancelRun: SandcastleBridge["runtime"]["cancelRun"];
   recoverRun: SandcastleBridge["runtime"]["recoverRun"];
   decideApproval: SandcastleBridge["runtime"]["decideApproval"];
+  retryApproval: SandcastleBridge["runtime"]["retryApproval"];
   retryNode: SandcastleBridge["runtime"]["retryNode"];
   audit: SandcastleBridge["runtime"]["audit"];
   events: SandcastleBridge["runtime"]["events"];
@@ -160,6 +195,76 @@ export interface RuntimeIpcMain {
     channel: string,
     handler: (...args: readonly unknown[]) => Promise<unknown> | unknown,
   ): void;
+}
+
+interface RuntimeIpcFrame {
+  readonly url: string;
+}
+
+interface RuntimeIpcWebContents {
+  readonly id: number;
+  readonly mainFrame: RuntimeIpcFrame;
+  readonly postMessage: (
+    channel: string,
+    message: unknown,
+    ports?: readonly unknown[],
+  ) => void;
+}
+
+interface RuntimeIpcPort extends RuntimeEventPort {
+  on(
+    event: "message",
+    listener: (event: { readonly data: unknown }) => void,
+  ): void;
+}
+
+export interface RuntimeIpcWindow {
+  readonly webContents: RuntimeIpcWebContents;
+}
+
+export interface RuntimeIpcOptions {
+  readonly getWindow?: () => RuntimeIpcWindow | null;
+  readonly allowedOrigins?: readonly string[] | (() => readonly string[]);
+  readonly createMessageChannel?: () => {
+    readonly port1: RuntimeIpcPort;
+    readonly port2: unknown;
+  };
+  readonly principal?: ActorRef;
+  readonly consumerId?: string;
+  readonly maxPayloadBytes?: number;
+  readonly maxCredits?: number;
+  readonly readBatchSize?: number;
+}
+
+export interface RuntimeIpcRegistration {
+  readonly revokeWindow: () => void;
+}
+
+const RuntimeCreditSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    type: z.literal("credit"),
+    subscriptionId: z.string().trim().min(1),
+    subscriptionGeneration: z.number().int().positive(),
+    credits: z.number().int().positive(),
+  })
+  .strict();
+
+type RuntimeEventFrameValue = z.infer<typeof RuntimeEventFrameSchema>["value"];
+
+interface RuntimeEventStreamState {
+  readonly webContentsId: number;
+  readonly handle: {
+    readonly subscriptionId: string;
+    readonly subscriptionGeneration: number;
+    readonly barrierSequence: number;
+  };
+  readonly port: RuntimeIpcPort;
+  credits: number;
+  reading: boolean;
+  cursorAccepted: boolean;
+  closed: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 const exposeRuntimeErrorCode = async <Result>(
@@ -203,7 +308,259 @@ const exposeRuntimeErrorCode = async <Result>(
 export const registerRuntimeIpc = (
   ipcMain: RuntimeIpcMain,
   runtime: () => RuntimeHealthSource,
-): void => {
+  options: RuntimeIpcOptions = {},
+): RuntimeIpcRegistration => {
+  const maxPayloadBytes = options.maxPayloadBytes ?? 256 * 1024;
+  const maxCredits = options.maxCredits ?? 32;
+  const readBatchSize = options.readBatchSize ?? 32;
+  const streams = new Map<number, RuntimeEventStreamState>();
+
+  const trustedPrincipal =
+    options.principal ??
+    ({
+      type: "electron-main",
+      id: "desktop-main",
+      authenticatedBy: "ipc-token",
+    } satisfies ActorRef);
+  const trustedConsumerId = options.consumerId ?? "desktop-window-1";
+
+  const allowedOrigins = (): readonly string[] =>
+    typeof options.allowedOrigins === "function"
+      ? options.allowedOrigins()
+      : (options.allowedOrigins ?? []);
+
+  const assertTrustedSender = (
+    event: unknown,
+    payload: unknown,
+  ): RuntimeIpcWebContents => {
+    const currentWindow = options.getWindow?.();
+    if (!currentWindow)
+      throw new Error("Runtime IPC has no active BrowserWindow.");
+    if (
+      typeof event !== "object" ||
+      event === null ||
+      !((event as { sender?: unknown }).sender === currentWindow.webContents)
+    ) {
+      throw new Error(
+        "Runtime IPC sender is not the registered BrowserWindow.",
+      );
+    }
+    const senderFrame = (event as { senderFrame?: unknown }).senderFrame;
+    if (senderFrame !== currentWindow.webContents.mainFrame) {
+      throw new Error("Runtime IPC only accepts the current main frame.");
+    }
+    const origin = new URL(currentWindow.webContents.mainFrame.url).origin;
+    if (!allowedOrigins().includes(origin)) {
+      throw new Error("Runtime IPC sender origin is not allowlisted.");
+    }
+    const encoded = JSON.stringify(payload);
+    if (
+      encoded === undefined ||
+      Buffer.byteLength(encoded, "utf8") > maxPayloadBytes
+    ) {
+      throw new Error("Runtime IPC payload exceeds the size limit.");
+    }
+    return currentWindow.webContents;
+  };
+
+  const sendFrame = (
+    stream: RuntimeEventStreamState,
+    value: RuntimeEventFrameValue,
+    consumeCredit = true,
+  ): void => {
+    if (stream.closed || streams.get(stream.webContentsId) !== stream) return;
+    if (consumeCredit && stream.credits <= 0) return;
+    const frame = RuntimeEventFrameSchema.parse({
+      subscriptionId: stream.handle.subscriptionId,
+      subscriptionGeneration: stream.handle.subscriptionGeneration,
+      barrierSequence: stream.handle.barrierSequence,
+      value,
+    });
+    if (Buffer.byteLength(JSON.stringify(frame), "utf8") > maxPayloadBytes) {
+      throw new Error("Runtime event frame exceeds the size limit.");
+    }
+    if (consumeCredit) stream.credits -= 1;
+    stream.port.postMessage(frame);
+  };
+
+  const closeStream = (stream: RuntimeEventStreamState): void => {
+    if (stream.closed) return;
+    stream.closed = true;
+    if (stream.timer) clearTimeout(stream.timer);
+    stream.port.close();
+    if (streams.get(stream.webContentsId) === stream) {
+      streams.delete(stream.webContentsId);
+    }
+  };
+
+  const pump = async (stream: RuntimeEventStreamState): Promise<void> => {
+    if (
+      stream.closed ||
+      stream.reading ||
+      stream.credits <= 0 ||
+      streams.get(stream.webContentsId) !== stream
+    ) {
+      return;
+    }
+    stream.reading = true;
+    try {
+      if (!stream.cursorAccepted) {
+        sendFrame(stream, {
+          kind: "control",
+          control: {
+            type: "cursor.accepted",
+            barrierSequence: stream.handle.barrierSequence,
+          },
+        });
+        stream.cursorAccepted = true;
+      }
+      if (stream.credits > 0) {
+        const source = runtime();
+        if (!source.readSubscription) {
+          throw new Error("Runtime event subscription is unavailable.");
+        }
+        const batch = await source.readSubscription({
+          subscriptionId: stream.handle.subscriptionId,
+          subscriptionGeneration: stream.handle.subscriptionGeneration,
+          limit: Math.min(stream.credits, readBatchSize),
+        });
+        for (const event of batch.events) {
+          sendFrame(stream, { kind: "event", event: event as never });
+          if (stream.closed) break;
+        }
+        if (!stream.closed && stream.credits > 0 && !batch.hasMore) {
+          stream.timer = setTimeout(() => {
+            stream.timer = null;
+            void pump(stream);
+          }, 50);
+        }
+      }
+    } catch (error) {
+      if (!stream.closed) {
+        try {
+          sendFrame(
+            stream,
+            {
+              kind: "control",
+              control: {
+                type: "runtime.disconnected",
+                code:
+                  typeof error === "object" &&
+                  error !== null &&
+                  "code" in error &&
+                  typeof error.code === "string"
+                    ? error.code
+                    : "COMPANY_RUNTIME_UNAVAILABLE",
+                message: error instanceof Error ? error.message : String(error),
+              },
+            },
+            false,
+          );
+        } finally {
+          closeStream(stream);
+        }
+      }
+    } finally {
+      stream.reading = false;
+    }
+  };
+
+  const registerStreamCredit = (
+    stream: RuntimeEventStreamState,
+    value: unknown,
+  ): void => {
+    const credit = RuntimeCreditSchema.safeParse(value);
+    if (!credit.success) return;
+    if (
+      credit.data.subscriptionId !== stream.handle.subscriptionId ||
+      credit.data.subscriptionGeneration !==
+        stream.handle.subscriptionGeneration
+    ) {
+      return;
+    }
+    stream.credits = Math.min(maxCredits, stream.credits + credit.data.credits);
+    void pump(stream);
+  };
+
+  ipcMain.handle(RUNTIME_TUNNEL_CHANNEL, async (event, input: unknown) => {
+    const webContents = assertTrustedSender(event, input);
+    const request = RuntimeTunnelRequestSchema.parse(input);
+    const source = runtime();
+    if (request.operation === "query") {
+      if (!source.queryEnvelope) {
+        throw new Error("Typed Runtime query tunnel is unavailable.");
+      }
+      return source.queryEnvelope({
+        schemaVersion: 1,
+        requestId: request.requestId,
+        principal: trustedPrincipal,
+        consumerId: trustedConsumerId,
+        query: request.query,
+      });
+    }
+    if (request.operation === "execute") {
+      if (!source.executeEnvelope) {
+        throw new Error("Typed Runtime command tunnel is unavailable.");
+      }
+      return source.executeEnvelope({
+        schemaVersion: 1,
+        commandId: request.commandId,
+        actor: trustedPrincipal,
+        consumerId: trustedConsumerId,
+        ...(request.expectedRevision === undefined
+          ? {}
+          : { expectedRevision: request.expectedRevision }),
+        command: request.command,
+      });
+    }
+    if (request.operation === "close-event-stream") {
+      const stream = streams.get(webContents.id);
+      if (
+        !stream ||
+        stream.handle.subscriptionId !== request.subscriptionId ||
+        stream.handle.subscriptionGeneration !== request.subscriptionGeneration
+      ) {
+        return { closed: false, stale: true };
+      }
+      closeStream(stream);
+      if (source.closeSubscription) {
+        await source.closeSubscription({
+          subscriptionId: request.subscriptionId,
+          subscriptionGeneration: request.subscriptionGeneration,
+        });
+      }
+      return { closed: true };
+    }
+    if (!source.openSubscription || !options.createMessageChannel) {
+      throw new Error("MessagePort Runtime event stream is unavailable.");
+    }
+    const previous = streams.get(webContents.id);
+    if (previous) closeStream(previous);
+    const handle = await source.openSubscription();
+    const channel = options.createMessageChannel();
+    const stream: RuntimeEventStreamState = {
+      webContentsId: webContents.id,
+      handle,
+      port: channel.port1,
+      credits: 0,
+      reading: false,
+      cursorAccepted: false,
+      closed: false,
+      timer: null,
+    };
+    streams.set(webContents.id, stream);
+    channel.port1.on("message", (message) =>
+      registerStreamCredit(stream, message.data),
+    );
+    channel.port1.start();
+    webContents.postMessage(
+      RUNTIME_EVENT_PORT_CHANNEL,
+      { streamRequestId: request.streamRequestId },
+      [channel.port2],
+    );
+    return handle;
+  });
+
   ipcMain.handle(RUNTIME_HEALTH_CHANNEL, () => runtime().health());
   ipcMain.handle(AGENT_CATALOG_INSPECT_CHANNEL, () =>
     runtime().inspectAgentCatalog(),
@@ -781,6 +1138,7 @@ export const registerRuntimeIpc = (
       | "run.cancel"
       | "run.recover"
       | "run.approval.decide"
+      | "run.approval.retry"
       | "run.node.retry",
     execute: (command: never) => Promise<unknown>,
   ): void => {
@@ -820,7 +1178,26 @@ export const registerRuntimeIpc = (
     "run.approval.decide",
     (command) => runtime().decideApproval(command),
   );
+  registerRunCommand(
+    RUN_APPROVAL_RETRY_CHANNEL,
+    "run.approval.retry",
+    (command) => runtime().retryApproval(command),
+  );
   registerRunCommand(RUN_NODE_RETRY_CHANNEL, "run.node.retry", (command) =>
     runtime().retryNode(command),
   );
+  return {
+    revokeWindow: () => {
+      const currentWindow = options.getWindow?.();
+      if (!currentWindow) return;
+      const stream = streams.get(currentWindow.webContents.id);
+      if (!stream) return;
+      closeStream(stream);
+      const closing = runtime().closeSubscription?.({
+        subscriptionId: stream.handle.subscriptionId,
+        subscriptionGeneration: stream.handle.subscriptionGeneration,
+      });
+      void closing?.catch(() => undefined);
+    },
+  };
 };

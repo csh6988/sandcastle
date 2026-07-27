@@ -8,8 +8,9 @@
   "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
-    "dev:electron": "tsc -p tsconfig.main.json && node scripts/start-dev-electron.mjs",
-    "build": "tsc --noEmit && vite build && tsc -p tsconfig.main.json",
+    "dev:electron": "tsc -p tsconfig.main.json && npm run build:preload && node scripts/start-dev-electron.mjs",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.main.json && npm run build:preload",
+    "build:preload": "node scripts/build-preload.mjs",
     "dist": "npm run dist:unpacked",
     "dist:unpacked": "npm run build && electron-builder --dir",
     "dist:windows": "npm run build && electron-builder --win nsis --x64",
@@ -38,6 +39,7 @@
     "concurrently": "^10.0.3",
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "tsx": "^4.22.5",
     "typescript": "^6.0.3",
     "vite": "^8.1.3"

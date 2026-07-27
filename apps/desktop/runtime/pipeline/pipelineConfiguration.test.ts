@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
-import { DepartmentPipelineDraftGraphSchema } from "../interface.js";
+import {
+  DepartmentPipelineDraftGraphSchema,
+  type DepartmentPipelineDraftGraph,
+} from "../interface.js";
 import { PipelineConfigurationError } from "./pipelineConfiguration.js";
 
 const tempCompanyDir = (): string =>
@@ -43,7 +46,7 @@ describe("Pipeline Configuration", () => {
 
     try {
       const before = database.pipelineConfiguration.inspect("software-rnd");
-      const graph = {
+      const graph: DepartmentPipelineDraftGraph = {
         ...before.draft.graph,
         nodes: before.draft.graph.nodes.map((node) =>
           node.id === "technical-plan"
@@ -263,6 +266,8 @@ describe("Pipeline Configuration", () => {
         version: before.published?.version,
         graph: before.published?.graph,
         hash: before.published?.hash,
+        handlerRegistry: before.published?.handlerRegistry,
+        handlers: before.published?.handlers,
         publishedAt: before.published?.publishedAt,
         nodeCount: before.published?.graph.nodes.length,
         edgeCount: before.published?.graph.edges.length,
@@ -797,6 +802,86 @@ describe("Pipeline Configuration", () => {
           })
           .issues.map((issue) => issue.code),
         ["SKILL_FLOW_ARCHIVED"],
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("publishes exact versioned Node Handler Kinds and rejects unavailable versions", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+
+    try {
+      const department = database.catalog.createDepartment({
+        name: "Deterministic delivery",
+      });
+      const editor = database.pipelineConfiguration.inspect(department.id);
+      const graph = {
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [{ from: "start", to: "complete" }],
+      };
+
+      const saved = database.pipelineConfiguration.saveDraft({
+        departmentId: department.id,
+        expectedRevision: editor.draft.revision,
+        graph,
+      });
+      const published = database.pipelineConfiguration.publish({
+        departmentId: department.id,
+        expectedRevision: saved.draft.revision,
+      });
+
+      assert.equal(published.published?.handlerRegistry.version, 1);
+      assert.match(
+        published.published?.handlerRegistry.hash ?? "",
+        /^[a-f0-9]{64}$/,
+      );
+      assert.deepEqual(published.published?.handlers, [
+        {
+          nodeId: "start",
+          handlerKindId: "run-start@1",
+          inputSchemaHash:
+            "7cf6ccb929565b4ee33d61da9495b90346ca6fd51af2f0b951afc267ad185a9d",
+          outputSchemaHash:
+            "054457d8154bfb5834b25b4527d67289fd4e1a433f57725a75c7f1eb3c3e7015",
+        },
+        {
+          nodeId: "complete",
+          handlerKindId: "run-complete@1",
+          inputSchemaHash:
+            "d2f68f16780c653b4d5741c571ac8ff7cc8819f2e9f5cc48623a8e986118d0d6",
+          outputSchemaHash:
+            "43ca94b560c403b3826f61fe67d6893762fc538cf6f7834502b9b43adbe30da0",
+        },
+      ]);
+
+      const unavailable = database.pipelineConfiguration.validate({
+        departmentId: department.id,
+        graph: {
+          ...graph,
+          nodes: graph.nodes.map((node) =>
+            node.id === "start"
+              ? { ...node, handlerKindId: "run-start@2" }
+              : node,
+          ),
+        },
+      });
+      assert.deepEqual(
+        unavailable.issues.map((issue) => issue.code),
+        ["HANDLER_VERSION_UNAVAILABLE"],
       );
     } finally {
       database.close();

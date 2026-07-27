@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, MessageChannelMain, ipcMain } from "electron";
 import { createCompanyRuntimeSupervisor } from "../dist-electron/main/companyRuntimeSupervisor.js";
 import { registerRuntimeIpc } from "../dist-electron/main/runtimeIpc.js";
 
@@ -21,15 +21,19 @@ const cleanup = async () => {
 };
 
 const run = async () => {
-  registerRuntimeIpc(ipcMain, () => supervisor);
+  const runtimeIpc = registerRuntimeIpc(ipcMain, () => supervisor, {
+    getWindow: () => window,
+    allowedOrigins: ["null"],
+    createMessageChannel: () => new MessageChannelMain(),
+  });
   const started = await supervisor.start(companyDir);
   window = new BrowserWindow({
     show: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: join(desktopRoot, "dist-electron", "preload", "index.js"),
-      sandbox: false,
+      preload: join(desktopRoot, "dist-electron", "preload", "index.cjs"),
+      sandbox: true,
     },
   });
   await window.loadURL(
@@ -50,6 +54,47 @@ const run = async () => {
       goal: "Verify the Department Run preload path."
     })`,
     true,
+  );
+  const streamHandle = await window.webContents.executeJavaScript(
+    "window.sandcastle.openEventStream((frame) => { window.__sandcastleFrames = [...(window.__sandcastleFrames ?? []), frame]; })",
+    true,
+  );
+  const projectBeforeUpdate = await window.webContents.executeJavaScript(
+    `window.sandcastle.query({ type: "project.inspect", projectId: ${JSON.stringify(project.id)} })`,
+    true,
+  );
+  await window.webContents.executeJavaScript(
+    `window.sandcastle.execute({
+      commandId: "electron-smoke-project-update-1",
+      expectedRevision: ${projectBeforeUpdate.view.revision},
+      command: {
+        type: "project.update",
+        projectId: ${JSON.stringify(project.id)},
+        name: "Electron smoke updated",
+        goal: "Verify the typed tunnel.",
+        sharedContext: "typed tunnel",
+        repositoryReferences: []
+      }
+    })`,
+    true,
+  );
+  const streamEvent = await window.webContents.executeJavaScript(
+    `new Promise((resolve, reject) => {
+      const deadline = Date.now() + 2000;
+      const check = () => {
+        const event = (window.__sandcastleFrames ?? []).find((frame) => frame.value?.kind === "event");
+        if (event) return resolve(event);
+        if (Date.now() > deadline) return reject(new Error("Runtime event did not reach the renderer."));
+        setTimeout(check, 20);
+      };
+      check();
+    })`,
+    true,
+  );
+  assert.equal(streamEvent.subscriptionId, streamHandle.subscriptionId);
+  assert.equal(
+    streamEvent.subscriptionGeneration,
+    streamHandle.subscriptionGeneration,
   );
   const startedRun = await window.webContents.executeJavaScript(
     `window.sandcastle.runtime.startRun({
@@ -136,6 +181,7 @@ const run = async () => {
     }
   }
   const reloaded = once(window.webContents, "did-finish-load");
+  runtimeIpc.revokeWindow();
   window.webContents.reload();
   await reloaded;
   const afterReload = await window.webContents.executeJavaScript(
@@ -150,6 +196,25 @@ const run = async () => {
     `window.sandcastle.runtime.inspectRun(${JSON.stringify(startedRun.run.id)})`,
     true,
   );
+  const recovery = await window.webContents.executeJavaScript(
+    `window.sandcastle.query({ type: "project.inspect", projectId: ${JSON.stringify(project.id)} })`,
+    true,
+  );
+  const recoveryAck = await window.webContents.executeJavaScript(
+    `window.sandcastle.execute({
+      commandId: "electron-smoke-view-sync-1",
+      command: {
+        type: "ack-runtime-events",
+        sequence: ${recovery.asOfSequence},
+        viewSyncToken: ${JSON.stringify(recovery.viewSyncToken)}
+      }
+    })`,
+    true,
+  );
+  const reopened = await window.webContents.executeJavaScript(
+    "window.sandcastle.openEventStream((frame) => { window.__sandcastleFrames = [...(window.__sandcastleFrames ?? []), frame]; })",
+    true,
+  );
 
   assert.equal(beforeReload.pid, started.pid);
   assert.equal(afterReload.pid, started.pid);
@@ -162,11 +227,13 @@ const run = async () => {
   assert.equal(completedRun.run.status, "completed");
   assert.equal(afterRun.run.status, "completed");
   assert.equal(afterRun.snapshot.hash, startedRun.snapshot.hash);
+  assert.equal(recoveryAck.status, "succeeded");
+  assert.equal(reopened.barrierSequence, recovery.asOfSequence);
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
       runtimePid: started.pid,
-      preload: join(desktopRoot, "dist-electron", "preload", "index.js"),
+      preload: join(desktopRoot, "dist-electron", "preload", "index.cjs"),
     })}\n`,
   );
 };

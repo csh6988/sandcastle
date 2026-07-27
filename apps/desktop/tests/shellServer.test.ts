@@ -40,6 +40,10 @@ describe("startShellServer", () => {
 
     assert.equal(response.status, 200);
     assert.match(await response.text(), /Company Overview/);
+    const csp = response.headers.get("content-security-policy");
+    assert.ok(csp);
+    assert.match(csp, /script-src 'self'/);
+    assert.match(csp, /frame-src 'none'/);
   });
 
   it("reports that Board compatibility APIs are unavailable when no board runs", async () => {

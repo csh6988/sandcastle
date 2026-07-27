@@ -5,7 +5,10 @@ import {
   createSandcastleExecutionPort,
   type SandcastleExecutionRuntime,
 } from "./sandcastleExecutionPort.js";
-import { createSandcastleInteractionExecutionAdapter } from "./interactionExecutionAdapter.js";
+import {
+  createHttpModelTransport,
+  createModelOnlyInteractionExecutionAdapter,
+} from "./interactionExecutionAdapter.js";
 
 export const loadConfiguredExecutionAdapter = async (
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -23,5 +26,24 @@ export const loadConfiguredExecutionAdapter = async (
 };
 
 export const loadConfiguredInteractionExecutionAdapter = async (
-  loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
-) => createSandcastleInteractionExecutionAdapter(await loadRuntime());
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) => {
+  const mode =
+    environment.SANDCASTLE_COMPANY_RUNTIME_INTERACTION_ADAPTER ?? "disabled";
+  if (mode === "disabled" || mode === "scripted") return undefined;
+  if (mode !== "production") {
+    throw new Error(
+      `Unsupported Company Runtime interaction execution adapter: ${mode}`,
+    );
+  }
+  const endpoint = environment.SANDCASTLE_MODEL_TRANSPORT_URL;
+  const credential = environment.SANDCASTLE_MODEL_TRANSPORT_CREDENTIAL;
+  if (!endpoint || !credential) {
+    throw new Error(
+      "Production model-only interaction adapter requires a transport URL and credential.",
+    );
+  }
+  return createModelOnlyInteractionExecutionAdapter(
+    createHttpModelTransport({ endpoint, credential }),
+  );
+};

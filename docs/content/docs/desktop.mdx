@@ -32,3 +32,13 @@ Each Position has an AI Member identity, a default Agent, and a set of enabled S
 ## Run history
 
 When a Run starts, its Snapshot records the resolved Agent and whether it came from the Position default or a temporary override. It also records each Position Skill reference and its fingerprint/version, so historical Runs remain explainable after local Agent or Skill installations change.
+
+## Review Topics
+
+The Company Runtime owns Review Topic state, immutable independent findings, append-only resolutions, bounded discussion rounds, exact revisions, fresh re-review votes, and the final Quality Gate Result. Topic creation freezes the strict input manifest/hash, participant eligibility, reviewer quorum, budget, and stop policy. Owner-participants and moderators may respond but never submit findings or vote; the reviewed producer is also excluded from reviewer eligibility.
+
+Every re-review vote uses a new independent Interaction Session. Final quorum must include at least one eligible reviewer who did not submit an initial finding. Any `FAIL` vote fails the gate, otherwise any `CONDITIONAL_PASS` remains conditional, and only unanimous `PASS` votes with no unresolved blocking finding satisfy downstream production contracts. Budget exhaustion records an immutable `FAIL` result and escalation evidence instead of continuing an unbounded discussion.
+
+Product Review is bound to one exact Product Baseline and Project Spec Revision/hash. Eligible reviewers classify each Product Finding as scope-preserving or scope-changing; a scope-changing Finding permanently blocks promotion in that Run even if an owner or moderator later rejects or resolves it, so continuation requires a newly confirmed Product Proposal and child Fork. Readiness checks are immutable evidence, blockers keep the Run blocked, and only a `PASS` Product Gate can atomically append the accepted Spec/readiness references to a new child Snapshot Revision.
+
+Technical Design starts from explicit Project-scoped Application registrations. Each immutable Application Spec Revision remains subordinate to the promoted Project Spec, and each Technical Baseline Proposal freezes the exact readiness, Application Spec, and cross-Application contract version/hash inputs reviewed by independent participants. The Software architect owns the proposal but cannot vote or promote it; incompatible contract evidence and conditional results remain blocking, while only a fresh `PASS` lets the Delivery coordinator atomically materialize a separate accepted Technical Baseline and append it to the next child Snapshot Revision.

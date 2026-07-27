@@ -36,19 +36,29 @@ events: {
 Observer errors and rejected promises are swallowed, so protocol adapters cannot
 interrupt the agent workflow.
 
+This applies only to non-authoritative in-process observers on the core callback.
+Company Runtime durable outbox delivery, cursor advancement, ACP request
+correlation, and permission responses must record failures and never advance an
+acknowledgment because an adapter error was swallowed.
+
 ## ACP facade sketch
 
 The ACP facade is intentionally not implemented as a network server in this
 change. The future mapping should be:
 
-| ACP method                   | Sandcastle mapping                                     |
-| ---------------------------- | ------------------------------------------------------ |
-| `initialize`                 | Return Sandcastle capabilities and supported providers |
-| `session/new`                | `createSandbox()` or prepare a sandbox-backed session  |
-| `session/prompt`             | `sandbox.run()` / `run()` with `events.onRuntimeEvent` |
-| `session/cancel`             | `AbortController.abort()` for the active run           |
-| `session/update`             | Stream `RuntimeEvent` values through the ACP transport |
-| `session/request_permission` | Future approval / confirmation adapter before commands |
+| ACP method                           | Sandcastle mapping                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------------------ |
+| `initialize`                         | Return Sandcastle capabilities and supported providers                               |
+| `session/new`                        | Open a durable interaction session; execution may later prepare a Sandbox            |
+| `session/prompt`                     | Create a persistent turn that invokes `run()`/Sandbox execution behind Runtime       |
+| `session/cancel`                     | Cancel the active turn and reconcile the underlying operation                        |
+| `session/update` (Agent → Client)    | Stream mapped `RuntimeEvent` values as notifications                                 |
+| `session/request_permission` (A → C) | Correlate an outbound permission request with the Client response and Runtime policy |
+
+For the Desktop Company Runtime profile, these mappings go through its Command,
+Interaction Session, permission, audit, and cursor boundaries. ACP never calls
+`createSandbox()` as an alternate state authority, and the Client cannot send
+`session/update` or `session/request_permission` as pull/decision methods.
 
 The facade should own transport, request correlation, permissions, and external
 session shape. Sandcastle core should continue to own sandbox lifecycle,

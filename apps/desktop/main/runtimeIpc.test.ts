@@ -44,6 +44,8 @@ import {
   SKILL_DISCOVERY_REFRESH_CHANNEL,
   SKILL_DISCOVERY_ENABLE_CHANNEL,
   SKILL_DISCOVERY_ARCHIVE_CHANNEL,
+  RUNTIME_TUNNEL_CHANNEL,
+  RUNTIME_EVENT_PORT_CHANNEL,
 } from "../preload/bridge.js";
 import { registerRuntimeIpc } from "./runtimeIpc.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
@@ -51,6 +53,415 @@ import { scriptedSkillConfiguration } from "../runtime/testing/skillConfiguratio
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
 describe("Runtime Electron IPC", () => {
+  it("validates the typed tunnel sender and injects trusted context", async () => {
+    const handlers = new Map<
+      string,
+      ((...args: readonly unknown[]) => Promise<unknown> | unknown) | undefined
+    >();
+    const mainFrame = { url: "http://127.0.0.1:4399/" };
+    const webContents = { id: 7, mainFrame, postMessage: () => undefined };
+    const window = { webContents };
+    const queryEnvelopeCalls: unknown[] = [];
+    const executeEnvelopeCalls: unknown[] = [];
+    registerRuntimeIpc(
+      {
+        handle(channel, handler) {
+          handlers.set(channel, handler);
+        },
+      },
+      () =>
+        ({
+          queryEnvelope: async (envelope: unknown) => {
+            queryEnvelopeCalls.push(envelope);
+            return {
+              view: {
+                id: "project-1",
+                name: "Checkout",
+                goal: "Ship it",
+                status: "active",
+                revision: 0,
+                sharedContext: "",
+                repositoryReferences: [],
+                departmentRuns: [],
+                createdAt: "2026-07-14T00:00:00.000Z",
+              },
+              asOfSequence: 0,
+              viewSyncToken: "token-1",
+            };
+          },
+          executeEnvelope: async (envelope: unknown) => {
+            executeEnvelopeCalls.push(envelope);
+            return {
+              status: "succeeded",
+              value: {
+                id: "project-1",
+                name: "Checkout",
+                goal: "Ship it",
+                status: "active",
+                revision: 1,
+                sharedContext: "updated",
+                repositoryReferences: [],
+                departmentRuns: [],
+                createdAt: "2026-07-14T00:00:00.000Z",
+              },
+              effectIds: ["effect-1"],
+            };
+          },
+        }) as never,
+      {
+        getWindow: () => window,
+        allowedOrigins: ["http://127.0.0.1:4399"],
+        maxPayloadBytes: 1_024,
+      },
+    );
+    const handler = handlers.get(RUNTIME_TUNNEL_CHANNEL)!;
+    const result = await handler(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "query",
+        requestId: "request-1",
+        query: { type: "project.inspect", projectId: "project-1" },
+      },
+    );
+    assert.equal((result as { asOfSequence: number }).asOfSequence, 0);
+    const queryEnvelope = queryEnvelopeCalls[0] as {
+      principal: { type: string; id: string };
+      consumerId: string;
+    };
+    assert.deepEqual(queryEnvelope.principal, {
+      type: "electron-main",
+      id: "desktop-main",
+      authenticatedBy: "ipc-token",
+    });
+    assert.equal(queryEnvelope.consumerId, "desktop-window-1");
+
+    await handler(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "execute",
+        commandId: "command-1",
+        expectedRevision: 0,
+        command: {
+          type: "project.update",
+          projectId: "project-1",
+          name: "Checkout",
+          goal: "Ship it",
+          sharedContext: "updated",
+          repositoryReferences: [],
+        },
+      },
+    );
+    const commandEnvelope = executeEnvelopeCalls[0] as {
+      actor: { type: string; id: string };
+      consumerId: string;
+      command: { type: string };
+    };
+    assert.equal(commandEnvelope.command.type, "project.update");
+    assert.equal(commandEnvelope.consumerId, "desktop-window-1");
+    await handler(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "query",
+        requestId: "review-query-1",
+        query: { type: "review.topics.list", projectId: "project-1" },
+      },
+    );
+    await handler(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "execute",
+        commandId: "review-command-1",
+        expectedRevision: 7,
+        command: {
+          type: "review.recheck.submit",
+          topicId: "topic-1",
+          recheckId: "recheck-1",
+          revisionId: "revision-1",
+          reviewerParticipantId: "reviewer-1",
+          reviewerSessionId: "fresh-session-1",
+          result: "PASS",
+          conditions: [],
+          evidenceRefs: ["evidence-1"],
+        },
+      },
+    );
+    assert.equal(
+      (queryEnvelopeCalls[1] as { query: { type: string } }).query.type,
+      "review.topics.list",
+    );
+    assert.equal(
+      (executeEnvelopeCalls[1] as { command: { type: string } }).command.type,
+      "review.recheck.submit",
+    );
+    await assert.rejects(
+      async () =>
+        handler(
+          { sender: { id: 99 }, senderFrame: mainFrame },
+          {
+            schemaVersion: 1,
+            operation: "query",
+            requestId: "request-2",
+            query: { type: "project.inspect", projectId: "project-1" },
+          },
+        ),
+      /sender|window/i,
+    );
+    mainFrame.url = "https://evil.test/";
+    await assert.rejects(
+      async () =>
+        handler(
+          { sender: webContents, senderFrame: mainFrame },
+          {
+            schemaVersion: 1,
+            operation: "query",
+            requestId: "request-3",
+            query: { type: "project.inspect", projectId: "project-1" },
+          },
+        ),
+      /origin/i,
+    );
+    mainFrame.url = "http://127.0.0.1:4399/";
+    await assert.rejects(
+      async () =>
+        handler(
+          { sender: webContents, senderFrame: mainFrame },
+          {
+            schemaVersion: 1,
+            operation: "query",
+            requestId: "request-4",
+            query: { type: "project.inspect", projectId: "project-1" },
+            extra: "x",
+          },
+        ),
+      /schema|unrecognized|invalid/i,
+    );
+    await assert.rejects(
+      async () =>
+        handler(
+          { sender: webContents, senderFrame: mainFrame },
+          {
+            schemaVersion: 1,
+            operation: "execute",
+            commandId: "command-oversized",
+            expectedRevision: 0,
+            command: {
+              type: "project.update",
+              projectId: "project-1",
+              name: "Checkout",
+              goal: "Ship it",
+              sharedContext: "x".repeat(2_000),
+              repositoryReferences: [],
+            },
+          },
+        ),
+      /size limit/i,
+    );
+  });
+
+  it("fences stale event stream closes after a new window generation opens", async () => {
+    const handlers = new Map<
+      string,
+      ((...args: readonly unknown[]) => Promise<unknown> | unknown) | undefined
+    >();
+    const mainFrame = { url: "http://127.0.0.1:4399/" };
+    const webContents = {
+      id: 7,
+      mainFrame,
+      postMessage: () => undefined,
+    };
+    const window = { webContents };
+    const closed: unknown[] = [];
+    let generation = 0;
+    registerRuntimeIpc(
+      {
+        handle(channel, handler) {
+          handlers.set(channel, handler);
+        },
+      },
+      () =>
+        ({
+          openSubscription: async () => ({
+            subscriptionId: `subscription-${++generation}`,
+            subscriptionGeneration: generation,
+            barrierSequence: 0,
+          }),
+          closeSubscription: async (input: unknown) => {
+            closed.push(input);
+          },
+          readSubscription: async () => ({
+            events: [],
+            nextSequence: 0,
+            hasMore: false,
+          }),
+        }) as never,
+      {
+        getWindow: () => window,
+        allowedOrigins: ["http://127.0.0.1:4399"],
+        createMessageChannel: () => ({
+          port1: {
+            onmessage: null,
+            on: () => undefined,
+            start: () => undefined,
+            close: () => undefined,
+            postMessage: () => undefined,
+          },
+          port2: {},
+        }),
+      },
+    );
+    const open = handlers.get(RUNTIME_TUNNEL_CHANNEL)!;
+    const first = (await open(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "open-event-stream",
+        streamRequestId: "s1",
+      },
+    )) as { subscriptionId: string; subscriptionGeneration: number };
+    const second = (await open(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "open-event-stream",
+        streamRequestId: "s2",
+      },
+    )) as { subscriptionId: string; subscriptionGeneration: number };
+    const close = handlers.get(RUNTIME_TUNNEL_CHANNEL)!;
+    const stale = await close(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "close-event-stream",
+        subscriptionId: first.subscriptionId,
+        subscriptionGeneration: first.subscriptionGeneration,
+      },
+    );
+    assert.deepEqual(stale, { closed: false, stale: true });
+    assert.equal(second.subscriptionGeneration, 2);
+    assert.equal(closed.length, 0);
+  });
+
+  it("relays generation-tagged frames only when preload grants bounded credit", async () => {
+    const handlers = new Map<
+      string,
+      ((...args: readonly unknown[]) => Promise<unknown> | unknown) | undefined
+    >();
+    const mainFrame = { url: "http://127.0.0.1:4399/" };
+    const transferred: Array<{ channel: string; message: unknown }> = [];
+    const webContents = {
+      id: 7,
+      mainFrame,
+      postMessage: (channel: string, message: unknown) => {
+        transferred.push({ channel, message });
+      },
+    };
+    let onMessage: ((event: { readonly data: unknown }) => void) | undefined;
+    const sent: unknown[] = [];
+    const port = {
+      onmessage: null,
+      on: (
+        _event: "message",
+        listener: (event: { readonly data: unknown }) => void,
+      ) => {
+        onMessage = listener;
+      },
+      start: () => undefined,
+      close: () => undefined,
+      postMessage: (value: unknown) => {
+        sent.push(value);
+      },
+    };
+    let reads = 0;
+    registerRuntimeIpc(
+      {
+        handle(channel, handler) {
+          handlers.set(channel, handler);
+        },
+      },
+      () =>
+        ({
+          openSubscription: async () => ({
+            subscriptionId: "subscription-1",
+            subscriptionGeneration: 4,
+            barrierSequence: 8,
+          }),
+          readSubscription: async () => {
+            reads += 1;
+            return {
+              events:
+                reads === 1
+                  ? [
+                      {
+                        registryVersion: 1,
+                        schemaVersion: 1,
+                        sequence: 9,
+                        eventId: "event-9",
+                        type: "project.updated",
+                        companyId: "company-1",
+                        projectId: "project-1",
+                        timestamp: "2026-07-14T00:00:00.000Z",
+                        payload: {},
+                      },
+                    ]
+                  : [],
+              nextSequence: reads === 1 ? 10 : 9,
+              hasMore: false,
+            };
+          },
+        }) as never,
+      {
+        getWindow: () => ({ webContents }),
+        allowedOrigins: ["http://127.0.0.1:4399"],
+        maxCredits: 1,
+        createMessageChannel: () => ({ port1: port, port2: {} }),
+      },
+    );
+    const tunnel = handlers.get(RUNTIME_TUNNEL_CHANNEL)!;
+    const handle = (await tunnel(
+      { sender: webContents, senderFrame: mainFrame },
+      {
+        schemaVersion: 1,
+        operation: "open-event-stream",
+        streamRequestId: "stream-1",
+      },
+    )) as { subscriptionId: string; subscriptionGeneration: number };
+    assert.equal(transferred[0]?.channel, RUNTIME_EVENT_PORT_CHANNEL);
+    onMessage?.({
+      data: {
+        schemaVersion: 1,
+        type: "credit",
+        subscriptionId: handle.subscriptionId,
+        subscriptionGeneration: handle.subscriptionGeneration,
+        credits: 1,
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      (sent[0] as { value: { control: { type: string } } }).value.control.type,
+      "cursor.accepted",
+    );
+    assert.equal(reads, 0);
+    onMessage?.({
+      data: {
+        schemaVersion: 1,
+        type: "credit",
+        subscriptionId: handle.subscriptionId,
+        subscriptionGeneration: handle.subscriptionGeneration,
+        credits: 1,
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      (sent[1] as { value: { event: { sequence: number } } }).value.event
+        .sequence,
+      9,
+    );
+    assert.equal(reads, 1);
+  });
   it("routes the allowlisted health query to the active supervisor", async () => {
     const handlers = new Map<
       string,
@@ -247,6 +658,7 @@ describe("Runtime Electron IPC", () => {
         cancelRun: async () => scriptedDepartmentRun,
         recoverRun: async () => scriptedDepartmentRun,
         decideApproval: async () => scriptedDepartmentRun,
+        retryApproval: async () => scriptedDepartmentRun,
         retryNode: async () => scriptedDepartmentRun,
         audit: async () => [],
         events: async () => [],

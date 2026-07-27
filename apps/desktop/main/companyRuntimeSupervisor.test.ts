@@ -90,6 +90,9 @@ describe("Company Runtime Supervisor", () => {
         string,
         (...args: readonly unknown[]) => Promise<unknown> | unknown
       >();
+      const mainFrame = { url: "https://sandcastle.local" };
+      const webContents = { id: 1, mainFrame, postMessage() {} };
+      const ipcEvent = { sender: webContents, senderFrame: mainFrame };
       registerRuntimeIpc(
         {
           handle(channel, handler) {
@@ -97,14 +100,75 @@ describe("Company Runtime Supervisor", () => {
           },
         },
         () => supervisor,
+        {
+          getWindow: () => ({ webContents }),
+          allowedOrigins: ["https://sandcastle.local"],
+        },
       );
       const bridge = createSandcastleBridge((channel, payload) =>
-        Promise.resolve(handlers.get(channel)?.({}, payload)),
+        Promise.resolve(handlers.get(channel)?.(ipcEvent, payload)),
       );
       const project = await bridge.runtime.createProject({
         name: "Checkout",
         goal: "Ship the checkout redesign",
       });
+      const session = await bridge.runtime.createInteractionSession({
+        projectId: project.id,
+        mode: "consultation",
+      });
+      await bridge.runtime.addInteractionParticipant({
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: "product-planner-member",
+        role: "product-manager",
+      });
+      const revised = await bridge.execute({
+        commandId: "supervisor-product-revise",
+        expectedRevision: 0,
+        command: {
+          type: "product.proposal.revise",
+          projectId: project.id,
+          producerSessionId: session.id,
+          content: {
+            goal: "Ship the checkout redesign",
+            users: ["Checkout users"],
+            scope: ["Checkout flow"],
+            nonGoals: [],
+            acceptanceCriteria: ["Checkout completes"],
+            constraints: ["Keep the existing payment contract"],
+            risks: ["Regression"],
+            openQuestions: [],
+          },
+        },
+      });
+      assert.equal(revised.status, "succeeded");
+      if (revised.status !== "succeeded") return;
+      const proposal = revised.value.proposal!;
+      const awaiting = await bridge.execute({
+        commandId: "supervisor-product-awaiting",
+        expectedRevision: proposal.revision,
+        command: {
+          type: "product.proposal.mark-awaiting-confirmation",
+          projectId: project.id,
+          proposalRevisionId: proposal.currentRevision.id,
+          proposalHash: proposal.currentRevision.hash,
+        },
+      });
+      assert.equal(awaiting.status, "succeeded");
+      if (awaiting.status !== "succeeded") return;
+      const exact = awaiting.value.proposal!;
+      const confirmed = await bridge.execute({
+        commandId: "supervisor-product-confirm",
+        expectedRevision: exact.revision,
+        command: {
+          type: "confirm-product-baseline",
+          projectId: project.id,
+          departmentId: "software-rnd",
+          proposalRevisionId: exact.currentRevision.id,
+          proposalHash: exact.currentRevision.hash,
+        },
+      });
+      assert.equal(confirmed.status, "succeeded");
       const started = await bridge.runtime.startRun({
         projectId: project.id,
         departmentId: "software-rnd",
@@ -177,7 +241,7 @@ describe("Company Runtime Supervisor", () => {
           "name" in error &&
           error.name === "RuntimeBridgeError" &&
           "code" in error &&
-          error.code === "APPROVAL_STATE_INVALID",
+          error.code === "APPROVAL_DECISION_EXISTS",
       );
       await assert.rejects(
         () =>
@@ -273,6 +337,11 @@ describe("Company Runtime Supervisor", () => {
         string,
         (...args: readonly unknown[]) => Promise<unknown> | unknown
       >();
+      const webContents = {
+        id: 1,
+        mainFrame: { url: "https://sandcastle.local" },
+        postMessage() {},
+      };
       registerRuntimeIpc(
         {
           handle(channel, handler) {
@@ -280,9 +349,18 @@ describe("Company Runtime Supervisor", () => {
           },
         },
         () => supervisor,
+        {
+          getWindow: () => ({ webContents }),
+          allowedOrigins: ["https://sandcastle.local"],
+        },
       );
       const bridge = createSandcastleBridge((channel, payload) =>
-        Promise.resolve(handlers.get(channel)?.({}, payload)),
+        Promise.resolve(
+          handlers.get(channel)?.(
+            { sender: webContents, senderFrame: webContents.mainFrame },
+            payload,
+          ),
+        ),
       );
       const project = await bridge.runtime.createProject({
         name: "Checkout",

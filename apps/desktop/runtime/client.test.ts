@@ -106,6 +106,185 @@ describe("Company Runtime client", () => {
     );
   });
 
+  it("parses Technical Review Query and promotion Command envelopes", async () => {
+    const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
+    const state = {
+      projectId: "project-1",
+      runId: "run-1",
+      applications: [],
+      applicationSpecRevisions: [],
+      technicalBaselineProposals: [],
+      applicationContracts: [],
+      reviewTopics: [],
+      conditionalObligations: [],
+      acceptedBaseline: null,
+      promotion: null,
+      snapshotLineage: [
+        {
+          id: "snapshot-r2",
+          revision: 2,
+          parentRevision: 1,
+          hash: "a".repeat(64),
+        },
+      ],
+    };
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        requests.push(request);
+        return request.kind === "query"
+          ? {
+              id: request.id,
+              ok: true,
+              result: { view: state, asOfSequence: 12 },
+            }
+          : {
+              id: request.id,
+              ok: true,
+              result: {
+                status: "succeeded",
+                value: state,
+                effectIds: ["audit-technical"],
+              },
+            };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+
+    const inspected = await client.query({
+      type: "technical-review.inspect",
+      runId: "run-1",
+    });
+    const promoted = await client.executeEnvelope({
+      schemaVersion: 1,
+      commandId: "technical-promote-1",
+      actor: {
+        type: "runtime-worker",
+        id: "delivery-coordinator-member",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "runtime-delivery-coordinator",
+      expectedRevision: 2,
+      command: {
+        type: "technical-gate.promote",
+        runId: "run-1",
+        parentSnapshotRevisionId: "snapshot-r2",
+        gateResultId: "technical-gate-1",
+      },
+    });
+
+    assert.equal(inspected.runId, "run-1");
+    assert.equal(promoted.status, "succeeded");
+    assert.deepEqual(
+      requests.map((request) => request.kind),
+      ["query", "command"],
+    );
+  });
+
+  it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
+    const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        requests.push(request);
+        if (request.kind === "subscription.open") {
+          return {
+            id: request.id,
+            ok: true,
+            result: {
+              subscriptionId: "subscription-1",
+              subscriptionGeneration: 3,
+              barrierSequence: 4,
+            },
+          };
+        }
+        if (request.kind === "subscription.read") {
+          return {
+            id: request.id,
+            ok: true,
+            result: {
+              events: [
+                {
+                  registryVersion: 1,
+                  schemaVersion: 1,
+                  sequence: 5,
+                  eventId: "event-5",
+                  type: "project.updated",
+                  companyId: "company",
+                  projectId: "project-1",
+                  timestamp: "2026-07-15T00:00:00.000Z",
+                  payload: { projectId: "project-1", revision: 1 },
+                },
+              ],
+              nextSequence: 5,
+              hasMore: false,
+            },
+          };
+        }
+        if (request.kind === "subscription.close") {
+          return { id: request.id, ok: true, result: { closed: true } };
+        }
+        return {
+          id: request.id,
+          ok: true,
+          result: {
+            status: "succeeded",
+            value: {
+              acknowledged: true,
+              subscriptionGeneration: 3,
+              barrierSequence: 5,
+              auditId: "audit-1",
+            },
+            effectIds: ["audit-1"],
+          },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token", {
+      actor: {
+        type: "electron-main",
+        id: "desktop-main",
+        authenticatedBy: "ipc-token",
+      },
+      consumerId: "desktop-window-1",
+    });
+
+    const subscription = await client.openSubscription();
+    const batch = await client.readSubscription({
+      ...subscription,
+      limit: 10,
+    });
+    const acknowledged = await client.execute({
+      type: "ack-runtime-events",
+      sequence: batch.nextSequence,
+      subscriptionGeneration: subscription.subscriptionGeneration,
+    });
+    await client.closeSubscription(subscription);
+
+    assert.equal(batch.events[0]?.eventId, "event-5");
+    assert.equal(acknowledged.barrierSequence, 5);
+    const ackRequest = requests.find(
+      (request) =>
+        request.kind === "command" &&
+        "envelope" in request &&
+        request.envelope.command.type === "ack-runtime-events",
+    );
+    assert.equal(ackRequest?.kind, "command");
+    if (ackRequest?.kind === "command" && "envelope" in ackRequest) {
+      assert.equal(ackRequest.envelope.consumerId, "desktop-window-1");
+      assert.equal("consumerId" in ackRequest.envelope.command, false);
+    }
+    assert.deepEqual(
+      requests.map((request) => request.kind),
+      [
+        "subscription.open",
+        "subscription.read",
+        "command",
+        "subscription.close",
+      ],
+    );
+  });
+
   it("lets Agent Catalog discovery own its subprocess timeout", async () => {
     const directory = mkdtempSync(join(tmpdir(), "sandcastle-runtime-client-"));
     const address = companyRuntimeAddress(directory);

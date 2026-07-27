@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -10,12 +11,58 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { CURRENT_SCHEMA_VERSION } from "./migrations.js";
 import { openCompanyDatabase, restoreCompanyDatabase } from "./sqlite.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-company-database-"));
 
+const removeImmutableArtifactContentKinds = (database: DatabaseSync): void => {
+  const hasProductBaselineColumn = database
+    .prepare("PRAGMA table_info(department_runs)")
+    .all()
+    .some(
+      (column) =>
+        (column as { readonly name?: unknown }).name === "product_baseline_id",
+    );
+  database.exec(`
+    DROP TRIGGER IF EXISTS product_baselines_immutable_update;
+    DROP TRIGGER IF EXISTS product_baselines_immutable_delete;
+    DROP INDEX IF EXISTS department_runs_product_baseline_idx;
+    DROP TABLE IF EXISTS runtime_run_quarantines;
+  `);
+  if (hasProductBaselineColumn) {
+    database.exec(
+      "ALTER TABLE department_runs DROP COLUMN product_baseline_id",
+    );
+  }
+  database.exec(`
+    DROP TABLE IF EXISTS product_baselines;
+    DROP INDEX IF EXISTS product_proposal_revisions_proposal_idx;
+    DROP TABLE IF EXISTS product_proposal_revisions;
+    DROP TABLE IF EXISTS product_proposals;
+  `);
+  database.exec(`
+    DROP INDEX artifact_links_to_idx;
+    DROP TABLE artifact_supersessions;
+    DROP INDEX artifact_integrity_observations_version_idx;
+    DROP TABLE artifact_integrity_observations;
+    DROP TABLE artifact_write_journal;
+    DROP INDEX artifact_registrations_dedup_idx;
+    DROP TABLE artifact_registrations;
+    ALTER TABLE artifact_versions DROP COLUMN finalized_at;
+    ALTER TABLE artifact_versions DROP COLUMN registration_id;
+    ALTER TABLE artifact_versions DROP COLUMN integrity_descriptor_json;
+    ALTER TABLE artifact_versions DROP COLUMN producer_context_hash;
+    ALTER TABLE artifact_versions DROP COLUMN producer_context_json;
+    ALTER TABLE artifact_versions DROP COLUMN identity_hash;
+    ALTER TABLE artifact_versions DROP COLUMN canonical_identity_json;
+    ALTER TABLE artifact_versions DROP COLUMN content_kind;
+  `);
+};
+
 const removeArtifactRegistry = (database: DatabaseSync): void => {
+  removeImmutableArtifactContentKinds(database);
   database.exec(`
     DROP TABLE artifact_links;
     DROP INDEX artifact_versions_run_idx;
@@ -35,6 +82,13 @@ const removeForkRunLinks = (database: DatabaseSync): void => {
 
 const removeInteraction = (database: DatabaseSync): void => {
   database.exec(`
+    DROP TRIGGER IF EXISTS interaction_turn_delete_leases;
+    DROP TRIGGER IF EXISTS node_attempt_delete_execution_leases;
+    DROP TRIGGER IF EXISTS execution_leases_target_guard;
+    DROP INDEX IF EXISTS interaction_turns_active_session_idx;
+    DROP INDEX IF EXISTS interaction_turns_session_idx;
+    DROP TABLE IF EXISTS interaction_turns;
+    DROP TABLE IF EXISTS permission_decisions;
     DROP INDEX permission_requests_session_idx;
     DROP TABLE permission_requests;
     DROP INDEX session_messages_session_idx;
@@ -53,7 +107,83 @@ const removeMemory = (database: DatabaseSync): void => {
   `);
 };
 
+const removeReviewTopics = (database: DatabaseSync): void => {
+  database.exec(`
+    DROP TRIGGER IF EXISTS quality_gate_results_immutable_delete;
+    DROP TRIGGER IF EXISTS quality_gate_results_immutable_update;
+    DROP TRIGGER IF EXISTS review_rechecks_immutable_delete;
+    DROP TRIGGER IF EXISTS review_rechecks_immutable_update;
+    DROP TRIGGER IF EXISTS review_revisions_immutable_delete;
+    DROP TRIGGER IF EXISTS review_revisions_immutable_update;
+    DROP TRIGGER IF EXISTS review_resolutions_immutable_delete;
+    DROP TRIGGER IF EXISTS review_resolutions_immutable_update;
+    DROP TRIGGER IF EXISTS review_findings_immutable_delete;
+    DROP TRIGGER IF EXISTS review_findings_immutable_update;
+    DROP TABLE IF EXISTS quality_gate_results;
+    DROP TABLE IF EXISTS review_rechecks;
+    DROP INDEX IF EXISTS review_revisions_topic_idx;
+    DROP TABLE IF EXISTS review_revisions;
+    DROP TABLE IF EXISTS review_discussions;
+    DROP INDEX IF EXISTS review_resolutions_finding_idx;
+    DROP TABLE IF EXISTS review_resolutions;
+    DROP INDEX IF EXISTS review_findings_topic_idx;
+    DROP TABLE IF EXISTS review_findings;
+    DROP INDEX IF EXISTS review_participants_topic_role_idx;
+    DROP TABLE IF EXISTS review_participants;
+    DROP INDEX IF EXISTS review_topics_run_idx;
+    DROP INDEX IF EXISTS review_topics_project_idx;
+    DROP TABLE IF EXISTS review_topics;
+    DELETE FROM schema_migrations WHERE version = 33;
+    UPDATE schema_metadata SET value = '32' WHERE key = 'schema_version';
+  `);
+};
+
+const removeProductReview = (database: DatabaseSync): void => {
+  database.exec(`
+    DROP TRIGGER IF EXISTS product_gate_promotions_immutable_delete;
+    DROP TRIGGER IF EXISTS product_gate_promotions_immutable_update;
+    DROP TABLE IF EXISTS product_gate_promotions;
+    DROP TRIGGER IF EXISTS product_readiness_evidence_immutable_delete;
+    DROP TRIGGER IF EXISTS product_readiness_evidence_immutable_update;
+    DROP INDEX IF EXISTS product_readiness_evidence_run_idx;
+    DROP TABLE IF EXISTS product_readiness_evidence;
+    DROP TRIGGER IF EXISTS project_spec_revisions_immutable_delete;
+    DROP TRIGGER IF EXISTS project_spec_revisions_immutable_update;
+    DROP INDEX IF EXISTS project_spec_revisions_run_idx;
+    DROP TABLE IF EXISTS project_spec_revisions;
+    DROP TABLE IF EXISTS project_specs;
+    ALTER TABLE review_findings DROP COLUMN scope_impact;
+    DELETE FROM schema_migrations WHERE version = 34;
+    UPDATE schema_metadata SET value = '33' WHERE key = 'schema_version';
+    PRAGMA user_version = 33;
+  `);
+};
+
+const removeDurableRuntimeEventSubscriptions = (
+  database: DatabaseSync,
+): void => {
+  database.exec(`
+    DROP INDEX IF EXISTS consumed_view_sync_tokens_expiry_idx;
+    DROP TABLE IF EXISTS consumed_view_sync_tokens;
+    DROP INDEX IF EXISTS runtime_event_cursors_active_subscription_idx;
+    ALTER TABLE runtime_event_cursors DROP COLUMN retired_at;
+    ALTER TABLE runtime_event_cursors DROP COLUMN expires_at;
+    ALTER TABLE runtime_event_cursors DROP COLUMN last_seen_at;
+    ALTER TABLE runtime_event_cursors DROP COLUMN barrier_sequence;
+    ALTER TABLE runtime_event_cursors DROP COLUMN last_delivered_sequence;
+    ALTER TABLE runtime_event_cursors DROP COLUMN subscription_generation;
+    ALTER TABLE runtime_event_cursors DROP COLUMN active_subscription_id;
+    ALTER TABLE runtime_event_cursors DROP COLUMN owner_principal_json;
+    ALTER TABLE runtime_event_outbox DROP COLUMN scope_json;
+    ALTER TABLE runtime_event_outbox DROP COLUMN project_id;
+    ALTER TABLE runtime_event_outbox DROP COLUMN company_id;
+    ALTER TABLE runtime_event_outbox DROP COLUMN event_schema_version;
+    ALTER TABLE runtime_event_outbox DROP COLUMN registry_version;
+  `);
+};
+
 const removeCatalogAuditTriggers = (database: DatabaseSync): void => {
+  removeDurableRuntimeEventSubscriptions(database);
   const triggers = database
     .prepare(
       "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'runtime_%'",
@@ -76,7 +206,17 @@ const removeNodeAttemptLeases = (database: DatabaseSync): void => {
 };
 
 const removeRecoveryAttemptReason = (database: DatabaseSync): void => {
+  removeImmutableArtifactContentKinds(database);
+  removeDurableRuntimeEventSubscriptions(database);
   database.exec(`
+    DROP TRIGGER IF EXISTS interaction_turn_delete_leases;
+    DROP TRIGGER IF EXISTS node_attempt_delete_execution_leases;
+    DROP TRIGGER IF EXISTS execution_leases_target_guard;
+    DROP TABLE IF EXISTS interaction_turns;
+    DROP TABLE permission_decisions;
+    DROP TABLE execution_facts;
+    DROP TABLE execution_leases;
+    DROP INDEX node_attempts_execution_operation_idx;
     CREATE TABLE node_attempts_v17 (
       id TEXT PRIMARY KEY,
       node_run_id TEXT NOT NULL REFERENCES node_runs(id) ON DELETE CASCADE,
@@ -101,7 +241,44 @@ const removeRecoveryAttemptReason = (database: DatabaseSync): void => {
       recoverable INTEGER NOT NULL DEFAULT 0 CHECK (recoverable IN (0, 1)),
       UNIQUE (node_run_id, attempt_number)
     ) STRICT;
-    INSERT INTO node_attempts_v17 SELECT * FROM node_attempts;
+    INSERT INTO node_attempts_v17 (
+      id,
+      node_run_id,
+      attempt_number,
+      snapshot_revision_id,
+      reason,
+      status,
+      structured_result_json,
+      failure_code,
+      failure_message,
+      created_at,
+      started_at,
+      completed_at,
+      lease_id,
+      lease_owner,
+      lease_expires_at,
+      checkpoint_json,
+      recoverable
+    )
+    SELECT
+      id,
+      node_run_id,
+      attempt_number,
+      snapshot_revision_id,
+      reason,
+      status,
+      structured_result_json,
+      failure_code,
+      failure_message,
+      created_at,
+      started_at,
+      completed_at,
+      lease_id,
+      lease_owner,
+      lease_expires_at,
+      checkpoint_json,
+      recoverable
+    FROM node_attempts;
     DROP INDEX node_attempts_node_run_idx;
     DROP INDEX node_attempts_ready_lease_idx;
     DROP TABLE node_attempts;
@@ -207,7 +384,7 @@ describe("Company database migrations", () => {
     const database = openCompanyDatabase(companyDir);
 
     try {
-      assert.equal(database.schemaVersion(), 24);
+      assert.equal(database.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(database.path);
       try {
         assert.deepEqual(
@@ -245,7 +422,63 @@ describe("Company database migrations", () => {
             { version: 22, name: "position_default_agent_bindings" },
             { version: 23, name: "local_skill_discovery_catalog" },
             { version: 24, name: "command_envelopes_and_receipts" },
+            {
+              version: 25,
+              name: "durable_runtime_event_subscriptions",
+            },
+            { version: 26, name: "immutable_artifact_content_kinds" },
+            { version: 27, name: "product_proposal_lifecycle" },
+            { version: 28, name: "product_baseline_formal_run" },
+            { version: 29, name: "versioned_pipeline_node_handlers" },
+            { version: 30, name: "fenced_execution_facts" },
+            {
+              version: 31,
+              name: "interaction_turns_and_execution_targets",
+            },
+            { version: 32, name: "execution_reconciliation_states" },
+            { version: 33, name: "review_topics_and_quality_gates" },
+            { version: 34, name: "project_spec_revisions" },
+            { version: 35, name: "application_references" },
+            { version: 36, name: "application_spec_revisions" },
+            { version: 37, name: "technical_baseline_proposals" },
+            { version: 38, name: "accepted_technical_baselines" },
           ],
+        );
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT name FROM sqlite_schema
+               WHERE type = 'table'
+                 AND name IN ('execution_leases', 'execution_facts', 'permission_decisions')
+               ORDER BY name`,
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            { name: "execution_facts" },
+            { name: "execution_leases" },
+            { name: "permission_decisions" },
+          ],
+        );
+        assert.equal(
+          inspected
+            .prepare("PRAGMA table_info(node_attempts)")
+            .all()
+            .some(
+              (row) =>
+                (row as { name: string }).name === "execution_operation_key",
+            ),
+          true,
+        );
+        assert.equal(
+          inspected
+            .prepare("PRAGMA table_info(node_attempts)")
+            .all()
+            .some(
+              (row) =>
+                (row as { name: string }).name === "terminal_execution_fact_id",
+            ),
+          true,
         );
         assert.equal(
           (
@@ -253,7 +486,7 @@ describe("Company database migrations", () => {
               user_version: number;
             }
           ).user_version,
-          24,
+          CURRENT_SCHEMA_VERSION,
         );
         assert.deepEqual(
           inspected
@@ -303,6 +536,99 @@ describe("Company database migrations", () => {
     }
   });
 
+  it("upgrades a v32 database with immutable Review Topic storage", () => {
+    const companyDir = tempCompanyDir();
+    const initial = openCompanyDatabase(companyDir);
+    const path = initial.path;
+    initial.close();
+    const old = new DatabaseSync(path);
+    removeReviewTopics(old);
+    old.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(upgraded.path);
+      try {
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name IN (
+                  'review_topics', 'review_participants', 'review_findings',
+                  'review_resolutions', 'review_discussions',
+                  'review_revisions', 'review_rechecks',
+                  'quality_gate_results'
+                ) ORDER BY name`,
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            { name: "quality_gate_results" },
+            { name: "review_discussions" },
+            { name: "review_findings" },
+            { name: "review_participants" },
+            { name: "review_rechecks" },
+            { name: "review_resolutions" },
+            { name: "review_revisions" },
+            { name: "review_topics" },
+          ],
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("upgrades a v33 database with immutable Product Spec, readiness, and promotion storage", () => {
+    const companyDir = tempCompanyDir();
+    const initial = openCompanyDatabase(companyDir);
+    const path = initial.path;
+    initial.close();
+    const old = new DatabaseSync(path);
+    removeProductReview(old);
+    old.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(upgraded.path);
+      try {
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name IN (
+                  'project_specs', 'project_spec_revisions',
+                  'product_readiness_evidence', 'product_gate_promotions'
+                ) ORDER BY name`,
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            { name: "product_gate_promotions" },
+            { name: "product_readiness_evidence" },
+            { name: "project_spec_revisions" },
+            { name: "project_specs" },
+          ],
+        );
+        assert.equal(
+          inspected
+            .prepare("PRAGMA table_info(review_findings)")
+            .all()
+            .some((row) => (row as { name: string }).name === "scope_impact"),
+          true,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
   it("upgrades a schema version 23 database with command receipt and trigger context storage", () => {
     const companyDir = tempCompanyDir();
     const current = openCompanyDatabase(companyDir);
@@ -310,6 +636,7 @@ describe("Company database migrations", () => {
     current.close();
 
     const versionTwentyThree = new DatabaseSync(databasePath);
+    removeImmutableArtifactContentKinds(versionTwentyThree);
     removeCatalogAuditTriggers(versionTwentyThree);
     versionTwentyThree.exec(`
       DROP TABLE command_deduplication;
@@ -327,7 +654,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -352,6 +679,142 @@ describe("Company database migrations", () => {
             )
             .get() !== undefined,
           true,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("upgrades a schema version 25 Artifact Version with immutable content identity and integrity evidence", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const project = current.catalog.createProject({
+      name: "Legacy Artifact",
+      goal: "Preserve an Artifact Version across schema migration",
+    });
+    const databasePath = current.path;
+    current.close();
+
+    const content = Buffer.from("legacy artifact payload");
+    const contentHash = createHash("sha256").update(content).digest("hex");
+    const contentRef = ".sandcastle/artifacts/legacy/version.bin";
+    mkdirSync(join(companyDir, ".sandcastle", "artifacts", "legacy"), {
+      recursive: true,
+    });
+    writeFileSync(join(companyDir, contentRef), content);
+
+    const versionTwentyFive = new DatabaseSync(databasePath);
+    removeImmutableArtifactContentKinds(versionTwentyFive);
+    versionTwentyFive.exec(`
+      UPDATE schema_metadata SET value = '25' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 26;
+      PRAGMA user_version = 25;
+    `);
+    versionTwentyFive
+      .prepare(
+        `INSERT INTO artifacts(
+           id, project_id, type, logical_name, status, schema_version, created_at
+         ) VALUES (?, ?, 'evidence', 'legacy', 'active', '1', ?)`,
+      )
+      .run("legacy-artifact", project.id, "2026-07-23T00:00:00.000Z");
+    versionTwentyFive
+      .prepare(
+        `INSERT INTO artifact_versions(
+           id, artifact_id, version, content_ref, content_hash, byte_size,
+           status, producing_run_id, producing_node_run_id,
+           producing_node_attempt_id, snapshot_revision_id, ai_member_id,
+           created_at
+         ) VALUES (?, ?, 1, ?, ?, ?, 'produced', NULL, NULL, NULL, NULL, NULL, ?)`,
+      )
+      .run(
+        "legacy-artifact-version",
+        "legacy-artifact",
+        contentRef,
+        contentHash,
+        content.byteLength,
+        "2026-07-23T00:00:00.000Z",
+      );
+    versionTwentyFive.close();
+
+    const migrated = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const version = migrated.artifactRegistry.inspect(
+        "legacy-artifact-version",
+      ).version;
+      assert.equal(version.contentKind, "managed-file");
+      assert.equal(version.integrityStatus, "verified");
+      assert.equal(version.contentRef, contentRef);
+
+      const inspected = new DatabaseSync(migrated.path);
+      try {
+        const row = inspected
+          .prepare(
+            `SELECT content_kind AS contentKind,
+                    canonical_identity_json AS canonicalIdentityJson,
+                    identity_hash AS identityHash,
+                    producer_context_json AS producerContextJson,
+                    producer_context_hash AS producerContextHash,
+                    integrity_descriptor_json AS integrityDescriptorJson,
+                    finalized_at AS finalizedAt
+               FROM artifact_versions
+              WHERE id = ?`,
+          )
+          .get("legacy-artifact-version") as {
+          readonly contentKind: string;
+          readonly canonicalIdentityJson: string;
+          readonly identityHash: string;
+          readonly producerContextJson: string;
+          readonly producerContextHash: string;
+          readonly integrityDescriptorJson: string;
+          readonly finalizedAt: string;
+        };
+        assert.equal(row.contentKind, "managed-file");
+        assert.deepEqual(JSON.parse(row.canonicalIdentityJson), {
+          kind: "managed-file",
+          contentHash,
+          byteSize: content.byteLength,
+          storageRef: contentRef,
+        });
+        assert.equal(row.identityHash.length, 64);
+        assert.notEqual(row.identityHash, "0".repeat(64));
+        assert.deepEqual(JSON.parse(row.producerContextJson), {});
+        assert.equal(row.producerContextHash.length, 64);
+        assert.notEqual(row.producerContextHash, "0".repeat(64));
+        assert.deepEqual(JSON.parse(row.integrityDescriptorJson), {
+          algorithm: "sha256",
+          digest: contentHash,
+          byteSize: content.byteLength,
+        });
+        assert.equal(row.finalizedAt, "2026-07-23T00:00:00.000Z");
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT status, evidence_json AS evidenceJson
+                 FROM artifact_integrity_observations
+                WHERE artifact_version_id = ?`,
+            )
+            .all("legacy-artifact-version")
+            .map((observation) => ({ ...observation })),
+          [
+            {
+              status: "verified",
+              evidenceJson: JSON.stringify({
+                source: "schema-migration-26",
+              }),
+            },
+          ],
+        );
+        assert.equal(
+          (
+            inspected.prepare("PRAGMA user_version").get() as {
+              user_version: number;
+            }
+          ).user_version,
+          CURRENT_SCHEMA_VERSION,
         );
       } finally {
         inspected.close();
@@ -423,7 +886,7 @@ describe("Company database migrations", () => {
 
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(database.schemaVersion(), 24);
+      assert.equal(database.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.equal(
         database.catalog.inspectDepartment("existing-department").name,
         "Existing",
@@ -485,7 +948,7 @@ describe("Company database migrations", () => {
     try {
       const pipeline =
         migrated.pipelineConfiguration.inspect("software-rnd").published;
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.equal(
         pipeline?.hash,
         "bceeae6c19bab660551f35f602d07bab10c6a93388556346cc19f6fbb748acdb",
@@ -529,7 +992,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.deepEqual(migrated.projectConfiguration.inspect(project.id), {
         id: project.id,
         name: "Existing Project",
@@ -568,7 +1031,7 @@ describe("Company database migrations", () => {
     const migrated = openCompanyDatabase(companyDir);
     try {
       const configuration = migrated.skillConfiguration.inspect("software-rnd");
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.equal(configuration.revision, 0);
       assert.equal(configuration.activeSkills.length, 7);
       assert.equal(configuration.skillFlows.length, 5);
@@ -604,7 +1067,7 @@ describe("Company database migrations", () => {
         (position) => position.id === "software-engineer",
       );
 
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.equal(department.revision, 0);
       assert.deepEqual(department.inputArtifactContracts, []);
       assert.deepEqual(department.outputArtifactContracts, []);
@@ -645,7 +1108,7 @@ describe("Company database migrations", () => {
       const departmentAfter =
         migrated.catalog.inspectDepartment("software-rnd");
 
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       assert.deepEqual(after.published, before.published);
       assert.deepEqual(after.history, before.history);
       assert.deepEqual(
@@ -693,7 +1156,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -773,7 +1236,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.deepEqual(
@@ -824,7 +1287,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(migrated.path);
       try {
         assert.equal(
@@ -861,7 +1324,7 @@ describe("Company database migrations", () => {
 
     const migrated = openCompanyDatabase(companyDir);
     try {
-      assert.equal(migrated.schemaVersion(), 24);
+      assert.equal(migrated.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(migrated.path);
       try {
         const table = inspected
@@ -882,24 +1345,76 @@ describe("Company database migrations", () => {
     }
   });
 
+  it("upgrades schema version 37 with accepted Technical Baselines and the Delivery coordinator", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const previous = new DatabaseSync(databasePath);
+    previous.exec(`
+      DROP TABLE technical_gate_promotions;
+      DROP TABLE technical_baselines;
+      DELETE FROM positions WHERE id = 'delivery-coordinator';
+      DELETE FROM ai_members WHERE id = 'delivery-coordinator-member';
+      DELETE FROM schema_migrations WHERE version = 38;
+      UPDATE schema_metadata SET value = '37' WHERE key = 'schema_version';
+      PRAGMA user_version = 37;
+    `);
+    previous.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(databasePath);
+      try {
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'technical_baselines'",
+            )
+            .get() !== undefined,
+          true,
+        );
+        assert.equal(
+          (
+            inspected
+              .prepare(
+                "SELECT ai_member_id AS aiMemberId FROM positions WHERE id = 'delivery-coordinator'",
+              )
+              .get() as { readonly aiMemberId: string }
+          ).aiMemberId,
+          "delivery-coordinator-member",
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
   it("rejects a database created by a newer runtime without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const databasePath = join(companyDir, ".sandcastle", "company.sqlite");
     mkdirSync(join(companyDir, ".sandcastle"), { recursive: true });
     const future = new DatabaseSync(databasePath);
+    const futureVersion = CURRENT_SCHEMA_VERSION + 1;
     future.exec(`
       CREATE TABLE schema_metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '25');
-      PRAGMA user_version = 25;
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '${futureVersion}');
+      PRAGMA user_version = ${futureVersion};
     `);
     future.close();
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Unsupported company database schema version 25/,
+      new RegExp(
+        `Unsupported company database schema version ${futureVersion}`,
+      ),
     );
 
     const inspected = new DatabaseSync(databasePath);
@@ -912,7 +1427,7 @@ describe("Company database migrations", () => {
             )
             .get() as { value: string }
         ).value,
-        "25",
+        String(futureVersion),
       );
       assert.equal(
         (
@@ -920,7 +1435,7 @@ describe("Company database migrations", () => {
             user_version: number;
           }
         ).user_version,
-        25,
+        futureVersion,
       );
       assert.equal(
         inspected
@@ -944,7 +1459,7 @@ describe("Company database backups", () => {
     const backup = await database.backup();
     database.close();
 
-    assert.equal(backup.schemaVersion, 24);
+    assert.equal(backup.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.equal(existsSync(backup.path), true);
     if (process.platform !== "win32") {
       assert.equal(statSync(backup.path).mode & 0o777, 0o600);
@@ -955,7 +1470,7 @@ describe("Company database backups", () => {
 
     const restored = openCompanyDatabase(companyDir);
     try {
-      assert.equal(restored.schemaVersion(), 24);
+      assert.equal(restored.schemaVersion(), CURRENT_SCHEMA_VERSION);
     } finally {
       restored.close();
     }
@@ -976,7 +1491,7 @@ describe("Company catalog", () => {
       assert.equal(departments[0]?.builtIn, true);
       assert.equal(departments[0]?.publishedPipelineVersion, 2);
       assert.equal(department.name, "Software R&D");
-      assert.equal(department.positions.length, 5);
+      assert.equal(department.positions.length, 6);
       assert.ok(department.pipeline);
       assert.deepEqual(
         department.positions.map((position) => position.id),
@@ -986,6 +1501,7 @@ describe("Company catalog", () => {
           "software-engineer",
           "reviewer",
           "evaluator",
+          "delivery-coordinator",
         ],
       );
       assert.equal(
@@ -1065,7 +1581,7 @@ describe("Company catalog", () => {
       assert.equal(database.catalog.departments().length, 0);
       assert.equal(
         database.catalog.inspectDepartment("software-rnd").positions.length,
-        5,
+        6,
       );
     } finally {
       database.close();
