@@ -91,6 +91,23 @@ const agUiRegistryFixture = [
   "execution.reattached@1:custom",
 ] as const;
 
+const retainedCatalogRegistryFixture = [
+  "department",
+  "position",
+  "ai-member",
+  "execution-profile",
+  "secret-reference",
+  "skill",
+  "skill-flow",
+  "pipeline-draft",
+  "pipeline-version",
+  "position-skill-binding",
+].flatMap((entity) =>
+  ["created", "updated", "deleted"].map(
+    (operation) => `${entity}.${operation}@1`,
+  ),
+);
+
 describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
@@ -110,7 +127,107 @@ describe("Runtime Event registry", () => {
         .list()
         .filter((entry) => entry.agUiMapping === "unmapped")
         .map((entry) => `${entry.type}@${entry.schemaVersion}`),
-      ["project.created@1", "project.updated@1", "project.deleted@1"],
+      [
+        "project.created@1",
+        "project.updated@1",
+        "project.deleted@1",
+        ...retainedCatalogRegistryFixture,
+        "session.created@1",
+        "session.participant.added@1",
+        "session.closed@1",
+        "session.message.created@1",
+        "memory.candidate.created@1",
+        "memory.candidate.reviewed@1",
+      ],
+    );
+  });
+
+  it("accepts exact retained catalog trigger contracts", () => {
+    const registry = createRuntimeEventRegistry();
+
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "pipeline-version.created",
+        scope: { companyId: "company" },
+        payload: {
+          entityId: "pipeline-version-1",
+          operation: "created",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "department.updated",
+        scope: { companyId: "company" },
+        payload: {
+          entityId: "department-1",
+          operation: "updated",
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "department.updated",
+          scope: { companyId: "company" },
+          payload: {
+            entityId: "department-1",
+            operation: "created",
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_PAYLOAD_INVALID",
+    );
+  });
+
+  it("accepts retained Session and Memory compatibility events", () => {
+    const registry = createRuntimeEventRegistry();
+
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "session.created",
+        scope: { companyId: "company" },
+        payload: {
+          sessionId: "session-1",
+          mode: "consultation",
+          projectId: "project-1",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "session.created",
+        scope: { companyId: "company" },
+        payload: {
+          sessionId: "session-2",
+          mode: "run-collaboration",
+          status: "active",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "memory.candidate.reviewed",
+        scope: { companyId: "company" },
+        payload: {
+          candidateId: "candidate-1",
+          status: "approved",
+          recordId: "record-1",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "permission.requested",
+        scope: { companyId: "company" },
+        payload: {
+          sessionId: "session-1",
+          permissionId: "permission-1",
+          scope: "repository.write",
+          status: "pending",
+        },
+      }),
     );
   });
 

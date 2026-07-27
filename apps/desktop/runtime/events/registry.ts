@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 8;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 9;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -62,6 +62,119 @@ const projectEventPayloadSchema = z
     operation: z.enum(["created", "updated", "deleted"]).optional(),
   })
   .passthrough();
+
+const retainedCatalogEntities = [
+  "department",
+  "position",
+  "ai-member",
+  "execution-profile",
+  "secret-reference",
+  "skill",
+  "skill-flow",
+  "pipeline-draft",
+  "pipeline-version",
+  "position-skill-binding",
+] as const;
+
+const retainedCatalogOperations = ["created", "updated", "deleted"] as const;
+
+const retainedCatalogEventDefinitions = retainedCatalogEntities.flatMap(
+  (entity) =>
+    retainedCatalogOperations.map(
+      (operation) =>
+        ({
+          type: `${entity}.${operation}`,
+          schemaVersion: 1,
+          requiredTopLevelIds: ["companyId"],
+          payloadSchema: z
+            .object({
+              entityId: z.string().trim().min(1),
+              operation: z.literal(operation),
+            })
+            .strict(),
+          retentionClass: "durable",
+          agUiMapping: "unmapped",
+          acpMapping: "unmapped",
+        }) satisfies RuntimeEventDefinition,
+    ),
+);
+
+const retainedSessionEventDefinitions = [
+  {
+    type: "session.created",
+    payloadSchema: z.union([
+      z
+        .object({
+          sessionId: z.string().trim().min(1),
+          mode: z.enum(["consultation", "run-collaboration"]),
+          projectId: z.string().trim().min(1),
+        })
+        .strict(),
+      z
+        .object({
+          sessionId: z.string().trim().min(1),
+          mode: z.literal("run-collaboration"),
+          status: z.literal("active"),
+        })
+        .strict(),
+    ]),
+  },
+  {
+    type: "session.participant.added",
+    payloadSchema: z
+      .object({
+        sessionId: z.string().trim().min(1),
+        participantType: z.enum(["human", "ai-member", "system"]),
+        role: z.string().trim().min(1),
+      })
+      .strict(),
+  },
+  {
+    type: "session.closed",
+    payloadSchema: z
+      .object({
+        sessionId: z.string().trim().min(1),
+        status: z.literal("closed"),
+      })
+      .strict(),
+  },
+  {
+    type: "session.message.created",
+    payloadSchema: z
+      .object({
+        sessionId: z.string().trim().min(1),
+        messageId: z.string().trim().min(1),
+        participantId: z.string().trim().min(1),
+        kind: z.enum(["text", "tool", "status"]),
+        content: z.string(),
+      })
+      .strict(),
+  },
+] as const;
+
+const retainedMemoryEventDefinitions = [
+  {
+    type: "memory.candidate.created",
+    payloadSchema: z
+      .object({
+        candidateId: z.string().trim().min(1),
+        projectId: z.string().trim().min(1),
+        scope: z.enum(["project", "ai-member"]),
+        status: z.literal("pending"),
+      })
+      .strict(),
+  },
+  {
+    type: "memory.candidate.reviewed",
+    payloadSchema: z
+      .object({
+        candidateId: z.string().trim().min(1),
+        status: z.enum(["approved", "rejected"]),
+        recordId: z.string().trim().min(1).nullable(),
+      })
+      .strict(),
+  },
+] as const;
 
 const applicationRegisteredPayloadSchema = z
   .object({
@@ -404,6 +517,29 @@ const definitions = [
     agUiMapping: "unmapped",
     acpMapping: "unmapped",
   },
+  ...retainedCatalogEventDefinitions,
+  ...retainedSessionEventDefinitions.map(
+    (definition) =>
+      ({
+        ...definition,
+        schemaVersion: 1,
+        requiredTopLevelIds: ["companyId"],
+        retentionClass: "durable",
+        agUiMapping: "unmapped",
+        acpMapping: "unmapped",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  ...retainedMemoryEventDefinitions.map(
+    (definition) =>
+      ({
+        ...definition,
+        schemaVersion: 1,
+        requiredTopLevelIds: ["companyId"],
+        retentionClass: "durable",
+        agUiMapping: "unmapped",
+        acpMapping: "unmapped",
+      }) satisfies RuntimeEventDefinition,
+  ),
   {
     type: "application.registered",
     schemaVersion: 1,
@@ -761,12 +897,7 @@ const definitions = [
       ({
         type,
         schemaVersion: 1,
-        requiredTopLevelIds: [
-          "companyId",
-          "projectId",
-          "sessionId",
-          "permissionRequestId",
-        ],
+        requiredTopLevelIds: ["companyId"],
         payloadSchema: permissionEventPayloadSchema,
         retentionClass: "durable",
         agUiMapping: "custom",

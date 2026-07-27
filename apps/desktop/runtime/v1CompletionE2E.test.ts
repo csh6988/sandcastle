@@ -417,7 +417,7 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         method: "session/update",
         params: { afterSequence: 0, limit: 100 },
       });
-      assert.ok(replay.result);
+      assert.ok(replay.result, JSON.stringify(replay));
       assert.ok(
         Array.isArray(
           (replay.result as { readonly events?: unknown[] }).events,
