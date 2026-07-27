@@ -42,7 +42,12 @@ import {
   type DepartmentSettingsSaveOperation,
 } from "./departmentSettingsSave.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
-import { RunSupervisionPanel } from "./runSupervision.js";
+import {
+  applyRunSupervisionFrame,
+  connectRunSupervision,
+  RunSupervisionPanel,
+  type RunSupervisionConnection,
+} from "./runSupervision.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2339,8 +2344,17 @@ export function ProjectDetailView({
   const [selectedRun, setSelectedRun] = useState<DepartmentRunView | null>(
     null,
   );
-  const [runSupervision, setRunSupervision] =
-    useState<RunSupervisionView | null>(null);
+  const [runSupervisionState, setRunSupervisionState] = useState<{
+    readonly generation: number;
+    readonly view: RunSupervisionView | null;
+  }>({ generation: 0, view: null });
+  const runSupervision = runSupervisionState.view;
+  const [runSupervisionDiagnostic, setRunSupervisionDiagnostic] = useState<
+    string | null
+  >(null);
+  const runSupervisionConnection = useRef<RunSupervisionConnection | null>(
+    null,
+  );
   const [runDepartmentId, setRunDepartmentId] = useState("");
   const [runAgents, setRunAgents] = useState<AgentCatalogView["agents"]>([]);
   const [agentOverrideId, setAgentOverrideId] = useState("");
@@ -2416,29 +2430,52 @@ export function ProjectDetailView({
   };
 
   useEffect(() => {
+    let active = true;
+    const previous = runSupervisionConnection.current;
+    runSupervisionConnection.current = null;
+    if (previous) void previous.close();
     if (!selectedRun) {
-      setRunSupervision(null);
+      setRunSupervisionState({ generation: 0, view: null });
+      setRunSupervisionDiagnostic(null);
       return;
     }
-    let active = true;
-    window.sandcastle
-      .query({
-        type: "run.supervision.inspect",
-        runId: selectedRun.run.id,
-      })
-      .then((result) => {
-        if (active) setRunSupervision(result.view);
+    setRunSupervisionState({ generation: 0, view: null });
+    setRunSupervisionDiagnostic("Synchronizing Runtime supervision…");
+    connectRunSupervision({
+      bridge: window.sandcastle,
+      runId: selectedRun.run.id,
+      onFrame: (frame) => {
+        if (active) {
+          setRunSupervisionState((current) =>
+            applyRunSupervisionFrame(current, frame),
+          );
+        }
+      },
+      onDiagnostic: (diagnostic) => {
+        if (active) setRunSupervisionDiagnostic(diagnostic);
+      },
+    })
+      .then(async (connection) => {
+        if (!active) {
+          await connection.close();
+          return;
+        }
+        runSupervisionConnection.current = connection;
       })
       .catch((nextError: unknown) => {
         if (active) {
-          setRunSupervision(null);
-          setRunError(errorMessage(nextError));
+          setRunSupervisionDiagnostic(
+            `Runtime unavailable; resync required: ${errorMessage(nextError)}`,
+          );
         }
       });
     return () => {
       active = false;
+      const connection = runSupervisionConnection.current;
+      runSupervisionConnection.current = null;
+      if (connection) void connection.close();
     };
-  }, [selectedRun?.run.id, selectedRun?.run.revision]);
+  }, [selectedRun?.run.id]);
 
   useEffect(() => {
     let active = true;
@@ -3063,7 +3100,12 @@ export function ProjectDetailView({
           code: result.error.code,
         });
       }
-      setRunSupervision(result.value);
+      setRunSupervisionState((current) =>
+        applyRunSupervisionFrame(current, {
+          generation: current.generation,
+          view: result.value,
+        }),
+      );
       await refreshRuns();
     } catch (nextError) {
       setRunError(errorMessage(nextError));
@@ -3073,7 +3115,14 @@ export function ProjectDetailView({
           type: "run.supervision.inspect",
           runId: selectedRun.run.id,
         })
-        .then((result) => setRunSupervision(result.view))
+        .then((result) =>
+          setRunSupervisionState((current) =>
+            applyRunSupervisionFrame(current, {
+              generation: current.generation,
+              view: result.view,
+            }),
+          ),
+        )
         .catch(() => undefined);
     } finally {
       setRunBusy(false);
@@ -3607,6 +3656,7 @@ export function ProjectDetailView({
                   {runSupervision ? (
                     <RunSupervisionPanel
                       busy={runBusy || interactionBusy}
+                      diagnostic={runSupervisionDiagnostic}
                       onCancelAttempt={(attemptId) =>
                         void applySupervisionCommand({
                           type: "node-attempt.cancel",
@@ -3635,6 +3685,9 @@ export function ProjectDetailView({
                         })
                       }
                       onPause={() => void controlRun("pause")}
+                      onResync={() =>
+                        void runSupervisionConnection.current?.resync()
+                      }
                       onResume={() => void controlRun("resume")}
                       view={runSupervision}
                     />

@@ -153,12 +153,32 @@ describe("Run supervision", () => {
       if (cancelledTurn.status !== "succeeded") {
         assert.fail("Turn cancellation was rejected.");
       }
+      assert.equal(cancelledTurn.effectIds.length, 1);
       assert.equal(
         cancelledTurn.value.interactions
           .flatMap((entry) => entry.turns)
           .find((turn) => turn.id === prompted.value.id)?.status,
         "cancelled",
       );
+
+      for (let revision = 1; revision <= 1_001; revision += 1) {
+        database.events.append({
+          type: "project.updated",
+          scope: { companyId: "company", projectId: "noise-project" },
+          payload: { projectId: "noise-project", revision },
+        });
+      }
+      database.events.append({
+        type: "run.intervention.recorded",
+        scope: {
+          companyId: "company",
+          projectId: project.id,
+          departmentId: department.id,
+          runId: run.run.id,
+        },
+        payload: { status: "late-supervision-evidence" },
+        eventId: "late-supervision-event",
+      });
 
       const view = database.supervision.inspect(run.run.id);
 
@@ -173,6 +193,26 @@ describe("Run supervision", () => {
       );
       assert.deepEqual(view.graph.edges, graph.edges);
       assert.equal(view.timeline[0]?.type, "run.created");
+      assert.equal(
+        view.timeline.some(
+          (event) => event.eventId === "late-supervision-event",
+        ),
+        true,
+      );
+      const cancellationEvent = view.timeline.find(
+        (event) =>
+          event.payload !== null &&
+          typeof event.payload === "object" &&
+          "turnId" in event.payload &&
+          event.payload.turnId === prompted.value.id,
+      );
+      assert.equal(cancellationEvent?.type, "interaction.turn.cancelled");
+      assert.deepEqual(cancellationEvent?.payload, {
+        sessionId: consultation.id,
+        turnId: prompted.value.id,
+        status: "cancelled",
+        failureCode: "TURN_CANCELLED_BEFORE_EXECUTION",
+      });
       const activity = view.agentActivities.find(
         (candidate) => candidate.nodeRunId === implement.id,
       );

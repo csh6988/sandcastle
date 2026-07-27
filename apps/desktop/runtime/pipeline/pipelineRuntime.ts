@@ -5658,14 +5658,17 @@ export const openPipelineRuntime = (
         (candidate) => candidate.id === input.nodeRunId,
       );
       const attempt = node?.attempts.at(-1);
+      const activeAttempt =
+        attempt && ["running", "reconciling"].includes(attempt.status);
       if (
         !node ||
         !attempt ||
-        !["failed", "interrupted", "cancelled"].includes(attempt.status)
+        (!activeAttempt &&
+          !["failed", "interrupted", "cancelled"].includes(attempt.status))
       ) {
         throw new PipelineRuntimeError(
           "INTERVENTION_TERMINATION_UNPROVEN",
-          `Node Run ${input.nodeRunId} has no proven terminal Attempt.`,
+          `Node Run ${input.nodeRunId} has no active or proven terminal Attempt.`,
         );
       }
       const reason = input.reason.trim();
@@ -5684,9 +5687,54 @@ export const openPipelineRuntime = (
       const now = clock().toISOString();
       const interventionId = randomUUID();
       const nextAttemptId =
-        input.outcome === "new-attempt" ? randomUUID() : null;
+        !activeAttempt && input.outcome === "new-attempt" ? randomUUID() : null;
       database.exec("SAVEPOINT governed_intervention");
       try {
+        if (activeAttempt) {
+          database
+            .prepare(
+              `UPDATE node_attempts
+                  SET status = 'reconciling', recoverable = 1,
+                      failure_code = 'EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED',
+                      failure_message = 'Governed intervention fenced the active Attempt; external termination still requires reconciliation.',
+                      completed_at = NULL
+                WHERE id = ? AND status IN ('running', 'reconciling')`,
+            )
+            .run(attempt.id);
+          database
+            .prepare(
+              `UPDATE execution_leases
+                  SET cancel_requested = 1, released_at = COALESCE(released_at, ?)
+                WHERE target_kind = 'node-attempt' AND target_id = ?
+                  AND released_at IS NULL`,
+            )
+            .run(now, attempt.id);
+          database
+            .prepare(
+              `UPDATE node_runs
+                  SET status = 'blocked',
+                      failure_code = 'EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED',
+                      failure_message = 'Governed intervention fenced the active Attempt; external termination still requires reconciliation.',
+                      updated_at = ?
+                WHERE id = ? AND run_id = ?
+                  AND status IN ('running', 'blocked')`,
+            )
+            .run(now, input.nodeRunId, input.runId);
+          appendRuntimeMutation({
+            action: "attempt.intervention.request",
+            entityType: "node-attempt",
+            entityId: attempt.id,
+            eventType: "attempt.reconciling",
+            runId: input.runId,
+            nodeRunId: input.nodeRunId,
+            before: { status: attempt.status },
+            after: {
+              status: "reconciling",
+              failureCode: "EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED",
+            },
+            createdAt: now,
+          });
+        }
         if (nextAttemptId) {
           database
             .prepare(

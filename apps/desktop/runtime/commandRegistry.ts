@@ -1877,18 +1877,33 @@ const executeSupervisionCommand = (
           };
         }
       } else if (envelope.command.type === "run.governed-intervention") {
-        runId = envelope.command.runId;
+        const command = envelope.command;
+        runId = command.runId;
         if (envelope.expectedRevision === undefined) {
           throw new CompanyCommandError(
             "EXPECTED_REVISION_REQUIRED",
             "run.governed-intervention requires the Department Run revision.",
           );
         }
+        const activeAttempt = pipelineRuntime
+          .inspectRun(command.runId)
+          .nodes.find((node) => node.id === command.nodeRunId)
+          ?.attempts.at(-1);
         pipelineRuntime.applyGovernedIntervention({
-          ...envelope.command,
+          ...command,
           expectedRevision: envelope.expectedRevision,
           actorId: envelope.actor.id,
         });
+        if (
+          activeAttempt &&
+          ["running", "reconciling"].includes(activeAttempt.status)
+        ) {
+          dispatch = () => {
+            void pipelineRuntime.dispatchNodeAttemptCancellation(
+              activeAttempt.id,
+            );
+          };
+        }
       } else {
         throw new CompanyCommandError(
           "COMMAND_UNSUPPORTED",

@@ -214,6 +214,29 @@ export const openRuntimeInteraction = (
     readonly actor?: ActorRef;
     readonly commandId?: string;
   }): void => {
+    const commandContext = database
+      .prepare(
+        `SELECT command_id AS commandId, actor_type AS actorType,
+                actor_id AS actorId, authenticated_by AS authenticatedBy
+           FROM runtime_unit_of_work_context WHERE slot = 1`,
+      )
+      .get() as
+      | {
+          readonly commandId: string;
+          readonly actorType: ActorRef["type"];
+          readonly actorId: string;
+          readonly authenticatedBy: ActorRef["authenticatedBy"];
+        }
+      | undefined;
+    const actor =
+      input.actor ??
+      (commandContext
+        ? {
+            type: commandContext.actorType,
+            id: commandContext.actorId,
+            authenticatedBy: commandContext.authenticatedBy,
+          }
+        : undefined);
     database
       .prepare(
         `INSERT INTO runtime_audit_records(
@@ -231,10 +254,10 @@ export const openRuntimeInteraction = (
         input.nodeRunId ?? null,
         JSON.stringify(input.payload),
         input.createdAt,
-        input.commandId ?? null,
-        input.actor?.type ?? null,
-        input.actor?.id ?? null,
-        input.actor?.authenticatedBy ?? null,
+        input.commandId ?? commandContext?.commandId ?? null,
+        actor?.type ?? null,
+        actor?.id ?? null,
+        actor?.authenticatedBy ?? null,
       );
     database
       .prepare(
@@ -1825,14 +1848,20 @@ export const openRuntimeInteraction = (
         action: "interaction.turn.cancel.request",
         entityType: "interaction-turn",
         entityId: turnId,
-        eventType: "interaction.turn.reconciling",
+        eventType:
+          current.status === "queued"
+            ? "interaction.turn.cancelled"
+            : "interaction.turn.reconciling",
         runId: session.runId,
         nodeRunId: session.nodeRunId,
         sessionId: session.id,
         payload: {
           turnId,
           status: current.status === "queued" ? "cancelled" : "reconciling",
-          failureCode: "TURN_CANCELLATION_RECONCILIATION_REQUIRED",
+          failureCode:
+            current.status === "queued"
+              ? "TURN_CANCELLED_BEFORE_EXECUTION"
+              : "TURN_CANCELLATION_RECONCILIATION_REQUIRED",
         },
         createdAt: now,
       });

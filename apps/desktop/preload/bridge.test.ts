@@ -63,7 +63,79 @@ import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInsp
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
+const workspaceAllocationView = {
+  id: "allocation-1",
+  projectId: "project-1",
+  applicationId: "application-1",
+  executionProfileId: "profile-1",
+  executionProfileRevision: 1,
+  operationKey: "workspace-allocation:allocation-1",
+  state: "ready" as const,
+  repositoryRoot: "/repo",
+  allocationRoot: "/workspace",
+  sourceBranch: "main",
+  baseCommit: "a".repeat(40),
+  expectedSourceTip: "b".repeat(40),
+  capabilitySnapshot: {},
+  capabilitySnapshotHash: "c".repeat(64),
+  privateGitIdentity: null,
+  provisionReceipt: null,
+  cleanupEvidence: null,
+  failure: null,
+  revision: 2,
+  imports: [],
+  createdAt: "2026-07-27T00:00:00.000Z",
+  updatedAt: "2026-07-27T00:00:00.000Z",
+};
+
 describe("Sandcastle preload bridge", () => {
+  it("parses Workspace command results through the typed tunnel", async () => {
+    const bridge = createSandcastleBridge(async (channel) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      return {
+        status: "succeeded",
+        value: workspaceAllocationView,
+        effectIds: ["audit-workspace-1"],
+      };
+    });
+
+    const commands = [
+      {
+        type: "workspace-allocation.provision" as const,
+        allocationId: "allocation-1",
+        projectId: "project-1",
+        applicationId: "application-1",
+        executionProfileId: "profile-1",
+        sourceBranch: "main",
+        baseCommit: "a".repeat(40),
+        expectedSourceTip: "b".repeat(40),
+      },
+      {
+        type: "source-import.execute" as const,
+        allocationId: "allocation-1",
+        resultCommit: "d".repeat(40),
+        expectedSourceTip: "b".repeat(40),
+      },
+      {
+        type: "workspace-allocation.cleanup" as const,
+        allocationId: "allocation-1",
+      },
+    ];
+
+    for (const [index, command] of commands.entries()) {
+      const result = await bridge.execute({
+        commandId: `workspace-command-${index + 1}`,
+        expectedRevision: 1,
+        command,
+      });
+      assert.equal(result.status, "succeeded");
+      if (result.status === "succeeded") {
+        assert.equal(result.value.id, "allocation-1");
+        assert.equal(result.value.state, "ready");
+      }
+    }
+  });
+
   it("parses Run Supervision through the typed query tunnel", async () => {
     const view = {
       run: scriptedDepartmentRun.run,

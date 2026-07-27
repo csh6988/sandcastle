@@ -1152,6 +1152,96 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("governs an active Attempt by pausing and fencing it before dispatching cancellation", async () => {
+    let markStarted!: () => void;
+    const startedExecuting = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let receivedSignal: AbortSignal | undefined;
+    let cancellationRequests = 0;
+    const { database, project, department } = setup({
+      execute: async (input) => {
+        receivedSignal = input.signal;
+        markStarted();
+        await new Promise<void>((resolve) => {
+          input.signal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        return { kind: "succeeded" };
+      },
+      cancel: async () => {
+        cancellationRequests += 1;
+        return "unknown";
+      },
+    });
+    try {
+      const started = database.pipelineRuntime.startRun({
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const executing = database.pipelineRuntime
+        .executeReady({
+          runId: started.run.id,
+          expectedRevision: started.run.revision,
+        })
+        .catch((error: unknown) => error);
+      await startedExecuting;
+      const running = database.pipelineRuntime.inspectRun(started.run.id);
+      const activeNode = running.nodes.find(
+        (node) => node.pipelineNodeId === "implement",
+      );
+      const activeAttempt = activeNode?.attempts.at(-1);
+      assert.ok(activeNode);
+      assert.equal(activeAttempt?.status, "running");
+
+      const command = {
+        schemaVersion: 1 as const,
+        commandId: "intervention-active-1",
+        actor: {
+          type: "human" as const,
+          id: "user-local",
+          authenticatedBy: "local-session" as const,
+        },
+        expectedRevision: running.run.revision,
+        command: {
+          type: "run.governed-intervention" as const,
+          runId: running.run.id,
+          nodeRunId: activeNode.id,
+          reason:
+            "The active implementation is heading in the wrong direction.",
+          feedback:
+            "Stop before producing more effects and preserve the evidence.",
+          outcome: "feedback" as const,
+        },
+      };
+      const result = database.commandRegistry.execute(command);
+
+      assert.equal(result.status, "succeeded");
+      if (result.status !== "succeeded") {
+        assert.fail("Active intervention was rejected.");
+      }
+      assert.equal(result.value.run.status, "paused");
+      const fencedAttempt = result.value.agentActivities.find(
+        (activity) => activity.attemptId === activeAttempt?.id,
+      );
+      assert.equal(fencedAttempt?.status, "reconciling");
+      const execution = database.pipelineRuntime.inspectExecution({
+        attemptId: activeAttempt?.id,
+      });
+      assert.equal(execution.leases.at(-1)?.cancelRequested, true);
+      assert.equal(execution.leases.at(-1)?.releasedAt !== null, true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(cancellationRequests, 1);
+      assert.equal(receivedSignal?.aborted, true);
+      assert.deepEqual(database.commandRegistry.execute(command), result);
+      assert.equal(cancellationRequests, 1);
+      await executing;
+    } finally {
+      database.close();
+    }
+  });
+
   it("allows only one scheduler worker to claim the same Ready Node Attempt", async () => {
     const { companyDir, database, project, department, profile } = setup(
       createScriptedExecutionAdapter({

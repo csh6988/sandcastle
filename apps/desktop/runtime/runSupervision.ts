@@ -162,9 +162,17 @@ export const openRuntimeSupervision = (
         )
         .map((view) => [view.session.nodeRunId!, view]),
     );
-    const timeline = options.pipelineRuntime
-      .runtimeEvents({ afterSequence: 0, limit: 1_000 })
-      .filter((event) => event.runId === runId);
+    const timeline: RuntimeEventRecord[] = [];
+    let afterSequence = 0;
+    while (true) {
+      const batch = options.pipelineRuntime.runtimeEvents({
+        afterSequence,
+        limit: 1_000,
+      });
+      timeline.push(...batch.filter((event) => event.runId === runId));
+      if (batch.length < 1_000) break;
+      afterSequence = batch.at(-1)!.sequence;
+    }
     const usageByNode = new Map<
       string,
       { inputTokens: number; outputTokens: number; totalTokens: number }
@@ -302,9 +310,13 @@ export const openRuntimeSupervision = (
         ),
         interveneNodeRunIds: inspected.nodes
           .filter((node) =>
-            ["failed", "interrupted", "cancelled"].includes(
-              node.attempts.at(-1)?.status ?? "",
-            ),
+            [
+              "running",
+              "reconciling",
+              "failed",
+              "interrupted",
+              "cancelled",
+            ].includes(node.attempts.at(-1)?.status ?? ""),
           )
           .map((node) => node.id),
       },
