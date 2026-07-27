@@ -6,6 +6,7 @@ import {
   ApplicationViewSchema,
   TechnicalReviewStateViewSchema,
   WorkspaceAllocationViewSchema,
+  WorkPackageGraphViewSchema,
   ProjectEditorViewSchema,
   ProductDiscoveryViewSchema,
   ProductReviewStateViewSchema,
@@ -16,6 +17,8 @@ import {
   type TechnicalReviewStateView,
   type WorkspaceAllocationView,
   type WorkspaceEnvelopeCommand,
+  type WorkPackageEnvelopeCommand,
+  type WorkPackageGraphView,
   type EnvelopeCommand,
   type EnvelopeCommandResult,
   type ProjectEditorView,
@@ -75,6 +78,10 @@ import {
 } from "./workspaces/workspaceRuntime.js";
 import type { RuntimeSupervision } from "./runSupervision.js";
 import { RuntimeMemoryError, type RuntimeMemory } from "./memory.js";
+import {
+  WorkPackageRuntimeError,
+  type WorkPackageRuntime,
+} from "./workspaces/workPackages.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -219,6 +226,30 @@ export const companyCommandDefinitions = {
     primaryAggregate: "department-run",
     expectedRevisionRequired: true,
   },
+  "work-package.generate": {
+    primaryAggregate: "department-run",
+    expectedRevisionRequired: true,
+  },
+  "work-package.version": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
+  "work-package.assign": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
+  "work-package.start": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
+  "work-package.rework": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
+  "work-package.self-check": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
 } as const;
 
 const canonicalize = (value: unknown): unknown => {
@@ -275,6 +306,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof WorkspaceRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof WorkPackageRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof PipelineRuntimeError) {
@@ -2278,6 +2312,178 @@ const executeSupervisionCommand = (
   }
 };
 
+const executeWorkPackageCommand = (
+  database: DatabaseSync,
+  workPackageRuntime: WorkPackageRuntime,
+  envelope: CommandEnvelope<WorkPackageEnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<WorkPackageGraphView> => {
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy, consumer_id AS consumerId,
+                schema_version AS schemaVersion, request_hash AS requestHash,
+                result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<WorkPackageGraphView>;
+      }
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<WorkPackageGraphView>;
+    }
+
+    let result: CommandResult<WorkPackageGraphView>;
+    if (envelope.expectedRevision === undefined) {
+      result = {
+        status: "rejected",
+        error: {
+          code: "EXPECTED_REVISION_REQUIRED",
+          message: `${envelope.command.type} requires an expected aggregate revision.`,
+        },
+        effectIds: [],
+      };
+    } else {
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          envelope.commandId,
+          envelope.actor.type,
+          envelope.actor.id,
+          envelope.actor.authenticatedBy,
+          envelope.consumerId ?? null,
+          envelope.schemaVersion,
+        );
+      try {
+        const shared = {
+          commandId: envelope.commandId,
+          actor: envelope.actor,
+          expectedRevision: envelope.expectedRevision,
+        };
+        const command = envelope.command;
+        const value =
+          command.type === "work-package.generate"
+            ? workPackageRuntime.generateInTransaction({
+                ...shared,
+                ...command,
+              })
+            : command.type === "work-package.version"
+              ? workPackageRuntime.versionInTransaction({
+                  ...shared,
+                  ...command,
+                })
+              : command.type === "work-package.assign"
+                ? workPackageRuntime.assignInTransaction({
+                    ...shared,
+                    ...command,
+                  })
+                : command.type === "work-package.start"
+                  ? workPackageRuntime.startInTransaction({
+                      ...shared,
+                      ...command,
+                    })
+                  : command.type === "work-package.rework"
+                    ? workPackageRuntime.reworkInTransaction({
+                        ...shared,
+                        ...command,
+                      })
+                    : workPackageRuntime.recordSelfCheckInTransaction({
+                        ...shared,
+                        ...command,
+                      });
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = {
+          status: "succeeded",
+          value: WorkPackageGraphViewSchema.parse(value),
+          effectIds,
+        };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
 export const openCompanyCommandRegistry = (
   database: DatabaseSync,
   projectConfiguration: ProjectConfiguration,
@@ -2298,11 +2504,26 @@ export const openCompanyCommandRegistry = (
   workspaceRuntime?: WorkspaceRuntime,
   memory?: RuntimeMemory,
   memoryFailure?: (point: MemoryCommandFailurePoint) => void,
+  workPackageRuntime?: WorkPackageRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
       input,
     ) as CommandEnvelope<EnvelopeCommand>;
+    if (envelope.command.type.startsWith("work-package.")) {
+      if (!workPackageRuntime) {
+        throw new CompanyCommandError(
+          "WORK_PACKAGE_RUNTIME_UNAVAILABLE",
+          "Work Package Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeWorkPackageCommand(
+        database,
+        workPackageRuntime,
+        envelope as CommandEnvelope<WorkPackageEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
     if (
       envelope.command.type === "workspace-allocation.provision" ||
       envelope.command.type === "source-import.execute" ||

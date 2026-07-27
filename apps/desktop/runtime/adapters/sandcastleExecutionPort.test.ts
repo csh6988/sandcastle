@@ -81,6 +81,7 @@ const input = (): SoftwareDevelopmentExecutionInput => ({
     secretReferenceIds: [],
   },
   memoryEntries: [],
+  agentAdapterId: "codex",
   attempt: {
     id: "attempt-1",
     attemptNumber: 1,
@@ -191,6 +192,59 @@ describe("Sandcastle Execution Port", () => {
     assert.deepEqual(received?.branchStrategy, {
       type: "branch",
       branch: "sandcastle/run-1/node-1",
+    });
+  });
+
+  it("runs a Work Package only in its allocated execution tree", async () => {
+    let received: Readonly<Record<string, unknown>> | undefined;
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: (provider, model) => ({ provider, model }),
+      resolveSandbox: (sandbox) => ({ sandbox }),
+      run: async (options) => {
+        received = options;
+        return { commits: [{ sha: "abc123" }] };
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+    const packageInput = {
+      ...input(),
+      handler: "repository-implementation",
+      node: { ...input().node, id: "package-a" },
+      project: {
+        ...input().project,
+        repositoryReferences: ["/host/repository-a", "/host/repository-b"],
+      },
+      executionProfile: {
+        ...input().executionProfile,
+        branchStrategy: "branch",
+      },
+      request: {
+        sideEffectPolicy: "formal",
+        immutableContext: {
+          workPackage: {
+            id: "package-a",
+            versionId: "package-a-v1",
+            applicationId: "application-a",
+            repositoryReference: "/host/repository-a",
+            allocationId: "allocation-a",
+            executionTreePath: "/allocations/a/execution-tree",
+            sourceBranch: "sandcastle/package-a/attempt-1",
+            interactionSessionId: "session-a",
+            sandboxIdentity: "sandbox:a",
+            evidenceScope: "evidence:a",
+          },
+        },
+      },
+    } as unknown as SoftwareDevelopmentExecutionInput;
+
+    const result =
+      await createSandcastleExecutionPort(runtime).execute(packageInput);
+
+    assert.equal(result.kind, "succeeded");
+    assert.equal(received?.cwd, "/allocations/a/execution-tree");
+    assert.deepEqual(received?.branchStrategy, {
+      type: "branch",
+      branch: "sandcastle/package-a/attempt-1",
     });
   });
 

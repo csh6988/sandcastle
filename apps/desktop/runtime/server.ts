@@ -7,6 +7,7 @@ import {
   type ActorRef,
   type RuntimeRequest,
   type RuntimeResponse,
+  type WorkPackageGraphView,
 } from "./interface.js";
 import { CompanyCatalogError } from "./catalog/companyCatalog.js";
 import { PipelineConfigurationError } from "./pipeline/pipelineConfiguration.js";
@@ -31,6 +32,7 @@ import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactio
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
+import { WorkPackageRuntimeError } from "./workspaces/workPackages.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -338,6 +340,25 @@ export const startCompanyRuntimeServer = async (
                   database.workspaces.executeCleanup(
                     request.envelope.command.allocationId,
                   );
+                } else if (
+                  request.envelope.command.type === "work-package.assign" ||
+                  request.envelope.command.type === "work-package.rework"
+                ) {
+                  const graph = result.value as unknown as WorkPackageGraphView;
+                  const workPackageId = (
+                    request.envelope.command as {
+                      readonly workPackageId: string;
+                    }
+                  ).workPackageId;
+                  const workPackage = graph.packages.find(
+                    (entry) => entry.id === workPackageId,
+                  );
+                  const allocation = workPackage?.versions
+                    .at(-1)
+                    ?.assignments.at(-1)?.allocation;
+                  if (allocation?.state === "planned") {
+                    database.workspaces.executeProvision(allocation.id);
+                  }
                 }
               }
               sendResponse(socket, {
@@ -362,6 +383,8 @@ export const startCompanyRuntimeServer = async (
                     );
                   case "workspace-allocation.inspect":
                     return database.workspaces.inspect(query.allocationId);
+                  case "work-packages.inspect":
+                    return database.workPackages.inspect(query.runId);
                   case "applications.list":
                     return database.technicalReview.listApplications(
                       query.projectId,
@@ -436,6 +459,8 @@ export const startCompanyRuntimeServer = async (
                   return database.workspaces.inspect(
                     request.query.allocationId,
                   );
+                case "work-packages.inspect":
+                  return database.workPackages.inspect(request.query.runId);
                 case "applications.list":
                   return database.technicalReview.listApplications(
                     request.query.projectId,
@@ -1078,6 +1103,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||
+                error instanceof WorkPackageRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -1094,6 +1120,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||
+                error instanceof WorkPackageRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { JSDOM } from "jsdom";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   scriptedSoftwareRndDepartment,
@@ -14,6 +17,7 @@ import {
   SkillsPage,
   PositionDrawerEditor,
   ProjectDetailView,
+  ProjectDetailWorkPackages,
   CompanyInteractionPage,
   InteractionRunPanel,
   RUN_PROGRESS_POLL_INTERVAL_MS,
@@ -32,6 +36,7 @@ import {
   RunCollaborationWorkspace,
   projectCreationInputInvalid,
   startProjectDepartmentRun,
+  inspectProjectRunWorkPackages,
   confirmProjectProductBaseline,
   recoveryOverrideInputProvided,
 } from "./companyPages.js";
@@ -1762,6 +1767,233 @@ describe("Project detail", () => {
     assert.match(markup, /aria-selected="true"[^>]*>Overview/);
     assert.match(markup, /data-active-project-tab="overview"/);
     assert.match(markup, /data-project-overview/);
+  });
+
+  it("queries and mounts the selected Run Work Package graph without retaining failed data", async () => {
+    const graph = {
+      projectId: "project-1",
+      runId: "run-1",
+      technicalBaselineId: "technical-baseline-1",
+      packages: [],
+    };
+    const queries: unknown[] = [];
+    const loaded = await inspectProjectRunWorkPackages(
+      {
+        query: async (query) => {
+          queries.push(query);
+          return { view: graph };
+        },
+      },
+      "run-1",
+    );
+    assert.deepEqual(queries, [
+      { type: "work-packages.inspect", runId: "run-1" },
+    ]);
+    assert.deepEqual(loaded, graph);
+
+    const markup = renderToStaticMarkup(
+      <ProjectDetailWorkPackages active graph={loaded} />,
+    );
+    assert.match(markup, /data-work-package-graph/);
+    assert.match(markup, /Technical Baseline technical-baseline-1/);
+
+    const failed = await inspectProjectRunWorkPackages(
+      {
+        query: async () => {
+          throw new Error("query failed");
+        },
+      },
+      "run-1",
+    );
+    assert.equal(failed, null);
+    assert.equal(
+      renderToStaticMarkup(<ProjectDetailWorkPackages active graph={failed} />),
+      "",
+    );
+  });
+
+  it("loads the selected Run Work Package graph through Project Detail and clears it after a failed replacement query", async (context) => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const replacementProject = {
+      ...project,
+      id: "project-2",
+      name: "Billing",
+    };
+    const runFor = (projectId: string, runId: string): DepartmentRunView => ({
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        id: runId,
+        projectId,
+        status: "completed",
+      },
+      snapshot: {
+        ...scriptedDepartmentRun.snapshot,
+        payload: {
+          ...scriptedDepartmentRun.snapshot.payload,
+          project: {
+            ...scriptedDepartmentRun.snapshot.payload.project,
+            id: projectId,
+          },
+        },
+      },
+      nodes: scriptedDepartmentRun.nodes.map((node) => ({
+        ...node,
+        runId,
+      })),
+    });
+    const runs = new Map([
+      ["project-1", runFor("project-1", "run-1")],
+      ["project-2", runFor("project-2", "run-2")],
+    ]);
+    const queries: unknown[] = [];
+    const bridge = {
+      query: async (query: {
+        readonly type: string;
+        readonly runId?: string;
+        readonly projectId?: string;
+      }) => {
+        queries.push(query);
+        if (query.type === "product.discovery.inspect") {
+          return {
+            view: {
+              project: {
+                id: query.projectId!,
+                name: query.projectId === "project-1" ? "Checkout" : "Billing",
+                goal: "Ship",
+                revision: 1,
+              },
+              proposal: null,
+              baselines: [],
+              formalRuns: [],
+            },
+          };
+        }
+        if (query.type === "work-packages.inspect" && query.runId === "run-1") {
+          return {
+            view: {
+              projectId: "project-1",
+              runId: "run-1",
+              technicalBaselineId: "technical-baseline-1",
+              packages: [],
+            },
+          };
+        }
+        throw new Error("query failed");
+      },
+      runtime: {
+        departments: async () => [],
+        runs: async (projectId: string) => [runs.get(projectId)!],
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [],
+      },
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, {
+        configurable: true,
+        value,
+      });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    });
+
+    const workPackageQueries = () =>
+      queries.filter(
+        (query): query is { readonly type: string; readonly runId: string } =>
+          typeof query === "object" &&
+          query !== null &&
+          "type" in query &&
+          query.type === "work-packages.inspect",
+      );
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          project={project}
+          t={messages.en}
+          initialTab="runs"
+          onBack={() => undefined}
+          onSave={async () => project}
+          onArchive={async () => project}
+        />,
+      );
+    });
+
+    await act(async () => {
+      assert.deepEqual(workPackageQueries(), [
+        { type: "work-packages.inspect", runId: "run-1" },
+      ]);
+      assert.equal(
+        container.querySelectorAll("[data-work-package-graph]").length,
+        1,
+      );
+    });
+
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          project={replacementProject}
+          t={messages.en}
+          initialTab="runs"
+          onBack={() => undefined}
+          onSave={async () => replacementProject}
+          onArchive={async () => replacementProject}
+        />,
+      );
+    });
+
+    await act(async () => {
+      assert.deepEqual(workPackageQueries(), [
+        { type: "work-packages.inspect", runId: "run-1" },
+        { type: "work-packages.inspect", runId: "run-2" },
+      ]);
+      assert.equal(
+        container.querySelectorAll("[data-work-package-graph]").length,
+        0,
+      );
+    });
   });
 });
 

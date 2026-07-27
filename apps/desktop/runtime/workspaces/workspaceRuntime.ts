@@ -27,6 +27,11 @@ export interface WorkspaceAllocationView {
   readonly executionProfileId: string;
   readonly executionProfileRevision: number;
   readonly operationKey: string;
+  readonly workPackageVersionId: string | null;
+  readonly nodeAttemptId: string | null;
+  readonly interactionSessionId: string | null;
+  readonly sandboxIdentity: string | null;
+  readonly evidenceScope: string | null;
   readonly state: WorkspaceAllocationState;
   readonly repositoryRoot: string;
   readonly allocationRoot: string;
@@ -82,6 +87,12 @@ export interface WorkspaceRuntime {
     readonly sourceBranch: string;
     readonly baseCommit: string;
     readonly expectedSourceTip: string;
+    readonly operationKey?: string;
+    readonly workPackageVersionId?: string;
+    readonly nodeAttemptId?: string;
+    readonly interactionSessionId?: string;
+    readonly sandboxIdentity?: string;
+    readonly evidenceScope?: string;
   }) => WorkspaceAllocationView;
   readonly executeProvision: (allocationId: string) => WorkspaceAllocationView;
   readonly planImportInTransaction: (input: {
@@ -175,7 +186,12 @@ export const openWorkspaceRuntime = (
         `SELECT id, project_id AS projectId, application_id AS applicationId,
                 execution_profile_id AS executionProfileId,
                 execution_profile_revision AS executionProfileRevision,
-                operation_key AS operationKey, state,
+                operation_key AS operationKey,
+                work_package_version_id AS workPackageVersionId,
+                node_attempt_id AS nodeAttemptId,
+                interaction_session_id AS interactionSessionId,
+                sandbox_identity AS sandboxIdentity,
+                evidence_scope AS evidenceScope, state,
                 repository_root AS repositoryRoot,
                 allocation_root AS allocationRoot,
                 source_branch AS sourceBranch, base_commit AS baseCommit,
@@ -219,6 +235,20 @@ export const openWorkspaceRuntime = (
       executionProfileId: String(row.executionProfileId),
       executionProfileRevision: Number(row.executionProfileRevision),
       operationKey: String(row.operationKey),
+      workPackageVersionId:
+        row.workPackageVersionId === null
+          ? null
+          : String(row.workPackageVersionId),
+      nodeAttemptId:
+        row.nodeAttemptId === null ? null : String(row.nodeAttemptId),
+      interactionSessionId:
+        row.interactionSessionId === null
+          ? null
+          : String(row.interactionSessionId),
+      sandboxIdentity:
+        row.sandboxIdentity === null ? null : String(row.sandboxIdentity),
+      evidenceScope:
+        row.evidenceScope === null ? null : String(row.evidenceScope),
       state: row.state as WorkspaceAllocationState,
       repositoryRoot: String(row.repositoryRoot),
       allocationRoot: String(row.allocationRoot),
@@ -341,11 +371,13 @@ export const openWorkspaceRuntime = (
           `INSERT INTO workspace_allocations(
              id, project_id, application_id, execution_profile_id,
              execution_profile_revision, operation_key, state,
+             work_package_version_id, node_attempt_id,
+             interaction_session_id, sandbox_identity, evidence_scope,
              repository_root, allocation_root, source_branch, base_commit,
              expected_source_tip, capability_snapshot_json,
              capability_snapshot_hash, provision_command_id,
              revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         )
         .run(
           input.allocationId,
@@ -353,7 +385,12 @@ export const openWorkspaceRuntime = (
           input.applicationId,
           profile.executionProfileId,
           profile.executionProfileRevision,
-          `workspace-allocation:${input.allocationId}`,
+          input.operationKey ?? `workspace-allocation:${input.allocationId}`,
+          input.workPackageVersionId ?? null,
+          input.nodeAttemptId ?? null,
+          input.interactionSessionId ?? null,
+          input.sandboxIdentity ?? null,
+          input.evidenceScope ?? null,
           application.repositoryRoot,
           allocationRoot,
           input.sourceBranch,
@@ -869,9 +906,62 @@ export const openWorkspaceRuntime = (
         `Workspace Allocation ${allocationId} is not pending cleanup.`,
       );
     }
-    options.profile.cleanup(
-      allocation.provisionReceipt as LocalIsolatedGitProvisionReceipt,
-    );
+    try {
+      options.profile.cleanup(
+        allocation.provisionReceipt as LocalIsolatedGitProvisionReceipt,
+      );
+    } catch (error) {
+      const code =
+        error instanceof LocalIsolatedGitError
+          ? error.code
+          : "WORKSPACE_CLEANUP_FAILED";
+      const message = error instanceof Error ? error.message : String(error);
+      return internalTransaction(() => {
+        const now = clock().toISOString();
+        database
+          .prepare(
+            `UPDATE workspace_allocations
+                SET failure_code = ?, failure_message = ?,
+                    revision = revision + 1, updated_at = ?
+              WHERE id = ? AND state = 'cleanup-pending'`,
+          )
+          .run(code, message, now, allocation.id);
+        appendAudit({
+          action: "workspace-allocation.cleanup-failed",
+          entityType: "workspace-allocation",
+          entityId: allocation.id,
+          projectId: allocation.projectId,
+          commandId: allocation.operationKey,
+          actor: {
+            type: "runtime-worker",
+            id: "workspace-runtime",
+            authenticatedBy: "runtime",
+          },
+          before: { state: "cleanup-pending" },
+          after: { state: "cleanup-pending", code, message },
+          now,
+        });
+        options.events.append({
+          type: "workspace-allocation.failed",
+          scope: {
+            companyId: "company",
+            projectId: allocation.projectId,
+            applicationId: allocation.applicationId,
+            workspaceAllocationId: allocation.id,
+          },
+          payload: {
+            allocationId: allocation.id,
+            state: "cleanup-pending",
+            sourceBranch: allocation.sourceBranch,
+            baseCommit: allocation.baseCommit,
+            expectedSourceTip: allocation.expectedSourceTip,
+            failureCode: code,
+          },
+          timestamp: now,
+        });
+        return inspect(allocation.id);
+      });
+    }
     return internalTransaction(() => {
       const now = clock().toISOString();
       const evidence = {
@@ -884,6 +974,7 @@ export const openWorkspaceRuntime = (
         .prepare(
           `UPDATE workspace_allocations
               SET state = 'cleaned', cleanup_evidence_json = ?,
+                  failure_code = NULL, failure_message = NULL,
                   revision = revision + 1, updated_at = ? WHERE id = ?`,
         )
         .run(canonicalJson(evidence), now, allocation.id);

@@ -8,6 +8,7 @@ import type {
   AdapterExecutionFact,
   ExecutionCompletion,
   ExecutionEventSink,
+  FormalExecutionRequest,
 } from "../execution/contract.js";
 
 export type SoftwareDevelopmentHandler =
@@ -32,7 +33,9 @@ export interface SoftwareDevelopmentExecutionInput {
   };
   readonly executionProfile: RunSnapshotPayload["executionProfiles"][number];
   readonly memoryEntries: ExecutionAdapterInput["memoryEntries"];
+  readonly agentAdapterId: string;
   readonly attempt: ExecutionAdapterInput["attempt"];
+  readonly request?: FormalExecutionRequest;
 }
 
 export interface SoftwareDevelopmentExecutionPort {
@@ -62,14 +65,23 @@ export const createProductionExecutionAdapter = (
     input: ExecutionAdapterInput,
   ): Promise<ExecutionFact> => {
     const handler = handlerByNodeId[input.node.id];
-    if (!handler) {
+    const formalRequest =
+      input.request?.sideEffectPolicy === "formal" ? input.request : undefined;
+    const resolvedHandler = formalRequest?.immutableContext.workPackage
+      ? "repository-implementation"
+      : handler;
+    if (!resolvedHandler) {
       return failure(
         "PRODUCTION_NODE_HANDLER_NOT_FOUND",
         `No Software Development handler is registered for Pipeline node ${input.node.id}.`,
       );
     }
-    const position = input.snapshot.positions.find(
-      (candidate) => candidate.id === input.node.positionId,
+    const assignment = formalRequest?.immutableContext.workPackage;
+    const position = input.snapshot.positions.find((candidate) =>
+      assignment
+        ? candidate.id === assignment.positionId &&
+          candidate.aiMember.id === assignment.aiMemberId
+        : candidate.id === input.node.positionId,
     );
     if (!position || position.aiMember.status !== "active") {
       return failure(
@@ -98,7 +110,7 @@ export const createProductionExecutionAdapter = (
     }
     try {
       return await port.execute({
-        handler,
+        handler: resolvedHandler,
         runId: input.runId,
         nodeRunId: input.nodeRunId,
         signal: input.signal,
@@ -110,12 +122,15 @@ export const createProductionExecutionAdapter = (
         skillFlow: { ...skillFlowSnapshot, positionId: position.id },
         executionProfile,
         memoryEntries: input.memoryEntries,
+        agentAdapterId:
+          formalRequest?.agentAdapterId ?? executionProfile.providerRef,
         attempt: input.attempt,
+        ...(formalRequest ? { request: formalRequest } : {}),
       });
     } catch {
       return failure(
         "PRODUCTION_EXECUTION_FAILED",
-        `Software Development handler ${handler} failed without exposing provider output.`,
+        `Software Development handler ${resolvedHandler} failed without exposing provider output.`,
       );
     }
   };

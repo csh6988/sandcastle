@@ -91,11 +91,18 @@ import {
   openWorkspaceRuntime,
   type WorkspaceRuntime,
 } from "../workspaces/workspaceRuntime.js";
-import { openLocalIsolatedGitProfile } from "../workspaces/localIsolatedGitProfile.js";
+import {
+  openLocalIsolatedGitProfile,
+  type LocalIsolatedGitProfile,
+} from "../workspaces/localIsolatedGitProfile.js";
 import {
   openRuntimeSupervision,
   type RuntimeSupervision,
 } from "../runSupervision.js";
+import {
+  openWorkPackageRuntime,
+  type WorkPackageRuntime,
+} from "../workspaces/workPackages.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -118,6 +125,7 @@ export interface CompanyDatabase {
   readonly review: ReviewRuntime;
   readonly workspaces: WorkspaceRuntime;
   readonly supervision: RuntimeSupervision;
+  readonly workPackages: WorkPackageRuntime;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -213,6 +221,9 @@ export const openCompanyDatabase = (
     readonly pipelineRuntime?: {
       readonly handlerRegistry?: NodeHandlerRegistry;
     };
+    readonly workspaceRuntime?: {
+      readonly profile?: LocalIsolatedGitProfile;
+    };
     readonly artifactRegistry?: ArtifactRegistryOptions;
     readonly productRuntime?: {
       readonly confirmationFailure?: (
@@ -274,7 +285,7 @@ export const openCompanyDatabase = (
   });
   const workspaces = openWorkspaceRuntime(database, {
     projectConfiguration,
-    profile: openLocalIsolatedGitProfile(),
+    profile: options.workspaceRuntime?.profile ?? openLocalIsolatedGitProfile(),
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
@@ -317,6 +328,7 @@ export const openCompanyDatabase = (
       events,
       interaction,
       resolveMemoryEntries: (input) => memory.resolveEntriesForExecution(input),
+      workspaces,
       ...(options.pipelineRuntime?.handlerRegistry
         ? { handlerRegistry: options.pipelineRuntime.handlerRegistry }
         : {}),
@@ -361,6 +373,12 @@ export const openCompanyDatabase = (
       ? { promotionFailure: options.technicalReviewRuntime.promotionFailure }
       : {}),
   });
+  const workPackages = openWorkPackageRuntime(database, {
+    workspaces,
+    pipelineRuntime,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -386,8 +404,10 @@ export const openCompanyDatabase = (
     workspaces,
     memory,
     options.memoryRuntime?.commandFailure,
+    workPackages,
   );
   workspaces.reconcile();
+  pipelineRuntime.reconcileWorkPackageImports();
 
   return {
     path,
@@ -410,6 +430,7 @@ export const openCompanyDatabase = (
     review,
     workspaces,
     supervision,
+    workPackages,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

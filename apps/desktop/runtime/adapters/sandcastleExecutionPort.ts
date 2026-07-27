@@ -80,11 +80,25 @@ ${instruction}
 `;
 };
 
-const repositoryOptions = (input: SoftwareDevelopmentExecutionInput) =>
-  input.project.repositoryReferences.map((cwd, index) => ({
-    name: `repository-${index + 1}`,
-    cwd,
-  }));
+const workPackageContext = (input: SoftwareDevelopmentExecutionInput) =>
+  input.request?.sideEffectPolicy === "formal"
+    ? input.request.immutableContext.workPackage
+    : undefined;
+
+const repositoryOptions = (input: SoftwareDevelopmentExecutionInput) => {
+  const workPackage = workPackageContext(input);
+  return workPackage
+    ? [
+        {
+          name: workPackage.applicationId,
+          cwd: workPackage.executionTreePath,
+        },
+      ]
+    : input.project.repositoryReferences.map((cwd, index) => ({
+        name: `repository-${index + 1}`,
+        cwd,
+      }));
+};
 
 const repositoryLocks = new Map<string, Promise<void>>();
 
@@ -139,20 +153,23 @@ export const createSandcastleExecutionPort = (
   execute: async (input) => {
     try {
       const agent = runtime.resolveAgent(
-        input.executionProfile.providerRef,
+        input.agentAdapterId,
         input.executionProfile.model,
       );
       const sandbox = runtime.resolveSandbox(input.executionProfile.sandboxRef);
       const repositories = repositoryOptions(input);
+      const workPackage = workPackageContext(input);
       const common = {
         agent,
         sandbox,
         signal: input.signal,
-        branchStrategy: branchStrategy(
-          input.executionProfile.branchStrategy,
-          input.runId,
-          input.nodeRunId,
-        ),
+        branchStrategy: workPackage
+          ? { type: "branch", branch: workPackage.sourceBranch }
+          : branchStrategy(
+              input.executionProfile.branchStrategy,
+              input.runId,
+              input.nodeRunId,
+            ),
         maxIterations: input.executionProfile.limits.maxIterations,
         idleTimeoutSeconds: input.executionProfile.limits.timeoutSeconds,
         completionTimeoutSeconds: input.executionProfile.limits.timeoutSeconds,

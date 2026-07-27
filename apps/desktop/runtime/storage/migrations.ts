@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 41;
+export const CURRENT_SCHEMA_VERSION = 42;
 
 interface CompanyMigration {
   readonly version: number;
@@ -3495,6 +3495,611 @@ const migrations: readonly CompanyMigration[] = [
         CREATE TRIGGER IF NOT EXISTS run_memory_selections_immutable_delete
         BEFORE DELETE ON run_memory_selections
         BEGIN SELECT RAISE(ABORT, 'Run Memory Selection is immutable'); END;
+      `);
+    },
+  },
+  {
+    version: 42,
+    name: "work_package_execution",
+    migrate: (database) => {
+      const requiredTables = {
+        work_packages: [
+          "id",
+          "project_id",
+          "run_id",
+          "technical_baseline_id",
+          "state",
+          "revision",
+          "created_at",
+          "updated_at",
+        ],
+        work_package_versions: [
+          "id",
+          "work_package_id",
+          "version",
+          "application_id",
+          "repository_reference",
+          "node_run_id",
+          "manifest_json",
+          "manifest_hash",
+          "status",
+          "created_at",
+        ],
+        work_package_dependencies: [
+          "work_package_version_id",
+          "predecessor_work_package_version_id",
+          "kind",
+          "contract_id",
+          "contract_version",
+          "evidence_ref",
+          "created_at",
+        ],
+        work_package_assignments: [
+          "id",
+          "work_package_version_id",
+          "node_attempt_id",
+          "position_id",
+          "ai_member_id",
+          "agent_adapter_id",
+          "rationale_json",
+          "allocation_id",
+          "interaction_session_id",
+          "sandbox_identity",
+          "evidence_scope",
+          "state",
+          "created_at",
+          "updated_at",
+        ],
+        work_package_self_checks: [
+          "id",
+          "assignment_id",
+          "node_attempt_id",
+          "status",
+          "report_json",
+          "report_hash",
+          "created_at",
+        ],
+      } as const;
+      const requiredAllocationColumns = [
+        "work_package_version_id",
+        "node_attempt_id",
+        "interaction_session_id",
+        "sandbox_identity",
+        "evidence_scope",
+      ] as const;
+      const schemaObjects = database
+        .prepare(
+          `SELECT type, name FROM sqlite_schema
+           WHERE name LIKE 'work_package%'
+              OR name IN (
+                'workspace_allocations_attempt_idx',
+                'workspace_allocations_session_idx',
+                'workspace_allocations_sandbox_idx',
+                'workspace_allocations_evidence_idx'
+              )`,
+        )
+        .all() as Array<{
+        readonly type: string;
+        readonly name: string;
+      }>;
+      const hasExistingSchema =
+        schemaObjects.length > 0 ||
+        requiredAllocationColumns.some((column) =>
+          columnExists(database, "workspace_allocations", column),
+        );
+
+      if (hasExistingSchema) {
+        const normalizeSql = (sql: string): string =>
+          sql
+            .replace(/\s+/g, " ")
+            .replace(/\s*([(),])\s*/g, "$1")
+            .trim()
+            .toLowerCase();
+        const objectSql = (name: string): string | undefined => {
+          const row = database
+            .prepare("SELECT sql FROM sqlite_schema WHERE name = ?")
+            .get(name) as { readonly sql: string | null } | undefined;
+          return row?.sql ? normalizeSql(row.sql) : undefined;
+        };
+        const missingColumns = [
+          ...Object.entries(requiredTables).flatMap(([table, columns]) =>
+            columns
+              .filter((column) => !columnExists(database, table, column))
+              .map((column) => `${table}.${column}`),
+          ),
+          ...requiredAllocationColumns
+            .filter(
+              (column) =>
+                !columnExists(database, "workspace_allocations", column),
+            )
+            .map((column) => `workspace_allocations.${column}`),
+        ];
+        const requiredSchemaObjects = [
+          "work_packages_run_idx",
+          "work_package_versions_node_idx",
+          "work_package_versions_active_node_idx",
+          "work_package_dependencies_predecessor_idx",
+          "work_package_assignments_version_idx",
+          "workspace_allocations_attempt_idx",
+          "workspace_allocations_session_idx",
+          "workspace_allocations_sandbox_idx",
+          "workspace_allocations_evidence_idx",
+          "work_package_versions_immutable_update",
+          "work_package_versions_immutable_delete",
+          "work_package_self_checks_immutable_update",
+          "work_package_self_checks_immutable_delete",
+        ];
+        const existingObjectNames = new Set(
+          schemaObjects.map((entry) => entry.name),
+        );
+        const missingObjects = requiredSchemaObjects.filter(
+          (name) => !existingObjectNames.has(name),
+        );
+        const requiredTableFragments = {
+          work_packages: [
+            "state in ( 'ready', 'assigned', 'running', 'self-check', 'blocked', 'failed' )",
+            "revision integer not null default 0 check (revision >= 0)",
+            "unique (run_id, id)",
+            ") strict",
+          ],
+          work_package_versions: [
+            "work_package_id text not null references work_packages(id) on delete cascade",
+            "version integer not null check (version > 0)",
+            "application_id text not null references application_references(id)",
+            "node_run_id text not null references node_runs(id)",
+            "manifest_hash text not null check (length(manifest_hash) = 64)",
+            "status text not null check (status in ('ready', 'superseded'))",
+            "unique (work_package_id, version)",
+            ") strict",
+          ],
+          work_package_dependencies: [
+            "work_package_version_id text not null references work_package_versions(id) on delete cascade",
+            "predecessor_work_package_version_id text not null references work_package_versions(id)",
+            "kind text not null check ( kind in ('artifact', 'commit', 'contract', 'readiness', 'manual') )",
+            "contract_version text",
+            "evidence_ref text",
+            "primary key ( work_package_version_id, predecessor_work_package_version_id, kind )",
+            "check (work_package_version_id <> predecessor_work_package_version_id)",
+            ") strict",
+          ],
+          work_package_assignments: [
+            "work_package_version_id text not null references work_package_versions(id)",
+            "node_attempt_id text not null unique references node_attempts(id)",
+            "position_id text not null references positions(id)",
+            "ai_member_id text not null references ai_members(id)",
+            "allocation_id text not null unique references workspace_allocations(id)",
+            "interaction_session_id text not null unique references interaction_sessions(id)",
+            "sandbox_identity text not null unique",
+            "evidence_scope text not null unique",
+            "state text not null check ( state in ( 'assigned', 'running', 'awaiting-self-check', 'self-check-passed', 'failed', 'superseded' ) )",
+            ") strict",
+          ],
+          work_package_self_checks: [
+            "assignment_id text not null references work_package_assignments(id)",
+            "node_attempt_id text not null references node_attempts(id)",
+            "status text not null check (status in ('passed', 'failed'))",
+            "report_hash text not null check (length(report_hash) = 64)",
+            "unique (assignment_id, node_attempt_id)",
+            ") strict",
+          ],
+          workspace_allocations: [
+            "work_package_version_id text references work_package_versions(id)",
+            "node_attempt_id text references node_attempts(id)",
+            "interaction_session_id text references interaction_sessions(id)",
+            "sandbox_identity text",
+            "evidence_scope text",
+          ],
+        } as const;
+        const incompatibleTables = Object.entries(requiredTableFragments)
+          .filter(([name, fragments]) => {
+            const sql = objectSql(name);
+            return (
+              !sql ||
+              fragments.some(
+                (fragment) => !sql.includes(normalizeSql(fragment)),
+              )
+            );
+          })
+          .map(([name]) => name);
+        const requiredExactTableSql = {
+          work_packages: `CREATE TABLE work_packages (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+            technical_baseline_id TEXT NOT NULL REFERENCES technical_baselines(id),
+            state TEXT NOT NULL CHECK (
+              state IN (
+                'ready', 'assigned', 'running', 'self-check', 'blocked', 'failed'
+              )
+            ),
+            revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (run_id, id)
+          ) STRICT`,
+          work_package_versions: `CREATE TABLE work_package_versions (
+            id TEXT PRIMARY KEY,
+            work_package_id TEXT NOT NULL REFERENCES work_packages(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL CHECK (version > 0),
+            application_id TEXT NOT NULL REFERENCES application_references(id),
+            repository_reference TEXT NOT NULL,
+            node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            status TEXT NOT NULL CHECK (status IN ('ready', 'superseded')),
+            created_at TEXT NOT NULL,
+            UNIQUE (work_package_id, version)
+          ) STRICT`,
+          work_package_dependencies: `CREATE TABLE work_package_dependencies (
+            work_package_version_id TEXT NOT NULL
+              REFERENCES work_package_versions(id) ON DELETE CASCADE,
+            predecessor_work_package_version_id TEXT NOT NULL
+              REFERENCES work_package_versions(id),
+            kind TEXT NOT NULL CHECK (
+              kind IN ('artifact', 'commit', 'contract', 'readiness', 'manual')
+            ),
+            contract_id TEXT,
+            contract_version TEXT,
+            evidence_ref TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (
+              work_package_version_id,
+              predecessor_work_package_version_id,
+              kind
+            ),
+            CHECK (work_package_version_id <> predecessor_work_package_version_id)
+          ) STRICT`,
+          work_package_assignments: `CREATE TABLE work_package_assignments (
+            id TEXT PRIMARY KEY,
+            work_package_version_id TEXT NOT NULL
+              REFERENCES work_package_versions(id),
+            node_attempt_id TEXT NOT NULL UNIQUE REFERENCES node_attempts(id),
+            position_id TEXT NOT NULL REFERENCES positions(id),
+            ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+            agent_adapter_id TEXT NOT NULL,
+            rationale_json TEXT NOT NULL,
+            allocation_id TEXT NOT NULL UNIQUE REFERENCES workspace_allocations(id),
+            interaction_session_id TEXT NOT NULL UNIQUE
+              REFERENCES interaction_sessions(id),
+            sandbox_identity TEXT NOT NULL UNIQUE,
+            evidence_scope TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK (
+              state IN (
+                'assigned', 'running', 'awaiting-self-check',
+                'self-check-passed', 'failed', 'superseded'
+              )
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT`,
+          work_package_self_checks: `CREATE TABLE work_package_self_checks (
+            id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL REFERENCES work_package_assignments(id),
+            node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+            status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+            report_json TEXT NOT NULL,
+            report_hash TEXT NOT NULL CHECK (length(report_hash) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE (assignment_id, node_attempt_id)
+          ) STRICT`,
+          workspace_allocations: `CREATE TABLE workspace_allocations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            application_id TEXT NOT NULL REFERENCES application_references(id),
+            execution_profile_id TEXT NOT NULL REFERENCES execution_profiles(id),
+            execution_profile_revision INTEGER NOT NULL CHECK (execution_profile_revision >= 0),
+            operation_key TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK (
+              state IN ('planned', 'provisioning', 'ready', 'failed',
+                        'cleanup-pending', 'cleaned')
+            ),
+            repository_root TEXT NOT NULL,
+            allocation_root TEXT NOT NULL,
+            source_branch TEXT NOT NULL,
+            base_commit TEXT NOT NULL CHECK (length(base_commit) = 40),
+            expected_source_tip TEXT NOT NULL CHECK (length(expected_source_tip) = 40),
+            capability_snapshot_json TEXT NOT NULL,
+            capability_snapshot_hash TEXT NOT NULL CHECK (length(capability_snapshot_hash) = 64),
+            private_git_identity_json TEXT,
+            provision_receipt_json TEXT,
+            cleanup_evidence_json TEXT,
+            failure_code TEXT,
+            failure_message TEXT,
+            provision_command_id TEXT NOT NULL,
+            cleanup_command_id TEXT,
+            revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            work_package_version_id TEXT
+              REFERENCES work_package_versions(id),
+            node_attempt_id TEXT REFERENCES node_attempts(id),
+            interaction_session_id TEXT REFERENCES interaction_sessions(id),
+            sandbox_identity TEXT,
+            evidence_scope TEXT
+          ) STRICT`,
+        } as const;
+        incompatibleTables.push(
+          ...Object.entries(requiredExactTableSql)
+            .filter(
+              ([name, expected]) => objectSql(name) !== normalizeSql(expected),
+            )
+            .map(([name]) => name),
+        );
+        const workspaceAllocationColumns = database
+          .prepare("PRAGMA table_info(workspace_allocations)")
+          .all()
+          .map((entry) => {
+            const column = entry as {
+              readonly name: string;
+              readonly type: string;
+              readonly notnull: number;
+              readonly dflt_value: string | null;
+              readonly pk: number;
+            };
+            return `${column.name}:${column.type}:${column.notnull}:${column.dflt_value ?? ""}:${column.pk}`;
+          })
+          .join("|");
+        const expectedWorkspaceAllocationColumns = [
+          "id:TEXT:1::1",
+          "project_id:TEXT:1::0",
+          "application_id:TEXT:1::0",
+          "execution_profile_id:TEXT:1::0",
+          "execution_profile_revision:INTEGER:1::0",
+          "operation_key:TEXT:1::0",
+          "state:TEXT:1::0",
+          "repository_root:TEXT:1::0",
+          "allocation_root:TEXT:1::0",
+          "source_branch:TEXT:1::0",
+          "base_commit:TEXT:1::0",
+          "expected_source_tip:TEXT:1::0",
+          "capability_snapshot_json:TEXT:1::0",
+          "capability_snapshot_hash:TEXT:1::0",
+          "private_git_identity_json:TEXT:0::0",
+          "provision_receipt_json:TEXT:0::0",
+          "cleanup_evidence_json:TEXT:0::0",
+          "failure_code:TEXT:0::0",
+          "failure_message:TEXT:0::0",
+          "provision_command_id:TEXT:1::0",
+          "cleanup_command_id:TEXT:0::0",
+          "revision:INTEGER:1:0:0",
+          "created_at:TEXT:1::0",
+          "updated_at:TEXT:1::0",
+          "work_package_version_id:TEXT:0::0",
+          "node_attempt_id:TEXT:0::0",
+          "interaction_session_id:TEXT:0::0",
+          "sandbox_identity:TEXT:0::0",
+          "evidence_scope:TEXT:0::0",
+        ].join("|");
+        if (workspaceAllocationColumns !== expectedWorkspaceAllocationColumns) {
+          incompatibleTables.push("workspace_allocations");
+        }
+        const requiredExactSql = {
+          work_packages_run_idx:
+            "CREATE INDEX work_packages_run_idx ON work_packages(run_id, created_at, id)",
+          work_package_versions_node_idx:
+            "CREATE INDEX work_package_versions_node_idx ON work_package_versions(node_run_id, status, created_at)",
+          work_package_versions_active_node_idx:
+            "CREATE UNIQUE INDEX work_package_versions_active_node_idx ON work_package_versions(node_run_id) WHERE status = 'ready'",
+          work_package_dependencies_predecessor_idx:
+            "CREATE INDEX work_package_dependencies_predecessor_idx ON work_package_dependencies(predecessor_work_package_version_id)",
+          work_package_assignments_version_idx:
+            "CREATE INDEX work_package_assignments_version_idx ON work_package_assignments(work_package_version_id, created_at)",
+          workspace_allocations_attempt_idx:
+            "CREATE UNIQUE INDEX workspace_allocations_attempt_idx ON workspace_allocations(node_attempt_id) WHERE node_attempt_id IS NOT NULL",
+          workspace_allocations_session_idx:
+            "CREATE UNIQUE INDEX workspace_allocations_session_idx ON workspace_allocations(interaction_session_id) WHERE interaction_session_id IS NOT NULL",
+          workspace_allocations_sandbox_idx:
+            "CREATE UNIQUE INDEX workspace_allocations_sandbox_idx ON workspace_allocations(sandbox_identity) WHERE sandbox_identity IS NOT NULL",
+          workspace_allocations_evidence_idx:
+            "CREATE UNIQUE INDEX workspace_allocations_evidence_idx ON workspace_allocations(evidence_scope) WHERE evidence_scope IS NOT NULL",
+          work_package_versions_immutable_update: `
+            CREATE TRIGGER work_package_versions_immutable_update
+            BEFORE UPDATE ON work_package_versions
+            WHEN NEW.id <> OLD.id
+              OR NEW.work_package_id <> OLD.work_package_id
+              OR NEW.version <> OLD.version
+              OR NEW.application_id <> OLD.application_id
+              OR NEW.repository_reference <> OLD.repository_reference
+              OR NEW.node_run_id <> OLD.node_run_id
+              OR NEW.manifest_json <> OLD.manifest_json
+              OR NEW.manifest_hash <> OLD.manifest_hash
+              OR NEW.created_at <> OLD.created_at
+            BEGIN
+              SELECT RAISE(ABORT, 'Work Package Version is immutable');
+            END`,
+          work_package_versions_immutable_delete: `
+            CREATE TRIGGER work_package_versions_immutable_delete
+            BEFORE DELETE ON work_package_versions
+            BEGIN
+              SELECT RAISE(ABORT, 'Work Package Version is immutable');
+            END`,
+          work_package_self_checks_immutable_update: `
+            CREATE TRIGGER work_package_self_checks_immutable_update
+            BEFORE UPDATE ON work_package_self_checks
+            BEGIN
+              SELECT RAISE(ABORT, 'Work Package self-check evidence is immutable');
+            END`,
+          work_package_self_checks_immutable_delete: `
+            CREATE TRIGGER work_package_self_checks_immutable_delete
+            BEFORE DELETE ON work_package_self_checks
+            BEGIN
+              SELECT RAISE(ABORT, 'Work Package self-check evidence is immutable');
+            END`,
+        } as const;
+        const incompatibleObjects = Object.entries(requiredExactSql)
+          .filter(
+            ([name, expected]) => objectSql(name) !== normalizeSql(expected),
+          )
+          .map(([name]) => name);
+        if (
+          missingColumns.length > 0 ||
+          missingObjects.length > 0 ||
+          incompatibleTables.length > 0 ||
+          incompatibleObjects.length > 0
+        ) {
+          throw new Error(
+            `Existing Work Package schema is incompatible: ${[
+              ...missingColumns,
+              ...missingObjects,
+              ...incompatibleTables,
+              ...incompatibleObjects,
+            ].join(", ")}`,
+          );
+        }
+        return;
+      }
+
+      database.exec(`
+        CREATE TABLE work_packages (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          technical_baseline_id TEXT NOT NULL REFERENCES technical_baselines(id),
+          state TEXT NOT NULL CHECK (
+            state IN (
+              'ready', 'assigned', 'running', 'self-check', 'blocked', 'failed'
+            )
+          ),
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (run_id, id)
+        ) STRICT;
+
+        CREATE TABLE work_package_versions (
+          id TEXT PRIMARY KEY,
+          work_package_id TEXT NOT NULL REFERENCES work_packages(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL CHECK (version > 0),
+          application_id TEXT NOT NULL REFERENCES application_references(id),
+          repository_reference TEXT NOT NULL,
+          node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          status TEXT NOT NULL CHECK (status IN ('ready', 'superseded')),
+          created_at TEXT NOT NULL,
+          UNIQUE (work_package_id, version)
+        ) STRICT;
+
+        CREATE TABLE work_package_dependencies (
+          work_package_version_id TEXT NOT NULL
+            REFERENCES work_package_versions(id) ON DELETE CASCADE,
+          predecessor_work_package_version_id TEXT NOT NULL
+            REFERENCES work_package_versions(id),
+          kind TEXT NOT NULL CHECK (
+            kind IN ('artifact', 'commit', 'contract', 'readiness', 'manual')
+          ),
+          contract_id TEXT,
+          contract_version TEXT,
+          evidence_ref TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (
+            work_package_version_id,
+            predecessor_work_package_version_id,
+            kind
+          ),
+          CHECK (work_package_version_id <> predecessor_work_package_version_id)
+        ) STRICT;
+
+        CREATE TABLE work_package_assignments (
+          id TEXT PRIMARY KEY,
+          work_package_version_id TEXT NOT NULL
+            REFERENCES work_package_versions(id),
+          node_attempt_id TEXT NOT NULL UNIQUE REFERENCES node_attempts(id),
+          position_id TEXT NOT NULL REFERENCES positions(id),
+          ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          agent_adapter_id TEXT NOT NULL,
+          rationale_json TEXT NOT NULL,
+          allocation_id TEXT NOT NULL UNIQUE REFERENCES workspace_allocations(id),
+          interaction_session_id TEXT NOT NULL UNIQUE
+            REFERENCES interaction_sessions(id),
+          sandbox_identity TEXT NOT NULL UNIQUE,
+          evidence_scope TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (
+            state IN (
+              'assigned', 'running', 'awaiting-self-check',
+              'self-check-passed', 'failed', 'superseded'
+            )
+          ),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE work_package_self_checks (
+          id TEXT PRIMARY KEY,
+          assignment_id TEXT NOT NULL REFERENCES work_package_assignments(id),
+          node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+          status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+          report_json TEXT NOT NULL,
+          report_hash TEXT NOT NULL CHECK (length(report_hash) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE (assignment_id, node_attempt_id)
+        ) STRICT;
+
+        ALTER TABLE workspace_allocations
+          ADD COLUMN work_package_version_id TEXT
+            REFERENCES work_package_versions(id);
+        ALTER TABLE workspace_allocations
+          ADD COLUMN node_attempt_id TEXT REFERENCES node_attempts(id);
+        ALTER TABLE workspace_allocations
+          ADD COLUMN interaction_session_id TEXT REFERENCES interaction_sessions(id);
+        ALTER TABLE workspace_allocations
+          ADD COLUMN sandbox_identity TEXT;
+        ALTER TABLE workspace_allocations
+          ADD COLUMN evidence_scope TEXT;
+
+        CREATE INDEX work_packages_run_idx
+          ON work_packages(run_id, created_at, id);
+        CREATE INDEX work_package_versions_node_idx
+          ON work_package_versions(node_run_id, status, created_at);
+        CREATE UNIQUE INDEX work_package_versions_active_node_idx
+          ON work_package_versions(node_run_id)
+          WHERE status = 'ready';
+        CREATE INDEX work_package_dependencies_predecessor_idx
+          ON work_package_dependencies(predecessor_work_package_version_id);
+        CREATE INDEX work_package_assignments_version_idx
+          ON work_package_assignments(work_package_version_id, created_at);
+        CREATE UNIQUE INDEX workspace_allocations_attempt_idx
+          ON workspace_allocations(node_attempt_id)
+          WHERE node_attempt_id IS NOT NULL;
+        CREATE UNIQUE INDEX workspace_allocations_session_idx
+          ON workspace_allocations(interaction_session_id)
+          WHERE interaction_session_id IS NOT NULL;
+        CREATE UNIQUE INDEX workspace_allocations_sandbox_idx
+          ON workspace_allocations(sandbox_identity)
+          WHERE sandbox_identity IS NOT NULL;
+        CREATE UNIQUE INDEX workspace_allocations_evidence_idx
+          ON workspace_allocations(evidence_scope)
+          WHERE evidence_scope IS NOT NULL;
+
+        CREATE TRIGGER work_package_versions_immutable_update
+        BEFORE UPDATE ON work_package_versions
+        WHEN NEW.id <> OLD.id
+          OR NEW.work_package_id <> OLD.work_package_id
+          OR NEW.version <> OLD.version
+          OR NEW.application_id <> OLD.application_id
+          OR NEW.repository_reference <> OLD.repository_reference
+          OR NEW.node_run_id <> OLD.node_run_id
+          OR NEW.manifest_json <> OLD.manifest_json
+          OR NEW.manifest_hash <> OLD.manifest_hash
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+          SELECT RAISE(ABORT, 'Work Package Version is immutable');
+        END;
+        CREATE TRIGGER work_package_versions_immutable_delete
+        BEFORE DELETE ON work_package_versions
+        BEGIN
+          SELECT RAISE(ABORT, 'Work Package Version is immutable');
+        END;
+        CREATE TRIGGER work_package_self_checks_immutable_update
+        BEFORE UPDATE ON work_package_self_checks
+        BEGIN
+          SELECT RAISE(ABORT, 'Work Package self-check evidence is immutable');
+        END;
+        CREATE TRIGGER work_package_self_checks_immutable_delete
+        BEFORE DELETE ON work_package_self_checks
+        BEGIN
+          SELECT RAISE(ABORT, 'Work Package self-check evidence is immutable');
+        END;
       `);
     },
   },

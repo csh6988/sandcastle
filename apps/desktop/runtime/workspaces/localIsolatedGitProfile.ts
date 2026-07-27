@@ -201,6 +201,16 @@ export const openLocalIsolatedGitProfile = (): LocalIsolatedGitProfile => ({
     const repositoryRoot = realpathSync(input.repositoryRoot);
     const allocationRoot = realpathSync(input.allocationRoot);
     assertSourceBranch(repositoryRoot, input.sourceBranch);
+    const sourceRef = `refs/heads/${input.sourceBranch}`;
+    if (!gitSucceeds(repositoryRoot, "show-ref", "--verify", sourceRef)) {
+      if (input.expectedSourceTip !== input.baseCommit) {
+        throw new LocalIsolatedGitError(
+          "WORKSPACE_PROVISION_CONFLICT",
+          "A new source branch must start at the exact allocated base commit.",
+        );
+      }
+      git(repositoryRoot, "update-ref", sourceRef, input.baseCommit, "");
+    }
     const executionTreePath = join(allocationRoot, "execution-tree");
     const sourceTip = git(repositoryRoot, "rev-parse", input.sourceBranch);
     const baseCommit = git(

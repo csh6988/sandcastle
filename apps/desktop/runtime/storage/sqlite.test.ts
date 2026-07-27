@@ -452,6 +452,7 @@ describe("Company database migrations", () => {
               version: 41,
               name: "reviewed_memory_candidates_entries_and_snapshot_selections",
             },
+            { version: 42, name: "work_package_execution" },
           ],
         );
         assert.deepEqual(
@@ -1607,6 +1608,216 @@ describe("Company database migrations", () => {
     }
   });
 
+  it("adopts a complete compatible Work Package schema when replaying migration 42", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const previous = new DatabaseSync(databasePath);
+    previous.exec(`
+      DELETE FROM schema_migrations WHERE version = 42;
+      UPDATE schema_metadata SET value = '41' WHERE key = 'schema_version';
+      PRAGMA user_version = 41;
+    `);
+    previous.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(databasePath);
+      try {
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'work_packages'",
+            )
+            .get() !== undefined,
+          true,
+        );
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT 1 FROM schema_migrations WHERE version = 42 AND name = 'work_package_execution'",
+            )
+            .get() !== undefined,
+          true,
+        );
+        assert.match(
+          (
+            inspected
+              .prepare(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'work_package_versions_active_node_idx'",
+              )
+              .get() as { readonly sql: string }
+          ).sql,
+          /CREATE UNIQUE INDEX work_package_versions_active_node_idx[\s\S]*WHERE status = 'ready'/,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("transactionally rejects a partial Work Package schema without destructive DDL", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const partial = new DatabaseSync(databasePath);
+    partial.exec(`
+      DROP TRIGGER work_package_self_checks_immutable_delete;
+      DELETE FROM schema_migrations WHERE version = 42;
+      UPDATE schema_metadata SET value = '41' WHERE key = 'schema_version';
+      PRAGMA user_version = 41;
+    `);
+    partial.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Work Package schema is incompatible: work_package_self_checks_immutable_delete/,
+    );
+
+    const inspected = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get() as { readonly value: string }
+        ).value,
+        "41",
+      );
+      assert.equal(
+        inspected
+          .prepare(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'work_packages'",
+          )
+          .get() !== undefined,
+        true,
+      );
+      assert.equal(
+        inspected
+          .prepare(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'work_package_self_checks'",
+          )
+          .get() !== undefined,
+        true,
+      );
+      assert.equal(
+        inspected
+          .prepare("SELECT 1 FROM schema_migrations WHERE version = 42")
+          .get(),
+        undefined,
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("rejects same-name Work Package indexes and triggers with incompatible SQL", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const incompatible = new DatabaseSync(databasePath);
+    incompatible.exec(`
+      DROP INDEX work_package_assignments_version_idx;
+      CREATE INDEX work_package_assignments_version_idx
+        ON work_package_assignments(state);
+      DROP TRIGGER work_package_self_checks_immutable_delete;
+      CREATE TRIGGER work_package_self_checks_immutable_delete
+      BEFORE DELETE ON work_package_self_checks
+      BEGIN
+        SELECT 1;
+      END;
+      DELETE FROM schema_migrations WHERE version = 42;
+      UPDATE schema_metadata SET value = '41' WHERE key = 'schema_version';
+      PRAGMA user_version = 41;
+    `);
+    incompatible.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Work Package schema is incompatible:.*work_package_assignments_version_idx.*work_package_self_checks_immutable_delete/,
+    );
+
+    const inspected = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get() as { readonly value: string }
+        ).value,
+        "41",
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("rejects a same-name Work Package table with an extra column", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const incompatible = new DatabaseSync(databasePath);
+    incompatible.exec(`
+      ALTER TABLE work_packages ADD COLUMN unexpected_authority TEXT;
+      DELETE FROM schema_migrations WHERE version = 42;
+      UPDATE schema_metadata SET value = '41' WHERE key = 'schema_version';
+      PRAGMA user_version = 41;
+    `);
+    incompatible.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Work Package schema is incompatible:.*work_packages/,
+    );
+  });
+
+  it("rejects a workspace allocation table with the same columns but different constraints", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const incompatible = new DatabaseSync(databasePath);
+    incompatible.exec(`
+      PRAGMA writable_schema = ON;
+      UPDATE sqlite_schema
+         SET sql = replace(
+           sql,
+           'evidence_scope TEXT',
+           'evidence_scope TEXT CHECK (
+              evidence_scope IS NULL OR length(evidence_scope) > 0
+            )'
+         )
+       WHERE type = 'table' AND name = 'workspace_allocations';
+      PRAGMA writable_schema = OFF;
+      PRAGMA schema_version = 1000;
+      DELETE FROM schema_migrations WHERE version = 42;
+      UPDATE schema_metadata SET value = '41' WHERE key = 'schema_version';
+      PRAGMA user_version = 41;
+    `);
+    incompatible.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Work Package schema is incompatible:.*workspace_allocations/,
+    );
+  });
+
   it("rejects a database created by a newer runtime without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const databasePath = join(companyDir, ".sandcastle", "company.sqlite");
@@ -1663,7 +1874,6 @@ describe("Company database migrations", () => {
     }
   });
 });
-
 describe("Company database backups", () => {
   it("creates an online backup that can restore a closed company database", async () => {
     const companyDir = tempCompanyDir();
