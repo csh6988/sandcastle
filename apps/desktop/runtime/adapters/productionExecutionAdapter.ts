@@ -31,6 +31,7 @@ export interface SoftwareDevelopmentExecutionInput {
     readonly positionId: string;
   };
   readonly executionProfile: RunSnapshotPayload["executionProfiles"][number];
+  readonly memoryEntries: ExecutionAdapterInput["memoryEntries"];
   readonly attempt: ExecutionAdapterInput["attempt"];
 }
 
@@ -108,6 +109,7 @@ export const createProductionExecutionAdapter = (
         aiMember: position.aiMember,
         skillFlow: { ...skillFlowSnapshot, positionId: position.id },
         executionProfile,
+        memoryEntries: input.memoryEntries,
         attempt: input.attempt,
       });
     } catch {

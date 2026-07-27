@@ -480,23 +480,27 @@ describe("Sandcastle v1 Company Runtime E2E", () => {
         status: "accepted",
       });
       assert.equal(accepted.status, "accepted");
-      const candidate = await client.execute({
-        type: "memory.candidate.create",
-        projectId: project.id,
-        scope: "project",
-        sourceSessionId: sessionId,
-        sourceRunId: finished.run.id,
-        sourceArtifactVersionId: accepted.id,
-        summary: "The reviewed delivery passed the v1 Runtime E2E.",
-      });
-      const memory = await client.execute({
-        type: "memory.candidate.review",
-        candidateId: candidate.id,
-        expectedStatus: "pending",
-        decision: "approved",
-      });
-      assert.equal(memory.candidate.status, "approved");
-      assert.equal(memory.record?.version, 1);
+      assert.deepEqual(
+        await client.query({
+          type: "memory.candidates.list",
+          projectId: project.id,
+        }),
+        [],
+      );
+      assert.deepEqual(
+        await client.query({
+          type: "memory.entries.list",
+          projectId: project.id,
+        }),
+        [],
+      );
+      assert.deepEqual(
+        await client.query({
+          type: "memory.legacy-records.list",
+          projectId: project.id,
+        }),
+        [],
+      );
       const closed = await acp.handle({
         id: "session-cancel",
         method: "session/cancel",

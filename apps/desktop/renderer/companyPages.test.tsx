@@ -21,6 +21,7 @@ import {
   interactionSessionCloseLabel,
   interactionStatusLabel,
   loadInteractionProjectContext,
+  memoryCandidateDecisionLabel,
   promptInteractionSession,
   startRunProgressPolling,
   RuntimeDiagnosticsPanel,
@@ -2188,7 +2189,7 @@ describe("Agent Interaction workspace", () => {
     );
   });
 
-  it("loads interactions, memory candidates, and Department Runs together", async () => {
+  it("loads governed and legacy Memory with interactions and Department Runs", async () => {
     const calls: string[] = [];
     const runtime = {
       interactions: async (projectId: string) => {
@@ -2196,7 +2197,15 @@ describe("Agent Interaction workspace", () => {
         return [];
       },
       memoryCandidates: async (projectId: string) => {
-        calls.push(`memory:${projectId}`);
+        calls.push(`memory-candidates:${projectId}`);
+        return [];
+      },
+      memoryEntries: async (projectId: string) => {
+        calls.push(`memory-entries:${projectId}`);
+        return [];
+      },
+      legacyMemoryRecords: async (projectId: string) => {
+        calls.push(`memory-legacy:${projectId}`);
         return [];
       },
       runs: async (projectId: string) => {
@@ -2207,12 +2216,77 @@ describe("Agent Interaction workspace", () => {
 
     const context = await loadInteractionProjectContext(runtime, "project-1");
 
-    assert.deepEqual(context, { sessions: [], memoryCandidates: [], runs: [] });
+    assert.deepEqual(context, {
+      sessions: [],
+      memoryCandidates: [],
+      memoryEntries: [],
+      legacyMemoryRecords: [],
+      runs: [],
+    });
     assert.deepEqual(calls.sort(), [
       "interactions:project-1",
-      "memory:project-1",
+      "memory-candidates:project-1",
+      "memory-entries:project-1",
+      "memory-legacy:project-1",
       "runs:project-1",
     ]);
+  });
+
+  it("renders durable Memory decision, Gate, and Entry identity after reload", () => {
+    assert.equal(
+      memoryCandidateDecisionLabel(
+        {
+          id: "memory-candidate-1",
+          projectId: "project-1",
+          scope: "project",
+          aiMemberId: null,
+          status: "accepted",
+          revision: 1,
+          currentRevision: {
+            id: "memory-candidate-r1",
+            revision: 1,
+            supersedesRevisionId: null,
+            content: "Use exact reviewed evidence.",
+            hash: "a".repeat(64),
+            redactionPolicy: {
+              version: "redaction-v1",
+              hash: "b".repeat(64),
+            },
+            sourceArtifactVersions: [
+              { id: "artifact-r1", hash: "c".repeat(64) },
+            ],
+            sourceEventRanges: [
+              { runId: "run-1", fromSequence: 1, toSequence: 2 },
+            ],
+            producer: {
+              aiMemberId: "member-1",
+              positionId: "position-1",
+              sessionId: "session-1",
+            },
+            createdAt: "2026-07-27T00:00:00.000Z",
+          },
+          reviewTopicId: "memory-topic-1",
+          decision: {
+            id: "memory-decision-1",
+            candidateRevisionId: "memory-candidate-r1",
+            candidateRevisionHash: "a".repeat(64),
+            qualityGateResultId: "memory-gate-1",
+            decision: "accepted",
+            decidedBy: {
+              type: "human",
+              id: "local-user",
+              authenticatedBy: "local-session",
+            },
+            createdAt: "2026-07-27T00:01:00.000Z",
+            entryId: "memory-entry-1",
+          },
+          createdAt: "2026-07-27T00:00:00.000Z",
+          updatedAt: "2026-07-27T00:01:00.000Z",
+        },
+        messages.en.none,
+      ),
+      "accepted · gate memory-gate-1 · entry memory-entry-1",
+    );
   });
 
   it("cleans up the live Run polling timer", () => {

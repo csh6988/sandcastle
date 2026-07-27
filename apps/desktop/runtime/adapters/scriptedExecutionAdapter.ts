@@ -28,12 +28,26 @@ export type ExecutionFact =
       readonly message: string;
     };
 
+export interface ExecutionMemoryEntry {
+  readonly id: string;
+  readonly version: number;
+  readonly hash: string;
+  readonly scope: "project" | "ai-member";
+  readonly ownerId: string;
+  readonly content: string;
+  readonly redactionPolicy: {
+    readonly version: string;
+    readonly hash: string;
+  };
+}
+
 export interface ExecutionAdapterInput {
   readonly runId: string;
   readonly nodeRunId: string;
   readonly signal: AbortSignal;
   readonly node: RunSnapshotPayload["pipelineVersion"]["graph"]["nodes"][number];
   readonly snapshot: RunSnapshotPayload;
+  readonly memoryEntries: readonly ExecutionMemoryEntry[];
   readonly attempt: {
     readonly id: string;
     readonly attemptNumber: number;

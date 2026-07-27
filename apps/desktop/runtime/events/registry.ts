@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 10;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 11;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -31,6 +31,8 @@ export interface RuntimeEventScope {
   readonly artifactVersionId?: string;
   readonly workspaceAllocationId?: string;
   readonly permissionRequestId?: string;
+  readonly memoryCandidateId?: string;
+  readonly memoryEntryId?: string;
   readonly commandId?: string;
 }
 
@@ -152,18 +154,16 @@ const retainedSessionEventDefinitions = [
   },
 ] as const;
 
+const retainedMemoryCandidateCreatedPayloadSchema = z
+  .object({
+    candidateId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    scope: z.enum(["project", "ai-member"]),
+    status: z.literal("pending"),
+  })
+  .strict();
+
 const retainedMemoryEventDefinitions = [
-  {
-    type: "memory.candidate.created",
-    payloadSchema: z
-      .object({
-        candidateId: z.string().trim().min(1),
-        projectId: z.string().trim().min(1),
-        scope: z.enum(["project", "ai-member"]),
-        status: z.literal("pending"),
-      })
-      .strict(),
-  },
   {
     type: "memory.candidate.reviewed",
     payloadSchema: z
@@ -273,6 +273,29 @@ const artifactEventPayloadSchema = z
       .enum(["managed-file", "repository-object", "external-reference"])
       .optional(),
     integrityStatus: z.enum(["verified", "unavailable", "failed"]).optional(),
+  })
+  .passthrough();
+
+const memoryEventPayloadSchema = z
+  .object({
+    candidateId: z.string().trim().min(1).optional(),
+    candidateRevisionId: z.string().trim().min(1).optional(),
+    candidateRevisionHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    decisionId: z.string().trim().min(1).optional(),
+    entryId: z.string().trim().min(1).nullable().optional(),
+    entryHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable()
+      .optional(),
+    snapshotRevisionId: z.string().trim().min(1).optional(),
+    snapshotHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
   })
   .passthrough();
 
@@ -795,6 +818,92 @@ const definitions = [
         acpMapping: "custom",
       }) satisfies RuntimeEventDefinition,
   ),
+  {
+    type: "memory.candidate.created",
+    schemaVersion: 1,
+    requiredTopLevelIds: ["companyId"],
+    payloadSchema: z.union([
+      retainedMemoryCandidateCreatedPayloadSchema,
+      memoryEventPayloadSchema,
+    ]),
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "memory.review.started",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "memoryCandidateId",
+      "topicId",
+    ],
+    payloadSchema: memoryEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "memory.reviewed",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "memoryCandidateId",
+      "topicId",
+    ],
+    payloadSchema: memoryEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "memory.accepted",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "memoryCandidateId",
+      "memoryEntryId",
+      "topicId",
+      "qualityGateResultId",
+    ],
+    payloadSchema: memoryEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "memory.rejected",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "memoryCandidateId",
+      "topicId",
+      "qualityGateResultId",
+    ],
+    payloadSchema: memoryEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "memory.selected",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "snapshotRevisionId",
+      "memoryEntryId",
+    ],
+    payloadSchema: memoryEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
   ...[
     "artifact.registered",
     "artifact.finalized",

@@ -13,6 +13,7 @@ import {
   CompanyProjectSchema,
   DepartmentRunViewSchema,
   RunSupervisionViewSchema,
+  WorkspaceAllocationViewSchema,
   DepartmentPipelineDraftGraphSchema,
   DepartmentPipelineEditorViewSchema,
   DepartmentInspectSchema,
@@ -56,11 +57,14 @@ import {
   AgUiReplayViewSchema,
   type AgUiReplayView,
   MemoryCandidateViewSchema,
-  MemoryRecordViewSchema,
-  MemoryReviewViewSchema,
+  MemoryEntryViewSchema,
+  RunMemorySelectionViewSchema,
+  LegacyMemoryRecordViewSchema,
+  MemoryDecisionViewSchema,
   type MemoryCandidateView,
-  type MemoryRecordView,
-  type MemoryReviewView,
+  type MemoryEntryView,
+  type RunMemorySelectionView,
+  type LegacyMemoryRecordView,
   RuntimeDiagnosticsViewSchema,
   type RuntimeDiagnosticsView,
   RuntimeBackupViewSchema,
@@ -180,13 +184,6 @@ export const INTERACTION_PROMPT_CHANNEL = "sandcastle:interaction.prompt";
 export const PERMISSION_REQUEST_CHANNEL = "sandcastle:permission.request";
 export const PERMISSION_DECIDE_CHANNEL = "sandcastle:permission.decide";
 export const AG_UI_EVENTS_CHANNEL = "sandcastle:ag-ui.events";
-export const MEMORY_CANDIDATES_LIST_CHANNEL =
-  "sandcastle:memory.candidates.list";
-export const MEMORY_RECORDS_LIST_CHANNEL = "sandcastle:memory.records.list";
-export const MEMORY_CANDIDATE_CREATE_CHANNEL =
-  "sandcastle:memory.candidate.create";
-export const MEMORY_CANDIDATE_REVIEW_CHANNEL =
-  "sandcastle:memory.candidate.review";
 export const RUNTIME_DIAGNOSTICS_CHANNEL = "sandcastle:runtime.diagnostics";
 export const RUNTIME_BACKUP_CHANNEL = "sandcastle:runtime.backup";
 export const RUNTIME_EVENTS_COMPACT_CHANNEL =
@@ -657,23 +654,15 @@ export interface SandcastleBridge {
     readonly memoryCandidates: (
       projectId: string,
     ) => Promise<readonly MemoryCandidateView[]>;
-    readonly memoryRecords: (
+    readonly memoryEntries: (
       projectId: string,
-    ) => Promise<readonly MemoryRecordView[]>;
-    readonly createMemoryCandidate: (input: {
-      readonly projectId: string;
-      readonly scope: "project" | "ai-member";
-      readonly aiMemberId?: string;
-      readonly sourceSessionId?: string;
-      readonly sourceRunId?: string;
-      readonly sourceArtifactVersionId?: string;
-      readonly summary: string;
-    }) => Promise<MemoryCandidateView>;
-    readonly reviewMemoryCandidate: (input: {
-      readonly candidateId: string;
-      readonly expectedStatus: "pending";
-      readonly decision: "approved" | "discarded";
-    }) => Promise<MemoryReviewView>;
+    ) => Promise<readonly MemoryEntryView[]>;
+    readonly memorySelections: (
+      runId: string,
+    ) => Promise<readonly RunMemorySelectionView[]>;
+    readonly legacyMemoryRecords: (
+      projectId: string,
+    ) => Promise<readonly LegacyMemoryRecordView[]>;
     readonly runtimeDiagnostics: () => Promise<RuntimeDiagnosticsView>;
     readonly backupRuntime: () => Promise<RuntimeBackupView>;
     readonly compactRuntimeEvents: (input: {
@@ -804,21 +793,36 @@ export const createSandcastleBridge = (
     const view =
       nextQuery.type === "project.inspect"
         ? ProjectEditorViewSchema.parse(result.view)
-        : nextQuery.type === "applications.list"
-          ? ApplicationViewSchema.array().parse(result.view)
-          : nextQuery.type === "product.discovery.inspect"
-            ? ProductDiscoveryViewSchema.parse(result.view)
-            : nextQuery.type === "product-review.inspect"
-              ? ProductReviewStateViewSchema.parse(result.view)
-              : nextQuery.type === "technical-review.inspect"
-                ? TechnicalReviewStateViewSchema.parse(result.view)
-                : nextQuery.type === "review.topic.inspect"
-                  ? ReviewTopicViewSchema.parse(result.view)
-                  : nextQuery.type === "review.topics.list"
-                    ? ReviewTopicViewSchema.array().parse(result.view)
-                    : nextQuery.type === "run.supervision.inspect"
-                      ? RunSupervisionViewSchema.parse(result.view)
-                      : result.view;
+        : nextQuery.type === "workspace-allocation.inspect"
+          ? WorkspaceAllocationViewSchema.parse(result.view)
+          : nextQuery.type === "applications.list"
+            ? ApplicationViewSchema.array().parse(result.view)
+            : nextQuery.type === "product.discovery.inspect"
+              ? ProductDiscoveryViewSchema.parse(result.view)
+              : nextQuery.type === "product-review.inspect"
+                ? ProductReviewStateViewSchema.parse(result.view)
+                : nextQuery.type === "technical-review.inspect"
+                  ? TechnicalReviewStateViewSchema.parse(result.view)
+                  : nextQuery.type === "review.topic.inspect"
+                    ? ReviewTopicViewSchema.parse(result.view)
+                    : nextQuery.type === "review.topics.list"
+                      ? ReviewTopicViewSchema.array().parse(result.view)
+                      : nextQuery.type === "run.supervision.inspect"
+                        ? RunSupervisionViewSchema.parse(result.view)
+                        : nextQuery.type === "memory.candidates.list"
+                          ? MemoryCandidateViewSchema.array().parse(result.view)
+                          : nextQuery.type === "memory.records.list" ||
+                              nextQuery.type === "memory.legacy-records.list"
+                            ? LegacyMemoryRecordViewSchema.array().parse(
+                                result.view,
+                              )
+                            : nextQuery.type === "memory.entries.list"
+                              ? MemoryEntryViewSchema.array().parse(result.view)
+                              : nextQuery.type === "memory.selections.list"
+                                ? RunMemorySelectionViewSchema.array().parse(
+                                    result.view,
+                                  )
+                                : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
@@ -869,20 +873,39 @@ export const createSandcastleBridge = (
                 ? TechnicalReviewStateViewSchema.parse(result.value)
                 : input.command.type.startsWith("review.")
                   ? ReviewTopicViewSchema.parse(result.value)
-                  : input.command.type === "interaction.prompt"
-                    ? InteractionTurnViewSchema.parse(result.value)
-                    : input.command.type === "node-attempt.cancel" ||
-                        input.command.type === "interaction-turn.cancel" ||
-                        input.command.type === "run.governed-intervention"
-                      ? RunSupervisionViewSchema.parse(result.value)
-                      : z
-                          .object({
-                            acknowledged: z.literal(true),
-                            subscriptionGeneration: z.number().int().positive(),
-                            barrierSequence: z.number().int().nonnegative(),
-                            auditId: z.string().trim().min(1),
-                          })
-                          .parse(result.value);
+                  : input.command.type === "workspace-allocation.provision" ||
+                      input.command.type === "source-import.execute" ||
+                      input.command.type === "workspace-allocation.cleanup"
+                    ? WorkspaceAllocationViewSchema.parse(result.value)
+                    : input.command.type === "memory.candidate.propose" ||
+                        input.command.type === "memory.review.start"
+                      ? MemoryCandidateViewSchema.parse(result.value)
+                      : input.command.type === "memory.candidate.decide"
+                        ? MemoryDecisionViewSchema.parse(result.value)
+                        : input.command.type === "memory.entry.select-for-run"
+                          ? RunMemorySelectionViewSchema.parse(result.value)
+                          : input.command.type === "interaction.prompt"
+                            ? InteractionTurnViewSchema.parse(result.value)
+                            : input.command.type === "node-attempt.cancel" ||
+                                input.command.type ===
+                                  "interaction-turn.cancel" ||
+                                input.command.type ===
+                                  "run.governed-intervention"
+                              ? RunSupervisionViewSchema.parse(result.value)
+                              : z
+                                  .object({
+                                    acknowledged: z.literal(true),
+                                    subscriptionGeneration: z
+                                      .number()
+                                      .int()
+                                      .positive(),
+                                    barrierSequence: z
+                                      .number()
+                                      .int()
+                                      .nonnegative(),
+                                    auditId: z.string().trim().min(1),
+                                  })
+                                  .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,
@@ -1357,29 +1380,13 @@ export const createSandcastleBridge = (
       agUiEvents: async (input) =>
         AgUiReplayViewSchema.parse(await invoke(AG_UI_EVENTS_CHANNEL, input)),
       memoryCandidates: async (projectId) =>
-        MemoryCandidateViewSchema.array().parse(
-          await invoke(MEMORY_CANDIDATES_LIST_CHANNEL, projectId),
-        ),
-      memoryRecords: async (projectId) =>
-        MemoryRecordViewSchema.array().parse(
-          await invoke(MEMORY_RECORDS_LIST_CHANNEL, projectId),
-        ),
-      createMemoryCandidate: async (input) =>
-        MemoryCandidateViewSchema.parse(
-          await invokeRuntimeCommand(
-            invoke,
-            MEMORY_CANDIDATE_CREATE_CHANNEL,
-            input,
-          ),
-        ),
-      reviewMemoryCandidate: async (input) =>
-        MemoryReviewViewSchema.parse(
-          await invokeRuntimeCommand(
-            invoke,
-            MEMORY_CANDIDATE_REVIEW_CHANNEL,
-            input,
-          ),
-        ),
+        (await query({ type: "memory.candidates.list", projectId })).view,
+      memoryEntries: async (projectId) =>
+        (await query({ type: "memory.entries.list", projectId })).view,
+      memorySelections: async (runId) =>
+        (await query({ type: "memory.selections.list", runId })).view,
+      legacyMemoryRecords: async (projectId) =>
+        (await query({ type: "memory.legacy-records.list", projectId })).view,
       runtimeDiagnostics: async () =>
         RuntimeDiagnosticsViewSchema.parse(
           await invoke(RUNTIME_DIAGNOSTICS_CHANNEL),

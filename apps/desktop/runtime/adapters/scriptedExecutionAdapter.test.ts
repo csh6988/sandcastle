@@ -58,6 +58,7 @@ describe("Scripted Execution Adapter", () => {
           positionId: "product-manager",
         },
         snapshot: {} as never,
+        memoryEntries: [],
         request: {
           operationKey: "node-attempt:attempt-1",
           target: { kind: "node-attempt", id: "attempt-1" },

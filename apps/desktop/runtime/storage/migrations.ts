@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 40;
+export const CURRENT_SCHEMA_VERSION = 41;
 
 interface CompanyMigration {
   readonly version: number;
@@ -3279,6 +3279,225 @@ const migrations: readonly CompanyMigration[] = [
       `);
     },
   },
+  {
+    version: 41,
+    name: "reviewed_memory_candidates_entries_and_snapshot_selections",
+    migrate: (database) => {
+      const reviewTopicsSql = database
+        .prepare(
+          "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'review_topics'",
+        )
+        .get() as { readonly sql?: string } | undefined;
+      if (!reviewTopicsSql?.sql?.includes("'memory'")) {
+        database.exec(`
+        CREATE TABLE review_topics_v41 (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT REFERENCES department_runs(id),
+          title TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (
+            kind IN ('product', 'technical', 'code', 'aggregate', 'verification', 'memory')
+          ),
+          status TEXT NOT NULL CHECK (
+            status IN (
+              'scheduled', 'independent-review', 'discussion', 'revision',
+              're-review', 'blocked', 'PASS', 'CONDITIONAL_PASS', 'FAIL'
+            )
+          ),
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          quorum INTEGER NOT NULL CHECK (quorum > 0),
+          budget_json TEXT NOT NULL,
+          rounds_used INTEGER NOT NULL DEFAULT 0 CHECK (rounds_used >= 0),
+          duration_seconds_used INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds_used >= 0),
+          tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+          cost_cents_used INTEGER NOT NULL DEFAULT 0 CHECK (cost_cents_used >= 0),
+          stop_condition TEXT NOT NULL CHECK (
+            stop_condition = 'blocking-findings-dispositioned'
+          ),
+          escalation_policy TEXT NOT NULL CHECK (
+            escalation_policy = 'fail-with-evidence'
+          ),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        INSERT INTO review_topics_v41
+        SELECT * FROM review_topics;
+
+        CREATE TABLE quality_gate_results_v41 (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+          kind TEXT NOT NULL CHECK (
+            kind IN ('product', 'technical', 'code', 'aggregate', 'verification', 'memory')
+          ),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          revision_id TEXT REFERENCES review_revisions(id),
+          result TEXT NOT NULL CHECK (
+            result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')
+          ),
+          conditions_json TEXT NOT NULL,
+          recheck_ids_json TEXT NOT NULL,
+          evidence_refs_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        INSERT INTO quality_gate_results_v41
+        SELECT * FROM quality_gate_results;
+
+        DROP TABLE quality_gate_results;
+        ALTER TABLE quality_gate_results_v41 RENAME TO quality_gate_results;
+        DROP TABLE review_topics;
+        ALTER TABLE review_topics_v41 RENAME TO review_topics;
+
+        CREATE INDEX review_topics_project_idx
+          ON review_topics(project_id, created_at, id);
+        CREATE INDEX review_topics_run_idx
+          ON review_topics(run_id, created_at, id);
+        CREATE TRIGGER quality_gate_results_immutable_update
+        BEFORE UPDATE ON quality_gate_results
+        BEGIN
+          SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+        END;
+        CREATE TRIGGER quality_gate_results_immutable_delete
+        BEFORE DELETE ON quality_gate_results
+        BEGIN
+          SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+        END;
+        `);
+      }
+
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS reviewed_memory_candidates (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL CHECK (scope IN ('project', 'ai-member')),
+          ai_member_id TEXT REFERENCES ai_members(id),
+          current_revision_id TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          status TEXT NOT NULL CHECK (status IN ('draft', 'review', 'accepted', 'rejected')),
+          review_topic_id TEXT REFERENCES review_topics(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK ((scope = 'project' AND ai_member_id IS NULL)
+              OR (scope = 'ai-member' AND ai_member_id IS NOT NULL))
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS reviewed_memory_candidate_revisions (
+          id TEXT PRIMARY KEY,
+          candidate_id TEXT NOT NULL REFERENCES reviewed_memory_candidates(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL CHECK (scope IN ('project', 'ai-member')),
+          ai_member_id TEXT REFERENCES ai_members(id),
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          supersedes_revision_id TEXT REFERENCES reviewed_memory_candidate_revisions(id),
+          content TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          redaction_policy_version TEXT NOT NULL,
+          redaction_policy_hash TEXT NOT NULL CHECK (length(redaction_policy_hash) = 64),
+          source_artifact_versions_json TEXT NOT NULL,
+          source_event_ranges_json TEXT NOT NULL,
+          producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          producer_position_id TEXT NOT NULL REFERENCES positions(id),
+          producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (candidate_id, revision)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS reviewed_memory_review_topics (
+          topic_id TEXT PRIMARY KEY REFERENCES review_topics(id),
+          candidate_revision_id TEXT NOT NULL UNIQUE
+            REFERENCES reviewed_memory_candidate_revisions(id),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS reviewed_memory_decisions (
+          id TEXT PRIMARY KEY,
+          candidate_revision_id TEXT NOT NULL UNIQUE
+            REFERENCES reviewed_memory_candidate_revisions(id),
+          candidate_revision_hash TEXT NOT NULL CHECK (length(candidate_revision_hash) = 64),
+          topic_id TEXT NOT NULL REFERENCES review_topics(id),
+          quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+          decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NOT NULL,
+          authenticated_by TEXT NOT NULL,
+          command_id TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS reviewed_memory_entries (
+          id TEXT PRIMARY KEY,
+          decision_id TEXT NOT NULL UNIQUE REFERENCES reviewed_memory_decisions(id),
+          candidate_revision_id TEXT NOT NULL UNIQUE
+            REFERENCES reviewed_memory_candidate_revisions(id),
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL CHECK (scope IN ('project', 'ai-member')),
+          owner_id TEXT NOT NULL,
+          version INTEGER NOT NULL CHECK (version > 0),
+          content TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+          redaction_policy_version TEXT NOT NULL,
+          redaction_policy_hash TEXT NOT NULL CHECK (length(redaction_policy_hash) = 64),
+          quality_gate_result_id TEXT NOT NULL REFERENCES quality_gate_results(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (scope, owner_id, version)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS run_memory_selections (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          source_snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          entry_id TEXT NOT NULL REFERENCES reviewed_memory_entries(id),
+          entry_version INTEGER NOT NULL CHECK (entry_version > 0),
+          entry_hash TEXT NOT NULL CHECK (length(entry_hash) = 64),
+          selection_reason TEXT NOT NULL,
+          policy_hash TEXT NOT NULL CHECK (length(policy_hash) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE (snapshot_revision_id, entry_id)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS reviewed_memory_candidates_project_idx
+          ON reviewed_memory_candidates(project_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS reviewed_memory_entries_project_idx
+          ON reviewed_memory_entries(project_id, scope, owner_id, version);
+        CREATE INDEX IF NOT EXISTS run_memory_selections_run_idx
+          ON run_memory_selections(run_id, snapshot_revision_id, entry_id);
+
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_candidate_revisions_immutable_update
+        BEFORE UPDATE ON reviewed_memory_candidate_revisions
+        BEGIN SELECT RAISE(ABORT, 'Memory Candidate Revision is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_candidate_revisions_immutable_delete
+        BEFORE DELETE ON reviewed_memory_candidate_revisions
+        BEGIN SELECT RAISE(ABORT, 'Memory Candidate Revision is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_decisions_immutable_update
+        BEFORE UPDATE ON reviewed_memory_decisions
+        BEGIN SELECT RAISE(ABORT, 'Memory Decision is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_decisions_immutable_delete
+        BEFORE DELETE ON reviewed_memory_decisions
+        BEGIN SELECT RAISE(ABORT, 'Memory Decision is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_entries_immutable_update
+        BEFORE UPDATE ON reviewed_memory_entries
+        BEGIN SELECT RAISE(ABORT, 'Memory Entry is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS reviewed_memory_entries_immutable_delete
+        BEFORE DELETE ON reviewed_memory_entries
+        BEGIN SELECT RAISE(ABORT, 'Memory Entry is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS run_memory_selections_immutable_update
+        BEFORE UPDATE ON run_memory_selections
+        BEGIN SELECT RAISE(ABORT, 'Run Memory Selection is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS run_memory_selections_immutable_delete
+        BEFORE DELETE ON run_memory_selections
+        BEGIN SELECT RAISE(ABORT, 'Run Memory Selection is immutable'); END;
+      `);
+    },
+  },
 ];
 
 const schemaMetadataExists = (database: DatabaseSync): boolean =>
@@ -3322,6 +3541,14 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   const rebuildsNodeAttempts = existingVersion < 18;
   const rebuildsApprovals = existingVersion < 29;
   const rebuildsExecutionStates = existingVersion < 32;
+  const reviewTopicsSql = database
+    .prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'review_topics'",
+    )
+    .get() as { readonly sql?: string } | undefined;
+  const rebuildsReviewTables =
+    existingVersion < 39 &&
+    (!reviewTopicsSql?.sql || !reviewTopicsSql.sql.includes("'memory'"));
   const foreignKeysEnabled = Number(
     (
       database.prepare("PRAGMA foreign_keys").get() as
@@ -3330,7 +3557,10 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
     )?.foreign_keys,
   );
   if (
-    (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
+    (rebuildsNodeAttempts ||
+      rebuildsApprovals ||
+      rebuildsExecutionStates ||
+      rebuildsReviewTables) &&
     foreignKeysEnabled === 1
   ) {
     database.exec("PRAGMA foreign_keys = OFF");
@@ -3356,7 +3586,10 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
       )
       .run(String(CURRENT_SCHEMA_VERSION));
     if (
-      (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
+      (rebuildsNodeAttempts ||
+        rebuildsApprovals ||
+        rebuildsExecutionStates ||
+        rebuildsReviewTables) &&
       database.prepare("PRAGMA foreign_key_check").all().length > 0
     ) {
       throw new Error("Company database migration violated foreign keys.");
@@ -3369,7 +3602,10 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
     throw error;
   } finally {
     if (
-      (rebuildsNodeAttempts || rebuildsApprovals || rebuildsExecutionStates) &&
+      (rebuildsNodeAttempts ||
+        rebuildsApprovals ||
+        rebuildsExecutionStates ||
+        rebuildsReviewTables) &&
       foreignKeysEnabled === 1
     ) {
       database.exec("PRAGMA foreign_keys = ON");

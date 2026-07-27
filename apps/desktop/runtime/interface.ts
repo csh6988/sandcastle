@@ -537,6 +537,32 @@ export const ReviewInputManifestSchema = z.discriminatedUnion("scope", [
       evidenceIds: z.array(z.string().trim().min(1)),
     })
     .strict(),
+  z
+    .object({
+      ...ReviewInputManifestBaseShape,
+      scope: z.literal("memory"),
+      memoryCandidateId: z.string().trim().min(1),
+      memoryCandidateRevisionId: z.string().trim().min(1),
+      memoryCandidateRevisionHash: Sha256Schema,
+      targetScope: z.enum(["project", "ai-member"]),
+      targetProjectId: z.string().trim().min(1),
+      targetAiMemberId: z.string().trim().min(1).nullable(),
+      redactionPolicyVersion: z.string().trim().min(1),
+      redactionPolicyHash: Sha256Schema,
+      sourceArtifactVersions: z.array(
+        z.object({ id: z.string().trim().min(1), hash: Sha256Schema }).strict(),
+      ),
+      sourceEventRanges: z.array(
+        z
+          .object({
+            runId: z.string().trim().min(1),
+            fromSequence: z.number().int().positive(),
+            toSequence: z.number().int().positive(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
 ]);
 
 export const ReviewParticipantRoleSchema = z.enum([
@@ -640,7 +666,14 @@ export const ReviewRecheckSchema = z.object({
 export const QualityGateResultViewSchema = z.object({
   id: z.string(),
   topicId: z.string(),
-  kind: z.enum(["product", "technical", "code", "aggregate", "verification"]),
+  kind: z.enum([
+    "product",
+    "technical",
+    "code",
+    "aggregate",
+    "verification",
+    "memory",
+  ]),
   manifest: ReviewInputManifestSchema,
   manifestHash: Sha256Schema,
   revisionId: z.string().nullable(),
@@ -657,7 +690,14 @@ export const ReviewTopicViewSchema = z.object({
     id: z.string(),
     projectId: z.string(),
     title: z.string(),
-    kind: z.enum(["product", "technical", "code", "aggregate", "verification"]),
+    kind: z.enum([
+      "product",
+      "technical",
+      "code",
+      "aggregate",
+      "verification",
+      "memory",
+    ]),
     status: z.enum([
       "scheduled",
       "independent-review",
@@ -1415,6 +1455,21 @@ export const RunSnapshotPayloadSchema = z.object({
       promotedAt: z.string().datetime(),
     })
     .optional(),
+  memorySelections: z
+    .array(
+      z.object({
+        entryId: z.string(),
+        entryVersion: z.number().int().positive(),
+        entryHash: Sha256Schema,
+        scope: z.enum(["project", "ai-member"]),
+        ownerId: z.string(),
+        targetProjectId: z.string(),
+        selectionReason: z.string(),
+        policyHash: Sha256Schema,
+        selectedAt: z.string().datetime(),
+      }),
+    )
+    .optional(),
   project: RunSnapshotProjectSchema,
   department: RunSnapshotDepartmentSchema,
   pipelineVersion: z.object({
@@ -1859,21 +1914,76 @@ export const AgUiReplayViewSchema = z.object({
 
 export type AgUiReplayView = z.infer<typeof AgUiReplayViewSchema>;
 
+export const MemoryDecisionRecordSchema = z.object({
+  id: z.string(),
+  candidateRevisionId: z.string(),
+  candidateRevisionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  qualityGateResultId: z.string(),
+  decision: z.enum(["accepted", "rejected"]),
+  decidedBy: ActorRefSchema,
+  createdAt: z.string().datetime(),
+  entryId: z.string().nullable(),
+});
+
 export const MemoryCandidateViewSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   scope: z.enum(["project", "ai-member"]),
   aiMemberId: z.string().nullable(),
-  sourceSessionId: z.string().nullable(),
-  sourceRunId: z.string().nullable(),
-  sourceArtifactVersionId: z.string().nullable(),
-  summary: z.string(),
-  status: z.enum(["pending", "approved", "discarded"]),
+  status: z.enum(["draft", "review", "accepted", "rejected"]),
+  revision: z.number().int().positive(),
+  currentRevision: z.object({
+    id: z.string(),
+    revision: z.number().int().positive(),
+    supersedesRevisionId: z.string().nullable(),
+    content: z.string(),
+    hash: z.string().regex(/^[a-f0-9]{64}$/),
+    redactionPolicy: z.object({
+      version: z.string(),
+      hash: z.string().regex(/^[a-f0-9]{64}$/),
+    }),
+    sourceArtifactVersions: z.array(
+      z.object({ id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }),
+    ),
+    sourceEventRanges: z.array(
+      z.object({
+        runId: z.string(),
+        fromSequence: z.number().int().positive(),
+        toSequence: z.number().int().positive(),
+      }),
+    ),
+    producer: z.object({
+      aiMemberId: z.string(),
+      positionId: z.string(),
+      sessionId: z.string(),
+    }),
+    createdAt: z.string().datetime(),
+  }),
+  reviewTopicId: z.string().nullable(),
+  decision: MemoryDecisionRecordSchema.nullable(),
   createdAt: z.string().datetime(),
-  reviewedAt: z.string().datetime().nullable(),
+  updatedAt: z.string().datetime(),
 });
 
-export const MemoryRecordViewSchema = z.object({
+export const MemoryEntryViewSchema = z.object({
+  id: z.string(),
+  candidateRevisionId: z.string(),
+  projectId: z.string(),
+  scope: z.enum(["project", "ai-member"]),
+  ownerId: z.string(),
+  version: z.number().int().positive(),
+  content: z.string(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  redactionPolicy: z.object({
+    version: z.string(),
+    hash: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
+  qualityGateResultId: z.string(),
+  decisionId: z.string(),
+  createdAt: z.string().datetime(),
+});
+
+export const LegacyMemoryRecordViewSchema = z.object({
   id: z.string(),
   candidateId: z.string(),
   projectId: z.string(),
@@ -1886,14 +1996,36 @@ export const MemoryRecordViewSchema = z.object({
   revokedAt: z.string().datetime().nullable(),
 });
 
-export const MemoryReviewViewSchema = z.object({
+export const MemoryDecisionViewSchema = z.object({
   candidate: MemoryCandidateViewSchema,
-  record: MemoryRecordViewSchema.nullable(),
+  decision: MemoryDecisionRecordSchema,
+  entry: MemoryEntryViewSchema.nullable(),
+});
+
+export const RunMemorySelectionViewSchema = z.object({
+  snapshotRevisionId: z.string(),
+  snapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
+  selections: z.array(
+    z.object({
+      entryId: z.string(),
+      entryVersion: z.number().int().positive(),
+      entryHash: z.string().regex(/^[a-f0-9]{64}$/),
+      selectionReason: z.string(),
+      policyHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }),
+  ),
 });
 
 export type MemoryCandidateView = z.infer<typeof MemoryCandidateViewSchema>;
-export type MemoryRecordView = z.infer<typeof MemoryRecordViewSchema>;
-export type MemoryReviewView = z.infer<typeof MemoryReviewViewSchema>;
+export type MemoryDecisionRecord = z.infer<typeof MemoryDecisionRecordSchema>;
+export type MemoryEntryView = z.infer<typeof MemoryEntryViewSchema>;
+export type LegacyMemoryRecordView = z.infer<
+  typeof LegacyMemoryRecordViewSchema
+>;
+export type MemoryDecisionView = z.infer<typeof MemoryDecisionViewSchema>;
+export type RunMemorySelectionView = z.infer<
+  typeof RunMemorySelectionViewSchema
+>;
 
 export const RuntimeDiagnosticsViewSchema = z.object({
   schemaVersion: z.number().int().nonnegative(),
@@ -2090,6 +2222,12 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
     projectId: z.string(),
   }),
   z.object({ type: z.literal("memory.records.list"), projectId: z.string() }),
+  z.object({ type: z.literal("memory.entries.list"), projectId: z.string() }),
+  z.object({ type: z.literal("memory.selections.list"), runId: z.string() }),
+  z.object({
+    type: z.literal("memory.legacy-records.list"),
+    projectId: z.string(),
+  }),
   z.object({ type: z.literal("runtime.diagnostics") }),
 ]);
 
@@ -2178,10 +2316,16 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
                                                             : Query["type"] extends "memory.candidates.list"
                                                               ? readonly MemoryCandidateView[]
                                                               : Query["type"] extends "memory.records.list"
-                                                                ? readonly MemoryRecordView[]
-                                                                : Query["type"] extends "runtime.diagnostics"
-                                                                  ? RuntimeDiagnosticsView
-                                                                  : DepartmentRunView;
+                                                                ? readonly LegacyMemoryRecordView[]
+                                                                : Query["type"] extends "memory.entries.list"
+                                                                  ? readonly MemoryEntryView[]
+                                                                  : Query["type"] extends "memory.selections.list"
+                                                                    ? readonly RunMemorySelectionView[]
+                                                                    : Query["type"] extends "memory.legacy-records.list"
+                                                                      ? readonly LegacyMemoryRecordView[]
+                                                                      : Query["type"] extends "runtime.diagnostics"
+                                                                        ? RuntimeDiagnosticsView
+                                                                        : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -2340,22 +2484,6 @@ export const CompanyCommandSchema = z.discriminatedUnion("type", [
     permissionId: z.string().trim().min(1),
     expectedStatus: z.literal("pending"),
     decision: z.enum(["approved", "denied"]),
-  }),
-  z.object({
-    type: z.literal("memory.candidate.create"),
-    projectId: z.string().trim().min(1),
-    scope: z.enum(["project", "ai-member"]),
-    aiMemberId: z.string().trim().min(1).optional(),
-    sourceSessionId: z.string().trim().min(1).optional(),
-    sourceRunId: z.string().trim().min(1).optional(),
-    sourceArtifactVersionId: z.string().trim().min(1).optional(),
-    summary: z.string().trim().min(1).max(20_000),
-  }),
-  z.object({
-    type: z.literal("memory.candidate.review"),
-    candidateId: z.string().trim().min(1),
-    expectedStatus: z.literal("pending"),
-    decision: z.enum(["approved", "discarded"]),
   }),
   z.object({
     type: z.literal("runtime.events.compact"),
@@ -2906,6 +3034,94 @@ export const GovernedInterventionEnvelopeCommandSchema = z
   })
   .strict();
 
+const MemoryProducerSchema = z
+  .object({
+    aiMemberId: z.string().trim().min(1),
+    positionId: z.string().trim().min(1),
+    sessionId: z.string().trim().min(1),
+  })
+  .strict();
+
+const ExactMemoryEntryRefSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    version: z.number().int().positive(),
+    hash: Sha256Schema,
+  })
+  .strict();
+
+export const MemoryCandidateProposeEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("memory.candidate.propose"),
+    candidateId: z.string().trim().min(1),
+    revisionId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    scope: z.enum(["project", "ai-member"]),
+    aiMemberId: z.string().trim().min(1).optional(),
+    producer: MemoryProducerSchema,
+    content: z.string().trim().min(1).max(20_000),
+    redactionPolicy: z
+      .object({ version: z.string().trim().min(1), hash: Sha256Schema })
+      .strict(),
+    sourceArtifactVersions: z
+      .array(z.object({ id: z.string().trim().min(1), hash: Sha256Schema }))
+      .min(1),
+    sourceEventRanges: z
+      .array(
+        z
+          .object({
+            runId: z.string().trim().min(1),
+            fromSequence: z.number().int().positive(),
+            toSequence: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1),
+    supersedesRevisionId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export const MemoryReviewStartEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("memory.review.start"),
+    candidateId: z.string().trim().min(1),
+    candidateRevisionId: z.string().trim().min(1),
+    candidateRevisionHash: Sha256Schema,
+    topicId: z.string().trim().min(1),
+    participants: z.array(ReviewParticipantInputSchema).min(3),
+    quorum: z.number().int().positive().optional(),
+    budget: ReviewBudgetSchema,
+  })
+  .strict();
+
+export const MemoryCandidateDecideEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("memory.candidate.decide"),
+    candidateId: z.string().trim().min(1),
+    candidateRevisionId: z.string().trim().min(1),
+    candidateRevisionHash: Sha256Schema,
+    topicId: z.string().trim().min(1),
+    decision: z.enum(["accepted", "rejected"]),
+  })
+  .strict();
+
+export const MemoryEntrySelectForRunEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("memory.entry.select-for-run"),
+    runId: z.string().trim().min(1),
+    sourceSnapshotRevisionId: z.string().trim().min(1),
+    entryRefs: z.array(ExactMemoryEntryRefSchema).min(1),
+    selectionReason: z.string().trim().min(1),
+    policyHash: Sha256Schema,
+  })
+  .strict();
+
+export type MemoryEnvelopeCommand =
+  | z.infer<typeof MemoryCandidateProposeEnvelopeCommandSchema>
+  | z.infer<typeof MemoryReviewStartEnvelopeCommandSchema>
+  | z.infer<typeof MemoryCandidateDecideEnvelopeCommandSchema>
+  | z.infer<typeof MemoryEntrySelectForRunEnvelopeCommandSchema>;
+
 export const ReviewTopicCreateEnvelopeCommandSchema = z
   .object({
     type: z.literal("review.topic.create"),
@@ -3063,6 +3279,10 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   NodeAttemptCancelEnvelopeCommandSchema,
   InteractionTurnCancelEnvelopeCommandSchema,
   GovernedInterventionEnvelopeCommandSchema,
+  MemoryCandidateProposeEnvelopeCommandSchema,
+  MemoryReviewStartEnvelopeCommandSchema,
+  MemoryCandidateDecideEnvelopeCommandSchema,
+  MemoryEntrySelectForRunEnvelopeCommandSchema,
   ReviewTopicCreateEnvelopeCommandSchema,
   ReviewFindingSubmitEnvelopeCommandSchema,
   ReviewFindingDispositionEnvelopeCommandSchema,
@@ -3105,19 +3325,27 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
                   | "interaction-turn.cancel"
                   | "run.governed-intervention"
               ? RunSupervisionView
-              : Command["type"] extends ReviewEnvelopeCommand["type"]
-                ? ReviewTopicView
-                : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-                  ? ProductReviewStateView
-                  : Command["type"] extends ProductEnvelopeCommand["type"]
-                    ? ProductDiscoveryView
-                    : Command["type"] extends "artifact.version.register"
-                      ? ArtifactRegistrationView
-                      : Command["type"] extends
-                            | "artifact.version.finalize"
-                            | "artifact.version.supersede"
-                        ? ArtifactVersionView
-                        : ProjectEditorView;
+              : Command["type"] extends
+                    | "memory.candidate.propose"
+                    | "memory.review.start"
+                ? MemoryCandidateView
+                : Command["type"] extends "memory.candidate.decide"
+                  ? MemoryDecisionView
+                  : Command["type"] extends "memory.entry.select-for-run"
+                    ? RunMemorySelectionView
+                    : Command["type"] extends ReviewEnvelopeCommand["type"]
+                      ? ReviewTopicView
+                      : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                        ? ProductReviewStateView
+                        : Command["type"] extends ProductEnvelopeCommand["type"]
+                          ? ProductDiscoveryView
+                          : Command["type"] extends "artifact.version.register"
+                            ? ArtifactRegistrationView
+                            : Command["type"] extends
+                                  | "artifact.version.finalize"
+                                  | "artifact.version.supersede"
+                              ? ArtifactVersionView
+                              : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
@@ -3214,55 +3442,51 @@ export type CompanyCommandResult<Command extends CompanyCommand> =
                                       | "permission.request"
                                       | "permission.decide"
                                   ? PermissionRequestView
-                                  : Command["type"] extends "memory.candidate.create"
-                                    ? MemoryCandidateView
-                                    : Command["type"] extends "memory.candidate.review"
-                                      ? MemoryReviewView
-                                      : Command["type"] extends "runtime.events.compact"
-                                        ? {
-                                            readonly deleted: number;
-                                            readonly retained: number;
-                                          }
-                                        : Command["type"] extends "project.create"
-                                          ? CompanyProject
-                                          : Command["type"] extends
-                                                | "product.proposal.revise"
-                                                | "product.proposal.mark-awaiting-confirmation"
-                                                | "confirm-product-baseline"
-                                                | "fork-department-run"
-                                            ? ProductDiscoveryView
+                                  : Command["type"] extends "runtime.events.compact"
+                                    ? {
+                                        readonly deleted: number;
+                                        readonly retained: number;
+                                      }
+                                    : Command["type"] extends "project.create"
+                                      ? CompanyProject
+                                      : Command["type"] extends
+                                            | "product.proposal.revise"
+                                            | "product.proposal.mark-awaiting-confirmation"
+                                            | "confirm-product-baseline"
+                                            | "fork-department-run"
+                                        ? ProductDiscoveryView
+                                        : Command["type"] extends
+                                              | "project.update"
+                                              | "project.archive"
+                                          ? ProjectEditorView
+                                          : Command["type"] extends "department.create"
+                                            ? CompanyDepartment
                                             : Command["type"] extends
-                                                  | "project.update"
-                                                  | "project.archive"
-                                              ? ProjectEditorView
-                                              : Command["type"] extends "department.create"
-                                                ? CompanyDepartment
+                                                  | "skill.catalog.save"
+                                                  | "skill.catalog.archive"
+                                                  | "position.skills.set"
+                                                  | "skill-flow.save"
+                                                  | "skill-flow.archive"
+                                              ? SkillConfigurationView
+                                              : Command["type"] extends "position.configure"
+                                                ? PositionConfigurationResult
                                                 : Command["type"] extends
-                                                      | "skill.catalog.save"
-                                                      | "skill.catalog.archive"
-                                                      | "position.skills.set"
-                                                      | "skill-flow.save"
-                                                      | "skill-flow.archive"
-                                                  ? SkillConfigurationView
-                                                  : Command["type"] extends "position.configure"
-                                                    ? PositionConfigurationResult
-                                                    : Command["type"] extends
-                                                          | "department.pipeline.draft.save"
-                                                          | "department.pipeline.publish"
-                                                      ? DepartmentPipelineEditorView
-                                                      : Command["type"] extends
-                                                            | "run.start"
-                                                            | "run.execute-ready"
-                                                            | "run.fork"
-                                                            | "run.pause"
-                                                            | "run.resume"
-                                                            | "run.cancel"
-                                                            | "run.recover"
-                                                            | "run.approval.decide"
-                                                            | "run.approval.retry"
-                                                            | "run.node.retry"
-                                                        ? DepartmentRunView
-                                                        : DepartmentInspect;
+                                                      | "department.pipeline.draft.save"
+                                                      | "department.pipeline.publish"
+                                                  ? DepartmentPipelineEditorView
+                                                  : Command["type"] extends
+                                                        | "run.start"
+                                                        | "run.execute-ready"
+                                                        | "run.fork"
+                                                        | "run.pause"
+                                                        | "run.resume"
+                                                        | "run.cancel"
+                                                        | "run.recover"
+                                                        | "run.approval.decide"
+                                                        | "run.approval.retry"
+                                                        | "run.node.retry"
+                                                    ? DepartmentRunView
+                                                    : DepartmentInspect;
 
 export const EventEnvelopeSchema = z.object({
   registryVersion: z.number().int().positive().optional(),

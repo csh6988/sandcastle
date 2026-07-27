@@ -80,6 +80,7 @@ const input = (): SoftwareDevelopmentExecutionInput => ({
     permissionPolicy: "ask",
     secretReferenceIds: [],
   },
+  memoryEntries: [],
   attempt: {
     id: "attempt-1",
     attemptNumber: 1,

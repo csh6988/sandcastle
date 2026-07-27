@@ -159,7 +159,7 @@ try {
   assert.equal(report.interactionSessionStatus, "closed");
   assert.equal(report.permissionStatus, "approved");
   assert.ok(report.agUiEventCount > 0);
-  assert.equal(report.memoryRecordVersion, 1);
+  assert.equal(report.legacyMemoryRecordCount, 0);
   assert.equal(report.backupSchemaVersion, 23);
   assert.equal(report.legacyBoardNavigationVisible, false);
   process.stdout.write(

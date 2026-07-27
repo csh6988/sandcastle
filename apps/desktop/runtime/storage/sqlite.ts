@@ -61,6 +61,7 @@ import {
 import {
   openCompanyCommandRegistry,
   type CompanyCommandRegistry,
+  type MemoryCommandFailurePoint,
 } from "../commandRegistry.js";
 import {
   openRuntimeEvents,
@@ -231,6 +232,9 @@ export const openCompanyDatabase = (
         point: TechnicalGatePromotionFailurePoint,
       ) => void;
     };
+    readonly memoryRuntime?: {
+      readonly commandFailure?: (point: MemoryCommandFailurePoint) => void;
+    };
   } = {},
 ): CompanyDatabase => {
   const sandcastleDir = join(companyDir, ".sandcastle");
@@ -290,7 +294,6 @@ export const openCompanyDatabase = (
       : {}),
     events,
   });
-  const memory = openRuntimeMemory(database);
   const diagnostics = openRuntimeDiagnostics(database, path);
   const agentCatalog = openAgentCatalog(database, {
     ...(options.agentHost ? { host: options.agentHost } : {}),
@@ -304,6 +307,7 @@ export const openCompanyDatabase = (
       join(companyDir, ".agents", "skills"),
     ],
   });
+  let memory!: RuntimeMemory;
   const pipelineRuntime = openPipelineRuntime(
     database,
     options.executionAdapter ?? createScriptedExecutionAdapter(),
@@ -312,6 +316,7 @@ export const openCompanyDatabase = (
       artifactRegistry,
       events,
       interaction,
+      resolveMemoryEntries: (input) => memory.resolveEntriesForExecution(input),
       ...(options.pipelineRuntime?.handlerRegistry
         ? { handlerRegistry: options.pipelineRuntime.handlerRegistry }
         : {}),
@@ -356,6 +361,13 @@ export const openCompanyDatabase = (
       ? { promotionFailure: options.technicalReviewRuntime.promotionFailure }
       : {}),
   });
+  memory = openRuntimeMemory(database, {
+    events,
+    artifacts: artifactRegistry,
+    reviewRuntime: review,
+    pipelineRuntime,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const commandRegistry = openCompanyCommandRegistry(
     database,
     projectConfiguration,
@@ -372,6 +384,8 @@ export const openCompanyDatabase = (
     technicalReview,
     options.technicalReviewRuntime?.promotionFailure,
     workspaces,
+    memory,
+    options.memoryRuntime?.commandFailure,
   );
   workspaces.reconcile();
 

@@ -34,6 +34,12 @@ const agUiRegistryFixture = [
   "review.revision.created@1:custom",
   "review.recheck.completed@1:custom",
   "quality-gate.completed@1:custom",
+  "memory.candidate.created@1:custom",
+  "memory.review.started@1:custom",
+  "memory.reviewed@1:custom",
+  "memory.accepted@1:custom",
+  "memory.rejected@1:custom",
+  "memory.selected@1:custom",
   "artifact.registered@1:custom",
   "artifact.finalized@1:custom",
   "artifact.integrity-failed@1:custom",
@@ -137,7 +143,6 @@ describe("Runtime Event registry", () => {
         "session.participant.added@1",
         "session.closed@1",
         "session.message.created@1",
-        "memory.candidate.created@1",
         "memory.candidate.reviewed@1",
       ],
     );
@@ -393,6 +398,51 @@ describe("Runtime Event registry", () => {
             technicalBaselineId: "technical-baseline-1",
             technicalBaselineHash: "a".repeat(64),
             applicationSpecRevisionIds: ["application-spec-r1"],
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+    );
+  });
+
+  it("requires governed Memory Candidate and Entry identities", () => {
+    const registry = createRuntimeEventRegistry();
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "memory.accepted",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          memoryCandidateId: "memory-candidate-1",
+          memoryEntryId: "memory-entry-1",
+          topicId: "memory-topic-1",
+          qualityGateResultId: "memory-gate-1",
+        },
+        payload: {
+          decisionId: "memory-decision-1",
+          candidateId: "memory-candidate-1",
+          candidateRevisionId: "memory-candidate-revision-1",
+          candidateRevisionHash: "a".repeat(64),
+          entryId: "memory-entry-1",
+          entryHash: "b".repeat(64),
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "memory.selected",
+          scope: {
+            companyId: "company",
+            projectId: "project-1",
+            runId: "run-1",
+            snapshotRevisionId: "snapshot-r2",
+          },
+          payload: {
+            entryId: "memory-entry-1",
+            snapshotRevisionId: "snapshot-r2",
+            snapshotHash: "c".repeat(64),
           },
         }),
       (error: unknown) =>

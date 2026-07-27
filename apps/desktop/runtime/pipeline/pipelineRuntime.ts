@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { isRegisteredCompanyAgentId } from "../agent/agentCatalog.js";
-import type { ExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
+import type {
+  ExecutionAdapter,
+  ExecutionMemoryEntry,
+} from "../adapters/scriptedExecutionAdapter.js";
 import type { ArtifactRegistry } from "../artifactRegistry.js";
 import type { RuntimeEvents } from "../events/subscription.js";
 import type {
@@ -151,6 +154,23 @@ export interface PipelineRuntime {
     }[];
     readonly promotedAt: string;
     readonly checkpoint?: (point: "before-snapshot" | "after-snapshot") => void;
+  }) => DepartmentRunView;
+  readonly promoteMemorySelectionInTransaction: (input: {
+    readonly runId: string;
+    readonly expectedRevision: number;
+    readonly sourceSnapshotRevisionId: string;
+    readonly snapshotRevisionId: string;
+    readonly entries: readonly {
+      readonly entryId: string;
+      readonly entryVersion: number;
+      readonly entryHash: string;
+      readonly scope: "project" | "ai-member";
+      readonly ownerId: string;
+      readonly targetProjectId: string;
+    }[];
+    readonly selectionReason: string;
+    readonly policyHash: string;
+    readonly selectedAt: string;
   }) => DepartmentRunView;
   readonly startFormalizedRun: (input: {
     readonly projectId: string;
@@ -461,10 +481,30 @@ export const openPipelineRuntime = (
     readonly handlerRegistry?: NodeHandlerRegistry;
     readonly events?: Pick<RuntimeEvents, "append">;
     readonly interaction?: RuntimeInteraction;
+    readonly resolveMemoryEntries?: (input: {
+      readonly projectId: string;
+      readonly aiMemberId: string | null;
+      readonly selections: NonNullable<RunSnapshotPayload["memorySelections"]>;
+    }) => readonly ExecutionMemoryEntry[];
   } = {},
 ): PipelineRuntime => {
   const clock = options.clock ?? (() => new Date());
   const handlerRegistry = options.handlerRegistry ?? defaultNodeHandlerRegistry;
+  const resolveMemoryEntries = (
+    snapshot: RunSnapshotPayload,
+    node: RunSnapshotPayload["pipelineVersion"]["graph"]["nodes"][number],
+  ): readonly ExecutionMemoryEntry[] => {
+    const position = snapshot.positions.find(
+      (candidate) => candidate.id === node.positionId,
+    );
+    return (
+      options.resolveMemoryEntries?.({
+        projectId: snapshot.project.id,
+        aiMemberId: position?.aiMember.id ?? null,
+        selections: snapshot.memorySelections ?? [],
+      }) ?? []
+    );
+  };
   const activeExecutions = new Map<
     string,
     {
@@ -1913,6 +1953,108 @@ export const openPipelineRuntime = (
             WHERE id = ?`,
         )
         .run(input.snapshotRevisionId, input.promotedAt, input.runId);
+      return inspectRun(input.runId);
+    };
+
+  const promoteMemorySelectionInTransaction: PipelineRuntime["promoteMemorySelectionInTransaction"] =
+    (input) => {
+      const run = database
+        .prepare(
+          `SELECT revision, snapshot_revision_id AS snapshotRevisionId
+             FROM department_runs WHERE id = ?`,
+        )
+        .get(input.runId) as
+        | { readonly revision: number; readonly snapshotRevisionId: string }
+        | undefined;
+      if (!run) {
+        throw new PipelineRuntimeError(
+          "RUN_NOT_FOUND",
+          `Department Run ${input.runId} was not found.`,
+        );
+      }
+      if (Number(run.revision) !== input.expectedRevision) {
+        throw new PipelineRuntimeError(
+          "VERSION_CONFLICT",
+          `Run revision ${input.expectedRevision} does not match current revision ${Number(run.revision)}.`,
+        );
+      }
+      if (run.snapshotRevisionId !== input.sourceSnapshotRevisionId) {
+        throw new PipelineRuntimeError(
+          "RUN_SNAPSHOT_CONFLICT",
+          "Memory selection must extend the Run's current Snapshot Revision.",
+        );
+      }
+      const source = database
+        .prepare(
+          `SELECT revision, canonical_json AS canonicalJson, hash
+             FROM run_snapshot_revisions
+            WHERE id = ? AND run_id = ?`,
+        )
+        .get(input.sourceSnapshotRevisionId, input.runId) as
+        | {
+            readonly revision: number;
+            readonly canonicalJson: string;
+            readonly hash: string;
+          }
+        | undefined;
+      if (!source) {
+        throw new PipelineRuntimeError(
+          "RUN_SNAPSHOT_INVALID",
+          `Snapshot Revision ${input.sourceSnapshotRevisionId} was not found.`,
+        );
+      }
+      const sourcePayload = RunSnapshotPayloadSchema.parse(
+        parseJson(
+          source.canonicalJson,
+          `Snapshot Revision ${input.sourceSnapshotRevisionId}`,
+        ),
+      );
+      if (
+        canonicalPipelineJson(sourcePayload) !== source.canonicalJson ||
+        pipelineHash(sourcePayload) !== source.hash
+      ) {
+        throw new PipelineRuntimeError(
+          "RUN_SNAPSHOT_INVALID",
+          `Snapshot Revision ${input.sourceSnapshotRevisionId} failed its SHA-256 integrity check.`,
+        );
+      }
+      const existing = sourcePayload.memorySelections ?? [];
+      const selected = input.entries.map((entry) => ({
+        ...entry,
+        selectionReason: input.selectionReason,
+        policyHash: input.policyHash,
+        selectedAt: input.selectedAt,
+      }));
+      const payload = RunSnapshotPayloadSchema.parse({
+        ...sourcePayload,
+        memorySelections: [...existing, ...selected],
+      });
+      const canonicalJson = canonicalPipelineJson(payload);
+      const hash = pipelineHash(payload);
+      database
+        .prepare(
+          `INSERT INTO run_snapshot_revisions(
+             id, run_id, revision, parent_revision, schema_version,
+             canonical_json, hash, created_at
+           ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        )
+        .run(
+          input.snapshotRevisionId,
+          input.runId,
+          Number(source.revision) + 1,
+          Number(source.revision),
+          canonicalJson,
+          hash,
+          input.selectedAt,
+        );
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET snapshot_revision_id = ?, revision = revision + 1,
+                  updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(input.snapshotRevisionId, input.selectedAt, input.runId);
       return inspectRun(input.runId);
     };
 
@@ -4004,6 +4146,10 @@ export const openPipelineRuntime = (
               signal: controller.signal,
               node: pipelineNode,
               snapshot: blockedView.snapshot.payload,
+              memoryEntries: resolveMemoryEntries(
+                blockedView.snapshot.payload,
+                pipelineNode,
+              ),
               attempt: {
                 id: blockedAttempt.id,
                 attemptNumber: blockedAttempt.attemptNumber,
@@ -6658,6 +6804,10 @@ export const openPipelineRuntime = (
           node: input.node,
           signal: controller.signal,
           snapshot: runningView.snapshot.payload,
+          memoryEntries: resolveMemoryEntries(
+            runningView.snapshot.payload,
+            input.node,
+          ),
           request,
           attempt: {
             id: runningAttempt.id,
@@ -7745,6 +7895,7 @@ export const openPipelineRuntime = (
     recordProductReadinessInTransaction,
     promoteProductGateInTransaction,
     promoteTechnicalGateInTransaction,
+    promoteMemorySelectionInTransaction,
     startFormalizedRun,
     startRun,
     forkRun,

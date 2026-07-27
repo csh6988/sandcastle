@@ -6,6 +6,8 @@ import type {
   ArtifactLineageView,
   InteractionView,
   MemoryCandidateView,
+  MemoryEntryView,
+  LegacyMemoryRecordView,
   CompanyDepartment,
   CompanyOverview,
   CompanyProject,
@@ -8221,7 +8223,11 @@ type InteractionMemberOption = {
 
 type InteractionRuntime = Pick<
   (typeof window.sandcastle)["runtime"],
-  "interactions" | "memoryCandidates" | "runs"
+  | "interactions"
+  | "memoryCandidates"
+  | "memoryEntries"
+  | "legacyMemoryRecords"
+  | "runs"
 >;
 
 type RunCollaborationRuntime = Pick<
@@ -8257,14 +8263,25 @@ export const loadInteractionProjectContext = async (
 ): Promise<{
   readonly sessions: readonly InteractionView[];
   readonly memoryCandidates: readonly MemoryCandidateView[];
+  readonly memoryEntries: readonly MemoryEntryView[];
+  readonly legacyMemoryRecords: readonly LegacyMemoryRecordView[];
   readonly runs: readonly DepartmentRunView[];
 }> => {
-  const [sessions, memoryCandidates, runs] = await Promise.all([
-    runtime.interactions(projectId),
-    runtime.memoryCandidates(projectId),
-    runtime.runs(projectId),
-  ]);
-  return { sessions, memoryCandidates, runs };
+  const [sessions, memoryCandidates, memoryEntries, legacyMemoryRecords, runs] =
+    await Promise.all([
+      runtime.interactions(projectId),
+      runtime.memoryCandidates(projectId),
+      runtime.memoryEntries(projectId),
+      runtime.legacyMemoryRecords(projectId),
+      runtime.runs(projectId),
+    ]);
+  return {
+    sessions,
+    memoryCandidates,
+    memoryEntries,
+    legacyMemoryRecords,
+    runs,
+  };
 };
 
 export const startRunProgressPolling = (
@@ -8532,6 +8549,14 @@ export function InteractionRunPanel({
   );
 }
 
+export const memoryCandidateDecisionLabel = (
+  candidate: MemoryCandidateView,
+  noneLabel: string,
+): string =>
+  candidate.decision
+    ? `${candidate.decision.decision} · gate ${candidate.decision.qualityGateResultId} · entry ${candidate.decision.entryId ?? noneLabel}`
+    : "";
+
 export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
   const [projects, setProjects] = useState<readonly CompanyProject[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -8548,9 +8573,14 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
   const [selected, setSelected] = useState<InteractionView | null>(null);
   const [message, setMessage] = useState("");
   const [permissionScope, setPermissionScope] = useState("");
-  const [memorySummary, setMemorySummary] = useState("");
   const [memoryCandidates, setMemoryCandidates] = useState<
     readonly MemoryCandidateView[]
+  >([]);
+  const [memoryEntries, setMemoryEntries] = useState<
+    readonly MemoryEntryView[]
+  >([]);
+  const [legacyMemoryRecords, setLegacyMemoryRecords] = useState<
+    readonly LegacyMemoryRecordView[]
   >([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -8578,6 +8608,8 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
     );
     setSessions(context.sessions);
     setMemoryCandidates(context.memoryCandidates);
+    setMemoryEntries(context.memoryEntries);
+    setLegacyMemoryRecords(context.legacyMemoryRecords);
     setRuns(context.runs);
     setSelectedRunId((current) =>
       current && context.runs.some((run) => run.run.id === current)
@@ -8789,38 +8821,6 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
       setSelected(
         await window.sandcastle.runtime.inspectInteraction(selected.session.id),
       );
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    }
-  };
-
-  const createMemoryCandidate = async (): Promise<void> => {
-    if (!selected || !memorySummary.trim()) return;
-    try {
-      await window.sandcastle.runtime.createMemoryCandidate({
-        projectId: selected.session.projectId,
-        scope: "project",
-        sourceSessionId: selected.session.id,
-        summary: memorySummary.trim(),
-      });
-      setMemorySummary("");
-      await refresh(selected.session.projectId);
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    }
-  };
-
-  const reviewMemoryCandidate = async (
-    candidateId: string,
-    decision: "approved" | "discarded",
-  ): Promise<void> => {
-    try {
-      await window.sandcastle.runtime.reviewMemoryCandidate({
-        candidateId,
-        expectedStatus: "pending",
-        decision,
-      });
-      if (selected) await refresh(selected.session.projectId);
     } catch (nextError) {
       setError(errorMessage(nextError));
     }
@@ -9180,18 +9180,6 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                 <div className="interaction-panel-heading">
                   <h3>{t.memoryCandidates}</h3>
                 </div>
-                <textarea
-                  onChange={(event) => setMemorySummary(event.target.value)}
-                  placeholder={t.memoryCandidates}
-                  value={memorySummary}
-                />
-                <button
-                  disabled={!memorySummary.trim()}
-                  onClick={() => void createMemoryCandidate()}
-                  type="button"
-                >
-                  {t.createMemoryCandidate}
-                </button>
                 {memoryCandidates.map((candidate) => (
                   <div
                     className="interaction-memory-candidate"
@@ -9199,31 +9187,39 @@ export function CompanyInteractionPage({ t }: { readonly t: Messages }) {
                     key={candidate.id}
                   >
                     <span>
-                      {candidate.summary} · {candidate.status}
+                      {candidate.currentRevision.content} · {candidate.status}
                     </span>
-                    {candidate.status === "pending" ? (
-                      <div className="action-bar">
-                        <button
-                          onClick={() =>
-                            void reviewMemoryCandidate(candidate.id, "approved")
-                          }
-                          type="button"
-                        >
-                          {t.approve}
-                        </button>
-                        <button
-                          onClick={() =>
-                            void reviewMemoryCandidate(
-                              candidate.id,
-                              "discarded",
-                            )
-                          }
-                          type="button"
-                        >
-                          {t.discard}
-                        </button>
-                      </div>
-                    ) : null}
+                    <small>
+                      {candidate.reviewTopicId ?? t.none} · revision{" "}
+                      {candidate.revision}
+                      {candidate.decision
+                        ? ` · ${memoryCandidateDecisionLabel(candidate, t.none)}`
+                        : ""}
+                    </small>
+                  </div>
+                ))}
+                {memoryEntries.map((entry) => (
+                  <div
+                    className="interaction-memory-candidate"
+                    data-memory-entry={entry.id}
+                    key={entry.id}
+                  >
+                    <strong>{t.memoryEntries}</strong>
+                    <span>
+                      {entry.content} · v{entry.version}
+                    </span>
+                  </div>
+                ))}
+                {legacyMemoryRecords.map((record) => (
+                  <div
+                    className="interaction-memory-candidate"
+                    data-legacy-memory-record={record.id}
+                    key={record.id}
+                  >
+                    <strong>{t.legacyMemoryRecords}</strong>
+                    <span>
+                      {record.content} · {record.status}
+                    </span>
                   </div>
                 ))}
               </section>

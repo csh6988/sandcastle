@@ -448,6 +448,10 @@ describe("Company database migrations", () => {
               name: "local_isolated_git_workspace_imports",
             },
             { version: 40, name: "governed_run_interventions" },
+            {
+              version: 41,
+              name: "reviewed_memory_candidates_entries_and_snapshot_selections",
+            },
           ],
         );
         assert.deepEqual(
@@ -1391,6 +1395,209 @@ describe("Company database migrations", () => {
               .get() as { readonly aiMemberId: string }
           ).aiMemberId,
           "delivery-coordinator-member",
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("upgrades schema version 38 without losing generic Review rows and admits Memory Review kinds", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const project = initialized.catalog.createProject({
+      name: "Reviewed Memory migration",
+      goal: "Preserve generic Review evidence",
+    });
+    const producerSession = initialized.interaction.createSession({
+      projectId: project.id,
+      mode: "consultation",
+    });
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const previous = new DatabaseSync(databasePath);
+    previous
+      .prepare(
+        `INSERT INTO review_topics(
+          id, project_id, run_id, title, kind, status, revision,
+          manifest_json, manifest_hash, producer_ai_member_id,
+          producer_position_id, producer_session_id, quorum, budget_json,
+          rounds_used, duration_seconds_used, tokens_used, cost_cents_used,
+          stop_condition, escalation_policy, created_at, updated_at
+        ) VALUES (?, ?, NULL, ?, 'product', 'PASS', 1, '{}', ?, ?, ?, ?, 1,
+                  '{}', 0, 0, 0, 0, 'blocking-findings-dispositioned',
+                  'fail-with-evidence', ?, ?)`,
+      )
+      .run(
+        "review-topic-v38",
+        project.id,
+        "Existing Review",
+        "a".repeat(64),
+        "product-planner-member",
+        "product-planner",
+        producerSession.id,
+        "2026-07-27T00:00:00.000Z",
+        "2026-07-27T00:00:00.000Z",
+      );
+    previous
+      .prepare(
+        `INSERT INTO quality_gate_results(
+          id, topic_id, kind, manifest_json, manifest_hash, revision_id,
+          result, conditions_json, recheck_ids_json, evidence_refs_json,
+          created_at
+        ) VALUES (?, ?, 'product', '{}', ?, NULL, 'PASS', '[]', '[]', '[]', ?)`,
+      )
+      .run(
+        "quality-gate-v38",
+        "review-topic-v38",
+        "a".repeat(64),
+        "2026-07-27T00:00:00.000Z",
+      );
+    previous.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TABLE run_memory_selections;
+      DROP TABLE reviewed_memory_entries;
+      DROP TABLE reviewed_memory_decisions;
+      DROP TABLE reviewed_memory_review_topics;
+      DROP TABLE reviewed_memory_candidate_revisions;
+      DROP TABLE reviewed_memory_candidates;
+
+      CREATE TABLE review_topics_v38 (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES department_runs(id),
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (
+          kind IN ('product', 'technical', 'code', 'aggregate', 'verification')
+        ),
+        status TEXT NOT NULL CHECK (
+          status IN (
+            'scheduled', 'independent-review', 'discussion', 'revision',
+            're-review', 'blocked', 'PASS', 'CONDITIONAL_PASS', 'FAIL'
+          )
+        ),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        manifest_json TEXT NOT NULL,
+        manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+        producer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+        producer_position_id TEXT NOT NULL REFERENCES positions(id),
+        producer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+        quorum INTEGER NOT NULL CHECK (quorum > 0),
+        budget_json TEXT NOT NULL,
+        rounds_used INTEGER NOT NULL DEFAULT 0 CHECK (rounds_used >= 0),
+        duration_seconds_used INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds_used >= 0),
+        tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+        cost_cents_used INTEGER NOT NULL DEFAULT 0 CHECK (cost_cents_used >= 0),
+        stop_condition TEXT NOT NULL CHECK (
+          stop_condition = 'blocking-findings-dispositioned'
+        ),
+        escalation_policy TEXT NOT NULL CHECK (
+          escalation_policy = 'fail-with-evidence'
+        ),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO review_topics_v38 SELECT * FROM review_topics;
+
+      CREATE TABLE quality_gate_results_v38 (
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+        kind TEXT NOT NULL CHECK (
+          kind IN ('product', 'technical', 'code', 'aggregate', 'verification')
+        ),
+        manifest_json TEXT NOT NULL,
+        manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+        revision_id TEXT REFERENCES review_revisions(id),
+        result TEXT NOT NULL CHECK (
+          result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')
+        ),
+        conditions_json TEXT NOT NULL,
+        recheck_ids_json TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO quality_gate_results_v38 SELECT * FROM quality_gate_results;
+
+      DROP TABLE quality_gate_results;
+      ALTER TABLE quality_gate_results_v38 RENAME TO quality_gate_results;
+      DROP TABLE review_topics;
+      ALTER TABLE review_topics_v38 RENAME TO review_topics;
+      CREATE INDEX review_topics_project_idx
+        ON review_topics(project_id, created_at, id);
+      CREATE INDEX review_topics_run_idx
+        ON review_topics(run_id, created_at, id);
+      CREATE TRIGGER quality_gate_results_immutable_update
+      BEFORE UPDATE ON quality_gate_results
+      BEGIN
+        SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+      END;
+      CREATE TRIGGER quality_gate_results_immutable_delete
+      BEFORE DELETE ON quality_gate_results
+      BEGIN
+        SELECT RAISE(ABORT, 'Quality Gate Result is immutable');
+      END;
+
+      DELETE FROM schema_migrations WHERE version = 39;
+      UPDATE schema_metadata SET value = '38' WHERE key = 'schema_version';
+      PRAGMA user_version = 38;
+      PRAGMA foreign_keys = ON;
+    `);
+    previous.close();
+    const v38 = new DatabaseSync(databasePath);
+    try {
+      const topicSql = (
+        v38
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'review_topics'",
+          )
+          .get() as { readonly sql: string }
+      ).sql;
+      assert.equal(topicSql.includes("'memory'"), false);
+    } finally {
+      v38.close();
+    }
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(databasePath);
+      try {
+        assert.deepEqual(
+          {
+            ...(inspected
+              .prepare(
+                `SELECT topics.id AS topicId, topics.kind AS topicKind,
+                        gates.id AS gateId, gates.kind AS gateKind
+                   FROM review_topics AS topics
+                   JOIN quality_gate_results AS gates ON gates.topic_id = topics.id
+                  WHERE topics.id = 'review-topic-v38'`,
+              )
+              .get() as object),
+          },
+          {
+            topicId: "review-topic-v38",
+            topicKind: "product",
+            gateId: "quality-gate-v38",
+            gateKind: "product",
+          },
+        );
+        const reviewSql = inspected
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'review_topics'",
+          )
+          .get() as { readonly sql: string };
+        const gateSql = inspected
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'quality_gate_results'",
+          )
+          .get() as { readonly sql: string };
+        assert.match(reviewSql.sql, /'memory'/);
+        assert.match(gateSql.sql, /'memory'/);
+        assert.deepEqual(
+          inspected.prepare("PRAGMA foreign_key_check").all(),
+          [],
         );
       } finally {
         inspected.close();

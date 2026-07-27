@@ -67,6 +67,11 @@ const runtimeIpc = registerRuntimeIpc(ipcMain, () => runtimeSupervisor, {
   allowedOrigins: () => (rendererOrigin ? [rendererOrigin] : []),
   createMessageChannel: () => new MessageChannelMain() as never,
   consumerId: desktopConsumerId,
+  principal: {
+    type: "human",
+    id: "local-user",
+    authenticatedBy: "local-session",
+  },
 });
 
 const pickCompanyDir = async (): Promise<string | null> => {

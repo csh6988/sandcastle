@@ -67,7 +67,7 @@ export interface RuntimeBrowserWindowSmokeReport {
   readonly interactionSessionStatus: string;
   readonly permissionStatus: string;
   readonly agUiEventCount: number;
-  readonly memoryRecordVersion: number;
+  readonly legacyMemoryRecordCount: number;
   readonly backupSchemaVersion: number;
 }
 
@@ -1572,24 +1572,10 @@ export const runRuntimeBrowserWindowSmoke = async (
     `window.sandcastle.runtime.agUiEvents({ afterSequence: 0, limit: 1000 })`,
     true,
   )) as { readonly events: readonly unknown[] };
-  const memoryCandidate = (await window.webContents.executeJavaScript(
-    `window.sandcastle.runtime.createMemoryCandidate({
-      projectId: ${JSON.stringify(runProject.id)},
-      scope: 'project',
-      sourceSessionId: ${JSON.stringify(interaction.id)},
-      sourceRunId: ${JSON.stringify(runRuntimeId)},
-      summary: 'The packaged Runtime tracer completed with reviewed evidence.'
-    })`,
+  const legacyMemoryRecords = (await window.webContents.executeJavaScript(
+    `window.sandcastle.runtime.legacyMemoryRecords(${JSON.stringify(runProject.id)})`,
     true,
-  )) as { readonly id: string };
-  const reviewedMemory = (await window.webContents.executeJavaScript(
-    `window.sandcastle.runtime.reviewMemoryCandidate({
-      candidateId: ${JSON.stringify(memoryCandidate.id)},
-      expectedStatus: 'pending',
-      decision: 'approved'
-    })`,
-    true,
-  )) as { readonly record: { readonly version: number } | null };
+  )) as readonly unknown[];
   const closedInteraction = (await window.webContents.executeJavaScript(
     `window.sandcastle.runtime.closeInteractionSession(${JSON.stringify(interaction.id)})`,
     true,
@@ -1697,7 +1683,7 @@ export const runRuntimeBrowserWindowSmoke = async (
     interactionSessionStatus: closedInteraction.status,
     permissionStatus: decidedPermission.status,
     agUiEventCount: agUiReplay.events.length,
-    memoryRecordVersion: reviewedMemory.record?.version ?? 0,
+    legacyMemoryRecordCount: legacyMemoryRecords.length,
     backupSchemaVersion: backup.schemaVersion,
   };
 };

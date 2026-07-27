@@ -383,9 +383,9 @@ describe("Sandcastle preload bridge", () => {
       "decidePermission",
       "agUiEvents",
       "memoryCandidates",
-      "memoryRecords",
-      "createMemoryCandidate",
-      "reviewMemoryCandidate",
+      "memoryEntries",
+      "memorySelections",
+      "legacyMemoryRecords",
       "runtimeDiagnostics",
       "backupRuntime",
       "compactRuntimeEvents",
@@ -1103,6 +1103,83 @@ describe("Sandcastle preload bridge", () => {
       "run-1",
     );
     assert.equal(calls.length, 3);
+  });
+
+  it("separates governed Memory queries from legacy records and routes proposal Commands", async () => {
+    const hash = "a".repeat(64);
+    const candidate = {
+      id: "memory-candidate-1",
+      projectId: "project-1",
+      scope: "project",
+      aiMemberId: null,
+      status: "draft",
+      revision: 1,
+      currentRevision: {
+        id: "memory-candidate-r1",
+        revision: 1,
+        supersedesRevisionId: null,
+        content: "Use exact reviewed evidence.",
+        hash,
+        redactionPolicy: { version: "redaction-v1", hash },
+        sourceArtifactVersions: [{ id: "artifact-r1", hash }],
+        sourceEventRanges: [{ runId: "run-1", fromSequence: 1, toSequence: 2 }],
+        producer: {
+          aiMemberId: "member-1",
+          positionId: "position-1",
+          sessionId: "session-1",
+        },
+        createdAt: "2026-07-27T00:00:00.000Z",
+      },
+      reviewTopicId: null,
+      decision: null,
+      createdAt: "2026-07-27T00:00:00.000Z",
+      updatedAt: "2026-07-27T00:00:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (_channel, payload) => {
+      const request = payload as {
+        operation: "query" | "execute";
+        query?: { type?: string };
+      };
+      if (request.operation === "execute") {
+        return {
+          status: "succeeded",
+          value: candidate,
+          effectIds: ["audit-1"],
+        };
+      }
+      return {
+        view:
+          request.query?.type === "memory.candidates.list" ? [candidate] : [],
+        asOfSequence: 11,
+      };
+    });
+
+    assert.equal(
+      (await bridge.runtime.memoryCandidates("project-1")).length,
+      1,
+    );
+    assert.deepEqual(await bridge.runtime.memoryEntries("project-1"), []);
+    assert.deepEqual(await bridge.runtime.legacyMemoryRecords("project-1"), []);
+    const proposed = await bridge.execute({
+      commandId: "memory-propose-1",
+      command: {
+        type: "memory.candidate.propose",
+        candidateId: "memory-candidate-1",
+        revisionId: "memory-candidate-r1",
+        projectId: "project-1",
+        scope: "project",
+        producer: candidate.currentRevision.producer,
+        content: candidate.currentRevision.content,
+        redactionPolicy: candidate.currentRevision.redactionPolicy,
+        sourceArtifactVersions:
+          candidate.currentRevision.sourceArtifactVersions,
+        sourceEventRanges: candidate.currentRevision.sourceEventRanges,
+      },
+    });
+    assert.equal(proposed.status, "succeeded");
+    if (proposed.status === "succeeded") {
+      assert.equal(proposed.value.id, "memory-candidate-1");
+    }
   });
 
   it("recovers with Query View, View-sync Ack, then a new stream generation", async () => {

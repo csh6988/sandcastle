@@ -15,8 +15,9 @@ import {
   PermissionRequestViewSchema,
   AgUiReplayViewSchema,
   MemoryCandidateViewSchema,
-  MemoryRecordViewSchema,
-  MemoryReviewViewSchema,
+  MemoryEntryViewSchema,
+  RunMemorySelectionViewSchema,
+  LegacyMemoryRecordViewSchema,
   RuntimeDiagnosticsViewSchema,
   RuntimeBackupViewSchema,
   CompanyOverviewSchema,
@@ -357,7 +358,19 @@ export const createCompanyRuntimeClientFromTransport = (
           result,
         ) as unknown as CompanyQueryResult<Query>;
       case "memory.records.list":
-        return MemoryRecordViewSchema.array().parse(
+        return LegacyMemoryRecordViewSchema.array().parse(
+          result,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "memory.entries.list":
+        return MemoryEntryViewSchema.array().parse(
+          result,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "memory.selections.list":
+        return RunMemorySelectionViewSchema.array().parse(
+          result,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "memory.legacy-records.list":
+        return LegacyMemoryRecordViewSchema.array().parse(
           result,
         ) as unknown as CompanyQueryResult<Query>;
       case "runtime.diagnostics":
@@ -675,16 +688,6 @@ export const createCompanyRuntimeClientFromTransport = (
         result,
       ) as CompanyCommandResult<Command>;
     }
-    if (command.type === "memory.candidate.create") {
-      return MemoryCandidateViewSchema.parse(
-        result,
-      ) as CompanyCommandResult<Command>;
-    }
-    if (command.type === "memory.candidate.review") {
-      return MemoryReviewViewSchema.parse(
-        result,
-      ) as CompanyCommandResult<Command>;
-    }
     if (command.type === "runtime.events.compact") {
       return result as CompanyCommandResult<Command>;
     }
@@ -783,12 +786,26 @@ export const createCompanyRuntimeClientFromTransport = (
                       ? ReviewTopicViewSchema.array().parse(parsed.view)
                       : envelope.query.type === "run.supervision.inspect"
                         ? RunSupervisionViewSchema.parse(parsed.view)
-                        : (() => {
-                            throw new RuntimeClientError(
-                              "PROTOCOL_ERROR",
-                              `Verified QueryEnvelope does not support ${envelope.query.type}.`,
-                            );
-                          })();
+                        : envelope.query.type === "memory.candidates.list"
+                          ? MemoryCandidateViewSchema.array().parse(parsed.view)
+                          : envelope.query.type === "memory.records.list" ||
+                              envelope.query.type ===
+                                "memory.legacy-records.list"
+                            ? LegacyMemoryRecordViewSchema.array().parse(
+                                parsed.view,
+                              )
+                            : envelope.query.type === "memory.entries.list"
+                              ? MemoryEntryViewSchema.array().parse(parsed.view)
+                              : envelope.query.type === "memory.selections.list"
+                                ? RunMemorySelectionViewSchema.array().parse(
+                                    parsed.view,
+                                  )
+                                : (() => {
+                                    throw new RuntimeClientError(
+                                      "PROTOCOL_ERROR",
+                                      `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                                    );
+                                  })();
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,

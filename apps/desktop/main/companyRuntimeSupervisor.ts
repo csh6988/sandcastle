@@ -18,8 +18,9 @@ import type {
   PermissionRequestView,
   AgUiReplayView,
   MemoryCandidateView,
-  MemoryRecordView,
-  MemoryReviewView,
+  MemoryEntryView,
+  RunMemorySelectionView,
+  LegacyMemoryRecordView,
   RuntimeDiagnosticsView,
   RuntimeBackupView,
   CompanyOverview,
@@ -252,21 +253,11 @@ export interface CompanyRuntimeSupervisor {
     readonly limit: number;
   }): Promise<AgUiReplayView>;
   memoryCandidates(projectId: string): Promise<readonly MemoryCandidateView[]>;
-  memoryRecords(projectId: string): Promise<readonly MemoryRecordView[]>;
-  createMemoryCandidate(input: {
-    readonly projectId: string;
-    readonly scope: "project" | "ai-member";
-    readonly aiMemberId?: string;
-    readonly sourceSessionId?: string;
-    readonly sourceRunId?: string;
-    readonly sourceArtifactVersionId?: string;
-    readonly summary: string;
-  }): Promise<MemoryCandidateView>;
-  reviewMemoryCandidate(input: {
-    readonly candidateId: string;
-    readonly expectedStatus: "pending";
-    readonly decision: "approved" | "discarded";
-  }): Promise<MemoryReviewView>;
+  memoryEntries(projectId: string): Promise<readonly MemoryEntryView[]>;
+  memorySelections(runId: string): Promise<readonly RunMemorySelectionView[]>;
+  legacyMemoryRecords(
+    projectId: string,
+  ): Promise<readonly LegacyMemoryRecordView[]>;
   runtimeDiagnostics(): Promise<RuntimeDiagnosticsView>;
   backupRuntime(): Promise<RuntimeBackupView>;
   compactRuntimeEvents(input: {
@@ -812,12 +803,12 @@ export const createCompanyRuntimeSupervisor = (
     agUiEvents: (input) => query({ type: "ag-ui.events", ...input }),
     memoryCandidates: (projectId) =>
       query({ type: "memory.candidates.list", projectId }),
-    memoryRecords: (projectId) =>
-      query({ type: "memory.records.list", projectId }),
-    createMemoryCandidate: (input) =>
-      execute({ type: "memory.candidate.create", ...input }),
-    reviewMemoryCandidate: (input) =>
-      execute({ type: "memory.candidate.review", ...input }),
+    memoryEntries: (projectId) =>
+      query({ type: "memory.entries.list", projectId }),
+    memorySelections: (runId) =>
+      query({ type: "memory.selections.list", runId }),
+    legacyMemoryRecords: (projectId) =>
+      query({ type: "memory.legacy-records.list", projectId }),
     runtimeDiagnostics: () => query({ type: "runtime.diagnostics" }),
     backupRuntime: () => execute({ type: "runtime.backup" }),
     compactRuntimeEvents: (input) =>

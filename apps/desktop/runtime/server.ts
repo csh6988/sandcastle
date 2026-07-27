@@ -318,6 +318,16 @@ export const startCompanyRuntimeServer = async (
                     return database.artifactRegistry.inspectLineage(
                       query.versionId,
                     );
+                  case "memory.candidates.list":
+                    return database.memory.listCandidates(query.projectId);
+                  case "memory.records.list":
+                    return database.memory.listLegacyRecords(query.projectId);
+                  case "memory.entries.list":
+                    return database.memory.listEntries(query.projectId);
+                  case "memory.selections.list":
+                    return database.memory.listSelections(query.runId);
+                  case "memory.legacy-records.list":
+                    return database.memory.listLegacyRecords(query.projectId);
                   default:
                     throw new Error(
                       `Verified QueryEnvelope does not support ${query.type}.`,
@@ -449,7 +459,17 @@ export const startCompanyRuntimeServer = async (
                     request.query.projectId,
                   );
                 case "memory.records.list":
-                  return database.memory.listRecords(request.query.projectId);
+                  return database.memory.listLegacyRecords(
+                    request.query.projectId,
+                  );
+                case "memory.entries.list":
+                  return database.memory.listEntries(request.query.projectId);
+                case "memory.selections.list":
+                  return database.memory.listSelections(request.query.runId);
+                case "memory.legacy-records.list":
+                  return database.memory.listLegacyRecords(
+                    request.query.projectId,
+                  );
                 case "runtime.diagnostics":
                   return database.diagnostics.inspect();
               }
@@ -653,20 +673,6 @@ export const startCompanyRuntimeServer = async (
                   actor: principal,
                   commandId: request.id,
                 }),
-              });
-              return;
-            case "memory.candidate.create":
-              sendResponse(socket, {
-                id: request.id,
-                ok: true,
-                result: database.memory.createCandidate(request.command),
-              });
-              return;
-            case "memory.candidate.review":
-              sendResponse(socket, {
-                id: request.id,
-                ok: true,
-                result: database.memory.reviewCandidate(request.command),
               });
               return;
             case "runtime.events.compact":

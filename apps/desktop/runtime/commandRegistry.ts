@@ -23,6 +23,10 @@ import {
   type ProductReviewStateView,
   type ReviewTopicView,
   type ReviewEnvelopeCommand,
+  type MemoryEnvelopeCommand,
+  MemoryCandidateViewSchema,
+  MemoryDecisionViewSchema,
+  RunMemorySelectionViewSchema,
   InteractionTurnViewSchema,
   type InteractionTurnView,
   RunSupervisionViewSchema,
@@ -68,6 +72,7 @@ import {
   type WorkspaceRuntime,
 } from "./workspaces/workspaceRuntime.js";
 import type { RuntimeSupervision } from "./runSupervision.js";
+import { RuntimeMemoryError, type RuntimeMemory } from "./memory.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -84,6 +89,8 @@ export class CompanyCommandError extends Error {
     this.name = "CompanyCommandError";
   }
 }
+
+export type MemoryCommandFailurePoint = "before-receipt" | "before-commit";
 
 export const companyCommandDefinitions = {
   "project.update": {
@@ -194,6 +201,22 @@ export const companyCommandDefinitions = {
     primaryAggregate: "workspace-allocation",
     expectedRevisionRequired: true,
   },
+  "memory.candidate.propose": {
+    primaryAggregate: "memory-candidate",
+    expectedRevisionRequired: false,
+  },
+  "memory.review.start": {
+    primaryAggregate: "memory-candidate",
+    expectedRevisionRequired: true,
+  },
+  "memory.candidate.decide": {
+    primaryAggregate: "memory-candidate-revision",
+    expectedRevisionRequired: false,
+  },
+  "memory.entry.select-for-run": {
+    primaryAggregate: "department-run",
+    expectedRevisionRequired: true,
+  },
 } as const;
 
 const canonicalize = (value: unknown): unknown => {
@@ -259,6 +282,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof ReviewRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof RuntimeMemoryError) {
     return { code: error.code, message: error.message };
   }
   return undefined;
@@ -1249,6 +1275,172 @@ const executeTechnicalReviewCommand = (
   }
 };
 
+const executeMemoryCommand = (
+  database: DatabaseSync,
+  memory: RuntimeMemory,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+  failureInjection?: (point: MemoryCommandFailurePoint) => void,
+): CommandResult<unknown> => {
+  if (!envelope.command.type.startsWith("memory.")) {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Memory command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<unknown>;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<unknown>;
+    database.exec("SAVEPOINT memory_command");
+    try {
+      const command = envelope.command as MemoryEnvelopeCommand;
+      const value =
+        command.type === "memory.candidate.propose"
+          ? MemoryCandidateViewSchema.parse(
+              memory.proposeCandidateInTransaction({
+                commandId: envelope.commandId,
+                actor: envelope.actor,
+                command,
+              }),
+            )
+          : command.type === "memory.review.start"
+            ? MemoryCandidateViewSchema.parse(
+                memory.startReviewInTransaction({
+                  commandId: envelope.commandId,
+                  actor: envelope.actor,
+                  expectedRevision: envelope.expectedRevision ?? -1,
+                  command,
+                }),
+              )
+            : command.type === "memory.candidate.decide"
+              ? MemoryDecisionViewSchema.parse(
+                  memory.decideCandidateInTransaction({
+                    commandId: envelope.commandId,
+                    actor: envelope.actor,
+                    command,
+                  }),
+                )
+              : RunMemorySelectionViewSchema.parse(
+                  memory.selectEntriesForRunInTransaction({
+                    commandId: envelope.commandId,
+                    actor: envelope.actor,
+                    expectedRevision: envelope.expectedRevision ?? -1,
+                    command,
+                  }),
+                );
+      database.exec("RELEASE memory_command");
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      result = { status: "succeeded", value, effectIds };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO memory_command");
+      database.exec("RELEASE memory_command");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+    const resultJson = canonicalJson(result);
+    if (envelope.command.type === "memory.candidate.decide") {
+      failureInjection?.("before-receipt");
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    if (envelope.command.type === "memory.candidate.decide") {
+      failureInjection?.("before-commit");
+    }
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
 const executeArtifactCommand = (
   database: DatabaseSync,
   artifactRegistry: ArtifactRegistry,
@@ -1779,6 +1971,8 @@ export const openCompanyCommandRegistry = (
     point: TechnicalGatePromotionFailurePoint,
   ) => void,
   workspaceRuntime?: WorkspaceRuntime,
+  memory?: RuntimeMemory,
+  memoryFailure?: (point: MemoryCommandFailurePoint) => void,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
@@ -1820,6 +2014,21 @@ export const openCompanyCommandRegistry = (
         supervision,
         envelope,
         clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type.startsWith("memory.")) {
+      if (!memory) {
+        throw new CompanyCommandError(
+          "MEMORY_RUNTIME_UNAVAILABLE",
+          "Memory Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeMemoryCommand(
+        database,
+        memory,
+        envelope,
+        clock,
+        memoryFailure,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
     }
     if (envelope.command.type.startsWith("review.")) {

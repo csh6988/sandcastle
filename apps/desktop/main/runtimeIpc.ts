@@ -13,10 +13,6 @@ import {
   PERMISSION_REQUEST_CHANNEL,
   PERMISSION_DECIDE_CHANNEL,
   AG_UI_EVENTS_CHANNEL,
-  MEMORY_CANDIDATES_LIST_CHANNEL,
-  MEMORY_RECORDS_LIST_CHANNEL,
-  MEMORY_CANDIDATE_CREATE_CHANNEL,
-  MEMORY_CANDIDATE_REVIEW_CHANNEL,
   RUNTIME_DIAGNOSTICS_CHANNEL,
   RUNTIME_BACKUP_CHANNEL,
   RUNTIME_EVENTS_COMPACT_CHANNEL,
@@ -181,10 +177,6 @@ interface RuntimeHealthSource {
   requestPermission: SandcastleBridge["runtime"]["requestPermission"];
   decidePermission: SandcastleBridge["runtime"]["decidePermission"];
   agUiEvents: SandcastleBridge["runtime"]["agUiEvents"];
-  memoryCandidates: SandcastleBridge["runtime"]["memoryCandidates"];
-  memoryRecords: SandcastleBridge["runtime"]["memoryRecords"];
-  createMemoryCandidate: SandcastleBridge["runtime"]["createMemoryCandidate"];
-  reviewMemoryCandidate: SandcastleBridge["runtime"]["reviewMemoryCandidate"];
   runtimeDiagnostics: SandcastleBridge["runtime"]["runtimeDiagnostics"];
   backupRuntime: SandcastleBridge["runtime"]["backupRuntime"];
   compactRuntimeEvents: SandcastleBridge["runtime"]["compactRuntimeEvents"];
@@ -1018,21 +1010,6 @@ export const registerRuntimeIpc = (
       runtime().agUiEvents(input as { afterSequence: number; limit: number }),
     );
   });
-  ipcMain.handle(
-    MEMORY_CANDIDATES_LIST_CHANNEL,
-    (_event, projectId: unknown) => {
-      if (typeof projectId !== "string" || !projectId.trim()) {
-        throw new Error("Invalid memory.candidates.list payload.");
-      }
-      return runtime().memoryCandidates(projectId);
-    },
-  );
-  ipcMain.handle(MEMORY_RECORDS_LIST_CHANNEL, (_event, projectId: unknown) => {
-    if (typeof projectId !== "string" || !projectId.trim()) {
-      throw new Error("Invalid memory.records.list payload.");
-    }
-    return runtime().memoryRecords(projectId);
-  });
   ipcMain.handle(RUNTIME_DIAGNOSTICS_CHANNEL, () =>
     runtime().runtimeDiagnostics(),
   );
@@ -1066,9 +1043,7 @@ export const registerRuntimeIpc = (
       | "interaction.message.add"
       | "interaction.prompt"
       | "permission.request"
-      | "permission.decide"
-      | "memory.candidate.create"
-      | "memory.candidate.review",
+      | "permission.decide",
     execute: (command: never) => Promise<unknown>,
   ): void => {
     ipcMain.handle(channel, (_event, input: unknown) => {
@@ -1091,16 +1066,6 @@ export const registerRuntimeIpc = (
       runtime().closeInteractionSession(
         (command as { readonly sessionId: string }).sessionId,
       ),
-  );
-  registerInteractionCommand(
-    MEMORY_CANDIDATE_CREATE_CHANNEL,
-    "memory.candidate.create",
-    (command) => runtime().createMemoryCandidate(command),
-  );
-  registerInteractionCommand(
-    MEMORY_CANDIDATE_REVIEW_CHANNEL,
-    "memory.candidate.review",
-    (command) => runtime().reviewMemoryCandidate(command),
   );
   registerInteractionCommand(
     INTERACTION_PARTICIPANT_ADD_CHANNEL,

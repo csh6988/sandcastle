@@ -830,6 +830,30 @@ describe("Company Runtime", () => {
         query: { type: "project.inspect", projectId: project.id },
       });
       assert.ok(query.viewSyncToken);
+      const memoryCandidates = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "view-sync-memory-candidates",
+        principal: {
+          type: "human",
+          id: "local-user",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "desktop-window-1",
+        query: { type: "memory.candidates.list", projectId: project.id },
+      });
+      assert.deepEqual(memoryCandidates.view, []);
+      const memoryEntries = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "view-sync-memory-entries",
+        principal: {
+          type: "human",
+          id: "local-user",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "desktop-window-1",
+        query: { type: "memory.entries.list", projectId: project.id },
+      });
+      assert.deepEqual(memoryEntries.view, []);
       const before = await client.query({
         type: "runtime.diagnostics",
       });
