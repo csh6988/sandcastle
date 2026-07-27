@@ -2011,6 +2011,15 @@ export const openArtifactRegistry = (
         ? Buffer.from(input.content, "utf8")
         : Buffer.from(input.content);
     const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const producerContext = {
+      projectId: input.projectId,
+      ...input.producer,
+    };
+    validateProducer(producerContext, input.projectId);
+    const producerContextJson = producerJson(producerContext);
+    const producerContextHash = createHash("sha256")
+      .update(producerContextJson)
+      .digest("hex");
     const createdAt = new Date().toISOString();
     let finalPath: string | undefined;
     let temporaryPath: string | undefined;
@@ -2076,8 +2085,8 @@ export const openArtifactRegistry = (
              id, artifact_id, version, content_ref, content_hash, byte_size,
              status, producing_run_id, producing_node_run_id,
              producing_node_attempt_id, snapshot_revision_id, ai_member_id,
-             created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             created_at, producer_context_json, producer_context_hash
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           versionId,
@@ -2093,6 +2102,8 @@ export const openArtifactRegistry = (
           input.producer.snapshotRevisionId,
           input.producer.aiMemberId,
           createdAt,
+          producerContextJson,
+          producerContextHash,
         );
       for (const inputVersionId of input.inputVersionIds ?? []) {
         const inputVersion = database

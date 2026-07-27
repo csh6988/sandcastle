@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/jsdom": "^21.1.7",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -40,6 +41,7 @@
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
+    "jsdom": "^26.1.0",
     "tsx": "^4.22.5",
     "typescript": "^6.0.3",
     "vite": "^8.1.3"

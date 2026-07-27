@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 import {
+  LocalIsolatedGitError,
   openLocalIsolatedGitProfile,
   type LocalIsolatedGitProvisionReceipt,
 } from "./localIsolatedGitProfile.js";
@@ -311,6 +312,81 @@ describe("Workspace Runtime", () => {
       assert.notEqual(cleaned.cleanupEvidence, null);
       database.workspaces.reconcile();
       assert.equal(database.workspaces.inspect(ready.id).state, "cleaned");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("records cleanup failure and retries it during restart reconciliation", () => {
+    const repository = createRepository();
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-workspace-cleanup-failure-"),
+    );
+    const profile = openLocalIsolatedGitProfile();
+    let failCleanup = true;
+    let database = openCompanyDatabase(companyDir, {
+      workspaceRuntime: {
+        profile: {
+          ...profile,
+          cleanup: (allocation) => {
+            if (failCleanup) {
+              failCleanup = false;
+              throw new LocalIsolatedGitError(
+                "WORKSPACE_CLEANUP_FAILED",
+                "Injected cleanup failure.",
+              );
+            }
+            profile.cleanup(allocation);
+          },
+        },
+      },
+    });
+    const application = registerApplication(database, repository.root);
+    const planned = planAllocation(database, {
+      allocationId: "allocation-cleanup-failure",
+      ...application,
+      repositoryRoot: repository.root,
+      sourceBranch: repository.sourceBranch,
+      baseCommit: repository.baseCommit,
+    });
+    assert.equal(planned.status, "succeeded");
+    const ready = database.workspaces.executeProvision(
+      "allocation-cleanup-failure",
+    );
+    database.workspaces.planCleanupInTransaction({
+      commandId: "cleanup-allocation-failure",
+      actor: runtimeActor,
+      expectedRevision: ready.revision,
+      allocationId: ready.id,
+    });
+    const failed = database.workspaces.executeCleanup(ready.id);
+    assert.equal(failed.state, "cleanup-pending");
+    assert.deepEqual(failed.failure, {
+      code: "WORKSPACE_CLEANUP_FAILED",
+      message: "Injected cleanup failure.",
+    });
+    assert.equal(
+      database.events
+        .readAfter(0, 100)
+        .some(
+          (event) =>
+            event.type === "workspace-allocation.failed" &&
+            typeof event.payload === "object" &&
+            event.payload !== null &&
+            "failureCode" in event.payload &&
+            event.payload.failureCode === "WORKSPACE_CLEANUP_FAILED",
+        ),
+      true,
+    );
+    database.close();
+
+    database = openCompanyDatabase(companyDir);
+    try {
+      const cleaned = database.workspaces.inspect(ready.id);
+      assert.equal(cleaned.state, "cleaned");
+      assert.notEqual(cleaned.cleanupEvidence, null);
+      assert.equal(cleaned.failure, null);
+      assert.equal(cleaned.imports.length, 0);
     } finally {
       database.close();
     }

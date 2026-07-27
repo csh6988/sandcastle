@@ -34,6 +34,7 @@ import {
   defaultNodeHandlerRegistry,
   type NodeHandlerRegistry,
 } from "./nodeHandlerRegistry.js";
+import type { WorkspaceRuntime } from "../workspaces/workspaceRuntime.js";
 
 export class PipelineRuntimeError extends Error {
   constructor(
@@ -197,8 +198,32 @@ export interface PipelineRuntime {
     readonly workerId: string;
     readonly leaseDurationMs: number;
   }) => ReadyAttemptClaim;
+  readonly prepareWorkPackageAttemptInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly snapshotRevisionId: string;
+    readonly attemptId: string;
+    readonly operationKey: string;
+    readonly reason: "initial" | "retry";
+  }) => void;
+  readonly blockWorkPackageAttemptInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly nodeAttemptId: string;
+    readonly workspaceAllocationId: string;
+    readonly failure: {
+      readonly code: string;
+      readonly message: string;
+    };
+  }) => void;
+  readonly releaseWorkPackageSuccessorsInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly assignmentId: string;
+  }) => void;
   readonly recoverExpiredLeases: () => number;
   readonly reconcilePendingExecutions: () => Promise<number>;
+  readonly reconcileWorkPackageImports: () => number;
   readonly prepareForShutdown: () => Promise<void>;
   readonly recoverExpiredApprovals: () => number;
   readonly renewAttemptLease: (input: {
@@ -227,6 +252,9 @@ export interface PipelineRuntime {
     readonly artifactProducer?: {
       readonly snapshotRevisionId: string;
       readonly aiMemberId: string;
+      readonly positionId?: string;
+      readonly sessionId?: string;
+      readonly workPackageId?: string;
     };
   }) => DepartmentRunView;
   readonly failClaimedAttempt: (input: {
@@ -439,6 +467,10 @@ export const openPipelineRuntime = (
     readonly handlerRegistry?: NodeHandlerRegistry;
     readonly events?: Pick<RuntimeEvents, "append">;
     readonly interaction?: RuntimeInteraction;
+    readonly workspaces?: Pick<
+      WorkspaceRuntime,
+      "inspect" | "planImportInTransaction" | "executeImport"
+    >;
   } = {},
 ): PipelineRuntime => {
   const clock = options.clock ?? (() => new Date());
@@ -460,6 +492,10 @@ export const openPipelineRuntime = (
     readonly additionalEventType?: string;
     readonly runId?: string;
     readonly nodeRunId?: string;
+    readonly nodeAttemptId?: string;
+    readonly workPackageId?: string;
+    readonly workPackageVersionId?: string;
+    readonly workspaceAllocationId?: string;
     readonly before?: unknown;
     readonly after: unknown;
     readonly createdAt: string;
@@ -513,6 +549,18 @@ export const openPipelineRuntime = (
             departmentId: runScope.departmentId,
             runId: input.runId,
             ...(input.nodeRunId ? { nodeRunId: input.nodeRunId } : {}),
+            ...(input.nodeAttemptId
+              ? { nodeAttemptId: input.nodeAttemptId }
+              : {}),
+            ...(input.workPackageId
+              ? { workPackageId: input.workPackageId }
+              : {}),
+            ...(input.workPackageVersionId
+              ? { workPackageVersionId: input.workPackageVersionId }
+              : {}),
+            ...(input.workspaceAllocationId
+              ? { workspaceAllocationId: input.workspaceAllocationId }
+              : {}),
             ...(runScope.snapshotRevisionId
               ? { snapshotRevisionId: runScope.snapshotRevisionId }
               : {}),
@@ -2538,6 +2586,20 @@ export const openPipelineRuntime = (
               AND node_runs.status = 'ready'
               AND node_attempts.status = 'ready'
               AND (
+                NOT EXISTS (
+                  SELECT 1 FROM work_package_versions
+                   WHERE work_package_versions.node_run_id = node_runs.id
+                ) OR EXISTS (
+                  SELECT 1
+                    FROM work_package_assignments
+                    JOIN workspace_allocations
+                      ON workspace_allocations.id = work_package_assignments.allocation_id
+                   WHERE work_package_assignments.node_attempt_id = node_attempts.id
+                     AND work_package_assignments.state = 'running'
+                     AND workspace_allocations.state = 'ready'
+                )
+              )
+              AND (
                 node_attempts.lease_id IS NULL OR
                 node_attempts.lease_expires_at IS NULL OR
                 node_attempts.lease_expires_at <= ?
@@ -2785,6 +2847,91 @@ export const openPipelineRuntime = (
       : { kind: "lost", reason: "lease-not-owned" };
   };
 
+  const projectWorkPackageAttemptTerminalInTransaction = (input: {
+    readonly attemptId: string;
+    readonly status: "succeeded" | "failed";
+    readonly now: string;
+  }): void => {
+    const assignment = database
+      .prepare(
+        `SELECT work_package_assignments.id,
+                work_package_versions.id AS workPackageVersionId,
+                work_package_versions.work_package_id AS workPackageId,
+                work_packages.project_id AS projectId,
+                work_packages.run_id AS runId,
+                work_package_versions.node_run_id AS nodeRunId
+           FROM work_package_assignments
+           JOIN work_package_versions
+             ON work_package_versions.id = work_package_assignments.work_package_version_id
+           JOIN work_packages
+             ON work_packages.id = work_package_versions.work_package_id
+          WHERE work_package_assignments.node_attempt_id = ?`,
+      )
+      .get(input.attemptId) as
+      | {
+          readonly id: string;
+          readonly workPackageVersionId: string;
+          readonly workPackageId: string;
+          readonly projectId: string;
+          readonly runId: string;
+          readonly nodeRunId: string;
+        }
+      | undefined;
+    if (!assignment) return;
+    if (input.status === "succeeded") return;
+    database
+      .prepare(
+        `UPDATE work_package_assignments
+            SET state = ?, updated_at = ?
+          WHERE id = ? AND state = 'running'`,
+      )
+      .run("failed", input.now, assignment.id);
+    database
+      .prepare(
+        `UPDATE work_packages
+            SET state = ?, revision = revision + 1, updated_at = ?
+          WHERE id = ? AND state = 'running'`,
+      )
+      .run("failed", input.now, assignment.workPackageId);
+    database
+      .prepare(
+        `INSERT INTO runtime_audit_records(
+           id, action, entity_type, entity_id, run_id, node_run_id,
+           before_json, after_json, created_at
+         ) VALUES (?, ?, 'work-package', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        "work-package.fail",
+        assignment.workPackageId,
+        assignment.runId,
+        assignment.nodeRunId,
+        JSON.stringify({ state: "running" }),
+        JSON.stringify({ state: "failed", nodeAttemptId: input.attemptId }),
+        input.now,
+      );
+    options.events?.append({
+      type: "work-package.failed",
+      scope: {
+        companyId: "company",
+        projectId: assignment.projectId,
+        runId: assignment.runId,
+        nodeRunId: assignment.nodeRunId,
+        nodeAttemptId: input.attemptId,
+        workPackageId: assignment.workPackageId,
+        workPackageVersionId: assignment.workPackageVersionId,
+      },
+      payload: {
+        workPackageId: assignment.workPackageId,
+        workPackageVersionId: assignment.workPackageVersionId,
+        state: "failed",
+        nodeAttemptId: input.attemptId,
+        status: "failed",
+      },
+      timestamp: input.now,
+    });
+  };
+
   const completeClaimedAttempt = (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -2804,9 +2951,13 @@ export const openPipelineRuntime = (
     readonly artifactProducer?: {
       readonly snapshotRevisionId: string;
       readonly aiMemberId: string;
+      readonly positionId?: string;
+      readonly sessionId?: string;
+      readonly workPackageId?: string;
     };
   }): DepartmentRunView => {
     const now = clock().toISOString();
+    let workPackageImportId: string | undefined;
     database.exec("BEGIN IMMEDIATE");
     try {
       const completedAttempt = database
@@ -2855,6 +3006,15 @@ export const openPipelineRuntime = (
           `Node Run ${input.nodeRunId} is no longer owned by this scheduler worker.`,
         );
       }
+      workPackageImportId = planWorkPackageImportInTransaction(
+        input.attemptId,
+        input.result,
+      );
+      projectWorkPackageAttemptTerminalInTransaction({
+        attemptId: input.attemptId,
+        status: "succeeded",
+        now,
+      });
       refreshQueuedNodes(input.runId, now);
       const updatedRun = database
         .prepare(
@@ -2891,6 +3051,9 @@ export const openPipelineRuntime = (
               nodeAttemptId: input.attemptId,
               snapshotRevisionId: input.artifactProducer.snapshotRevisionId,
               aiMemberId: input.artifactProducer.aiMemberId,
+              positionId: input.artifactProducer.positionId,
+              sessionId: input.artifactProducer.sessionId,
+              workPackageId: input.artifactProducer.workPackageId,
             },
             inputVersionIds: artifact.inputVersionIds,
           });
@@ -2918,6 +3081,18 @@ export const openPipelineRuntime = (
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
+    }
+    if (
+      workPackageImportId &&
+      !executeWorkPackageImport({
+        attemptId: input.attemptId,
+        importId: workPackageImportId,
+      })
+    ) {
+      blockWorkPackageImportFailure({
+        attemptId: input.attemptId,
+        importId: workPackageImportId,
+      });
     }
     return inspectRun(input.runId);
   };
@@ -3038,6 +3213,11 @@ export const openPipelineRuntime = (
           `Department Run ${input.runId} cannot accept the failed Attempt.`,
         );
       }
+      projectWorkPackageAttemptTerminalInTransaction({
+        attemptId: input.attemptId,
+        status: "failed",
+        now,
+      });
       database
         .prepare(
           `UPDATE execution_leases
@@ -3206,13 +3386,20 @@ export const openPipelineRuntime = (
     readonly nodeRunId: string;
     readonly attemptId: string;
     readonly snapshotRevisionId: string;
-    readonly aiMemberId: string | undefined;
+    readonly producer:
+      | {
+          readonly aiMemberId: string;
+          readonly positionId?: string;
+          readonly sessionId?: string;
+          readonly workPackageId?: string;
+        }
+      | undefined;
   }): string[] => {
     const artifacts = Array.isArray(input.payload.artifacts)
       ? (input.payload.artifacts as Array<Record<string, unknown>>)
       : [];
     if (artifacts.length === 0) return [];
-    if (!options.artifactRegistry || !input.aiMemberId) {
+    if (!options.artifactRegistry || !input.producer?.aiMemberId) {
       throw new PipelineRuntimeError(
         "ARTIFACT_PRODUCER_INVALID",
         "Execution Artifact facts require complete producer provenance.",
@@ -3244,7 +3431,10 @@ export const openPipelineRuntime = (
           nodeRunId: input.nodeRunId,
           nodeAttemptId: input.attemptId,
           snapshotRevisionId: input.snapshotRevisionId,
-          aiMemberId: input.aiMemberId,
+          aiMemberId: input.producer.aiMemberId,
+          positionId: input.producer.positionId,
+          sessionId: input.producer.sessionId,
+          workPackageId: input.producer.workPackageId,
         },
         inputVersionIds: Array.isArray(artifact.inputVersionIds)
           ? artifact.inputVersionIds.filter(
@@ -3476,6 +3666,9 @@ export const openPipelineRuntime = (
                 (position) => position.id === pipelineNode.positionId,
               )
             : undefined;
+          const packageContext = workPackageExecutionContext(
+            candidate.attemptId,
+          );
           if (!reconcilingNode || !reconcilingAttempt || !pipelineNode) {
             throw new PipelineRuntimeError(
               "NODE_STATE_INVALID",
@@ -3544,7 +3737,18 @@ export const openPipelineRuntime = (
                   nodeRunId: candidate.nodeRunId,
                   attemptId: candidate.attemptId,
                   snapshotRevisionId: reconcilingAttempt.snapshotRevisionId,
-                  aiMemberId: producer?.aiMember.id,
+                  producer: packageContext
+                    ? {
+                        aiMemberId: packageContext.aiMemberId,
+                        positionId: packageContext.positionId,
+                        sessionId: packageContext.interactionSessionId,
+                        workPackageId: packageContext.workPackageId,
+                      }
+                    : producer
+                      ? {
+                          aiMemberId: producer.aiMember.id,
+                        }
+                      : undefined,
                 })
               : [];
           if (attemptStatus === "succeeded") {
@@ -3754,11 +3958,12 @@ export const openPipelineRuntime = (
           throw error;
         }
 
+        const packageContext = workPackageExecutionContext(candidate.attemptId);
         const request: ExecutionRequest = {
           operationKey,
           target,
           lease: executionLease,
-          agentAdapterId: profile.providerRef,
+          agentAdapterId: packageContext?.agentAdapterId ?? profile.providerRef,
           permissionScope: profile.permissionPolicy,
           sideEffectPolicy: "formal",
           completionSignal: "execution-fact",
@@ -3769,6 +3974,25 @@ export const openPipelineRuntime = (
             nodeAttemptId: candidate.attemptId,
             snapshotRevisionId: blockedAttempt.snapshotRevisionId,
             handlerKindId: blockedNode.handler?.handlerKindId ?? "unknown",
+            ...(packageContext
+              ? {
+                  workPackage: {
+                    id: packageContext.workPackageId,
+                    versionId: packageContext.workPackageVersionId,
+                    applicationId: packageContext.applicationId,
+                    repositoryReference: packageContext.repositoryReference,
+                    positionId: packageContext.positionId,
+                    aiMemberId: packageContext.aiMemberId,
+                    allowedPermissions: packageContext.allowedPermissions,
+                    allocationId: packageContext.allocationId,
+                    executionTreePath: packageContext.executionTreePath,
+                    sourceBranch: packageContext.sourceBranch,
+                    interactionSessionId: packageContext.interactionSessionId,
+                    sandboxIdentity: packageContext.sandboxIdentity,
+                    evidenceScope: packageContext.evidenceScope,
+                  },
+                }
+              : {}),
           },
         };
         const previousAttempts = blockedNode.attempts.filter(
@@ -3791,7 +4015,7 @@ export const openPipelineRuntime = (
           controller,
           done,
         });
-        const reattachSink = createExecutionFactSink({
+        const reattachFactSink = createExecutionFactSink({
           database,
           lease: executionLease,
           target,
@@ -3809,6 +4033,24 @@ export const openPipelineRuntime = (
               createdAt: event.timestamp,
             }),
           applyAcceptedFact: ({ fact, envelope, now }) => {
+            if (fact.kind === "permission-request" && packageContext) {
+              const permissionPayload =
+                typeof fact.payload === "object" &&
+                fact.payload !== null &&
+                !Array.isArray(fact.payload)
+                  ? (fact.payload as Record<string, unknown>)
+                  : {};
+              const scope =
+                typeof permissionPayload.scope === "string"
+                  ? permissionPayload.scope.trim()
+                  : "";
+              if (!packageContext.allowedPermissions.includes(scope)) {
+                throw new ExecutionFactError(
+                  "WORK_PACKAGE_PERMISSION_DENIED",
+                  `Work Package Version ${packageContext.workPackageVersionId} does not allow Permission scope ${scope || "<empty>"}.`,
+                );
+              }
+            }
             if (!["completed", "failed", "cancelled"].includes(fact.kind)) {
               return [];
             }
@@ -3827,6 +4069,12 @@ export const openPipelineRuntime = (
             const structuredResult = succeeded
               ? (payload.structuredResult ?? null)
               : null;
+            const importId = succeeded
+              ? planWorkPackageImportInTransaction(
+                  candidate.attemptId,
+                  structuredResult,
+                )
+              : undefined;
             const failureCode = succeeded
               ? null
               : typeof payload.code === "string"
@@ -3901,6 +4149,11 @@ export const openPipelineRuntime = (
                 `Reattached Node Attempt ${candidate.attemptId} cannot accept another terminal Fact.`,
               );
             }
+            projectWorkPackageAttemptTerminalInTransaction({
+              attemptId: candidate.attemptId,
+              status: succeeded ? "succeeded" : "failed",
+              now,
+            });
             const artifactEffectIds = succeeded
               ? registerExecutionArtifacts({
                   payload,
@@ -3908,11 +4161,23 @@ export const openPipelineRuntime = (
                   nodeRunId: candidate.nodeRunId,
                   attemptId: candidate.attemptId,
                   snapshotRevisionId: blockedAttempt.snapshotRevisionId,
-                  aiMemberId: pipelineNode.positionId
-                    ? blockedView.snapshot.payload.positions.find(
-                        (position) => position.id === pipelineNode.positionId,
-                      )?.aiMember.id
-                    : undefined,
+                  producer: packageContext
+                    ? {
+                        aiMemberId: packageContext.aiMemberId,
+                        positionId: packageContext.positionId,
+                        sessionId: packageContext.interactionSessionId,
+                        workPackageId: packageContext.workPackageId,
+                      }
+                    : pipelineNode.positionId
+                      ? blockedView.snapshot.payload.positions
+                          .filter(
+                            (position) =>
+                              position.id === pipelineNode.positionId,
+                          )
+                          .map((position) => ({
+                            aiMemberId: position.aiMember.id,
+                          }))[0]
+                      : undefined,
                 })
               : [];
             if (succeeded) refreshQueuedNodes(candidate.runId, now);
@@ -3952,9 +4217,41 @@ export const openPipelineRuntime = (
               },
               createdAt: now,
             });
-            return artifactEffectIds;
+            return importId
+              ? [...artifactEffectIds, importId]
+              : artifactEffectIds;
           },
         });
+        const reattachSink = {
+          record: async (
+            fact: Parameters<typeof reattachFactSink.record>[0],
+          ) => {
+            const receipt = await reattachFactSink.record(fact);
+            if (
+              fact.kind === "completed" &&
+              receipt.status === "accepted" &&
+              packageContext
+            ) {
+              for (const importId of workPackageImportEffectIds(
+                candidate.attemptId,
+                receipt.effectIds,
+              )) {
+                if (
+                  !executeWorkPackageImport({
+                    attemptId: candidate.attemptId,
+                    importId,
+                  })
+                ) {
+                  blockWorkPackageImportFailure({
+                    attemptId: candidate.attemptId,
+                    importId,
+                  });
+                }
+              }
+            }
+            return receipt;
+          },
+        };
         try {
           const completion = await executionAdapter.reattach(
             {
@@ -4268,8 +4565,27 @@ export const openPipelineRuntime = (
       readonly status: string;
       readonly requiredDependencyIdsJson: string;
     }>;
-    const statusByPipelineNodeId = new Map(
-      nodes.map((node) => [node.pipelineNodeId, node.status]),
+    const nodeByPipelineNodeId = new Map(
+      nodes.map((node) => [node.pipelineNodeId, node]),
+    );
+    const workPackageDependencySatisfied = database.prepare(
+      `SELECT CASE
+                WHEN NOT EXISTS (
+                  SELECT 1 FROM work_package_versions
+                   WHERE work_package_versions.node_run_id = ?
+                ) THEN 1
+                WHEN EXISTS (
+                  SELECT 1
+                    FROM work_package_versions
+                    JOIN work_package_assignments
+                      ON work_package_assignments.work_package_version_id =
+                         work_package_versions.id
+                   WHERE work_package_versions.node_run_id = ?
+                     AND work_package_versions.status = 'ready'
+                     AND work_package_assignments.state = 'self-check-passed'
+                ) THEN 1
+                ELSE 0
+              END AS satisfied`,
     );
     const makeReady = database.prepare(
       `UPDATE node_runs SET status = 'ready', updated_at = ?
@@ -4283,13 +4599,18 @@ export const openPipelineRuntime = (
       );
       if (
         Array.isArray(dependencyIds) &&
-        dependencyIds.every(
-          (dependencyId) =>
-            typeof dependencyId === "string" &&
-            ["succeeded", "skipped"].includes(
-              statusByPipelineNodeId.get(dependencyId) ?? "",
-            ),
-        )
+        dependencyIds.every((dependencyId) => {
+          if (typeof dependencyId !== "string") return false;
+          const dependency = nodeByPipelineNodeId.get(dependencyId);
+          if (!dependency) return false;
+          if (dependency.status === "skipped") return true;
+          if (dependency.status !== "succeeded") return false;
+          const gate = workPackageDependencySatisfied.get(
+            dependency.id,
+            dependency.id,
+          ) as { readonly satisfied: number };
+          return Number(gate.satisfied) === 1;
+        })
       ) {
         makeReady.run(now, node.id, runId);
       }
@@ -5410,6 +5731,658 @@ export const openPipelineRuntime = (
     }
   };
 
+  const prepareWorkPackageAttemptInTransaction: PipelineRuntime["prepareWorkPackageAttemptInTransaction"] =
+    (input) => {
+      const node = database
+        .prepare(
+          `SELECT node_runs.attempt_count AS attemptCount,
+                  node_runs.status,
+                  node_runs.handler_kind_id AS handlerKindId,
+                  department_runs.snapshot_revision_id AS snapshotRevisionId,
+                  department_runs.status AS runStatus,
+                  department_runs.revision AS runRevision
+             FROM node_runs
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.nodeRunId, input.runId) as
+        | {
+            readonly attemptCount: number;
+            readonly status: string;
+            readonly handlerKindId: string | null;
+            readonly snapshotRevisionId: string;
+            readonly runStatus: string;
+            readonly runRevision: number;
+          }
+        | undefined;
+      if (!node) {
+        throw new PipelineRuntimeError(
+          "NODE_NOT_FOUND",
+          `Node Run ${input.nodeRunId} was not found in Department Run ${input.runId}.`,
+        );
+      }
+      if (
+        node.handlerKindId !== "development@1" ||
+        node.snapshotRevisionId !== input.snapshotRevisionId
+      ) {
+        throw new PipelineRuntimeError(
+          "WORK_PACKAGE_NODE_INVALID",
+          `Node Run ${input.nodeRunId} is not a frozen development@1 node for Snapshot ${input.snapshotRevisionId}.`,
+        );
+      }
+      const active = database
+        .prepare(
+          `SELECT id FROM node_attempts
+            WHERE node_run_id = ?
+              AND status IN ('ready', 'running', 'reconciling')
+            LIMIT 1`,
+        )
+        .get(input.nodeRunId);
+      if (active) {
+        throw new PipelineRuntimeError(
+          "WORK_PACKAGE_ATTEMPT_ACTIVE",
+          `Node Run ${input.nodeRunId} already has a non-terminal Attempt.`,
+        );
+      }
+      const now = clock().toISOString();
+      const attemptNumber = Number(node.attemptCount) + 1;
+      const prepared = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'ready', attempt_count = ?, result_json = NULL,
+                  failure_code = NULL, failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ?
+              AND status IN ('queued', 'ready', 'blocked', 'succeeded', 'failed')`,
+        )
+        .run(attemptNumber, now, input.nodeRunId, input.runId);
+      if (prepared.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "NODE_STATE_INVALID",
+          `Node Run ${input.nodeRunId} cannot prepare a Work Package Attempt from ${node.status}.`,
+        );
+      }
+      database
+        .prepare(
+          `INSERT INTO node_attempts(
+             id, node_run_id, attempt_number, snapshot_revision_id, reason,
+             status, structured_result_json, failure_code, failure_message,
+             created_at, started_at, completed_at, execution_operation_key
+           ) VALUES (?, ?, ?, ?, ?, 'ready', NULL, NULL, NULL, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          input.attemptId,
+          input.nodeRunId,
+          attemptNumber,
+          input.snapshotRevisionId,
+          input.reason,
+          now,
+          input.operationKey,
+        );
+      if (input.reason === "retry") {
+        const resumed = database
+          .prepare(
+            `UPDATE department_runs
+                SET status = 'running', revision = revision + 1, updated_at = ?
+              WHERE id = ? AND status IN ('blocked', 'failed')`,
+          )
+          .run(now, input.runId);
+        if (resumed.changes === 1) {
+          appendRuntimeMutation({
+            action: "run.work-package-retry",
+            entityType: "department-run",
+            entityId: input.runId,
+            eventType: "run.resumed",
+            runId: input.runId,
+            nodeRunId: input.nodeRunId,
+            nodeAttemptId: input.attemptId,
+            before: { status: node.runStatus, revision: node.runRevision },
+            after: {
+              status: "running",
+              revision: node.runRevision + 1,
+              reason: "work-package-retry",
+            },
+            createdAt: now,
+          });
+        } else if (!["ready", "running"].includes(node.runStatus)) {
+          throw new PipelineRuntimeError(
+            "RUN_STATE_INVALID",
+            `Department Run ${input.runId} cannot resume Work Package execution from ${node.runStatus}.`,
+          );
+        }
+      }
+    };
+
+  const blockWorkPackageAttemptInTransaction: PipelineRuntime["blockWorkPackageAttemptInTransaction"] =
+    (input) => {
+      const current = database
+        .prepare(
+          `SELECT node_runs.status AS nodeStatus,
+                  department_runs.status AS runStatus,
+                  department_runs.revision AS runRevision
+             FROM node_runs
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.nodeRunId, input.runId) as
+        | {
+            readonly nodeStatus: string;
+            readonly runStatus: string;
+            readonly runRevision: number;
+          }
+        | undefined;
+      if (!current) {
+        throw new PipelineRuntimeError(
+          "NODE_NOT_FOUND",
+          `Node Run ${input.nodeRunId} was not found in Department Run ${input.runId}.`,
+        );
+      }
+      const now = clock().toISOString();
+      const blockedNode = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'blocked', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND status IN ('ready', 'blocked')`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      const blockedRun = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'blocked', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      if (blockedNode.changes !== 1 || blockedRun.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "WORK_PACKAGE_BLOCK_STATE_INVALID",
+          `Work Package failure cannot block Node Run ${input.nodeRunId} from ${current.nodeStatus} or Department Run ${input.runId} from ${current.runStatus}.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "run.work-package-blocked",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.blocked",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        nodeAttemptId: input.nodeAttemptId,
+        workspaceAllocationId: input.workspaceAllocationId,
+        before: {
+          status: current.runStatus,
+          revision: current.runRevision,
+          nodeStatus: current.nodeStatus,
+        },
+        after: {
+          status: "blocked",
+          revision: current.runRevision + 1,
+          nodeStatus: "blocked",
+          failure: input.failure,
+        },
+        createdAt: now,
+      });
+    };
+
+  const releaseWorkPackageSuccessorsInTransaction: PipelineRuntime["releaseWorkPackageSuccessorsInTransaction"] =
+    (input) => {
+      const assignment = database
+        .prepare(
+          `SELECT work_package_assignments.id
+             FROM work_package_assignments
+             JOIN work_package_versions
+               ON work_package_versions.id =
+                  work_package_assignments.work_package_version_id
+             JOIN work_packages
+               ON work_packages.id = work_package_versions.work_package_id
+            WHERE work_package_assignments.id = ?
+              AND work_package_assignments.state = 'self-check-passed'
+              AND work_package_versions.status = 'ready'
+              AND work_package_versions.node_run_id = ?
+              AND work_packages.run_id = ?`,
+        )
+        .get(input.assignmentId, input.nodeRunId, input.runId);
+      if (!assignment) {
+        throw new PipelineRuntimeError(
+          "WORK_PACKAGE_SELF_CHECK_GATE_INVALID",
+          `Work Package Assignment ${input.assignmentId} cannot release successors before its exact Developer self-check passes.`,
+        );
+      }
+      refreshQueuedNodes(input.runId, clock().toISOString());
+    };
+
+  const canExecuteReadyNode = (nodeRunId: string): boolean => {
+    const row = database
+      .prepare(
+        `SELECT CASE
+                  WHEN NOT EXISTS (
+                    SELECT 1 FROM work_package_versions
+                     WHERE work_package_versions.node_run_id = ?
+                  ) THEN 1
+                  WHEN EXISTS (
+                    SELECT 1
+                      FROM work_package_assignments
+                      JOIN workspace_allocations
+                        ON workspace_allocations.id = work_package_assignments.allocation_id
+                     WHERE work_package_assignments.node_attempt_id IN (
+                             SELECT id FROM node_attempts
+                              WHERE node_run_id = ? AND status = 'ready'
+                           )
+                       AND work_package_assignments.state = 'running'
+                       AND workspace_allocations.state = 'ready'
+                  ) THEN 1
+                  ELSE 0
+                END AS executable`,
+      )
+      .get(nodeRunId, nodeRunId) as { readonly executable: number };
+    return Number(row.executable) === 1;
+  };
+
+  const workPackageExecutionContext = (attemptId: string) => {
+    const row = database
+      .prepare(
+        `SELECT work_packages.id AS workPackageId,
+                work_package_versions.id AS workPackageVersionId,
+                work_package_versions.application_id AS applicationId,
+                work_package_versions.repository_reference AS repositoryReference,
+                work_package_versions.manifest_json AS manifestJson,
+                work_package_assignments.position_id AS positionId,
+                work_package_assignments.ai_member_id AS aiMemberId,
+                work_package_assignments.agent_adapter_id AS agentAdapterId,
+                work_package_assignments.allocation_id AS allocationId,
+                workspace_allocations.source_branch AS sourceBranch,
+                workspace_allocations.provision_receipt_json AS provisionReceiptJson,
+                work_package_assignments.interaction_session_id AS interactionSessionId,
+                work_package_assignments.sandbox_identity AS sandboxIdentity,
+                work_package_assignments.evidence_scope AS evidenceScope
+           FROM work_package_assignments
+           JOIN work_package_versions
+             ON work_package_versions.id = work_package_assignments.work_package_version_id
+           JOIN work_packages
+             ON work_packages.id = work_package_versions.work_package_id
+           JOIN workspace_allocations
+             ON workspace_allocations.id = work_package_assignments.allocation_id
+          WHERE work_package_assignments.node_attempt_id = ?`,
+      )
+      .get(attemptId) as
+      | {
+          readonly workPackageId: string;
+          readonly workPackageVersionId: string;
+          readonly applicationId: string;
+          readonly repositoryReference: string;
+          readonly manifestJson: string;
+          readonly positionId: string;
+          readonly aiMemberId: string;
+          readonly agentAdapterId: string;
+          readonly allocationId: string;
+          readonly sourceBranch: string;
+          readonly provisionReceiptJson: string;
+          readonly interactionSessionId: string;
+          readonly sandboxIdentity: string;
+          readonly evidenceScope: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    const manifest = parseJson(row.manifestJson, "Work Package manifest") as {
+      readonly allowedPermissions?: unknown;
+    };
+    if (
+      !Array.isArray(manifest.allowedPermissions) ||
+      !manifest.allowedPermissions.every(
+        (permission) => typeof permission === "string" && permission.length > 0,
+      )
+    ) {
+      throw new PipelineRuntimeError(
+        "WORK_PACKAGE_MANIFEST_INVALID",
+        `Work Package Version ${row.workPackageVersionId} has invalid permissions.`,
+      );
+    }
+    const provisionReceipt = parseJson(
+      row.provisionReceiptJson,
+      "Workspace Allocation provision receipt",
+    ) as { readonly executionTreePath?: unknown };
+    if (
+      typeof provisionReceipt.executionTreePath !== "string" ||
+      provisionReceipt.executionTreePath.length === 0
+    ) {
+      throw new PipelineRuntimeError(
+        "WORKSPACE_ALLOCATION_INVALID",
+        `Workspace Allocation ${row.allocationId} has no execution tree path.`,
+      );
+    }
+    return {
+      ...row,
+      allowedPermissions: manifest.allowedPermissions,
+      executionTreePath: provisionReceipt.executionTreePath,
+    };
+  };
+
+  const workPackageResultCommit = (result: unknown): string | undefined => {
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      Array.isArray(result)
+    ) {
+      return undefined;
+    }
+    const commits = (result as { readonly commits?: unknown }).commits;
+    if (!Array.isArray(commits)) return undefined;
+    const commit = commits.at(-1);
+    if (
+      typeof commit !== "object" ||
+      commit === null ||
+      Array.isArray(commit)
+    ) {
+      return undefined;
+    }
+    const sha = (commit as { readonly sha?: unknown }).sha;
+    return typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha)
+      ? sha
+      : undefined;
+  };
+
+  const planWorkPackageImportInTransaction = (
+    attemptId: string,
+    result: unknown,
+  ): string | undefined => {
+    const packageContext = workPackageExecutionContext(attemptId);
+    if (!packageContext) return undefined;
+    if (!options.workspaces) {
+      throw new PipelineRuntimeError(
+        "WORKSPACE_RUNTIME_UNAVAILABLE",
+        "Work Package execution requires the Runtime-owned Workspace importer.",
+      );
+    }
+    const resultCommit = workPackageResultCommit(result);
+    if (!resultCommit) {
+      throw new PipelineRuntimeError(
+        "WORK_PACKAGE_RESULT_COMMIT_REQUIRED",
+        `Work Package Attempt ${attemptId} did not produce an exact source commit.`,
+      );
+    }
+    const allocation = options.workspaces.inspect(packageContext.allocationId);
+    const planned = options.workspaces.planImportInTransaction({
+      commandId: `work-package-import:${attemptId}:${resultCommit}`,
+      actor: {
+        type: "runtime-worker",
+        id: "pipeline-runtime",
+        authenticatedBy: "runtime",
+      },
+      expectedRevision: allocation.revision,
+      allocationId: allocation.id,
+      resultCommit,
+      expectedSourceTip: allocation.expectedSourceTip,
+    });
+    const workspaceImport = planned.imports.find(
+      (entry) => entry.resultCommit === resultCommit,
+    );
+    if (!workspaceImport) {
+      throw new PipelineRuntimeError(
+        "WORKSPACE_IMPORT_NOT_FOUND",
+        `Work Package Attempt ${attemptId} did not persist an import intent.`,
+      );
+    }
+    return workspaceImport.id;
+  };
+
+  const blockWorkPackageImportFailure = (input: {
+    readonly attemptId: string;
+    readonly importId: string;
+  }): void => {
+    const assignment = database
+      .prepare(
+        `SELECT work_package_assignments.id AS assignmentId,
+                work_package_assignments.allocation_id AS allocationId,
+                work_package_versions.id AS workPackageVersionId,
+                work_package_versions.work_package_id AS workPackageId,
+                work_package_versions.node_run_id AS nodeRunId,
+                work_packages.project_id AS projectId,
+                work_packages.run_id AS runId
+           FROM work_package_assignments
+           JOIN work_package_versions
+             ON work_package_versions.id = work_package_assignments.work_package_version_id
+           JOIN work_packages
+             ON work_packages.id = work_package_versions.work_package_id
+          WHERE work_package_assignments.node_attempt_id = ?`,
+      )
+      .get(input.attemptId) as
+      | {
+          readonly assignmentId: string;
+          readonly allocationId: string;
+          readonly workPackageVersionId: string;
+          readonly workPackageId: string;
+          readonly nodeRunId: string;
+          readonly projectId: string;
+          readonly runId: string;
+        }
+      | undefined;
+    if (!assignment) return;
+    const workspaceImport = options.workspaces
+      ?.inspect(assignment.allocationId)
+      .imports.find((entry) => entry.id === input.importId);
+    const failureCode =
+      workspaceImport?.failure?.code ?? "WORKSPACE_IMPORT_FAILED";
+    const failureMessage =
+      workspaceImport?.failure?.message ??
+      `Workspace import ${input.importId} did not complete.`;
+    const now = clock().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database
+        .prepare(
+          `UPDATE work_package_assignments
+              SET state = 'failed', updated_at = ?
+            WHERE id = ? AND state IN ('running', 'awaiting-self-check')`,
+        )
+        .run(now, assignment.assignmentId);
+      database
+        .prepare(
+          `UPDATE work_packages
+              SET state = 'failed', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND state IN ('running', 'self-check')`,
+        )
+        .run(now, assignment.workPackageId);
+      database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'blocked', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND status = 'succeeded'`,
+        )
+        .run(
+          failureCode,
+          failureMessage,
+          now,
+          assignment.nodeRunId,
+          assignment.runId,
+        );
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'blocked', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, assignment.runId);
+      appendRuntimeMutation({
+        action: "work-package.import-failed",
+        entityType: "work-package",
+        entityId: assignment.workPackageId,
+        eventType: "work-package.failed",
+        runId: assignment.runId,
+        nodeRunId: assignment.nodeRunId,
+        nodeAttemptId: input.attemptId,
+        workPackageId: assignment.workPackageId,
+        workPackageVersionId: assignment.workPackageVersionId,
+        workspaceAllocationId: assignment.allocationId,
+        before: { state: "running" },
+        after: {
+          workPackageId: assignment.workPackageId,
+          workPackageVersionId: assignment.workPackageVersionId,
+          state: "failed",
+          runStatus: "blocked",
+          failureCode,
+          importId: input.importId,
+        },
+        createdAt: now,
+      });
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+
+  const projectWorkPackageImportSucceeded = (input: {
+    readonly attemptId: string;
+    readonly importId: string;
+  }): void => {
+    const assignment = database
+      .prepare(
+        `SELECT work_package_assignments.id AS assignmentId,
+                work_package_assignments.allocation_id AS allocationId,
+                work_package_assignments.interaction_session_id AS sessionId,
+                work_package_versions.id AS workPackageVersionId,
+                work_package_versions.work_package_id AS workPackageId,
+                work_package_versions.node_run_id AS nodeRunId,
+                work_packages.run_id AS runId
+           FROM work_package_assignments
+           JOIN work_package_versions
+             ON work_package_versions.id = work_package_assignments.work_package_version_id
+           JOIN work_packages
+             ON work_packages.id = work_package_versions.work_package_id
+          WHERE work_package_assignments.node_attempt_id = ?`,
+      )
+      .get(input.attemptId) as
+      | {
+          readonly assignmentId: string;
+          readonly allocationId: string;
+          readonly sessionId: string;
+          readonly workPackageVersionId: string;
+          readonly workPackageId: string;
+          readonly nodeRunId: string;
+          readonly runId: string;
+        }
+      | undefined;
+    if (!assignment) return;
+    const now = clock().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const assignmentUpdate = database
+        .prepare(
+          `UPDATE work_package_assignments
+              SET state = 'awaiting-self-check', updated_at = ?
+            WHERE id = ? AND state = 'running'`,
+        )
+        .run(now, assignment.assignmentId);
+      const packageUpdate = database
+        .prepare(
+          `UPDATE work_packages
+              SET state = 'self-check', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND state = 'running'`,
+        )
+        .run(now, assignment.workPackageId);
+      if (assignmentUpdate.changes === 0 && packageUpdate.changes === 0) {
+        database.exec("COMMIT");
+        return;
+      }
+      if (assignmentUpdate.changes !== 1 || packageUpdate.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "WORK_PACKAGE_IMPORT_PROJECTION_CONFLICT",
+          `Work Package Attempt ${input.attemptId} cannot project import ${input.importId}.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "work-package.await-self-check",
+        entityType: "work-package",
+        entityId: assignment.workPackageId,
+        eventType: "work-package.self-check",
+        runId: assignment.runId,
+        nodeRunId: assignment.nodeRunId,
+        nodeAttemptId: input.attemptId,
+        workPackageId: assignment.workPackageId,
+        workPackageVersionId: assignment.workPackageVersionId,
+        workspaceAllocationId: assignment.allocationId,
+        before: { state: "running" },
+        after: {
+          workPackageId: assignment.workPackageId,
+          workPackageVersionId: assignment.workPackageVersionId,
+          state: "self-check",
+          status: "awaiting-evidence",
+          approval: false,
+          importId: input.importId,
+        },
+        createdAt: now,
+      });
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+
+  const executeWorkPackageImport = (input: {
+    readonly attemptId: string;
+    readonly importId: string;
+  }): boolean => {
+    if (!options.workspaces) return false;
+    const imported = options.workspaces.executeImport(input.importId);
+    const succeeded = imported.imports.some(
+      (entry) => entry.id === input.importId && entry.state === "succeeded",
+    );
+    if (succeeded) projectWorkPackageImportSucceeded(input);
+    return succeeded;
+  };
+
+  const workPackageImportEffectIds = (
+    attemptId: string,
+    effectIds: readonly string[],
+  ): readonly string[] => {
+    if (!options.workspaces) return [];
+    const packageContext = workPackageExecutionContext(attemptId);
+    if (!packageContext) return [];
+    const importIds = new Set(
+      options.workspaces
+        .inspect(packageContext.allocationId)
+        .imports.map((entry) => entry.id),
+    );
+    return effectIds.filter((effectId) => importIds.has(effectId));
+  };
+
+  const reconcileWorkPackageImports = (): number => {
+    const candidates = database
+      .prepare(
+        `SELECT work_package_assignments.node_attempt_id AS attemptId,
+                workspace_imports.id AS importId,
+                workspace_imports.state
+           FROM work_package_assignments
+           JOIN node_attempts
+             ON node_attempts.id = work_package_assignments.node_attempt_id
+           JOIN workspace_imports
+             ON workspace_imports.allocation_id = work_package_assignments.allocation_id
+          WHERE work_package_assignments.state = 'running'
+            AND node_attempts.status = 'succeeded'
+            AND workspace_imports.state IN ('succeeded', 'failed')
+       ORDER BY workspace_imports.created_at, workspace_imports.id`,
+      )
+      .all() as Array<{
+      readonly attemptId: string;
+      readonly importId: string;
+      readonly state: "succeeded" | "failed";
+    }>;
+    for (const candidate of candidates) {
+      if (candidate.state === "succeeded") {
+        projectWorkPackageImportSucceeded(candidate);
+      } else {
+        blockWorkPackageImportFailure(candidate);
+      }
+    }
+    return candidates.length;
+  };
+
   const recoverRun = (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -5856,11 +6829,12 @@ export const openPipelineRuntime = (
       executionEpoch: claim.executionEpoch,
       fenceToken: claim.fenceToken,
     };
+    const packageContext = workPackageExecutionContext(claim.attemptId);
     const request: ExecutionRequest = {
       operationKey: claim.operationKey,
       target: lease.target,
       lease,
-      agentAdapterId: profile.providerRef,
+      agentAdapterId: packageContext?.agentAdapterId ?? profile.providerRef,
       permissionScope: profile.permissionPolicy,
       sideEffectPolicy: "formal",
       completionSignal: "execution-fact",
@@ -5871,6 +6845,25 @@ export const openPipelineRuntime = (
         nodeAttemptId: claim.attemptId,
         snapshotRevisionId: runningAttempt.snapshotRevisionId,
         handlerKindId: runningNode.handler?.handlerKindId ?? "unknown",
+        ...(packageContext
+          ? {
+              workPackage: {
+                id: packageContext.workPackageId,
+                versionId: packageContext.workPackageVersionId,
+                applicationId: packageContext.applicationId,
+                repositoryReference: packageContext.repositoryReference,
+                positionId: packageContext.positionId,
+                aiMemberId: packageContext.aiMemberId,
+                allowedPermissions: packageContext.allowedPermissions,
+                allocationId: packageContext.allocationId,
+                executionTreePath: packageContext.executionTreePath,
+                sourceBranch: packageContext.sourceBranch,
+                interactionSessionId: packageContext.interactionSessionId,
+                sandboxIdentity: packageContext.sandboxIdentity,
+                evidenceScope: packageContext.evidenceScope,
+              },
+            }
+          : {}),
       },
     };
     const applyAcceptedExecutionFact = (
@@ -5894,6 +6887,15 @@ export const openPipelineRuntime = (
           throw new ExecutionFactError(
             "PERMISSION_SCOPE_INVALID",
             "Permission Fact scope must identify one exact capability.",
+          );
+        }
+        if (
+          packageContext &&
+          !packageContext.allowedPermissions.includes(scope)
+        ) {
+          throw new ExecutionFactError(
+            "WORK_PACKAGE_PERMISSION_DENIED",
+            `Work Package Version ${packageContext.workPackageVersionId} does not allow Permission scope ${scope}.`,
           );
         }
         const safeRead = scope.split(".").at(-1) === "read";
@@ -6065,6 +7067,12 @@ export const openPipelineRuntime = (
 
       if (fact.kind === "completed") {
         const result = payload.structuredResult;
+        const importEffectIds: string[] = [];
+        const importId = planWorkPackageImportInTransaction(
+          claim.attemptId,
+          result,
+        );
+        if (importId) importEffectIds.push(importId);
         const completedAttempt = database
           .prepare(
             `UPDATE node_attempts
@@ -6105,6 +7113,11 @@ export const openPipelineRuntime = (
             `Node Attempt ${claim.attemptId} cannot accept another terminal fact.`,
           );
         }
+        projectWorkPackageAttemptTerminalInTransaction({
+          attemptId: claim.attemptId,
+          status: "succeeded",
+          now: fact.createdAt,
+        });
         const producer = input.node.positionId
           ? runningView.snapshot.payload.positions.find(
               (position) => position.id === input.node.positionId,
@@ -6116,7 +7129,18 @@ export const openPipelineRuntime = (
           nodeRunId: input.ready.id,
           attemptId: claim.attemptId,
           snapshotRevisionId: runningAttempt.snapshotRevisionId,
-          aiMemberId: producer?.aiMember.id,
+          producer: packageContext
+            ? {
+                aiMemberId: packageContext.aiMemberId,
+                positionId: packageContext.positionId,
+                sessionId: packageContext.interactionSessionId,
+                workPackageId: packageContext.workPackageId,
+              }
+            : producer
+              ? {
+                  aiMemberId: producer.aiMember.id,
+                }
+              : undefined,
         });
         refreshQueuedNodes(input.runId, fact.createdAt);
         const updatedRun = database
@@ -6161,7 +7185,7 @@ export const openPipelineRuntime = (
           },
           createdAt: fact.createdAt,
         });
-        return artifactEffectIds;
+        return [...artifactEffectIds, ...importEffectIds];
       }
 
       const failure = {
@@ -6235,6 +7259,11 @@ export const openPipelineRuntime = (
           `Node Attempt ${claim.attemptId} cannot accept another terminal fact.`,
         );
       }
+      projectWorkPackageAttemptTerminalInTransaction({
+        attemptId: claim.attemptId,
+        status: "failed",
+        now: fact.createdAt,
+      });
       database
         .prepare(
           `UPDATE execution_leases SET released_at = ?
@@ -6293,6 +7322,28 @@ export const openPipelineRuntime = (
     const sink = {
       record: async (fact: Parameters<typeof factSink.record>[0]) => {
         const receipt = await factSink.record(fact);
+        if (
+          fact.kind === "completed" &&
+          receipt.status === "accepted" &&
+          packageContext
+        ) {
+          for (const importId of workPackageImportEffectIds(
+            claim.attemptId,
+            receipt.effectIds,
+          )) {
+            if (
+              !executeWorkPackageImport({
+                attemptId: claim.attemptId,
+                importId,
+              })
+            ) {
+              blockWorkPackageImportFailure({
+                attemptId: claim.attemptId,
+                importId,
+              });
+            }
+          }
+        }
         if (fact.kind === "permission-request") {
           const permissionId = receipt.effectIds[0];
           const permission =
@@ -6415,15 +7466,23 @@ export const openPipelineRuntime = (
         workerId,
         result: fact.structuredResult,
         artifacts: fact.artifacts,
-        artifactProducer: input.node.positionId
+        artifactProducer: packageContext
           ? {
               snapshotRevisionId: runningAttempt.snapshotRevisionId,
-              aiMemberId:
-                runningView.snapshot.payload.positions.find(
-                  (position) => position.id === input.node.positionId,
-                )?.aiMember.id ?? "",
+              aiMemberId: packageContext.aiMemberId,
+              positionId: packageContext.positionId,
+              sessionId: packageContext.interactionSessionId,
+              workPackageId: packageContext.workPackageId,
             }
-          : undefined,
+          : input.node.positionId
+            ? {
+                snapshotRevisionId: runningAttempt.snapshotRevisionId,
+                aiMemberId:
+                  runningView.snapshot.payload.positions.find(
+                    (position) => position.id === input.node.positionId,
+                  )?.aiMember.id ?? "",
+              }
+            : undefined,
       });
     } catch (error) {
       if (error instanceof ExecutionFactError) {
@@ -6515,7 +7574,7 @@ export const openPipelineRuntime = (
       );
     }
     if (
-      ["completed", "failed", "cancelled", "paused"].includes(
+      ["completed", "failed", "cancelled", "paused", "blocked"].includes(
         initial.run.status,
       )
     ) {
@@ -6528,13 +7587,32 @@ export const openPipelineRuntime = (
     while (true) {
       const view = inspectRun(input.runId);
       if (
-        ["completed", "failed", "waiting-approval"].includes(view.run.status)
+        ["completed", "failed", "blocked", "waiting-approval"].includes(
+          view.run.status,
+        )
       ) {
         return view;
       }
-      const readyNodes = view.nodes.filter((node) => node.status === "ready");
+      const readyNodes = view.nodes.filter(
+        (node) => node.status === "ready" && canExecuteReadyNode(node.id),
+      );
       const ready = readyNodes[0];
       if (!ready) {
+        const hasWorkPackages = database
+          .prepare(
+            `SELECT 1 AS present
+               FROM work_package_versions
+               JOIN node_runs
+                 ON node_runs.id = work_package_versions.node_run_id
+              WHERE node_runs.run_id = ? LIMIT 1`,
+          )
+          .get(input.runId);
+        if (
+          hasWorkPackages ||
+          view.nodes.some((node) => node.status === "ready")
+        ) {
+          return view;
+        }
         throw new PipelineRuntimeError(
           "NODE_STATE_INVALID",
           `Department Run ${input.runId} has no Ready Node run.`,
@@ -7425,9 +8503,13 @@ export const openPipelineRuntime = (
     startRun,
     forkRun,
     executeReady,
+    reconcileWorkPackageImports,
     controlRun,
     recoverRun,
     claimReadyAttempt,
+    prepareWorkPackageAttemptInTransaction,
+    blockWorkPackageAttemptInTransaction,
+    releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,
     prepareForShutdown,

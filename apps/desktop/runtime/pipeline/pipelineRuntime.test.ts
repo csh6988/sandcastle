@@ -2086,7 +2086,7 @@ describe("Pipeline Runtime", () => {
     }
   });
 
-  it("selects a Condition branch from a persisted upstream structured result", async () => {
+  it("lets a skipped package-bound Condition branch satisfy its Join", async () => {
     const executed: string[] = [];
     const adapter = createScriptedExecutionAdapter({
       script: {
@@ -2135,6 +2135,7 @@ describe("Pipeline Runtime", () => {
           name: "Hold task",
           positionId,
         },
+        { id: "join", type: "join", name: "Join" },
         { id: "complete", type: "complete", name: "Complete" },
       ],
       edges: [
@@ -2142,8 +2143,9 @@ describe("Pipeline Runtime", () => {
         { from: "classify", to: "condition" },
         { from: "condition", to: "ship-task", branchId: "ship" },
         { from: "condition", to: "hold-task", branchId: "hold" },
-        { from: "ship-task", to: "complete" },
-        { from: "hold-task", to: "complete" },
+        { from: "ship-task", to: "join" },
+        { from: "hold-task", to: "join" },
+        { from: "join", to: "complete" },
       ],
     }));
     try {
@@ -2151,6 +2153,45 @@ describe("Pipeline Runtime", () => {
         projectId: project.id,
         departmentId: department.id,
       });
+      const skippedNodeRunId = started.nodes.find(
+        (node) => node.pipelineNodeId === "hold-task",
+      )!.id;
+      const raw = new DatabaseSync(database.path);
+      raw.exec("PRAGMA foreign_keys = OFF");
+      try {
+        raw
+          .prepare(
+            `INSERT INTO work_packages(
+               id, project_id, run_id, technical_baseline_id, state,
+               revision, created_at, updated_at
+             ) VALUES (?, ?, ?, 'condition-test-baseline', 'ready', 0, ?, ?)`,
+          )
+          .run(
+            "condition-skipped-package",
+            project.id,
+            started.run.id,
+            started.run.createdAt,
+            started.run.updatedAt,
+          );
+        raw
+          .prepare(
+            `INSERT INTO work_package_versions(
+               id, work_package_id, version, application_id,
+               repository_reference, node_run_id, manifest_json,
+               manifest_hash, status, created_at
+             ) VALUES (?, 'condition-skipped-package', 1,
+                       'condition-test-application', '/condition-test', ?,
+                       '{}', ?, 'ready', ?)`,
+          )
+          .run(
+            "condition-skipped-package-v1",
+            skippedNodeRunId,
+            "a".repeat(64),
+            started.run.createdAt,
+          );
+      } finally {
+        raw.close();
+      }
       const completed = await database.pipelineRuntime.executeReady({
         runId: started.run.id,
         expectedRevision: started.run.revision,
@@ -2170,6 +2211,10 @@ describe("Pipeline Runtime", () => {
         completed.nodes.find((node) => node.pipelineNodeId === "hold-task")
           ?.status,
         "skipped",
+      );
+      assert.equal(
+        completed.nodes.find((node) => node.pipelineNodeId === "join")?.status,
+        "succeeded",
       );
     } finally {
       database.close();

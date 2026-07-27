@@ -102,6 +102,21 @@ export interface FormalExecutionRequest extends ExecutionRequestBase {
     readonly nodeAttemptId: string;
     readonly snapshotRevisionId: string;
     readonly handlerKindId: string;
+    readonly workPackage?: {
+      readonly id: string;
+      readonly versionId: string;
+      readonly applicationId: string;
+      readonly repositoryReference: string;
+      readonly positionId: string;
+      readonly aiMemberId: string;
+      readonly allowedPermissions: readonly string[];
+      readonly allocationId: string;
+      readonly executionTreePath: string;
+      readonly sourceBranch: string;
+      readonly interactionSessionId: string;
+      readonly sandboxIdentity: string;
+      readonly evidenceScope: string;
+    };
   };
 }
 

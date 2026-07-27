@@ -181,6 +181,43 @@ describe("Company Runtime client", () => {
     );
   });
 
+  it("parses Work Package graphs through verified Query envelopes", async () => {
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        return {
+          id: request.id,
+          ok: true,
+          result: {
+            view: {
+              projectId: "project-1",
+              runId: "run-1",
+              technicalBaselineId: "technical-baseline-1",
+              packages: [],
+            },
+            asOfSequence: 19,
+          },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+
+    const inspected = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "work-package-query-1",
+      principal: {
+        type: "runtime-worker",
+        id: "delivery-coordinator-member",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "runtime-delivery-coordinator",
+      query: { type: "work-packages.inspect", runId: "run-1" },
+    });
+
+    assert.equal(inspected.view.runId, "run-1");
+    assert.equal(inspected.asOfSequence, 19);
+  });
+
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
     const transport = {

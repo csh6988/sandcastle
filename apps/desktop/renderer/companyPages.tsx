@@ -17,6 +17,7 @@ import type {
   ProductDiscoveryView,
   ProductReviewStateView,
   TechnicalReviewStateView,
+  WorkPackageGraphView,
   ProductProposalContent,
   ProjectEditorView,
   ReviewTopicView,
@@ -26,6 +27,7 @@ import type {
   AgentCatalogView,
   SkillCatalogView,
 } from "../runtime/interface.js";
+import { WorkPackageGraphPanel } from "./workPackageView.js";
 import {
   departmentName,
   pipelineNodeName,
@@ -2284,6 +2286,32 @@ type ProjectDetailTab =
   | "memory"
   | "settings";
 
+export const inspectProjectRunWorkPackages = async (
+  runtime: {
+    readonly query: (query: {
+      readonly type: "work-packages.inspect";
+      readonly runId: string;
+    }) => Promise<{ readonly view: WorkPackageGraphView }>;
+  },
+  runId: string,
+): Promise<WorkPackageGraphView | null> => {
+  try {
+    return (await runtime.query({ type: "work-packages.inspect", runId })).view;
+  } catch {
+    return null;
+  }
+};
+
+export function ProjectDetailWorkPackages({
+  active,
+  graph,
+}: {
+  readonly active: boolean;
+  readonly graph: WorkPackageGraphView | null;
+}) {
+  return active && graph ? <WorkPackageGraphPanel graph={graph} /> : null;
+}
+
 export function ProjectDetailView({
   project,
   t,
@@ -2356,6 +2384,8 @@ export function ProjectDetailView({
     useState<ProductReviewStateView | null>(null);
   const [technicalReview, setTechnicalReview] =
     useState<TechnicalReviewStateView | null>(null);
+  const [workPackageGraph, setWorkPackageGraph] =
+    useState<WorkPackageGraphView | null>(null);
   const [proposalDraft, setProposalDraft] = useState<ProductProposalContent>({
     goal: project.goal,
     users: [],
@@ -2408,6 +2438,22 @@ export function ProjectDetailView({
     );
     return next;
   };
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setWorkPackageGraph(null);
+      return;
+    }
+    let active = true;
+    inspectProjectRunWorkPackages(window.sandcastle, selectedRun.run.id).then(
+      (graph) => {
+        if (active) setWorkPackageGraph(graph);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedRun?.run.id]);
 
   useEffect(() => {
     let active = true;
@@ -2511,11 +2557,19 @@ export function ProjectDetailView({
       void Promise.all([
         window.sandcastle.runtime.inspectRun(selectedRun.run.id),
         window.sandcastle.runtime.artifacts(project.id),
+        window.sandcastle
+          .query({
+            type: "work-packages.inspect",
+            runId: selectedRun.run.id,
+          })
+          .then((result) => result.view)
+          .catch(() => null),
       ])
-        .then(([nextRun, artifacts]) => {
+        .then(([nextRun, artifacts, graph]) => {
           if (!active) return;
           setSelectedRun(nextRun);
           setRunArtifacts(artifacts);
+          setWorkPackageGraph(graph);
           setRuns((current) =>
             current.map((run) =>
               run.run.id === nextRun.run.id ? nextRun : run,
@@ -3331,6 +3385,10 @@ export function ProjectDetailView({
           t={t}
         />
       ) : null}
+      <ProjectDetailWorkPackages
+        active={Boolean(selectedRun) && activeTab === "runs"}
+        graph={workPackageGraph}
+      />
       {activeTab === "artifacts" ? (
         <section className="create-panel" data-project-artifacts>
           <h2>{t.projectArtifactsTab}</h2>

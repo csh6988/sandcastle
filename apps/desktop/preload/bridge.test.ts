@@ -930,6 +930,47 @@ describe("Sandcastle preload bridge", () => {
     }
   });
 
+  it("routes Work Package Query and Command envelopes through typed IPC", async () => {
+    const calls: unknown[] = [];
+    const graph = {
+      projectId: "project-1",
+      runId: "run-1",
+      technicalBaselineId: "technical-baseline-1",
+      packages: [],
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      const request = payload as { readonly operation: "query" | "execute" };
+      return request.operation === "query"
+        ? { view: graph, asOfSequence: 21 }
+        : { status: "succeeded", value: graph, effectIds: ["effect-wp"] };
+    });
+
+    const inspected = await bridge.query({
+      type: "work-packages.inspect",
+      runId: "run-1",
+    });
+    const started = await bridge.execute({
+      commandId: "start-package-a",
+      expectedRevision: 1,
+      command: { type: "work-package.start", workPackageId: "package-a" },
+    });
+
+    assert.equal(inspected.view.technicalBaselineId, "technical-baseline-1");
+    assert.equal(started.status, "succeeded");
+    assert.deepEqual(
+      calls.map((call) => (call as { readonly operation: string }).operation),
+      ["query", "execute"],
+    );
+    for (const call of calls) {
+      const payload = call as Record<string, unknown>;
+      assert.equal("actor" in payload, false);
+      assert.equal("principal" in payload, false);
+      assert.equal("consumerId" in payload, false);
+    }
+  });
+
   it("routes Product Review Query and Command envelopes through typed IPC", async () => {
     const calls: unknown[] = [];
     const state = {

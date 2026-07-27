@@ -22,6 +22,8 @@ import {
   ApplicationViewSchema,
   TechnicalReviewStateViewSchema,
   ReviewTopicViewSchema,
+  WorkspaceAllocationViewSchema,
+  WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
   AgentTestResultSchema,
@@ -811,11 +813,15 @@ export const createSandcastleBridge = (
               ? ProductReviewStateViewSchema.parse(result.view)
               : nextQuery.type === "technical-review.inspect"
                 ? TechnicalReviewStateViewSchema.parse(result.view)
-                : nextQuery.type === "review.topic.inspect"
-                  ? ReviewTopicViewSchema.parse(result.view)
-                  : nextQuery.type === "review.topics.list"
-                    ? ReviewTopicViewSchema.array().parse(result.view)
-                    : result.view;
+                : nextQuery.type === "workspace-allocation.inspect"
+                  ? WorkspaceAllocationViewSchema.parse(result.view)
+                  : nextQuery.type === "work-packages.inspect"
+                    ? WorkPackageGraphViewSchema.parse(result.view)
+                    : nextQuery.type === "review.topic.inspect"
+                      ? ReviewTopicViewSchema.parse(result.view)
+                      : nextQuery.type === "review.topics.list"
+                        ? ReviewTopicViewSchema.array().parse(result.view)
+                        : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
@@ -864,18 +870,26 @@ export const createSandcastleBridge = (
                   input.command.type === "technical-review.start" ||
                   input.command.type === "technical-gate.promote"
                 ? TechnicalReviewStateViewSchema.parse(result.value)
-                : input.command.type.startsWith("review.")
-                  ? ReviewTopicViewSchema.parse(result.value)
-                  : input.command.type === "interaction.prompt"
-                    ? InteractionTurnViewSchema.parse(result.value)
-                    : z
-                        .object({
-                          acknowledged: z.literal(true),
-                          subscriptionGeneration: z.number().int().positive(),
-                          barrierSequence: z.number().int().nonnegative(),
-                          auditId: z.string().trim().min(1),
-                        })
-                        .parse(result.value);
+                : input.command.type.startsWith("workspace-allocation.") ||
+                    input.command.type === "source-import.execute"
+                  ? WorkspaceAllocationViewSchema.parse(result.value)
+                  : input.command.type.startsWith("work-package.")
+                    ? WorkPackageGraphViewSchema.parse(result.value)
+                    : input.command.type.startsWith("review.")
+                      ? ReviewTopicViewSchema.parse(result.value)
+                      : input.command.type === "interaction.prompt"
+                        ? InteractionTurnViewSchema.parse(result.value)
+                        : z
+                            .object({
+                              acknowledged: z.literal(true),
+                              subscriptionGeneration: z
+                                .number()
+                                .int()
+                                .positive(),
+                              barrierSequence: z.number().int().nonnegative(),
+                              auditId: z.string().trim().min(1),
+                            })
+                            .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,

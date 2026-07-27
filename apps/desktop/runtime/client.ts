@@ -32,6 +32,7 @@ import {
   TechnicalReviewStateViewSchema,
   ReviewTopicViewSchema,
   WorkspaceAllocationViewSchema,
+  WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
   AgentTestResultSchema,
@@ -199,6 +200,7 @@ export const createCompanyRuntimeClientFromTransport = (
       transport,
       query.type === "project.inspect" ||
         query.type === "workspace-allocation.inspect" ||
+        query.type === "work-packages.inspect" ||
         query.type === "applications.list" ||
         query.type === "product.discovery.inspect" ||
         query.type === "product-review.inspect" ||
@@ -259,6 +261,10 @@ export const createCompanyRuntimeClientFromTransport = (
         ) as CompanyQueryResult<Query>;
       case "workspace-allocation.inspect":
         return WorkspaceAllocationViewSchema.parse(
+          queryValue,
+        ) as CompanyQueryResult<Query>;
+      case "work-packages.inspect":
+        return WorkPackageGraphViewSchema.parse(
           queryValue,
         ) as CompanyQueryResult<Query>;
       case "applications.list":
@@ -763,24 +769,26 @@ export const createCompanyRuntimeClientFromTransport = (
         ? ProjectEditorViewSchema.parse(parsed.view)
         : envelope.query.type === "workspace-allocation.inspect"
           ? WorkspaceAllocationViewSchema.parse(parsed.view)
-          : envelope.query.type === "applications.list"
-            ? ApplicationViewSchema.array().parse(parsed.view)
-            : envelope.query.type === "product.discovery.inspect"
-              ? ProductDiscoveryViewSchema.parse(parsed.view)
-              : envelope.query.type === "product-review.inspect"
-                ? ProductReviewStateViewSchema.parse(parsed.view)
-                : envelope.query.type === "technical-review.inspect"
-                  ? TechnicalReviewStateViewSchema.parse(parsed.view)
-                  : envelope.query.type === "review.topic.inspect"
-                    ? ReviewTopicViewSchema.parse(parsed.view)
-                    : envelope.query.type === "review.topics.list"
-                      ? ReviewTopicViewSchema.array().parse(parsed.view)
-                      : (() => {
-                          throw new RuntimeClientError(
-                            "PROTOCOL_ERROR",
-                            `Verified QueryEnvelope does not support ${envelope.query.type}.`,
-                          );
-                        })();
+          : envelope.query.type === "work-packages.inspect"
+            ? WorkPackageGraphViewSchema.parse(parsed.view)
+            : envelope.query.type === "applications.list"
+              ? ApplicationViewSchema.array().parse(parsed.view)
+              : envelope.query.type === "product.discovery.inspect"
+                ? ProductDiscoveryViewSchema.parse(parsed.view)
+                : envelope.query.type === "product-review.inspect"
+                  ? ProductReviewStateViewSchema.parse(parsed.view)
+                  : envelope.query.type === "technical-review.inspect"
+                    ? TechnicalReviewStateViewSchema.parse(parsed.view)
+                    : envelope.query.type === "review.topic.inspect"
+                      ? ReviewTopicViewSchema.parse(parsed.view)
+                      : envelope.query.type === "review.topics.list"
+                        ? ReviewTopicViewSchema.array().parse(parsed.view)
+                        : (() => {
+                            throw new RuntimeClientError(
+                              "PROTOCOL_ERROR",
+                              `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                            );
+                          })();
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,

@@ -67,6 +67,13 @@ const agUiRegistryFixture = [
   "approval.decided@1:custom",
   "approval.request-changes@1:custom",
   "approval.expired@1:custom",
+  "work-package.ready@1:custom",
+  "work-package.versioned@1:custom",
+  "work-package.assigned@1:custom",
+  "work-package.blocked@1:custom",
+  "work-package.started@1:custom",
+  "work-package.self-check@1:custom",
+  "work-package.failed@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -275,6 +282,47 @@ describe("Runtime Event registry", () => {
             technicalBaselineId: "technical-baseline-1",
             technicalBaselineHash: "a".repeat(64),
             applicationSpecRevisionIds: ["application-spec-r1"],
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+    );
+  });
+
+  it("requires exact Work Package and Version identities", () => {
+    const registry = createRuntimeEventRegistry();
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "work-package.started",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+        },
+        payload: {
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+          state: "running",
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "work-package.started",
+          scope: {
+            companyId: "company",
+            projectId: "project-1",
+            runId: "run-1",
+            workPackageId: "work-package-1",
+          },
+          payload: {
+            workPackageId: "work-package-1",
+            workPackageVersionId: "work-package-version-1",
+            state: "running",
           },
         }),
       (error: unknown) =>
