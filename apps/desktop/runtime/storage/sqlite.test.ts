@@ -442,6 +442,10 @@ describe("Company database migrations", () => {
             { version: 36, name: "application_spec_revisions" },
             { version: 37, name: "technical_baseline_proposals" },
             { version: 38, name: "accepted_technical_baselines" },
+            {
+              version: 39,
+              name: "local_isolated_git_workspace_imports",
+            },
           ],
         );
         assert.deepEqual(

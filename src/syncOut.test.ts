@@ -36,6 +36,55 @@ const getLog = async (dir: string) => {
 };
 
 describe("syncOut", () => {
+  it("can sync into a private execution repository without advancing its source repository", async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), "source-"));
+    await initRepo(sourceDir);
+    await commitFile(sourceDir, "initial.txt", "initial", "initial commit");
+    const sourceHead = (
+      await execAsync("git rev-parse HEAD", { cwd: sourceDir })
+    ).stdout.trim();
+    await execAsync("git branch work/source", { cwd: sourceDir });
+
+    const privateParent = await mkdtemp(join(tmpdir(), "private-parent-"));
+    const privateDir = join(privateParent, "execution-tree");
+    await execAsync(
+      `git clone --no-local --no-checkout "${sourceDir}" "${privateDir}"`,
+    );
+    await execAsync("git remote remove origin", { cwd: privateDir });
+    await execAsync(`git checkout -b work/source ${sourceHead}`, {
+      cwd: privateDir,
+    });
+
+    const provider = testIsolated();
+    const handle = await provider.create({ env: {} });
+    try {
+      await Effect.runPromise(syncIn(privateDir, handle));
+      const wp = handle.worktreePath;
+      await handle.exec('echo "private result" > result.txt', { cwd: wp });
+      await handle.exec("git add result.txt", { cwd: wp });
+      await handle.exec('git commit -m "private result"', { cwd: wp });
+      await Effect.runPromise(syncOut(privateDir, handle));
+
+      expect(
+        (
+          await execAsync("git rev-parse HEAD", { cwd: privateDir })
+        ).stdout.trim(),
+      ).not.toBe(sourceHead);
+      expect(
+        (
+          await execAsync("git rev-parse refs/heads/work/source", {
+            cwd: sourceDir,
+          })
+        ).stdout.trim(),
+      ).toBe(sourceHead);
+      expect(
+        (await execAsync("git remote", { cwd: privateDir })).stdout.trim(),
+      ).toBe("");
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("extracts a single commit from sandbox back to host", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "host-"));
     await initRepo(hostDir);

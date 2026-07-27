@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 7;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 8;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -29,6 +29,7 @@ export interface RuntimeEventScope {
   readonly qualityGateResultId?: string;
   readonly artifactId?: string;
   readonly artifactVersionId?: string;
+  readonly workspaceAllocationId?: string;
   readonly commandId?: string;
 }
 
@@ -69,6 +70,33 @@ const applicationRegisteredPayloadSchema = z
     revision: z.literal(1),
   })
   .strict();
+
+const workspaceAllocationPayloadSchema = z
+  .object({
+    allocationId: z.string().trim().min(1),
+    state: z.enum([
+      "planned",
+      "provisioning",
+      "ready",
+      "failed",
+      "cleanup-pending",
+      "cleaned",
+    ]),
+    sourceBranch: z.string().trim().min(1),
+    baseCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    expectedSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+  })
+  .passthrough();
+
+const sourceImportPayloadSchema = z
+  .object({
+    importId: z.string().trim().min(1),
+    allocationId: z.string().trim().min(1),
+    state: z.enum(["intent", "running", "succeeded", "failed", "unknown"]),
+    beforeSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    resultCommit: z.string().regex(/^[a-f0-9]{40}$/),
+  })
+  .passthrough();
 
 const applicationSpecRevisedPayloadSchema = z
   .object({
@@ -358,6 +386,50 @@ const definitions = [
     agUiMapping: "custom",
     acpMapping: "custom",
   },
+  ...[
+    "workspace-allocation.planned",
+    "workspace-allocation.ready",
+    "workspace-allocation.failed",
+    "workspace-allocation.cleanup-requested",
+    "workspace-allocation.cleaned",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "applicationId",
+          "workspaceAllocationId",
+        ],
+        payloadSchema: workspaceAllocationPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  ...[
+    "source-import.planned",
+    "source-import.completed",
+    "source-import.failed",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "applicationId",
+          "workspaceAllocationId",
+        ],
+        payloadSchema: sourceImportPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
   {
     type: "application-spec.revised",
     schemaVersion: 1,

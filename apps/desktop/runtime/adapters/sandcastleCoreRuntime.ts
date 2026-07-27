@@ -71,6 +71,10 @@ interface NoSandboxModule {
   };
 }
 
+interface DockerSandboxModule {
+  readonly docker: () => unknown;
+}
+
 const translateSandboxPath = (
   path: string,
   mounts: readonly {
@@ -180,6 +184,7 @@ const findCoreDirectory = (): string => {
 export const createSandcastleExecutionRuntimeFromModules = (
   core: SandcastleCoreModule,
   noSandboxModule: NoSandboxModule,
+  dockerModule?: DockerSandboxModule,
 ): SandcastleExecutionRuntime => {
   const hostBindMountSandbox = createHostBindMountSandbox(
     core,
@@ -211,10 +216,9 @@ export const createSandcastleExecutionRuntimeFromModules = (
       }
     },
     resolveSandbox: (sandboxRef) => {
-      if (sandboxRef !== "no-sandbox") {
-        throw new Error(`Unsupported Sandbox reference: ${sandboxRef}`);
-      }
-      return hostBindMountSandbox;
+      if (sandboxRef === "no-sandbox") return hostBindMountSandbox;
+      if (sandboxRef === "docker" && dockerModule) return dockerModule.docker();
+      throw new Error(`Unsupported Sandbox reference: ${sandboxRef}`);
     },
     run: async (options) => {
       const outputMarker = options.output as
@@ -240,13 +244,20 @@ export const createSandcastleExecutionRuntimeFromModules = (
 export const loadSandcastleExecutionRuntime =
   async (): Promise<SandcastleExecutionRuntime> => {
     const directory = findCoreDirectory();
-    const [core, noSandboxModule] = await Promise.all([
+    const [core, noSandboxModule, dockerModule] = await Promise.all([
       import(
         pathToFileURL(join(directory, "index.js")).href
       ) as Promise<SandcastleCoreModule>,
       import(
         pathToFileURL(join(directory, "sandboxes/no-sandbox.js")).href
       ) as Promise<NoSandboxModule>,
+      import(
+        pathToFileURL(join(directory, "sandboxes/docker.js")).href
+      ) as Promise<DockerSandboxModule>,
     ]);
-    return createSandcastleExecutionRuntimeFromModules(core, noSandboxModule);
+    return createSandcastleExecutionRuntimeFromModules(
+      core,
+      noSandboxModule,
+      dockerModule,
+    );
   };

@@ -58,4 +58,38 @@ describe("Sandcastle core Runtime loader", () => {
     });
     assert.deepEqual(runOptions?.output, { kind: "object", tag: "alignment" });
   });
+
+  it("resolves the formal local profile to the Docker sandbox provider", () => {
+    const dockerSandbox = { tag: "bind-mount", name: "docker" };
+    const runtime = createSandcastleExecutionRuntimeFromModules(
+      {
+        run: async () => ({}),
+        runWorkspaceTask: async () => ({}),
+        Output: { object: ({ tag }) => ({ tag }) },
+        createBindMountSandboxProvider: (configuration) => configuration,
+        claudeCode: () => ({}),
+        codex: () => ({}),
+        copilot: () => ({}),
+        cursor: () => ({}),
+        opencode: () => ({}),
+        pi: () => ({}),
+      },
+      {
+        noSandbox: () => ({
+          create: async ({ worktreePath }) => ({
+            worktreePath,
+            exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+            close: async () => undefined,
+          }),
+        }),
+      },
+      { docker: () => dockerSandbox },
+    );
+
+    assert.equal(runtime.resolveSandbox("docker"), dockerSandbox);
+    assert.throws(
+      () => runtime.resolveSandbox("test-isolated"),
+      /Unsupported Sandbox reference/,
+    );
+  });
 });

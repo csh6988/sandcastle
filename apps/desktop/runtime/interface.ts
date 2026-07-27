@@ -1834,6 +1834,80 @@ export const RuntimeBackupViewSchema = z.object({
 
 export type RuntimeBackupView = z.infer<typeof RuntimeBackupViewSchema>;
 
+export const WorkspaceImportReceiptSchema = z
+  .object({
+    allocationId: z.string().trim().min(1),
+    status: z.enum(["imported", "duplicate"]),
+    beforeSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    afterSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    baseCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    resultCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    resultTree: z.string().regex(/^[a-f0-9]{40}$/),
+    objectSetHash: Sha256Schema,
+    changedPaths: z.array(z.string()),
+  })
+  .strict();
+
+export const WorkspaceImportViewSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    allocationId: z.string().trim().min(1),
+    state: z.enum(["intent", "running", "succeeded", "failed", "unknown"]),
+    expectedSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    beforeSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    resultCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    objectSetHash: Sha256Schema.nullable(),
+    receipt: WorkspaceImportReceiptSchema.nullable(),
+    failure: z
+      .object({ code: z.string().trim().min(1), message: z.string() })
+      .strict()
+      .nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+
+export const WorkspaceAllocationViewSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    applicationId: z.string().trim().min(1),
+    executionProfileId: z.string().trim().min(1),
+    executionProfileRevision: z.number().int().nonnegative(),
+    operationKey: z.string().trim().min(1),
+    state: z.enum([
+      "planned",
+      "provisioning",
+      "ready",
+      "failed",
+      "cleanup-pending",
+      "cleaned",
+    ]),
+    repositoryRoot: z.string().trim().min(1),
+    allocationRoot: z.string().trim().min(1),
+    sourceBranch: z.string().trim().min(1),
+    baseCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    expectedSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+    capabilitySnapshot: z.unknown(),
+    capabilitySnapshotHash: Sha256Schema,
+    privateGitIdentity: z.unknown().nullable(),
+    provisionReceipt: z.unknown().nullable(),
+    cleanupEvidence: z.unknown().nullable(),
+    failure: z
+      .object({ code: z.string().trim().min(1), message: z.string() })
+      .strict()
+      .nullable(),
+    revision: z.number().int().nonnegative(),
+    imports: z.array(WorkspaceImportViewSchema),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+
+export type WorkspaceAllocationView = z.infer<
+  typeof WorkspaceAllocationViewSchema
+>;
+
 export const CompanyQuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("runtime.health") }),
   z.object({ type: z.literal("agent.catalog.inspect") }),
@@ -1841,6 +1915,10 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("company.overview") }),
   z.object({ type: z.literal("projects.list") }),
   z.object({ type: z.literal("project.inspect"), projectId: z.string() }),
+  z.object({
+    type: z.literal("workspace-allocation.inspect"),
+    allocationId: z.string().trim().min(1),
+  }),
   z.object({
     type: z.literal("applications.list"),
     projectId: z.string().trim().min(1),
@@ -1961,57 +2039,59 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
             ? readonly CompanyProject[]
             : Query["type"] extends "project.inspect"
               ? ProjectEditorView
-              : Query["type"] extends "applications.list"
-                ? readonly ApplicationView[]
-                : Query["type"] extends "review.topic.inspect"
-                  ? ReviewTopicView
-                  : Query["type"] extends "review.topics.list"
-                    ? readonly ReviewTopicView[]
-                    : Query["type"] extends "product.discovery.inspect"
-                      ? ProductDiscoveryView
-                      : Query["type"] extends "product-review.inspect"
-                        ? ProductReviewStateView
-                        : Query["type"] extends "technical-review.inspect"
-                          ? TechnicalReviewStateView
-                          : Query["type"] extends "departments.list"
-                            ? readonly CompanyDepartment[]
-                            : Query["type"] extends "department.inspect"
-                              ? DepartmentInspect
-                              : Query["type"] extends "department.skill-configuration.inspect"
-                                ? SkillConfigurationView
-                                : Query["type"] extends "department.pipeline.inspect"
-                                  ? DepartmentPipelineEditorView
-                                  : Query["type"] extends "department.pipeline.validate"
-                                    ? PipelineValidationResult
-                                    : Query["type"] extends "runs.list"
-                                      ? readonly DepartmentRunView[]
-                                      : Query["type"] extends "execution.inspect"
-                                        ? ExecutionInspectionView
-                                        : Query["type"] extends "runtime.audit"
-                                          ? readonly RuntimeAuditRecord[]
-                                          : Query["type"] extends
-                                                | "runtime.events"
-                                                | "runtime.events.consumer"
-                                            ? readonly RuntimeEventRecord[]
-                                            : Query["type"] extends "artifacts.list"
-                                              ? readonly ArtifactVersionView[]
-                                              : Query["type"] extends "artifact.inspect"
-                                                ? ArtifactLineageView
-                                                : Query["type"] extends "artifact.lineage.inspect"
-                                                  ? ArtifactLineageGraphView
-                                                  : Query["type"] extends "interactions.list"
-                                                    ? readonly InteractionView[]
-                                                    : Query["type"] extends "interaction.inspect"
-                                                      ? InteractionView
-                                                      : Query["type"] extends "ag-ui.events"
-                                                        ? AgUiReplayView
-                                                        : Query["type"] extends "memory.candidates.list"
-                                                          ? readonly MemoryCandidateView[]
-                                                          : Query["type"] extends "memory.records.list"
-                                                            ? readonly MemoryRecordView[]
-                                                            : Query["type"] extends "runtime.diagnostics"
-                                                              ? RuntimeDiagnosticsView
-                                                              : DepartmentRunView;
+              : Query["type"] extends "workspace-allocation.inspect"
+                ? WorkspaceAllocationView
+                : Query["type"] extends "applications.list"
+                  ? readonly ApplicationView[]
+                  : Query["type"] extends "review.topic.inspect"
+                    ? ReviewTopicView
+                    : Query["type"] extends "review.topics.list"
+                      ? readonly ReviewTopicView[]
+                      : Query["type"] extends "product.discovery.inspect"
+                        ? ProductDiscoveryView
+                        : Query["type"] extends "product-review.inspect"
+                          ? ProductReviewStateView
+                          : Query["type"] extends "technical-review.inspect"
+                            ? TechnicalReviewStateView
+                            : Query["type"] extends "departments.list"
+                              ? readonly CompanyDepartment[]
+                              : Query["type"] extends "department.inspect"
+                                ? DepartmentInspect
+                                : Query["type"] extends "department.skill-configuration.inspect"
+                                  ? SkillConfigurationView
+                                  : Query["type"] extends "department.pipeline.inspect"
+                                    ? DepartmentPipelineEditorView
+                                    : Query["type"] extends "department.pipeline.validate"
+                                      ? PipelineValidationResult
+                                      : Query["type"] extends "runs.list"
+                                        ? readonly DepartmentRunView[]
+                                        : Query["type"] extends "execution.inspect"
+                                          ? ExecutionInspectionView
+                                          : Query["type"] extends "runtime.audit"
+                                            ? readonly RuntimeAuditRecord[]
+                                            : Query["type"] extends
+                                                  | "runtime.events"
+                                                  | "runtime.events.consumer"
+                                              ? readonly RuntimeEventRecord[]
+                                              : Query["type"] extends "artifacts.list"
+                                                ? readonly ArtifactVersionView[]
+                                                : Query["type"] extends "artifact.inspect"
+                                                  ? ArtifactLineageView
+                                                  : Query["type"] extends "artifact.lineage.inspect"
+                                                    ? ArtifactLineageGraphView
+                                                    : Query["type"] extends "interactions.list"
+                                                      ? readonly InteractionView[]
+                                                      : Query["type"] extends "interaction.inspect"
+                                                        ? InteractionView
+                                                        : Query["type"] extends "ag-ui.events"
+                                                          ? AgUiReplayView
+                                                          : Query["type"] extends "memory.candidates.list"
+                                                            ? readonly MemoryCandidateView[]
+                                                            : Query["type"] extends "memory.records.list"
+                                                              ? readonly MemoryRecordView[]
+                                                              : Query["type"] extends "runtime.diagnostics"
+                                                                ? RuntimeDiagnosticsView
+                                                                : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -2025,6 +2105,40 @@ export const ArtifactRegisterEnvelopeCommandSchema = z
     inputVersionIds: z.array(z.string().trim().min(1)).default([]),
   })
   .strict();
+
+export const WorkspaceAllocationProvisionEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("workspace-allocation.provision"),
+    allocationId: z.string().trim().min(1),
+    projectId: z.string().trim().min(1),
+    applicationId: z.string().trim().min(1),
+    executionProfileId: z.string().trim().min(1),
+    sourceBranch: z.string().trim().min(1),
+    baseCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    expectedSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+  })
+  .strict();
+
+export const SourceImportExecuteEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("source-import.execute"),
+    allocationId: z.string().trim().min(1),
+    resultCommit: z.string().regex(/^[a-f0-9]{40}$/),
+    expectedSourceTip: z.string().regex(/^[a-f0-9]{40}$/),
+  })
+  .strict();
+
+export const WorkspaceAllocationCleanupEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("workspace-allocation.cleanup"),
+    allocationId: z.string().trim().min(1),
+  })
+  .strict();
+
+export type WorkspaceEnvelopeCommand =
+  | z.infer<typeof WorkspaceAllocationProvisionEnvelopeCommandSchema>
+  | z.infer<typeof SourceImportExecuteEnvelopeCommandSchema>
+  | z.infer<typeof WorkspaceAllocationCleanupEnvelopeCommandSchema>;
 
 export const ArtifactFinalizeEnvelopeCommandSchema = z
   .object({
@@ -2839,6 +2953,9 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   ArtifactRegisterEnvelopeCommandSchema,
   ArtifactFinalizeEnvelopeCommandSchema,
   ArtifactSupersedeEnvelopeCommandSchema,
+  WorkspaceAllocationProvisionEnvelopeCommandSchema,
+  SourceImportExecuteEnvelopeCommandSchema,
+  WorkspaceAllocationCleanupEnvelopeCommandSchema,
 ]);
 
 export type EnvelopeCommand = z.infer<typeof EnvelopeCommandSchema>;
@@ -2851,29 +2968,31 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
         readonly barrierSequence: number;
         readonly auditId: string;
       }
-    : Command["type"] extends "application.register"
-      ? ApplicationView
-      : Command["type"] extends
-            | "application-spec.revise"
-            | "technical-baseline-proposal.revise"
-            | "technical-review.start"
-            | "technical-gate.promote"
-        ? TechnicalReviewStateView
-        : Command["type"] extends "interaction.prompt"
-          ? InteractionTurnView
-          : Command["type"] extends ReviewEnvelopeCommand["type"]
-            ? ReviewTopicView
-            : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-              ? ProductReviewStateView
-              : Command["type"] extends ProductEnvelopeCommand["type"]
-                ? ProductDiscoveryView
-                : Command["type"] extends "artifact.version.register"
-                  ? ArtifactRegistrationView
-                  : Command["type"] extends
-                        | "artifact.version.finalize"
-                        | "artifact.version.supersede"
-                    ? ArtifactVersionView
-                    : ProjectEditorView;
+    : Command["type"] extends WorkspaceEnvelopeCommand["type"]
+      ? WorkspaceAllocationView
+      : Command["type"] extends "application.register"
+        ? ApplicationView
+        : Command["type"] extends
+              | "application-spec.revise"
+              | "technical-baseline-proposal.revise"
+              | "technical-review.start"
+              | "technical-gate.promote"
+          ? TechnicalReviewStateView
+          : Command["type"] extends "interaction.prompt"
+            ? InteractionTurnView
+            : Command["type"] extends ReviewEnvelopeCommand["type"]
+              ? ReviewTopicView
+              : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                ? ProductReviewStateView
+                : Command["type"] extends ProductEnvelopeCommand["type"]
+                  ? ProductDiscoveryView
+                  : Command["type"] extends "artifact.version.register"
+                    ? ArtifactRegistrationView
+                    : Command["type"] extends
+                          | "artifact.version.finalize"
+                          | "artifact.version.supersede"
+                      ? ArtifactVersionView
+                      : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

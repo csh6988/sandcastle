@@ -10,6 +10,42 @@ const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-project-configuration-"));
 
 describe("Project Configuration", () => {
+  it("resolves only the production local isolated Git profile for formal Work Packages", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+    try {
+      assert.deepEqual(
+        database.projectConfiguration.resolveFormalExecutionProfile(
+          "software-rnd-local-isolated-git",
+        ),
+        {
+          executionProfileId: "software-rnd-local-isolated-git",
+          executionProfileRevision: 0,
+          sandboxRef: "docker",
+          branchStrategy: "branch",
+          capabilities: {
+            profileId: "local-isolated-git",
+            mechanism: "private-git-bundle-import",
+            mechanismVersion: "1",
+            gitRefWriteIsolation: true,
+            runtimeImportOnly: true,
+          },
+        },
+      );
+
+      assert.throws(
+        () =>
+          database.projectConfiguration.resolveFormalExecutionProfile(
+            "software-rnd-default",
+          ),
+        (error: unknown) =>
+          error instanceof ProjectConfigurationError &&
+          error.code === "PROVIDER_ISOLATION_REQUIRED",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("inspects, updates, and reloads persistent Project configuration", () => {
     const companyDir = tempCompanyDir();
     const database = openCompanyDatabase(companyDir);

@@ -88,6 +88,12 @@ Responsibilities (and nothing more):
   serialized, isolated `head` execution is serialized because it shares the
   host repository, and isolated `branch`/`merge-to-head` execution may run
   concurrently in independent Worktrees.
+  Formal local Work Packages use the built-in
+  `software-rnd-local-isolated-git` profile. It requires Docker and a prepared
+  Sandcastle image, gives the Agent a private Git database with no host remote,
+  and lets only the Company Runtime importer advance the allocated source
+  branch with expected-tip compare-and-swap. The default no-sandbox profile
+  and test-only isolated providers are rejected at this formal boundary.
   Failed AI Tasks can also create Snapshot Revision r2 through a Recovery
   Override limited to provider, model, Sandbox, limits, and validated Secret
   Reference IDs. The prior Snapshot remains immutable, r2 records its parent,

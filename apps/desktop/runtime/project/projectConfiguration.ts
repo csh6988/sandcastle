@@ -3,6 +3,7 @@ import {
   ProjectEditorViewSchema,
   type ProjectEditorView,
 } from "../interface.js";
+import { LOCAL_ISOLATED_GIT_CAPABILITIES } from "../workspaces/localIsolatedGitProfile.js";
 
 export class ProjectConfigurationError extends Error {
   constructor(
@@ -36,6 +37,13 @@ export interface ProjectConfiguration {
     readonly projectId: string;
     readonly expectedRevision: number;
   }) => ProjectEditorView;
+  readonly resolveFormalExecutionProfile: (executionProfileId: string) => {
+    readonly executionProfileId: string;
+    readonly executionProfileRevision: number;
+    readonly sandboxRef: "docker";
+    readonly branchStrategy: "branch";
+    readonly capabilities: typeof LOCAL_ISOLATED_GIT_CAPABILITIES;
+  };
 }
 
 export const openProjectConfiguration = (
@@ -148,6 +156,47 @@ export const openProjectConfiguration = (
 
   return {
     inspect,
+    resolveFormalExecutionProfile: (executionProfileId) => {
+      const profile = database
+        .prepare(
+          `SELECT id, revision, sandbox_ref AS sandboxRef,
+                  branch_strategy AS branchStrategy, status
+             FROM execution_profiles WHERE id = ?`,
+        )
+        .get(executionProfileId) as
+        | {
+            readonly id: string;
+            readonly revision: number;
+            readonly sandboxRef: string;
+            readonly branchStrategy: "head" | "merge-to-head" | "branch";
+            readonly status: "active" | "archived";
+          }
+        | undefined;
+      if (!profile) {
+        throw new ProjectConfigurationError(
+          "EXECUTION_PROFILE_NOT_FOUND",
+          `Execution Profile ${executionProfileId} was not found.`,
+        );
+      }
+      if (
+        profile.status !== "active" ||
+        profile.id !== "software-rnd-local-isolated-git" ||
+        profile.sandboxRef !== "docker" ||
+        profile.branchStrategy !== "branch"
+      ) {
+        throw new ProjectConfigurationError(
+          "PROVIDER_ISOLATION_REQUIRED",
+          `Execution Profile ${executionProfileId} does not prove gitRefWriteIsolation and runtimeImportOnly for a formal Work Package.`,
+        );
+      }
+      return {
+        executionProfileId: profile.id,
+        executionProfileRevision: Number(profile.revision),
+        sandboxRef: "docker",
+        branchStrategy: "branch",
+        capabilities: LOCAL_ISOLATED_GIT_CAPABILITIES,
+      };
+    },
     updateInTransaction,
     update: (input) => {
       database.exec("BEGIN IMMEDIATE");

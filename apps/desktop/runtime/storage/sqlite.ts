@@ -86,6 +86,11 @@ import {
   type TechnicalGatePromotionFailurePoint,
   type TechnicalReviewRuntime,
 } from "../project/technicalReviewRuntime.js";
+import {
+  openWorkspaceRuntime,
+  type WorkspaceRuntime,
+} from "../workspaces/workspaceRuntime.js";
+import { openLocalIsolatedGitProfile } from "../workspaces/localIsolatedGitProfile.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -106,6 +111,7 @@ export interface CompanyDatabase {
   readonly productReview: ProductReviewRuntime;
   readonly technicalReview: TechnicalReviewRuntime;
   readonly review: ReviewRuntime;
+  readonly workspaces: WorkspaceRuntime;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -257,6 +263,12 @@ export const openCompanyDatabase = (
   const events = openRuntimeEvents(database, {
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const workspaces = openWorkspaceRuntime(database, {
+    projectConfiguration,
+    profile: openLocalIsolatedGitProfile(),
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const pipelineConfiguration = openPipelineConfiguration(
     database,
     skillConfiguration,
@@ -348,7 +360,9 @@ export const openCompanyDatabase = (
     options.productReviewRuntime?.promotionFailure,
     technicalReview,
     options.technicalReviewRuntime?.promotionFailure,
+    workspaces,
   );
+  workspaces.reconcile();
 
   return {
     path,
@@ -369,6 +383,7 @@ export const openCompanyDatabase = (
     productReview,
     technicalReview,
     review,
+    workspaces,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

@@ -5,6 +5,7 @@ import {
   CommandResultSchema,
   ApplicationViewSchema,
   TechnicalReviewStateViewSchema,
+  WorkspaceAllocationViewSchema,
   ProjectEditorViewSchema,
   ProductDiscoveryViewSchema,
   ProductReviewStateViewSchema,
@@ -13,6 +14,8 @@ import {
   type CommandResult,
   type ApplicationView,
   type TechnicalReviewStateView,
+  type WorkspaceAllocationView,
+  type WorkspaceEnvelopeCommand,
   type EnvelopeCommand,
   type EnvelopeCommandResult,
   type ProjectEditorView,
@@ -55,6 +58,10 @@ import {
   type TechnicalGatePromotionFailurePoint,
   type TechnicalReviewRuntime,
 } from "./project/technicalReviewRuntime.js";
+import {
+  WorkspaceRuntimeError,
+  type WorkspaceRuntime,
+} from "./workspaces/workspaceRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -169,6 +176,18 @@ export const companyCommandDefinitions = {
     primaryAggregate: "review-topic",
     expectedRevisionRequired: true,
   },
+  "workspace-allocation.provision": {
+    primaryAggregate: "workspace-allocation",
+    expectedRevisionRequired: true,
+  },
+  "source-import.execute": {
+    primaryAggregate: "workspace-allocation",
+    expectedRevisionRequired: true,
+  },
+  "workspace-allocation.cleanup": {
+    primaryAggregate: "workspace-allocation",
+    expectedRevisionRequired: true,
+  },
 } as const;
 
 const canonicalize = (value: unknown): unknown => {
@@ -219,6 +238,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof TechnicalReviewRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof WorkspaceRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof PipelineRuntimeError) {
@@ -1389,6 +1411,164 @@ const executeArtifactCommand = (
   return result;
 };
 
+const executeWorkspaceCommand = (
+  database: DatabaseSync,
+  workspaceRuntime: WorkspaceRuntime,
+  envelope: CommandEnvelope<WorkspaceEnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<WorkspaceAllocationView> => {
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy, consumer_id AS consumerId,
+                schema_version AS schemaVersion, request_hash AS requestHash,
+                result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<WorkspaceAllocationView>;
+      }
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<WorkspaceAllocationView>;
+    }
+
+    let result: CommandResult<WorkspaceAllocationView>;
+    if (envelope.expectedRevision === undefined) {
+      result = {
+        status: "rejected",
+        error: {
+          code: "EXPECTED_REVISION_REQUIRED",
+          message: `${envelope.command.type} requires an expected workspace-allocation revision.`,
+        },
+        effectIds: [],
+      };
+    } else {
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          envelope.commandId,
+          envelope.actor.type,
+          envelope.actor.id,
+          envelope.actor.authenticatedBy,
+          envelope.consumerId ?? null,
+          envelope.schemaVersion,
+        );
+      try {
+        const value =
+          envelope.command.type === "workspace-allocation.provision"
+            ? workspaceRuntime.planProvisionInTransaction({
+                ...envelope.command,
+                commandId: envelope.commandId,
+                actor: envelope.actor,
+                expectedRevision: envelope.expectedRevision,
+              })
+            : envelope.command.type === "source-import.execute"
+              ? workspaceRuntime.planImportInTransaction({
+                  ...envelope.command,
+                  commandId: envelope.commandId,
+                  actor: envelope.actor,
+                  expectedRevision: envelope.expectedRevision,
+                })
+              : workspaceRuntime.planCleanupInTransaction({
+                  ...envelope.command,
+                  commandId: envelope.commandId,
+                  actor: envelope.actor,
+                  expectedRevision: envelope.expectedRevision,
+                });
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = {
+          status: "succeeded",
+          value: WorkspaceAllocationViewSchema.parse(value),
+          effectIds,
+        };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
 export const openCompanyCommandRegistry = (
   database: DatabaseSync,
   projectConfiguration: ProjectConfiguration,
@@ -1404,11 +1584,30 @@ export const openCompanyCommandRegistry = (
   technicalPromotionFailure?: (
     point: TechnicalGatePromotionFailurePoint,
   ) => void,
+  workspaceRuntime?: WorkspaceRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
       input,
     ) as CommandEnvelope<EnvelopeCommand>;
+    if (
+      envelope.command.type === "workspace-allocation.provision" ||
+      envelope.command.type === "source-import.execute" ||
+      envelope.command.type === "workspace-allocation.cleanup"
+    ) {
+      if (!workspaceRuntime) {
+        throw new CompanyCommandError(
+          "WORKSPACE_RUNTIME_UNAVAILABLE",
+          "Workspace Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeWorkspaceCommand(
+        database,
+        workspaceRuntime,
+        envelope as CommandEnvelope<WorkspaceEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
     if (envelope.command.type.startsWith("review.")) {
       if (!reviewRuntime) {
         throw new CompanyCommandError(

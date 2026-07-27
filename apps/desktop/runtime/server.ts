@@ -28,6 +28,7 @@ import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
+import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -241,6 +242,37 @@ export const startCompanyRuntimeServer = async (
               ) {
                 void database.interaction.executeTurn(result.value.id);
               }
+              if (result.status === "succeeded") {
+                if (
+                  request.envelope.command.type ===
+                  "workspace-allocation.provision"
+                ) {
+                  database.workspaces.executeProvision(
+                    request.envelope.command.allocationId,
+                  );
+                } else if (
+                  request.envelope.command.type === "source-import.execute"
+                ) {
+                  const resultCommit = request.envelope.command.resultCommit;
+                  const workspaceImport = database.workspaces
+                    .inspect(request.envelope.command.allocationId)
+                    .imports.find(
+                      (entry) =>
+                        entry.resultCommit === resultCommit &&
+                        (entry.state === "intent" || entry.state === "running"),
+                    );
+                  if (workspaceImport) {
+                    database.workspaces.executeImport(workspaceImport.id);
+                  }
+                } else if (
+                  request.envelope.command.type ===
+                  "workspace-allocation.cleanup"
+                ) {
+                  database.workspaces.executeCleanup(
+                    request.envelope.command.allocationId,
+                  );
+                }
+              }
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
@@ -261,6 +293,8 @@ export const startCompanyRuntimeServer = async (
                     return database.projectConfiguration.inspect(
                       query.projectId,
                     );
+                  case "workspace-allocation.inspect":
+                    return database.workspaces.inspect(query.allocationId);
                   case "applications.list":
                     return database.technicalReview.listApplications(
                       query.projectId,
@@ -316,6 +350,10 @@ export const startCompanyRuntimeServer = async (
                 case "project.inspect":
                   return database.projectConfiguration.inspect(
                     request.query.projectId,
+                  );
+                case "workspace-allocation.inspect":
+                  return database.workspaces.inspect(
+                    request.query.allocationId,
                   );
                 case "applications.list":
                   return database.technicalReview.listApplications(
@@ -962,6 +1000,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof AgUiCursorExpiredError ||
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
+                error instanceof WorkspaceRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -976,6 +1015,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof AgUiCursorExpiredError ||
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
+                error instanceof WorkspaceRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

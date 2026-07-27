@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 38;
+export const CURRENT_SCHEMA_VERSION = 39;
 
 interface CompanyMigration {
   readonly version: number;
@@ -3166,6 +3166,92 @@ const migrations: readonly CompanyMigration[] = [
         BEFORE DELETE ON technical_gate_promotions
         BEGIN
           SELECT RAISE(ABORT, 'Technical Gate Promotion is immutable');
+        END;
+      `);
+    },
+  },
+  {
+    version: 39,
+    name: "local_isolated_git_workspace_imports",
+    migrate: (database) => {
+      const installedAt = "2026-07-27T00:00:00.000Z";
+      database
+        .prepare(
+          `INSERT OR IGNORE INTO execution_profiles(
+             id, department_id, name, provider_ref, model, sandbox_ref,
+             branch_strategy, timeout_seconds, max_iterations, max_tokens,
+             retry_max_attempts, permission_policy, revision, status,
+             created_at, updated_at, archived_at
+           ) VALUES ('software-rnd-local-isolated-git', 'software-rnd',
+                     'Local Isolated Git (Docker)', 'default-agent', 'default',
+                     'docker', 'branch', 1800, 10, NULL, 1, 'ask', 0,
+                     'active', ?, ?, NULL)`,
+        )
+        .run(installedAt, installedAt);
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS workspace_allocations (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          application_id TEXT NOT NULL REFERENCES application_references(id),
+          execution_profile_id TEXT NOT NULL REFERENCES execution_profiles(id),
+          execution_profile_revision INTEGER NOT NULL CHECK (execution_profile_revision >= 0),
+          operation_key TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (
+            state IN ('planned', 'provisioning', 'ready', 'failed',
+                      'cleanup-pending', 'cleaned')
+          ),
+          repository_root TEXT NOT NULL,
+          allocation_root TEXT NOT NULL,
+          source_branch TEXT NOT NULL,
+          base_commit TEXT NOT NULL CHECK (length(base_commit) = 40),
+          expected_source_tip TEXT NOT NULL CHECK (length(expected_source_tip) = 40),
+          capability_snapshot_json TEXT NOT NULL,
+          capability_snapshot_hash TEXT NOT NULL CHECK (length(capability_snapshot_hash) = 64),
+          private_git_identity_json TEXT,
+          provision_receipt_json TEXT,
+          cleanup_evidence_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          provision_command_id TEXT NOT NULL,
+          cleanup_command_id TEXT,
+          revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS workspace_allocations_project_idx
+          ON workspace_allocations(project_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS workspace_allocations_state_idx
+          ON workspace_allocations(state, updated_at, id);
+
+        CREATE TABLE IF NOT EXISTS workspace_imports (
+          id TEXT PRIMARY KEY,
+          allocation_id TEXT NOT NULL REFERENCES workspace_allocations(id),
+          command_id TEXT NOT NULL,
+          request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+          state TEXT NOT NULL CHECK (
+            state IN ('intent', 'running', 'succeeded', 'failed', 'unknown')
+          ),
+          expected_source_tip TEXT NOT NULL CHECK (length(expected_source_tip) = 40),
+          before_source_tip TEXT NOT NULL CHECK (length(before_source_tip) = 40),
+          result_commit TEXT NOT NULL CHECK (length(result_commit) = 40),
+          object_set_hash TEXT,
+          receipt_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (allocation_id, request_hash)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS workspace_imports_state_idx
+          ON workspace_imports(state, updated_at, id);
+
+        CREATE TRIGGER IF NOT EXISTS workspace_import_receipt_immutable
+        BEFORE UPDATE OF receipt_json ON workspace_imports
+        WHEN OLD.receipt_json IS NOT NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'Workspace import receipt is immutable');
         END;
       `);
     },
