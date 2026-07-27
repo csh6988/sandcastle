@@ -47,6 +47,7 @@ const agUiRegistryFixture = [
   "run.resumed@1:custom",
   "run.blocked@1:custom",
   "run.cancelled@1:custom",
+  "run.intervention.recorded@1:custom",
   "snapshot.revision.created@1:custom",
   "node.queued@1:custom",
   "node.started@1:custom",

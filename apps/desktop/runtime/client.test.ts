@@ -11,8 +11,73 @@ import {
   createLocalRuntimeTransport,
 } from "./client.js";
 import { RuntimeRequestSchema, type RuntimeResponse } from "./interface.js";
+import { scriptedDepartmentRun } from "./testing/runContract.js";
 
 describe("Company Runtime client", () => {
+  it("parses an authoritative Run Supervision Query View", async () => {
+    const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
+    const view = {
+      run: scriptedDepartmentRun.run,
+      snapshot: {
+        id: scriptedDepartmentRun.snapshot.id,
+        revision: scriptedDepartmentRun.snapshot.revision,
+        hash: scriptedDepartmentRun.snapshot.hash,
+      },
+      graph: {
+        nodes: scriptedDepartmentRun.nodes.map((node) => ({
+          nodeRunId: node.id,
+          pipelineNodeId: node.pipelineNodeId,
+          name: node.pipelineNodeId,
+          type: node.nodeType,
+          status: node.status,
+          attemptId: null,
+        })),
+        edges:
+          scriptedDepartmentRun.snapshot.payload.pipelineVersion.graph.edges,
+      },
+      timeline: [],
+      agentActivities: [],
+      interactions: [],
+      interventions: [],
+      allowedCommands: {
+        pause: true,
+        resume: false,
+        cancelAttemptIds: [],
+        cancelTurnIds: [],
+        decidePermissionIds: [],
+        interveneNodeRunIds: [],
+      },
+    };
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        requests.push(request);
+        return {
+          id: request.id,
+          ok: true,
+          result: { view, asOfSequence: 14 },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+
+    const inspected = await client.query({
+      type: "run.supervision.inspect",
+      runId: scriptedDepartmentRun.run.id,
+    });
+
+    assert.equal(inspected.run.id, scriptedDepartmentRun.run.id);
+    assert.equal(inspected.graph.nodes[0]?.nodeRunId, "node-run-start");
+    assert.equal(inspected.allowedCommands.pause, true);
+    assert.equal(requests[0]?.kind, "query");
+    assert.equal(
+      requests[0]?.kind === "query" && "envelope" in requests[0]
+        ? requests[0].envelope?.query.type
+        : null,
+      "run.supervision.inspect",
+    );
+  });
+
   it("sends project.update through a verified command envelope and project.inspect through a verified query envelope", async () => {
     const requests: unknown[] = [];
     const transport = {

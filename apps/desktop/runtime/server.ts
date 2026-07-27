@@ -310,6 +310,8 @@ export const startCompanyRuntimeServer = async (
                     return database.review.inspect(query.topicId);
                   case "review.topics.list":
                     return database.review.list(query);
+                  case "run.supervision.inspect":
+                    return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
                     return database.artifactRegistry.inspect(query.versionId);
                   case "artifact.lineage.inspect":
@@ -392,6 +394,8 @@ export const startCompanyRuntimeServer = async (
                   return database.pipelineRuntime.inspectRun(
                     request.query.runId,
                   );
+                case "run.supervision.inspect":
+                  return database.supervision.inspect(request.query.runId);
                 case "execution.inspect":
                   return request.query.targetKind === "node-attempt"
                     ? database.pipelineRuntime.inspectExecution({

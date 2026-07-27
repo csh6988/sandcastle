@@ -25,6 +25,8 @@ import {
   type ReviewEnvelopeCommand,
   InteractionTurnViewSchema,
   type InteractionTurnView,
+  RunSupervisionViewSchema,
+  type RunSupervisionView,
 } from "./interface.js";
 import {
   ProjectConfigurationError,
@@ -39,7 +41,10 @@ import {
   type ProductConfirmationFailurePoint,
   type ProductRuntime,
 } from "./product/productRuntime.js";
-import { PipelineRuntimeError } from "./pipeline/pipelineRuntime.js";
+import {
+  PipelineRuntimeError,
+  type PipelineRuntime,
+} from "./pipeline/pipelineRuntime.js";
 import {
   RuntimeInteractionError,
   type RuntimeInteraction,
@@ -62,6 +67,7 @@ import {
   WorkspaceRuntimeError,
   type WorkspaceRuntime,
 } from "./workspaces/workspaceRuntime.js";
+import type { RuntimeSupervision } from "./runSupervision.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -219,6 +225,9 @@ const commandIdReuse = (commandId: string): CommandResult<unknown> => ({
 const deterministicError = (
   error: unknown,
 ): { readonly code: string; readonly message: string } | undefined => {
+  if (error instanceof CompanyCommandError) {
+    return { code: error.code, message: error.message };
+  }
   if (error instanceof ProjectConfigurationError) {
     return { code: error.code, message: error.message };
   }
@@ -1569,6 +1578,189 @@ const executeWorkspaceCommand = (
   }
 };
 
+const executeSupervisionCommand = (
+  database: DatabaseSync,
+  pipelineRuntime: PipelineRuntime,
+  interaction: RuntimeInteraction,
+  supervision: RuntimeSupervision,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<RunSupervisionView> => {
+  if (
+    ![
+      "node-attempt.cancel",
+      "interaction-turn.cancel",
+      "run.governed-intervention",
+    ].includes(envelope.command.type)
+  ) {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Run Supervision command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let dispatch: (() => void) | undefined;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | { readonly requestHash: string; readonly resultJson: string }
+      | undefined;
+    if (receipt) {
+      database.exec("COMMIT");
+      return receipt.requestHash === requestHash
+        ? (CommandResultSchema.parse(
+            JSON.parse(receipt.resultJson),
+          ) as CommandResult<RunSupervisionView>)
+        : (commandIdReuse(
+            envelope.commandId,
+          ) as CommandResult<RunSupervisionView>);
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<RunSupervisionView>;
+    let runId: string;
+    database.exec("SAVEPOINT supervision_command");
+    try {
+      if (envelope.command.type === "node-attempt.cancel") {
+        runId = envelope.command.runId;
+        if (envelope.expectedRevision === undefined) {
+          throw new CompanyCommandError(
+            "EXPECTED_REVISION_REQUIRED",
+            "node-attempt.cancel requires the Department Run revision.",
+          );
+        }
+        pipelineRuntime.requestNodeAttemptCancellationInTransaction({
+          runId: envelope.command.runId,
+          attemptId: envelope.command.attemptId,
+          expectedRevision: envelope.expectedRevision,
+        });
+        dispatch = () => {
+          void pipelineRuntime.dispatchNodeAttemptCancellation(
+            envelope.command.type === "node-attempt.cancel"
+              ? envelope.command.attemptId
+              : "",
+          );
+        };
+      } else if (envelope.command.type === "interaction-turn.cancel") {
+        runId = envelope.command.runId;
+        const turn = interaction.inspectTurn(envelope.command.turnId);
+        const session = interaction.inspectSession(turn.sessionId).session;
+        if (session.runId !== envelope.command.runId) {
+          throw new RuntimeInteractionError(
+            "INTERACTION_TURN_RUN_MISMATCH",
+            `Interaction Turn ${turn.id} does not belong to Run ${envelope.command.runId}.`,
+          );
+        }
+        const cancelled =
+          interaction.requestInteractionTurnCancellationInTransaction(turn.id);
+        if (cancelled.status !== "cancelled") {
+          dispatch = () => {
+            void interaction.dispatchInteractionTurnCancellation(turn.id);
+          };
+        }
+      } else if (envelope.command.type === "run.governed-intervention") {
+        runId = envelope.command.runId;
+        if (envelope.expectedRevision === undefined) {
+          throw new CompanyCommandError(
+            "EXPECTED_REVISION_REQUIRED",
+            "run.governed-intervention requires the Department Run revision.",
+          );
+        }
+        pipelineRuntime.applyGovernedIntervention({
+          ...envelope.command,
+          expectedRevision: envelope.expectedRevision,
+          actorId: envelope.actor.id,
+        });
+      } else {
+        throw new CompanyCommandError(
+          "COMMAND_UNSUPPORTED",
+          `Command ${envelope.command.type} is not a Run Supervision command.`,
+        );
+      }
+      result = {
+        status: "succeeded",
+        value: RunSupervisionViewSchema.parse(supervision.inspect(runId)),
+        effectIds: (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id),
+      };
+      database.exec("RELEASE supervision_command");
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO supervision_command");
+      database.exec("RELEASE supervision_command");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    dispatch?.();
+    return result;
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // Receipt replay may already have committed the transaction.
+    }
+    throw error;
+  }
+};
+
 export const openCompanyCommandRegistry = (
   database: DatabaseSync,
   projectConfiguration: ProjectConfiguration,
@@ -1577,6 +1769,8 @@ export const openCompanyCommandRegistry = (
   productRuntime?: ProductRuntime,
   failureInjection?: (point: ProductConfirmationFailurePoint) => void,
   interaction?: RuntimeInteraction,
+  pipelineRuntime?: PipelineRuntime,
+  supervision?: RuntimeSupervision,
   reviewRuntime?: ReviewRuntime,
   productReviewRuntime?: ProductReviewRuntime,
   promotionFailure?: (point: ProductGatePromotionFailurePoint) => void,
@@ -1605,6 +1799,26 @@ export const openCompanyCommandRegistry = (
         database,
         workspaceRuntime,
         envelope as CommandEnvelope<WorkspaceEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (
+      envelope.command.type === "node-attempt.cancel" ||
+      envelope.command.type === "interaction-turn.cancel" ||
+      envelope.command.type === "run.governed-intervention"
+    ) {
+      if (!interaction || !pipelineRuntime || !supervision) {
+        throw new CompanyCommandError(
+          "RUN_SUPERVISION_RUNTIME_UNAVAILABLE",
+          "Run Supervision Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeSupervisionCommand(
+        database,
+        pipelineRuntime,
+        interaction,
+        supervision,
+        envelope,
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
     }

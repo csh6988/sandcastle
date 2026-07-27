@@ -130,6 +130,15 @@ export interface RuntimeInteraction {
     readonly content: string;
   }) => InteractionTurnView;
   readonly executeTurn: (turnId: string) => Promise<InteractionTurnView>;
+  readonly cancelInteractionTurn: (
+    turnId: string,
+  ) => Promise<InteractionTurnView>;
+  readonly requestInteractionTurnCancellationInTransaction: (
+    turnId: string,
+  ) => InteractionTurnView;
+  readonly dispatchInteractionTurnCancellation: (
+    turnId: string,
+  ) => Promise<void>;
   readonly reconcilePendingTurns: () => Promise<number>;
   readonly prepareForShutdown: () => Promise<void>;
   readonly inspectTurn: (turnId: string) => InteractionTurnView;
@@ -1774,6 +1783,109 @@ export const openRuntimeInteraction = (
       return reconciled;
     };
 
+  const requestInteractionTurnCancellationInTransaction: RuntimeInteraction["requestInteractionTurnCancellationInTransaction"] =
+    (turnId) => {
+      const current = readTurn(turnId);
+      if (
+        ["completed", "failed", "cancelled", "interrupted"].includes(
+          current.status,
+        )
+      ) {
+        throw new RuntimeInteractionError(
+          "INTERACTION_TURN_CANCEL_STATE_INVALID",
+          `Interaction Turn ${turnId} is not active.`,
+        );
+      }
+      const now = clock().toISOString();
+      const session = readSession(current.sessionId);
+      database
+        .prepare(
+          `UPDATE interaction_turns
+                SET status = CASE WHEN status = 'queued' THEN 'cancelled'
+                                  ELSE 'reconciling' END,
+                    failure_code = CASE WHEN status = 'queued'
+                      THEN 'TURN_CANCELLED_BEFORE_EXECUTION'
+                      ELSE 'TURN_CANCELLATION_RECONCILIATION_REQUIRED' END,
+                    failure_message = CASE WHEN status = 'queued'
+                      THEN 'The Interaction Turn was cancelled before execution.'
+                      ELSE 'Cancellation was requested, but provider termination is not proven.' END,
+                    completed_at = CASE WHEN status = 'queued' THEN ? ELSE NULL END
+              WHERE id = ? AND status IN ('queued', 'running', 'reconciling')`,
+        )
+        .run(now, turnId);
+      database
+        .prepare(
+          `UPDATE execution_leases
+                SET cancel_requested = 1, released_at = COALESCE(released_at, ?)
+              WHERE target_kind = 'interaction-turn' AND target_id = ?
+                AND released_at IS NULL`,
+        )
+        .run(now, turnId);
+      appendMutation({
+        action: "interaction.turn.cancel.request",
+        entityType: "interaction-turn",
+        entityId: turnId,
+        eventType: "interaction.turn.reconciling",
+        runId: session.runId,
+        nodeRunId: session.nodeRunId,
+        sessionId: session.id,
+        payload: {
+          turnId,
+          status: current.status === "queued" ? "cancelled" : "reconciling",
+          failureCode: "TURN_CANCELLATION_RECONCILIATION_REQUIRED",
+        },
+        createdAt: now,
+      });
+      return readTurn(turnId);
+    };
+
+  const dispatchInteractionTurnCancellation: RuntimeInteraction["dispatchInteractionTurnCancellation"] =
+    async (turnId) => {
+      const current = readTurn(turnId);
+      try {
+        await interactionAdapter?.cancel(current.executionOperationKey);
+      } catch {
+        // Cancellation is advisory; reconciliation remains authoritative.
+      }
+      const active = activeTurns.get(turnId);
+      active?.controller.abort();
+      if (active) await active.done;
+      const execution = inspectExecution(database, {
+        operationKey: current.executionOperationKey,
+      });
+      const terminalProven = execution.facts.some(
+        (fact) =>
+          fact.status === "accepted" &&
+          ["completed", "failed", "cancelled"].includes(fact.kind),
+      );
+      if (!terminalProven) {
+        database
+          .prepare(
+            `UPDATE interaction_turns
+                SET status = 'reconciling',
+                    failure_code = 'TURN_CANCELLATION_RECONCILIATION_REQUIRED',
+                    failure_message = 'Cancellation was requested, but provider termination is not proven.',
+                    completed_at = NULL
+              WHERE id = ? AND status IN ('failed', 'interrupted')`,
+          )
+          .run(turnId);
+      }
+    };
+
+  const cancelInteractionTurn: RuntimeInteraction["cancelInteractionTurn"] =
+    async (turnId) => {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        requestInteractionTurnCancellationInTransaction(turnId);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      await dispatchInteractionTurnCancellation(turnId);
+      return readTurn(turnId);
+    };
+
   const prepareForShutdown: RuntimeInteraction["prepareForShutdown"] =
     async () => {
       const active = [...activeTurns.values()];
@@ -2161,6 +2273,9 @@ export const openRuntimeInteraction = (
     inspectSession,
     acceptPromptInTransaction,
     executeTurn,
+    cancelInteractionTurn,
+    requestInteractionTurnCancellationInTransaction,
+    dispatchInteractionTurnCancellation,
     reconcilePendingTurns,
     prepareForShutdown,
     inspectTurn: readTurn,

@@ -177,6 +177,28 @@ export interface PipelineRuntime {
     readonly expectedRevision: number;
     readonly action: "pause" | "resume" | "cancel";
   }) => Promise<DepartmentRunView>;
+  readonly cancelNodeAttempt: (input: {
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly expectedRevision: number;
+  }) => Promise<DepartmentRunView>;
+  readonly requestNodeAttemptCancellationInTransaction: (input: {
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly expectedRevision: number;
+  }) => DepartmentRunView;
+  readonly dispatchNodeAttemptCancellation: (
+    attemptId: string,
+  ) => Promise<void>;
+  readonly applyGovernedIntervention: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly expectedRevision: number;
+    readonly actorId: string;
+    readonly reason: string;
+    readonly feedback: string;
+    readonly outcome: "feedback" | "new-attempt";
+  }) => DepartmentRunView;
   readonly recoverRun: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -466,12 +488,27 @@ export const openPipelineRuntime = (
     readonly audit?: boolean;
   }): void => {
     if (input.audit !== false) {
+      const commandContext = database
+        .prepare(
+          `SELECT command_id AS commandId, actor_type AS actorType,
+                  actor_id AS actorId, authenticated_by AS authenticatedBy
+             FROM runtime_unit_of_work_context WHERE slot = 1`,
+        )
+        .get() as
+        | {
+            readonly commandId: string;
+            readonly actorType: string;
+            readonly actorId: string;
+            readonly authenticatedBy: string;
+          }
+        | undefined;
       database
         .prepare(
           `INSERT INTO runtime_audit_records(
              id, action, entity_type, entity_id, run_id, node_run_id,
-             before_json, after_json, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             before_json, after_json, created_at, command_id, actor_type,
+             actor_id, authenticated_by
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           randomUUID(),
@@ -483,6 +520,10 @@ export const openPipelineRuntime = (
           input.before === undefined ? null : JSON.stringify(input.before),
           JSON.stringify(input.after),
           input.createdAt,
+          commandContext?.commandId ?? null,
+          commandContext?.actorType ?? null,
+          commandContext?.actorId ?? null,
+          commandContext?.authenticatedBy ?? null,
         );
     }
     const runScope = input.runId
@@ -4994,6 +5035,138 @@ export const openPipelineRuntime = (
     }
   };
 
+  const requestNodeAttemptCancellationInTransaction: PipelineRuntime["requestNodeAttemptCancellationInTransaction"] =
+    (input) => {
+      const current = readRunRow(input.runId);
+      if (current.revision !== input.expectedRevision) {
+        throw new PipelineRuntimeError(
+          "VERSION_CONFLICT",
+          `Department Run revision ${input.expectedRevision} does not match current revision ${current.revision}.`,
+        );
+      }
+      const candidate = database
+        .prepare(
+          `SELECT node_attempts.node_run_id AS nodeRunId,
+                node_attempts.status,
+                COALESCE(node_attempts.execution_operation_key,
+                         'node-attempt:' || node_attempts.id) AS operationKey
+           FROM node_attempts
+           JOIN node_runs ON node_runs.id = node_attempts.node_run_id
+          WHERE node_attempts.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.attemptId, input.runId) as
+        | {
+            readonly nodeRunId: string;
+            readonly status: string;
+            readonly operationKey: string;
+          }
+        | undefined;
+      if (
+        !candidate ||
+        !["running", "reconciling"].includes(candidate.status)
+      ) {
+        throw new PipelineRuntimeError(
+          "ATTEMPT_CANCEL_STATE_INVALID",
+          `Node Attempt ${input.attemptId} is not active in Department Run ${input.runId}.`,
+        );
+      }
+      const now = clock().toISOString();
+      database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'reconciling', recoverable = 1,
+                  failure_code = 'EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED',
+                  failure_message = 'Cancellation was requested, but external termination still requires reconciliation.',
+                  completed_at = NULL
+            WHERE id = ? AND status IN ('running', 'reconciling')`,
+        )
+        .run(input.attemptId);
+      database
+        .prepare(
+          `UPDATE execution_leases
+              SET cancel_requested = 1, released_at = COALESCE(released_at, ?)
+            WHERE target_kind = 'node-attempt' AND target_id = ?
+              AND released_at IS NULL`,
+        )
+        .run(now, input.attemptId);
+      database
+        .prepare(
+          `UPDATE node_runs SET status = 'blocked',
+                  failure_code = 'EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED',
+                  failure_message = 'Cancellation was requested, but external termination still requires reconciliation.',
+                  updated_at = ?
+            WHERE id = ? AND status IN ('running', 'blocked')`,
+        )
+        .run(now, candidate.nodeRunId);
+      const changed = database
+        .prepare(
+          `UPDATE department_runs SET status = 'blocked',
+                  revision = revision + 1, updated_at = ?
+            WHERE id = ? AND revision = ?
+              AND status NOT IN ('completed', 'cancelled')`,
+        )
+        .run(now, input.runId, input.expectedRevision);
+      if (changed.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "VERSION_CONFLICT",
+          `Department Run ${input.runId} changed before cancellation was recorded.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "attempt.cancel.request",
+        entityType: "node-attempt",
+        entityId: input.attemptId,
+        eventType: "attempt.reconciling",
+        runId: input.runId,
+        nodeRunId: candidate.nodeRunId,
+        before: { status: candidate.status },
+        after: {
+          status: "reconciling",
+          operationKey: candidate.operationKey,
+          failureCode: "EXECUTION_CANCELLATION_RECONCILIATION_REQUIRED",
+        },
+        createdAt: now,
+      });
+      return inspectRun(input.runId);
+    };
+
+  const dispatchNodeAttemptCancellation: PipelineRuntime["dispatchNodeAttemptCancellation"] =
+    async (attemptId) => {
+      const candidate = database
+        .prepare(
+          `SELECT COALESCE(execution_operation_key, 'node-attempt:' || id)
+                    AS operationKey
+             FROM node_attempts WHERE id = ?`,
+        )
+        .get(attemptId) as { readonly operationKey: string } | undefined;
+      if (!candidate) return;
+      try {
+        await executionAdapter.cancel?.(candidate.operationKey);
+      } catch {
+        // Cancellation is advisory; reconciliation remains authoritative.
+      }
+      const active = [...activeExecutions.values()].filter(
+        (execution) => execution.attemptId === attemptId,
+      );
+      for (const execution of active) execution.controller.abort();
+      await Promise.all(active.map((execution) => execution.done));
+    };
+
+  const cancelNodeAttempt: PipelineRuntime["cancelNodeAttempt"] = async (
+    input,
+  ) => {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      requestNodeAttemptCancellationInTransaction(input);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    await dispatchNodeAttemptCancellation(input.attemptId);
+    return inspectRun(input.runId);
+  };
+
   const controlRun = async (input: {
     readonly runId: string;
     readonly expectedRevision: number;
@@ -5325,6 +5498,157 @@ export const openPipelineRuntime = (
     }
     return inspectRun(input.runId);
   };
+
+  const applyGovernedIntervention: PipelineRuntime["applyGovernedIntervention"] =
+    (input) => {
+      const current = inspectRun(input.runId);
+      if (current.run.revision !== input.expectedRevision) {
+        throw new PipelineRuntimeError(
+          "VERSION_CONFLICT",
+          `Department Run revision ${input.expectedRevision} does not match current revision ${current.run.revision}.`,
+        );
+      }
+      const node = current.nodes.find(
+        (candidate) => candidate.id === input.nodeRunId,
+      );
+      const attempt = node?.attempts.at(-1);
+      if (
+        !node ||
+        !attempt ||
+        !["failed", "interrupted", "cancelled"].includes(attempt.status)
+      ) {
+        throw new PipelineRuntimeError(
+          "INTERVENTION_TERMINATION_UNPROVEN",
+          `Node Run ${input.nodeRunId} has no proven terminal Attempt.`,
+        );
+      }
+      const reason = input.reason.trim();
+      const feedback = input.feedback.trim();
+      if (
+        !reason ||
+        reason.length > 1_000 ||
+        !feedback ||
+        feedback.length > 10_000
+      ) {
+        throw new PipelineRuntimeError(
+          "INTERVENTION_INPUT_INVALID",
+          "Governed intervention requires a reason and feedback within their limits.",
+        );
+      }
+      const now = clock().toISOString();
+      const interventionId = randomUUID();
+      const nextAttemptId =
+        input.outcome === "new-attempt" ? randomUUID() : null;
+      database.exec("SAVEPOINT governed_intervention");
+      try {
+        if (nextAttemptId) {
+          database
+            .prepare(
+              `INSERT INTO node_attempts(
+                 id, node_run_id, attempt_number, snapshot_revision_id, reason,
+                 status, structured_result_json, failure_code, failure_message,
+                 created_at, started_at, completed_at
+               ) VALUES (?, ?, ?, ?, 'retry', 'ready', NULL, NULL, NULL, ?, NULL, NULL)`,
+            )
+            .run(
+              nextAttemptId,
+              input.nodeRunId,
+              node.attemptCount + 1,
+              current.snapshot.id,
+              now,
+            );
+          database
+            .prepare(
+              `INSERT INTO node_feedback(
+                 id, run_id, node_run_id, source_approval_id,
+                 target_attempt_id, kind, content, created_at
+               ) VALUES (?, ?, ?, NULL, ?, 'retry', ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              input.runId,
+              input.nodeRunId,
+              nextAttemptId,
+              feedback,
+              now,
+            );
+          database
+            .prepare(
+              `UPDATE node_runs
+                  SET status = 'ready', attempt_count = attempt_count + 1,
+                      result_json = NULL, failure_code = NULL,
+                      failure_message = NULL, updated_at = ?
+                WHERE id = ? AND run_id = ?`,
+            )
+            .run(now, input.nodeRunId, input.runId);
+        }
+        database
+          .prepare(
+            `INSERT INTO governed_interventions(
+               id, run_id, node_run_id, attempt_id, snapshot_revision_id,
+               actor_id, reason, feedback, outcome, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            interventionId,
+            input.runId,
+            input.nodeRunId,
+            attempt.id,
+            current.snapshot.id,
+            input.actorId,
+            reason,
+            feedback,
+            input.outcome,
+            now,
+          );
+        const paused = database
+          .prepare(
+            `UPDATE department_runs
+                SET status = 'paused', paused_from_status = ?,
+                    revision = revision + 1, updated_at = ?
+              WHERE id = ? AND revision = ?
+                AND status NOT IN ('completed', 'cancelled', 'superseded')`,
+          )
+          .run(
+            nextAttemptId ? "recovering" : current.run.status,
+            now,
+            input.runId,
+            input.expectedRevision,
+          );
+        if (paused.changes !== 1) {
+          throw new PipelineRuntimeError(
+            "VERSION_CONFLICT",
+            `Department Run ${input.runId} changed before intervention was recorded.`,
+          );
+        }
+        appendRuntimeMutation({
+          action: "run.governed-intervention",
+          entityType: "governed-intervention",
+          entityId: interventionId,
+          eventType: "run.intervention.recorded",
+          runId: input.runId,
+          nodeRunId: input.nodeRunId,
+          before: {
+            runStatus: current.run.status,
+            attemptId: attempt.id,
+            snapshotRevisionId: current.snapshot.id,
+          },
+          after: {
+            status: "paused",
+            outcome: input.outcome,
+            attemptId: nextAttemptId ?? attempt.id,
+            snapshotRevisionId: current.snapshot.id,
+          },
+          createdAt: now,
+        });
+        database.exec("RELEASE governed_intervention");
+      } catch (error) {
+        database.exec("ROLLBACK TO governed_intervention");
+        database.exec("RELEASE governed_intervention");
+        throw error;
+      }
+      return inspectRun(input.runId);
+    };
 
   const ensureReadyAttempt = (input: {
     readonly runId: string;
@@ -7426,6 +7750,10 @@ export const openPipelineRuntime = (
     forkRun,
     executeReady,
     controlRun,
+    cancelNodeAttempt,
+    requestNodeAttemptCancellationInTransaction,
+    dispatchNodeAttemptCancellation,
+    applyGovernedIntervention,
     recoverRun,
     claimReadyAttempt,
     recoverExpiredLeases,

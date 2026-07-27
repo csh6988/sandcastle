@@ -60,6 +60,59 @@ const promptEnvelope = (
 });
 
 describe("Runtime Interaction", () => {
+  it("keeps one Turn reconciling when targeted cancellation is unknown", async () => {
+    let started!: () => void;
+    const executing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const adapter: ModelOnlyInteractionExecutionAdapter = {
+      capabilities: {
+        reattachRunningOperation: false,
+        strongExecutionFence: false,
+        enforceNoSideEffects: {
+          mechanism: "model-only",
+          mechanismVersion: "1",
+          policySchemaHash: MODEL_ONLY_CONTEXT_SCHEMA_HASH,
+        },
+      },
+      execute: async (_request, _sink, signal) => {
+        started();
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        throw new Error("local worker aborted");
+      },
+      cancel: async () => "unknown",
+      reconcile: async () => ({ status: "unknown", evidenceRefs: [] }),
+    };
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      interactionExecutionAdapter: adapter,
+    });
+    try {
+      const { session, human } = createConsultation(database);
+      const accepted = database.commandRegistry.execute(
+        promptEnvelope(session.id, human.id, "prompt:cancel-one"),
+      );
+      assert.equal(accepted.status, "succeeded");
+      if (accepted.status !== "succeeded") assert.fail("Prompt was rejected.");
+      const turnExecution = database.interaction.executeTurn(accepted.value.id);
+      await executing;
+
+      const cancelled = await database.interaction.cancelInteractionTurn(
+        accepted.value.id,
+      );
+
+      assert.equal(cancelled.status, "reconciling");
+      assert.equal(
+        cancelled.failureCode,
+        "TURN_CANCELLATION_RECONCILIATION_REQUIRED",
+      );
+      await turnExecution;
+    } finally {
+      database.close();
+    }
+  });
+
   it("executes one replay-safe model-only consultation Turn through fenced Execution Facts", async () => {
     let receivedContext:
       | Parameters<

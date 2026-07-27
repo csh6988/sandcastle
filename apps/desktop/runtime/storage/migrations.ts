@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 39;
+export const CURRENT_SCHEMA_VERSION = 40;
 
 interface CompanyMigration {
   readonly version: number;
@@ -3253,6 +3253,29 @@ const migrations: readonly CompanyMigration[] = [
         BEGIN
           SELECT RAISE(ABORT, 'Workspace import receipt is immutable');
         END;
+      `);
+    },
+  },
+  {
+    version: 40,
+    name: "governed_run_interventions",
+    migrate: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS governed_interventions (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES department_runs(id) ON DELETE CASCADE,
+          node_run_id TEXT NOT NULL REFERENCES node_runs(id) ON DELETE CASCADE,
+          attempt_id TEXT REFERENCES node_attempts(id),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          actor_id TEXT NOT NULL,
+          reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 1000),
+          feedback TEXT NOT NULL CHECK (length(trim(feedback)) BETWEEN 1 AND 10000),
+          outcome TEXT NOT NULL CHECK (outcome IN ('feedback', 'new-attempt')),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS governed_interventions_run_idx
+          ON governed_interventions(run_id, created_at, id);
       `);
     },
   },

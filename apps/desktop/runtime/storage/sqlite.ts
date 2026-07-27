@@ -91,6 +91,10 @@ import {
   type WorkspaceRuntime,
 } from "../workspaces/workspaceRuntime.js";
 import { openLocalIsolatedGitProfile } from "../workspaces/localIsolatedGitProfile.js";
+import {
+  openRuntimeSupervision,
+  type RuntimeSupervision,
+} from "../runSupervision.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -112,6 +116,7 @@ export interface CompanyDatabase {
   readonly technicalReview: TechnicalReviewRuntime;
   readonly review: ReviewRuntime;
   readonly workspaces: WorkspaceRuntime;
+  readonly supervision: RuntimeSupervision;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -312,6 +317,10 @@ export const openCompanyDatabase = (
         : {}),
     },
   );
+  const supervision = openRuntimeSupervision(database, {
+    pipelineRuntime,
+    interaction,
+  });
   pipelineRuntime.recoverExpiredLeases();
   pipelineRuntime.recoverExpiredApprovals();
   const product = openProductRuntime(database, {
@@ -355,6 +364,8 @@ export const openCompanyDatabase = (
     product,
     options.productRuntime?.confirmationFailure,
     interaction,
+    pipelineRuntime,
+    supervision,
     review,
     productReview,
     options.productReviewRuntime?.promotionFailure,
@@ -384,6 +395,7 @@ export const openCompanyDatabase = (
     technicalReview,
     review,
     workspaces,
+    supervision,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

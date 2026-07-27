@@ -316,6 +316,7 @@ const removeSnapshotRevisionParentLinks = (database: DatabaseSync): void => {
 
 const removeNodeAttemptRecovery = (database: DatabaseSync): void => {
   database.exec(`
+    DROP TABLE IF EXISTS governed_interventions;
     DROP TABLE node_feedback;
     DROP TABLE approvals;
     DROP TABLE node_attempts;
@@ -446,6 +447,7 @@ describe("Company database migrations", () => {
               version: 39,
               name: "local_isolated_git_workspace_imports",
             },
+            { version: 40, name: "governed_run_interventions" },
           ],
         );
         assert.deepEqual(

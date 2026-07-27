@@ -12,6 +12,7 @@ import {
   CompanyOverviewSchema,
   CompanyProjectSchema,
   DepartmentRunViewSchema,
+  RunSupervisionViewSchema,
   DepartmentPipelineDraftGraphSchema,
   DepartmentPipelineEditorViewSchema,
   DepartmentInspectSchema,
@@ -815,7 +816,9 @@ export const createSandcastleBridge = (
                   ? ReviewTopicViewSchema.parse(result.view)
                   : nextQuery.type === "review.topics.list"
                     ? ReviewTopicViewSchema.array().parse(result.view)
-                    : result.view;
+                    : nextQuery.type === "run.supervision.inspect"
+                      ? RunSupervisionViewSchema.parse(result.view)
+                      : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
@@ -868,14 +871,18 @@ export const createSandcastleBridge = (
                   ? ReviewTopicViewSchema.parse(result.value)
                   : input.command.type === "interaction.prompt"
                     ? InteractionTurnViewSchema.parse(result.value)
-                    : z
-                        .object({
-                          acknowledged: z.literal(true),
-                          subscriptionGeneration: z.number().int().positive(),
-                          barrierSequence: z.number().int().nonnegative(),
-                          auditId: z.string().trim().min(1),
-                        })
-                        .parse(result.value);
+                    : input.command.type === "node-attempt.cancel" ||
+                        input.command.type === "interaction-turn.cancel" ||
+                        input.command.type === "run.governed-intervention"
+                      ? RunSupervisionViewSchema.parse(result.value)
+                      : z
+                          .object({
+                            acknowledged: z.literal(true),
+                            subscriptionGeneration: z.number().int().positive(),
+                            barrierSequence: z.number().int().nonnegative(),
+                            auditId: z.string().trim().min(1),
+                          })
+                          .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,

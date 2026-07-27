@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 9;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 10;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -467,6 +467,7 @@ const pipelineEventDefinitions = [
   "run.resumed",
   "run.blocked",
   "run.cancelled",
+  "run.intervention.recorded",
   "snapshot.revision.created",
   "node.queued",
   "node.started",

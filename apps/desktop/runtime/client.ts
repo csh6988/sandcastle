@@ -22,6 +22,7 @@ import {
   CompanyOverviewSchema,
   CompanyProjectSchema,
   DepartmentRunViewSchema,
+  RunSupervisionViewSchema,
   ExecutionInspectionViewSchema,
   DepartmentPipelineEditorViewSchema,
   DepartmentInspectSchema,
@@ -205,6 +206,7 @@ export const createCompanyRuntimeClientFromTransport = (
         query.type === "technical-review.inspect" ||
         query.type === "review.topic.inspect" ||
         query.type === "review.topics.list" ||
+        query.type === "run.supervision.inspect" ||
         query.type === "artifact.inspect" ||
         query.type === "artifact.lineage.inspect"
         ? {
@@ -312,6 +314,10 @@ export const createCompanyRuntimeClientFromTransport = (
       case "run.inspect":
         return DepartmentRunViewSchema.parse(
           result,
+        ) as CompanyQueryResult<Query>;
+      case "run.supervision.inspect":
+        return RunSupervisionViewSchema.parse(
+          queryValue,
         ) as CompanyQueryResult<Query>;
       case "execution.inspect":
         return ExecutionInspectionViewSchema.parse(
@@ -775,12 +781,14 @@ export const createCompanyRuntimeClientFromTransport = (
                     ? ReviewTopicViewSchema.parse(parsed.view)
                     : envelope.query.type === "review.topics.list"
                       ? ReviewTopicViewSchema.array().parse(parsed.view)
-                      : (() => {
-                          throw new RuntimeClientError(
-                            "PROTOCOL_ERROR",
-                            `Verified QueryEnvelope does not support ${envelope.query.type}.`,
-                          );
-                        })();
+                      : envelope.query.type === "run.supervision.inspect"
+                        ? RunSupervisionViewSchema.parse(parsed.view)
+                        : (() => {
+                            throw new RuntimeClientError(
+                              "PROTOCOL_ERROR",
+                              `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                            );
+                          })();
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,

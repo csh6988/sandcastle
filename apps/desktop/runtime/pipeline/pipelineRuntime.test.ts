@@ -1075,6 +1075,83 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("records a governed intervention and atomically prepares a feedback Attempt under the current Snapshot", async () => {
+    const { database, project, department } = setup(
+      createScriptedExecutionAdapter({
+        defaultFact: {
+          kind: "failed",
+          code: "SCRIPTED_AGENT_FAILED",
+          message: "The first attempt failed.",
+        },
+      }),
+    );
+    try {
+      const started = database.pipelineRuntime.startRun({
+        projectId: project.id,
+        departmentId: department.id,
+      });
+      const failed = await database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const failedNode = failed.nodes.find(
+        (node) => node.pipelineNodeId === "implement",
+      );
+      assert.ok(failedNode);
+
+      const command = {
+        schemaVersion: 1 as const,
+        commandId: "intervention-1",
+        actor: {
+          type: "human" as const,
+          id: "user-local",
+          authenticatedBy: "local-session" as const,
+        },
+        expectedRevision: failed.run.revision,
+        command: {
+          type: "run.governed-intervention" as const,
+          runId: failed.run.id,
+          nodeRunId: failedNode.id,
+          reason: "Correct the implementation direction.",
+          feedback: "Keep the change within the existing API.",
+          outcome: "new-attempt" as const,
+        },
+      };
+      const result = database.commandRegistry.execute(command);
+      const replay = database.commandRegistry.execute(command);
+      assert.equal(result.status, "succeeded");
+      assert.deepEqual(replay, result);
+      if (result.status !== "succeeded")
+        assert.fail("Intervention was rejected.");
+      assert.equal(result.value.run.status, "paused");
+      assert.equal(result.effectIds.length > 0, true);
+      const intervened = database.pipelineRuntime.inspectRun(failed.run.id);
+
+      assert.equal(intervened.run.status, "paused");
+      const nextAttempt = intervened.nodes
+        .find((node) => node.id === failedNode.id)
+        ?.attempts.at(-1);
+      assert.equal(nextAttempt?.status, "ready");
+      assert.equal(nextAttempt?.snapshotRevisionId, failed.snapshot.id);
+      assert.deepEqual(
+        nextAttempt?.feedback.map((item) => item.content),
+        ["Keep the change within the existing API."],
+      );
+      const projection = database.supervision.inspect(failed.run.id);
+      assert.equal(projection.interventions[0]?.actorId, "user-local");
+      assert.equal(
+        projection.interventions[0]?.snapshotRevisionId,
+        failed.snapshot.id,
+      );
+      assert.equal(
+        projection.interventions[0]?.attemptId,
+        failedNode.attempts.at(-1)?.id,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("allows only one scheduler worker to claim the same Ready Node Attempt", async () => {
     const { companyDir, database, project, department, profile } = setup(
       createScriptedExecutionAdapter({
@@ -1753,11 +1830,30 @@ describe("Pipeline Runtime", () => {
       await startedExecuting;
       const running = database.pipelineRuntime.inspectRun(started.run.id);
 
-      const cancelled = await database.pipelineRuntime.controlRun({
-        runId: running.run.id,
+      const interruptedAttempt = running.nodes
+        .flatMap((node) => node.attempts)
+        .find((attempt) => attempt.status === "running");
+      assert.ok(interruptedAttempt);
+      const envelope = {
+        schemaVersion: 1 as const,
+        commandId: "cancel-attempt-1",
+        actor: {
+          type: "human" as const,
+          id: "user-local",
+          authenticatedBy: "local-session" as const,
+        },
         expectedRevision: running.run.revision,
-        action: "cancel",
-      });
+        command: {
+          type: "node-attempt.cancel" as const,
+          runId: running.run.id,
+          attemptId: interruptedAttempt.id,
+        },
+      };
+      const result = database.commandRegistry.execute(envelope);
+      assert.equal(result.status, "succeeded");
+      assert.deepEqual(database.commandRegistry.execute(envelope), result);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const cancelled = database.pipelineRuntime.inspectRun(running.run.id);
 
       assert.equal(receivedSignal?.aborted, true);
       assert.equal(cancelled.run.status, "blocked");

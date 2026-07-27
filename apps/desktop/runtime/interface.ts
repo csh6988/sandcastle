@@ -1749,6 +1749,88 @@ export type SessionMessageView = z.infer<typeof SessionMessageViewSchema>;
 export type InteractionTurnView = z.infer<typeof InteractionTurnViewSchema>;
 export type PermissionRequestView = z.infer<typeof PermissionRequestViewSchema>;
 
+export const RunSupervisionViewSchema = z.object({
+  run: DepartmentRunViewSchema.shape.run,
+  snapshot: z.object({
+    id: z.string(),
+    revision: z.number().int().positive(),
+    hash: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
+  graph: z.object({
+    nodes: z.array(
+      z.object({
+        nodeRunId: z.string(),
+        pipelineNodeId: z.string(),
+        name: z.string(),
+        type: z.string(),
+        status: NodeRunStatusSchema,
+        attemptId: z.string().nullable(),
+      }),
+    ),
+    edges: z.array(z.object({ from: z.string(), to: z.string() })),
+  }),
+  timeline: z.array(RuntimeEventRecordSchema),
+  agentActivities: z.array(
+    z.object({
+      aiMemberId: z.string(),
+      aiMemberName: z.string(),
+      positionId: z.string(),
+      positionName: z.string(),
+      agentAdapterId: z.string(),
+      model: z.string(),
+      sessionId: z.string().nullable(),
+      runId: z.string(),
+      snapshotRevisionId: z.string(),
+      nodeRunId: z.string(),
+      attemptId: z.string().nullable(),
+      workPackageId: z.string().nullable(),
+      worktree: z.string().nullable(),
+      status: z.union([
+        NodeRunStatusSchema,
+        z.literal("reconciling"),
+        z.literal("interrupted"),
+      ]),
+      startedAt: z.string().datetime().nullable(),
+      inputTokens: z.number().int().nonnegative(),
+      outputTokens: z.number().int().nonnegative(),
+      totalTokens: z.number().int().nonnegative(),
+      cost: z.number().nonnegative().nullable(),
+      nextAction: z.string(),
+    }),
+  ),
+  interactions: z.array(
+    z.object({
+      boundary: z.enum(["consultation", "run-collaboration"]),
+      session: InteractionSessionViewSchema,
+      turns: z.array(InteractionTurnViewSchema),
+      permissions: z.array(PermissionRequestViewSchema),
+    }),
+  ),
+  interventions: z.array(
+    z.object({
+      id: z.string(),
+      nodeRunId: z.string(),
+      attemptId: z.string().nullable(),
+      snapshotRevisionId: z.string(),
+      actorId: z.string(),
+      reason: z.string(),
+      feedback: z.string(),
+      outcome: z.enum(["feedback", "new-attempt"]),
+      createdAt: z.string().datetime(),
+    }),
+  ),
+  allowedCommands: z.object({
+    pause: z.boolean(),
+    resume: z.boolean(),
+    cancelAttemptIds: z.array(z.string()),
+    cancelTurnIds: z.array(z.string()),
+    decidePermissionIds: z.array(z.string()),
+    interveneNodeRunIds: z.array(z.string()),
+  }),
+});
+
+export type RunSupervisionView = z.infer<typeof RunSupervisionViewSchema>;
+
 export const AgUiEventSchema = z.object({
   type: z.enum([
     "RUN_STARTED",
@@ -1967,6 +2049,10 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("run.inspect"), runId: z.string() }),
   z.object({
+    type: z.literal("run.supervision.inspect"),
+    runId: z.string().trim().min(1),
+  }),
+  z.object({
     type: z.literal("execution.inspect"),
     targetKind: z.enum(["node-attempt", "interaction-turn"]),
     targetId: z.string().trim().min(1),
@@ -2067,33 +2153,35 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
                                       ? PipelineValidationResult
                                       : Query["type"] extends "runs.list"
                                         ? readonly DepartmentRunView[]
-                                        : Query["type"] extends "execution.inspect"
-                                          ? ExecutionInspectionView
-                                          : Query["type"] extends "runtime.audit"
-                                            ? readonly RuntimeAuditRecord[]
-                                            : Query["type"] extends
-                                                  | "runtime.events"
-                                                  | "runtime.events.consumer"
-                                              ? readonly RuntimeEventRecord[]
-                                              : Query["type"] extends "artifacts.list"
-                                                ? readonly ArtifactVersionView[]
-                                                : Query["type"] extends "artifact.inspect"
-                                                  ? ArtifactLineageView
-                                                  : Query["type"] extends "artifact.lineage.inspect"
-                                                    ? ArtifactLineageGraphView
-                                                    : Query["type"] extends "interactions.list"
-                                                      ? readonly InteractionView[]
-                                                      : Query["type"] extends "interaction.inspect"
-                                                        ? InteractionView
-                                                        : Query["type"] extends "ag-ui.events"
-                                                          ? AgUiReplayView
-                                                          : Query["type"] extends "memory.candidates.list"
-                                                            ? readonly MemoryCandidateView[]
-                                                            : Query["type"] extends "memory.records.list"
-                                                              ? readonly MemoryRecordView[]
-                                                              : Query["type"] extends "runtime.diagnostics"
-                                                                ? RuntimeDiagnosticsView
-                                                                : DepartmentRunView;
+                                        : Query["type"] extends "run.supervision.inspect"
+                                          ? RunSupervisionView
+                                          : Query["type"] extends "execution.inspect"
+                                            ? ExecutionInspectionView
+                                            : Query["type"] extends "runtime.audit"
+                                              ? readonly RuntimeAuditRecord[]
+                                              : Query["type"] extends
+                                                    | "runtime.events"
+                                                    | "runtime.events.consumer"
+                                                ? readonly RuntimeEventRecord[]
+                                                : Query["type"] extends "artifacts.list"
+                                                  ? readonly ArtifactVersionView[]
+                                                  : Query["type"] extends "artifact.inspect"
+                                                    ? ArtifactLineageView
+                                                    : Query["type"] extends "artifact.lineage.inspect"
+                                                      ? ArtifactLineageGraphView
+                                                      : Query["type"] extends "interactions.list"
+                                                        ? readonly InteractionView[]
+                                                        : Query["type"] extends "interaction.inspect"
+                                                          ? InteractionView
+                                                          : Query["type"] extends "ag-ui.events"
+                                                            ? AgUiReplayView
+                                                            : Query["type"] extends "memory.candidates.list"
+                                                              ? readonly MemoryCandidateView[]
+                                                              : Query["type"] extends "memory.records.list"
+                                                                ? readonly MemoryRecordView[]
+                                                                : Query["type"] extends "runtime.diagnostics"
+                                                                  ? RuntimeDiagnosticsView
+                                                                  : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -2791,6 +2879,33 @@ export const InteractionPromptEnvelopeCommandSchema = z
   })
   .strict();
 
+export const NodeAttemptCancelEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("node-attempt.cancel"),
+    runId: z.string().trim().min(1),
+    attemptId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const InteractionTurnCancelEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("interaction-turn.cancel"),
+    runId: z.string().trim().min(1),
+    turnId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const GovernedInterventionEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("run.governed-intervention"),
+    runId: z.string().trim().min(1),
+    nodeRunId: z.string().trim().min(1),
+    reason: z.string().trim().min(1).max(1_000),
+    feedback: z.string().trim().min(1).max(10_000),
+    outcome: z.enum(["feedback", "new-attempt"]),
+  })
+  .strict();
+
 export const ReviewTopicCreateEnvelopeCommandSchema = z
   .object({
     type: z.literal("review.topic.create"),
@@ -2945,6 +3060,9 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   ProductReadinessRecordEnvelopeCommandSchema,
   ProductGatePromoteEnvelopeCommandSchema,
   InteractionPromptEnvelopeCommandSchema,
+  NodeAttemptCancelEnvelopeCommandSchema,
+  InteractionTurnCancelEnvelopeCommandSchema,
+  GovernedInterventionEnvelopeCommandSchema,
   ReviewTopicCreateEnvelopeCommandSchema,
   ReviewFindingSubmitEnvelopeCommandSchema,
   ReviewFindingDispositionEnvelopeCommandSchema,
@@ -2982,19 +3100,24 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
           ? TechnicalReviewStateView
           : Command["type"] extends "interaction.prompt"
             ? InteractionTurnView
-            : Command["type"] extends ReviewEnvelopeCommand["type"]
-              ? ReviewTopicView
-              : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-                ? ProductReviewStateView
-                : Command["type"] extends ProductEnvelopeCommand["type"]
-                  ? ProductDiscoveryView
-                  : Command["type"] extends "artifact.version.register"
-                    ? ArtifactRegistrationView
-                    : Command["type"] extends
-                          | "artifact.version.finalize"
-                          | "artifact.version.supersede"
-                      ? ArtifactVersionView
-                      : ProjectEditorView;
+            : Command["type"] extends
+                  | "node-attempt.cancel"
+                  | "interaction-turn.cancel"
+                  | "run.governed-intervention"
+              ? RunSupervisionView
+              : Command["type"] extends ReviewEnvelopeCommand["type"]
+                ? ReviewTopicView
+                : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                  ? ProductReviewStateView
+                  : Command["type"] extends ProductEnvelopeCommand["type"]
+                    ? ProductDiscoveryView
+                    : Command["type"] extends "artifact.version.register"
+                      ? ArtifactRegistrationView
+                      : Command["type"] extends
+                            | "artifact.version.finalize"
+                            | "artifact.version.supersede"
+                        ? ArtifactVersionView
+                        : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

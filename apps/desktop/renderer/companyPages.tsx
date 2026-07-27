@@ -22,6 +22,7 @@ import type {
   ReviewTopicView,
   RuntimeDiagnosticsView,
   RuntimeBackupView,
+  RunSupervisionView,
   SkillConfigurationView,
   AgentCatalogView,
   SkillCatalogView,
@@ -39,6 +40,7 @@ import {
   type DepartmentSettingsSaveOperation,
 } from "./departmentSettingsSave.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
+import { RunSupervisionPanel } from "./runSupervision.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2335,6 +2337,8 @@ export function ProjectDetailView({
   const [selectedRun, setSelectedRun] = useState<DepartmentRunView | null>(
     null,
   );
+  const [runSupervision, setRunSupervision] =
+    useState<RunSupervisionView | null>(null);
   const [runDepartmentId, setRunDepartmentId] = useState("");
   const [runAgents, setRunAgents] = useState<AgentCatalogView["agents"]>([]);
   const [agentOverrideId, setAgentOverrideId] = useState("");
@@ -2408,6 +2412,31 @@ export function ProjectDetailView({
     );
     return next;
   };
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setRunSupervision(null);
+      return;
+    }
+    let active = true;
+    window.sandcastle
+      .query({
+        type: "run.supervision.inspect",
+        runId: selectedRun.run.id,
+      })
+      .then((result) => {
+        if (active) setRunSupervision(result.view);
+      })
+      .catch((nextError: unknown) => {
+        if (active) {
+          setRunSupervision(null);
+          setRunError(errorMessage(nextError));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedRun?.run.id, selectedRun?.run.revision]);
 
   useEffect(() => {
     let active = true;
@@ -2997,6 +3026,58 @@ export function ProjectDetailView({
     }
   };
 
+  const applySupervisionCommand = async (
+    command:
+      | {
+          readonly type: "node-attempt.cancel";
+          readonly runId: string;
+          readonly attemptId: string;
+        }
+      | {
+          readonly type: "interaction-turn.cancel";
+          readonly runId: string;
+          readonly turnId: string;
+        }
+      | {
+          readonly type: "run.governed-intervention";
+          readonly runId: string;
+          readonly nodeRunId: string;
+          readonly reason: string;
+          readonly feedback: string;
+          readonly outcome: "feedback" | "new-attempt";
+        },
+  ): Promise<void> => {
+    if (!selectedRun) return;
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      const result = await window.sandcastle.execute({
+        commandId: globalThis.crypto.randomUUID(),
+        expectedRevision: selectedRun.run.revision,
+        command,
+      });
+      if (result.status === "rejected") {
+        throw Object.assign(new Error(result.error.message), {
+          code: result.error.code,
+        });
+      }
+      setRunSupervision(result.value);
+      await refreshRuns();
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+      window.sandcastle
+        .query({
+          type: "run.supervision.inspect",
+          runId: selectedRun.run.id,
+        })
+        .then((result) => setRunSupervision(result.view))
+        .catch(() => undefined);
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
   const saveProject = async (): Promise<void> => {
     await onSave({
       projectId: project.id,
@@ -3520,18 +3601,57 @@ export function ProjectDetailView({
             </div>
             <div className="project-run-detail-pane" data-project-run-detail>
               {selectedRun ? (
-                <DepartmentRunDetail
-                  busy={runBusy}
-                  onDecision={(input) => void decideApproval(input)}
-                  onRetryApproval={(nodeRunId) => void retryApproval(nodeRunId)}
-                  onRetry={(input) => void retryNode(input)}
-                  onContinue={() => void continueRun()}
-                  onControl={(action) => void controlRun(action)}
-                  onRecover={(input) => void recoverRun(input)}
-                  onFork={(nodeRunId) => void forkRun(nodeRunId)}
-                  run={selectedRun}
-                  t={t}
-                />
+                <>
+                  {runSupervision ? (
+                    <RunSupervisionPanel
+                      busy={runBusy || interactionBusy}
+                      onCancelAttempt={(attemptId) =>
+                        void applySupervisionCommand({
+                          type: "node-attempt.cancel",
+                          runId: selectedRun.run.id,
+                          attemptId,
+                        })
+                      }
+                      onCancelTurn={(turnId) =>
+                        void applySupervisionCommand({
+                          type: "interaction-turn.cancel",
+                          runId: selectedRun.run.id,
+                          turnId,
+                        })
+                      }
+                      onDecidePermission={(permissionId, decision) =>
+                        void decideCollaborationPermission(
+                          permissionId,
+                          decision,
+                        )
+                      }
+                      onIntervene={(input) =>
+                        void applySupervisionCommand({
+                          type: "run.governed-intervention",
+                          runId: selectedRun.run.id,
+                          ...input,
+                        })
+                      }
+                      onPause={() => void controlRun("pause")}
+                      onResume={() => void controlRun("resume")}
+                      view={runSupervision}
+                    />
+                  ) : null}
+                  <DepartmentRunDetail
+                    busy={runBusy}
+                    onDecision={(input) => void decideApproval(input)}
+                    onRetryApproval={(nodeRunId) =>
+                      void retryApproval(nodeRunId)
+                    }
+                    onRetry={(input) => void retryNode(input)}
+                    onContinue={() => void continueRun()}
+                    onControl={(action) => void controlRun(action)}
+                    onRecover={(input) => void recoverRun(input)}
+                    onFork={(nodeRunId) => void forkRun(nodeRunId)}
+                    run={selectedRun}
+                    t={t}
+                  />
+                </>
               ) : (
                 <div className="empty-state">{t.selectRunToInspect}</div>
               )}

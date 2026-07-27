@@ -64,6 +64,63 @@ import { scriptedSkillConfiguration } from "../runtime/testing/skillConfiguratio
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
 describe("Sandcastle preload bridge", () => {
+  it("parses Run Supervision through the typed query tunnel", async () => {
+    const view = {
+      run: scriptedDepartmentRun.run,
+      snapshot: {
+        id: scriptedDepartmentRun.snapshot.id,
+        revision: scriptedDepartmentRun.snapshot.revision,
+        hash: scriptedDepartmentRun.snapshot.hash,
+      },
+      graph: { nodes: [], edges: [] },
+      timeline: [],
+      agentActivities: [],
+      interactions: [],
+      interventions: [],
+      allowedCommands: {
+        pause: true,
+        resume: false,
+        cancelAttemptIds: [],
+        cancelTurnIds: [],
+        decidePermissionIds: [],
+        interveneNodeRunIds: [],
+      },
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: { readonly type?: string };
+      };
+      if (request.operation === "execute") {
+        return { status: "succeeded", value: view, effectIds: ["audit-1"] };
+      }
+      assert.equal(request.query?.type, "run.supervision.inspect");
+      return { view, asOfSequence: 18 };
+    });
+
+    const result = await bridge.query({
+      type: "run.supervision.inspect",
+      runId: scriptedDepartmentRun.run.id,
+    });
+
+    assert.equal(result.view.run.id, scriptedDepartmentRun.run.id);
+    assert.equal(result.asOfSequence, 18);
+    const cancelled = await bridge.execute({
+      commandId: "cancel-attempt-1",
+      expectedRevision: scriptedDepartmentRun.run.revision,
+      command: {
+        type: "node-attempt.cancel",
+        runId: scriptedDepartmentRun.run.id,
+        attemptId: "attempt-1",
+      },
+    });
+    assert.equal(cancelled.status, "succeeded");
+    if (cancelled.status === "succeeded") {
+      assert.equal(cancelled.value.run.id, scriptedDepartmentRun.run.id);
+    }
+  });
+
   it("exposes Interaction Prompt without leaking Electron IPC", async () => {
     const calls: Array<{ channel: string; payload: unknown }> = [];
     const bridge = createSandcastleBridge(async (channel, payload) => {
