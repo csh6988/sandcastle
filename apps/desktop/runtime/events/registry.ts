@@ -30,6 +30,7 @@ export interface RuntimeEventScope {
   readonly artifactId?: string;
   readonly artifactVersionId?: string;
   readonly workspaceAllocationId?: string;
+  readonly permissionRequestId?: string;
   readonly commandId?: string;
 }
 
@@ -290,6 +291,32 @@ const interactionTurnEventPayloadSchema = z
     totalTokens: z.number().int().nonnegative().optional(),
     terminalExecutionFactId: z.string().trim().min(1).optional(),
     failureCode: z.string().trim().min(1).optional(),
+  })
+  .passthrough();
+
+const toolCallEventPayloadSchema = z
+  .object({
+    toolCallId: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    args: z.unknown(),
+    evidenceRefs: z.array(z.string().trim().min(1)).optional(),
+  })
+  .passthrough();
+
+const toolResultEventPayloadSchema = z
+  .object({
+    toolCallId: z.string().trim().min(1),
+    content: z.unknown(),
+    messageId: z.string().trim().min(1).optional(),
+    evidenceRefs: z.array(z.string().trim().min(1)).optional(),
+  })
+  .passthrough();
+
+const permissionEventPayloadSchema = z
+  .object({
+    permissionId: z.string().trim().min(1),
+    scope: z.string().trim().min(1),
+    status: z.enum(["pending", "approved", "denied", "expired"]),
   })
   .passthrough();
 
@@ -701,6 +728,51 @@ const definitions = [
         acpMapping: type === "message.delta" ? "mapped" : "custom",
       }) satisfies RuntimeEventDefinition,
   ),
+  {
+    type: "tool.call",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "sessionId",
+      "interactionTurnId",
+    ],
+    payloadSchema: toolCallEventPayloadSchema,
+    retentionClass: "standard",
+    agUiMapping: "mapped",
+    acpMapping: "mapped",
+  },
+  {
+    type: "tool.result",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "sessionId",
+      "interactionTurnId",
+    ],
+    payloadSchema: toolResultEventPayloadSchema,
+    retentionClass: "standard",
+    agUiMapping: "mapped",
+    acpMapping: "mapped",
+  },
+  ...["permission.requested", "permission.decided"].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "sessionId",
+          "permissionRequestId",
+        ],
+        payloadSchema: permissionEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "mapped",
+      }) satisfies RuntimeEventDefinition,
+  ),
   ...[
     "execution.leased",
     "execution.fact.accepted",
@@ -735,6 +807,7 @@ const definitions = [
 
 export interface RuntimeEventRegistry {
   readonly version: number;
+  readonly list: () => readonly RuntimeEventDefinition[];
   readonly get: (type: string) => RuntimeEventDefinition | undefined;
   readonly validate: (input: {
     readonly type: string;
@@ -750,6 +823,7 @@ export const createRuntimeEventRegistry = (): RuntimeEventRegistry => {
   );
   return {
     version: RUNTIME_EVENT_REGISTRY_VERSION,
+    list: () => [...definitions],
     get: (type) => entries.get(type),
     validate: (input) => {
       const definition = entries.get(input.type);

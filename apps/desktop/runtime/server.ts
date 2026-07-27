@@ -19,6 +19,7 @@ import { AgentCatalogError } from "./agent/agentCatalog.js";
 import { SkillCatalogError } from "./skill/skillDiscovery.js";
 import {
   AgUiCursorExpiredError,
+  AgUiProtocolDiagnosticError,
   replayRuntimeEventsAsAgUi,
 } from "./agUiAdapter.js";
 import { acquireCompanyRuntimeLock } from "./runtimeLock.js";
@@ -429,17 +430,14 @@ export const startCompanyRuntimeServer = async (
                   );
                 case "ag-ui.events":
                   return replayRuntimeEventsAsAgUi(
-                    database.pipelineRuntime.runtimeEvents({
-                      afterSequence: request.query.afterSequence,
-                      limit: request.query.limit,
-                    }),
+                    database.events.readAfter(
+                      request.query.afterSequence,
+                      request.query.limit,
+                    ),
                     {
                       ...request.query,
                       earliestRetainedSequence:
-                        database.pipelineRuntime.runtimeEvents({
-                          afterSequence: 0,
-                          limit: 1,
-                        })[0]?.sequence,
+                        database.events.earliestSequence(),
                     },
                   );
                 case "memory.candidates.list":
@@ -998,6 +996,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeInteractionError ||
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
+                error instanceof AgUiProtocolDiagnosticError ||
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||
@@ -1013,6 +1012,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof RuntimeInteractionError ||
                 error instanceof ArtifactRegistryError ||
                 error instanceof AgUiCursorExpiredError ||
+                error instanceof AgUiProtocolDiagnosticError ||
                 error instanceof RuntimeMemoryError ||
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||

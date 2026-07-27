@@ -943,14 +943,26 @@ describe("Company Runtime", () => {
     try {
       const insert = sqlite.prepare(
         `INSERT INTO runtime_event_outbox(
-           event_id, type, run_id, node_run_id, payload_json, created_at
-         ) VALUES (?, 'session.message.created', NULL, NULL, ?, ?)`,
+           event_id, type, registry_version, event_schema_version,
+           company_id, project_id, run_id, node_run_id, scope_json,
+           payload_json, created_at
+         ) VALUES (?, 'message.delta', 7, 1, 'company', 'project-1',
+                   NULL, NULL, ?, ?, ?)`,
       );
       sqlite.exec("BEGIN IMMEDIATE");
       for (let sequence = 1; sequence <= 1_005; sequence += 1) {
         insert.run(
           `event-${sequence}`,
-          JSON.stringify({ sessionId: "session-1", content: `${sequence}` }),
+          JSON.stringify({
+            companyId: "company",
+            projectId: "project-1",
+            sessionId: "session-1",
+            interactionTurnId: "turn-1",
+          }),
+          JSON.stringify({
+            messageId: "message-1",
+            content: `${sequence}`,
+          }),
           "2026-07-15T00:00:00.000Z",
         );
       }
