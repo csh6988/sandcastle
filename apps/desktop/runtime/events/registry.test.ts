@@ -7,6 +7,14 @@ import {
 
 const agUiRegistryFixture = [
   "application.registered@1:custom",
+  "workspace-allocation.planned@1:custom",
+  "workspace-allocation.ready@1:custom",
+  "workspace-allocation.failed@1:custom",
+  "workspace-allocation.cleanup-requested@1:custom",
+  "workspace-allocation.cleaned@1:custom",
+  "source-import.planned@1:custom",
+  "source-import.completed@1:custom",
+  "source-import.failed@1:custom",
   "application-spec.revised@1:custom",
   "technical-proposal.revised@1:custom",
   "technical-gate.passed@1:custom",

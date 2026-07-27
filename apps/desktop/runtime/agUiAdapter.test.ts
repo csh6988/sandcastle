@@ -7,13 +7,14 @@ import {
   replayRuntimeEventsAsAgUi,
   runtimeEventToAgUi,
 } from "./agUiAdapter.js";
+import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
 
 const envelope = (
   type: string,
   sequence: number,
   payload: unknown,
 ): EventEnvelope => ({
-  registryVersion: 7,
+  registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
   schemaVersion: 1,
   sequence,
   eventId: `event-${sequence}`,
@@ -32,7 +33,7 @@ const envelope = (
 const assertSource = (sequence: number) => ({
   eventId: `event-${sequence}`,
   sequence,
-  registryVersion: 7,
+  registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
   schemaVersion: 1,
   companyId: "company",
   projectId: "project-1",
@@ -46,7 +47,7 @@ const assertSource = (sequence: number) => ({
 describe("AG-UI Runtime Adapter", () => {
   it("maps a canonical message delta without changing Runtime event identity", () => {
     const runtimeEvent: EventEnvelope = {
-      registryVersion: 7,
+      registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
       schemaVersion: 1,
       sequence: 21,
       eventId: "event-21",
@@ -71,7 +72,7 @@ describe("AG-UI Runtime Adapter", () => {
           source: {
             eventId: "event-21",
             sequence: 21,
-            registryVersion: 7,
+            registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
             schemaVersion: 1,
             companyId: "company",
             projectId: "project-1",
@@ -105,7 +106,7 @@ describe("AG-UI Runtime Adapter", () => {
       source: {
         eventId: "event-22",
         sequence: 22,
-        registryVersion: 7,
+        registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
         schemaVersion: 1,
         companyId: "company",
         projectId: "project-1",
@@ -156,7 +157,7 @@ describe("AG-UI Runtime Adapter", () => {
             messageId: "message-future",
             content: "future",
           }),
-          registryVersion: 8,
+          registryVersion: RUNTIME_EVENT_REGISTRY_VERSION + 1,
         }),
       (error: unknown) =>
         error instanceof AgUiProtocolDiagnosticError &&
@@ -193,7 +194,7 @@ describe("AG-UI Runtime Adapter", () => {
       source: {
         eventId: "event-24",
         sequence: 24,
-        registryVersion: 7,
+        registryVersion: RUNTIME_EVENT_REGISTRY_VERSION,
         schemaVersion: 1,
         companyId: "company",
         projectId: "project-1",
