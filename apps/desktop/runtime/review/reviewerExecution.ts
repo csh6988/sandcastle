@@ -135,10 +135,12 @@ export interface ReviewerExecutionAdapter {
   ) => Promise<ReviewerExecutionResult>;
   readonly cancel?: (
     operationKey: string,
+    providerExecutionRef?: string,
   ) => Promise<"cancelled" | "not-found" | "unknown">;
   readonly reconcile?: (
     operationKey: string,
     sink?: ExecutionEventSink,
+    providerExecutionRef?: string,
   ) => Promise<ReviewerExecutionResult>;
   readonly reattach?: (
     input: ReviewerExecutionInput,

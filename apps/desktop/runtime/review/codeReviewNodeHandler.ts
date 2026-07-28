@@ -218,7 +218,7 @@ export const openCodeReviewNodeHandler = (
             input.review.id,
           );
       }
-      if (input.failure) {
+      if (input.failure?.status === "blocked") {
         options.pipelineRuntime.blockCodeReviewInTransaction({
           runId: input.review.manifest.runId,
           nodeRunId: input.review.workspace.reviewNodeRunId,
@@ -227,6 +227,25 @@ export const openCodeReviewNodeHandler = (
             message: input.failure.message,
           },
         });
+      } else if (input.failure?.status === "unknown") {
+        const run = options.pipelineRuntime.inspectRun(
+          input.review.manifest.runId,
+        );
+        const node = run.nodes.find(
+          (candidate) =>
+            candidate.id === input.review.workspace.reviewNodeRunId,
+        );
+        if (run.run.status === "running" && node?.status === "running") {
+          options.pipelineRuntime.blockCodeReviewInTransaction({
+            runId: input.review.manifest.runId,
+            nodeRunId: input.review.workspace.reviewNodeRunId,
+            reason: "code-review-reconciliation",
+            failure: {
+              code: input.failure.code,
+              message: input.failure.message,
+            },
+          });
+        }
       }
       const eventType =
         input.state === "running"
@@ -527,11 +546,9 @@ export const openCodeReviewNodeHandler = (
     if (persisted?.state === "succeeded" && persisted.resultJson) {
       return parseJson<unknown>(persisted.resultJson);
     }
-    if (persisted?.state === "blocked" || persisted?.state === "unknown") {
+    if (persisted?.state === "blocked") {
       throw new CodeReviewNodeHandlerError(
-        persisted.state === "blocked"
-          ? "PROVIDER_ISOLATION_REQUIRED"
-          : "RECONCILE_UNKNOWN",
+        "PROVIDER_ISOLATION_REQUIRED",
         `Reviewer execution ${persisted.operationKey} is ${persisted.state}.`,
       );
     }
@@ -551,7 +568,8 @@ export const openCodeReviewNodeHandler = (
       reviewerSessionId: input.reviewer.sessionId,
       reviewerAiMemberId: input.reviewer.aiMemberId,
       operationKey: input.operationKey,
-      reconcileExisting: persisted?.state === "running",
+      reconcileExisting:
+        persisted?.state === "running" || persisted?.state === "unknown",
       timeoutSeconds: input.executionProfile.timeoutSeconds,
       request: input,
       adapter: executionAdapter,
@@ -1098,7 +1116,20 @@ export const openCodeReviewNodeHandler = (
            JOIN node_runs
              ON node_runs.id = workspaces.review_node_run_id
           WHERE workspaces.state = 'ready'
-            AND node_runs.status = 'running'
+            AND (
+              node_runs.status = 'running'
+              OR (
+                node_runs.status = 'blocked'
+                AND EXISTS (
+                  SELECT 1 FROM node_attempts
+                   WHERE node_attempts.node_run_id = node_runs.id
+                     AND node_attempts.status = 'reconciling'
+                     AND node_attempts.failure_code IN (
+                       'RECONCILE_UNKNOWN', 'RUNTIME_SHUTDOWN'
+                     )
+                )
+              )
+            )
           ORDER BY manifests.run_id, workspaces.review_node_run_id`,
       )
       .all() as Array<{ readonly runId: string; readonly nodeRunId: string }>;

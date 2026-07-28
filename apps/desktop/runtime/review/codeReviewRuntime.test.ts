@@ -1339,11 +1339,16 @@ describe("Code Review Runtime", () => {
               )
               .get() as { readonly count: number }
           ).count,
-          1,
+          0,
         );
       } finally {
         raw.close();
       }
+      const interrupted = paused.nodes.find(
+        (node) => node.id === "code-review-node",
+      );
+      assert.equal(interrupted?.status, "blocked");
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
     } finally {
       fixture.database.close();
     }
@@ -1409,12 +1414,217 @@ describe("Code Review Runtime", () => {
       assert.equal((await execution) instanceof Error, true);
       const drained = fixture.database.pipelineRuntime.inspectRun("review-run");
       assert.equal(drained.run.status, "blocked");
-      assert.equal(
-        drained.nodes.find((node) => node.id === "code-review-node")?.status,
-        "blocked",
+      const interrupted = drained.nodes.find(
+        (node) => node.id === "code-review-node",
       );
+      assert.equal(interrupted?.status, "blocked");
+      assert.equal(interrupted?.attempts.at(-1)?.status, "reconciling");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        assert.equal(
+          (
+            raw
+              .prepare(
+                `SELECT COUNT(*) AS count FROM execution_facts
+                  WHERE operation_key IN (
+                    SELECT operation_key FROM code_review_execution_stages
+                     WHERE phase = 'initial-finding'
+                  ) AND kind = 'cancelled' AND status = 'accepted'`,
+              )
+              .get() as { readonly count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        raw.close();
+      }
     } finally {
       fixture.database.close();
+    }
+  });
+
+  it("reconciles and reattaches a shutdown-interrupted Reviewer operation after Runtime restart", async () => {
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async (_input, _sink, signal) => {
+        assert.ok(signal);
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return {
+          status: "unknown",
+          code: "RECONCILE_UNKNOWN",
+          message: "Runtime shutdown interrupted the local Reviewer worker.",
+          evidence: [],
+        };
+      },
+      cancel: async () => "unknown",
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "not used before restart",
+        evidence: [],
+      }),
+    });
+    let reopened: ReturnType<typeof openCompanyDatabase> | undefined;
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      const execution = fixture.database.pipelineRuntime
+        .executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        })
+        .catch((error: unknown) => error);
+      await started;
+      await fixture.database.pipelineRuntime.prepareForShutdown();
+      assert.equal((await execution) instanceof Error, true);
+      const drained = fixture.database.pipelineRuntime.inspectRun("review-run");
+      assert.equal(
+        drained.nodes
+          .find((node) => node.id === "code-review-node")
+          ?.attempts.at(-1)?.failure?.code,
+        "RUNTIME_SHUTDOWN",
+      );
+      fixture.database.close();
+
+      let reconcileCalls = 0;
+      let reattachCalls = 0;
+      const resumedExecutePhases: string[] = [];
+      reopened = openCompanyDatabase(fixture.companyDir, {
+        codeReviewRuntime: {
+          reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
+          reviewerExecutionAdapter: {
+            capabilities: {
+              executionBoundIsolation: true,
+              reattachRunningOperation: true,
+            },
+            reconcile: async () => {
+              reconcileCalls += 1;
+              return {
+                status: "running",
+                providerExecutionRef: "shutdown-review-operation-1",
+              };
+            },
+            reattach: async (input) => {
+              reattachCalls += 1;
+              return {
+                status: "succeeded",
+                providerId: "scripted-docker-reviewer",
+                isolation: {
+                  readOnlyFilesystem: true,
+                  independentGitDatabase: true,
+                  independentSessionStorage: true,
+                  independentCredentialScope: true,
+                  independentMutableCache: true,
+                  inputAllowlist: true,
+                  mountTableHash: "1".repeat(64),
+                  sessionScopeHash: "2".repeat(64),
+                  cacheScopeHash: "3".repeat(64),
+                  credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "shutdown-review-operation-1",
+                  inspectedReadOnlyReviewMount: true,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed",
+                  terminalProviderReceiptHash: "6".repeat(64),
+                  mechanism: "scripted-docker-readonly",
+                  mechanismVersion: "1",
+                },
+                isolationEvidence: ["provider:shutdown-reattached"],
+                output: {
+                  findings: [
+                    {
+                      severity: "info",
+                      summary: "Recovered exact review output.",
+                      rationale: "The provider operation remained attached.",
+                      impact: "No duplicate Reviewer was started.",
+                      evidenceRefs: [input.manifest.diffArtifactVersionId],
+                      suggestedOwner: "software-engineer",
+                      blocking: false,
+                    },
+                  ],
+                },
+              };
+            },
+            execute: async (input) => {
+              resumedExecutePhases.push(input.phase);
+              return {
+                status: "succeeded",
+                providerId: "scripted-docker-reviewer",
+                isolation: {
+                  readOnlyFilesystem: true,
+                  independentGitDatabase: true,
+                  independentSessionStorage: true,
+                  independentCredentialScope: true,
+                  independentMutableCache: true,
+                  inputAllowlist: true,
+                  mountTableHash: "1".repeat(64),
+                  sessionScopeHash: "2".repeat(64),
+                  cacheScopeHash: "3".repeat(64),
+                  credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "shutdown-fresh-recheck-operation",
+                  inspectedReadOnlyReviewMount: true,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed",
+                  terminalProviderReceiptHash: "6".repeat(64),
+                  mechanism: "scripted-docker-readonly",
+                  mechanismVersion: "1",
+                },
+                isolationEvidence: ["provider:shutdown-fresh-recheck"],
+                output: {
+                  result: "PASS",
+                  conditions: [],
+                  evidenceRefs: [input.manifest.diffArtifactVersionId],
+                },
+              };
+            },
+          },
+        },
+      });
+
+      assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
+      assert.equal(reconcileCalls, 1);
+      assert.equal(reattachCalls, 1);
+      assert.deepEqual(resumedExecutePhases, ["fresh-recheck"]);
+      assert.equal(
+        reopened.codeReviews.inspect("review-run")[0]?.integrationEligible,
+        true,
+      );
+      const raw = new DatabaseSync(reopened.path);
+      try {
+        const reattachAudit = raw
+          .prepare(
+            `SELECT command_id AS commandId
+               FROM runtime_audit_records
+              WHERE action = 'attempt.code-review-reattach'`,
+          )
+          .get() as { readonly commandId: string | null } | undefined;
+        assert.ok(reattachAudit?.commandId);
+        assert.equal(
+          (
+            raw
+              .prepare(
+                `SELECT COUNT(*) AS count FROM command_deduplication
+                  WHERE command_id = ? AND status = 'completed'`,
+              )
+              .get(reattachAudit.commandId) as { readonly count: number }
+          ).count,
+          1,
+        );
+      } finally {
+        raw.close();
+      }
+    } finally {
+      reopened?.close();
     }
   });
 
@@ -1836,6 +2046,12 @@ describe("Code Review Runtime", () => {
       assert.equal(
         blocked.nodes.find((node) => node.id === "code-review-node")?.status,
         "blocked",
+      );
+      assert.equal(
+        blocked.nodes
+          .find((node) => node.id === "code-review-node")
+          ?.attempts.at(-1)?.status,
+        "reconciling",
       );
     } finally {
       reopened?.close();

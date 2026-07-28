@@ -40,6 +40,10 @@ import {
 } from "../interface.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
 import {
+  openCodeReviewExecutionRuntime,
+  type ActivePipelineExecution,
+} from "./codeReviewExecutionRuntime.js";
+import {
   defaultNodeHandlerRegistry,
   type NodeHandlerRegistry,
 } from "./nodeHandlerRegistry.js";
@@ -284,7 +288,10 @@ export interface PipelineRuntime {
   readonly blockCodeReviewInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
-    readonly reason?: "code-review-isolation" | "code-review-rework";
+    readonly reason?:
+      | "code-review-isolation"
+      | "code-review-rework"
+      | "code-review-reconciliation";
     readonly failure: {
       readonly code: string;
       readonly message: string;
@@ -588,17 +595,7 @@ export const openPipelineRuntime = (
       }) ?? []
     );
   };
-  const activeExecutions = new Map<
-    string,
-    {
-      readonly attemptId: string;
-      readonly runId: string;
-      readonly operationKey: string;
-      readonly controller: AbortController;
-      readonly done: Promise<void>;
-      readonly cancel?: () => Promise<unknown>;
-    }
-  >();
+  const activeExecutions = new Map<string, ActivePipelineExecution>();
   let codeReviewExecutor:
     | ((input: {
         readonly runId: string;
@@ -609,377 +606,7 @@ export const openPipelineRuntime = (
     (executor) => {
       codeReviewExecutor = executor;
     };
-  const executeCodeReviewStage: PipelineRuntime["executeCodeReviewStage"] =
-    async (input) => {
-      const attempt = database
-        .prepare(
-          `SELECT node_attempts.id AS attemptId
-             FROM node_attempts
-             JOIN node_runs ON node_runs.id = node_attempts.node_run_id
-            WHERE node_runs.id = ? AND node_runs.run_id = ?
-              AND node_runs.handler_kind_id = 'code-review@1'
-              AND node_attempts.status IN ('running', 'reconciling')
-            ORDER BY node_attempts.attempt_number DESC LIMIT 1`,
-        )
-        .get(input.nodeRunId, input.runId) as
-        | { readonly attemptId: string }
-        | undefined;
-      if (!attempt) {
-        throw new PipelineRuntimeError(
-          "CODE_REVIEW_EXECUTION_STATE_INVALID",
-          `Code Review Node ${input.nodeRunId} has no active aggregate Attempt for Reviewer execution.`,
-        );
-      }
-      const existing = inspectExecution(database, {
-        operationKey: input.operationKey,
-      });
-      const existingTerminal = existing.facts.find(
-        (fact) =>
-          fact.status === "accepted" &&
-          ["completed", "failed", "cancelled"].includes(fact.kind),
-      );
-      if (existingTerminal?.kind === "completed") {
-        const payload =
-          typeof existingTerminal.payload === "object" &&
-          existingTerminal.payload !== null
-            ? (existingTerminal.payload as Record<string, unknown>)
-            : {};
-        return payload.structuredResult as ReviewerExecutionResult;
-      }
-      if (existingTerminal) {
-        return {
-          status: "unknown",
-          code: "RECONCILE_UNKNOWN",
-          message: `Reviewer execution ${input.operationKey} has terminal ${existingTerminal.kind} evidence and cannot be replayed.`,
-          evidence: existingTerminal.evidenceRefs,
-        };
-      }
-
-      const reconciliation =
-        input.reconcileExisting || existing.leases.length > 0;
-      const issueLease = (
-        leaseKind: "execution" | "reconciliation",
-      ): ExecutionLeaseContext & {
-        readonly target: { readonly kind: "node-attempt"; readonly id: string };
-      } => {
-        const issuedAt = clock();
-        const issuedAtIso = issuedAt.toISOString();
-        const executionEpoch =
-          Math.max(0, ...existing.leases.map((lease) => lease.executionEpoch)) +
-          (leaseKind === "execution" && reconciliation ? 2 : 1);
-        const leaseId = randomUUID();
-        const target = {
-          kind: "node-attempt" as const,
-          id: attempt.attemptId,
-        };
-        const lease = {
-          leaseId,
-          leaseKind,
-          operationKey: input.operationKey,
-          target,
-          executionEpoch,
-          fenceToken: `code-review-fence:${randomUUID()}`,
-        };
-        database.exec("BEGIN IMMEDIATE");
-        try {
-          database
-            .prepare(
-              `UPDATE execution_leases SET released_at = ?
-                WHERE operation_key = ? AND released_at IS NULL`,
-            )
-            .run(issuedAtIso, input.operationKey);
-          database
-            .prepare(
-              `INSERT INTO execution_leases(
-                 id, target_kind, target_id, lease_kind, operation_key,
-                 execution_epoch, fence_token, worker_id, issued_at,
-                 expires_at, renewed_at, released_at, cancel_requested
-               ) VALUES (?, 'node-attempt', ?, ?, ?, ?, ?,
-                         'code-review-node-handler', ?, ?, NULL, NULL, 0)`,
-            )
-            .run(
-              leaseId,
-              attempt.attemptId,
-              leaseKind,
-              input.operationKey,
-              executionEpoch,
-              lease.fenceToken,
-              issuedAtIso,
-              new Date(
-                issuedAt.getTime() + input.timeoutSeconds * 1_000,
-              ).toISOString(),
-            );
-          database.exec("COMMIT");
-        } catch (error) {
-          database.exec("ROLLBACK");
-          throw error;
-        }
-        return lease;
-      };
-
-      const runWithLease = async (
-        lease: ExecutionLeaseContext & {
-          readonly target: {
-            readonly kind: "node-attempt";
-            readonly id: string;
-          };
-        },
-        execute: (
-          sink: ExecutionEventSink,
-          signal: AbortSignal,
-        ) => Promise<ReviewerExecutionResult>,
-      ): Promise<ReviewerExecutionResult> => {
-        const controller = new AbortController();
-        let resolveDone!: () => void;
-        const done = new Promise<void>((resolve) => {
-          resolveDone = resolve;
-        });
-        activeExecutions.set(attempt.attemptId, {
-          attemptId: attempt.attemptId,
-          runId: input.runId,
-          operationKey: input.operationKey,
-          controller,
-          done,
-          ...(input.adapter.cancel
-            ? {
-                cancel: () => input.adapter.cancel!(input.operationKey),
-              }
-            : {}),
-        });
-        const baseSink = createExecutionFactSink({
-          database,
-          lease,
-          target: lease.target,
-          runId: input.runId,
-          nodeRunId: input.nodeRunId,
-          attemptId: attempt.attemptId,
-          now: clock,
-          appendEvent: (event) =>
-            appendExecutionEvent({
-              ...event,
-              runId: input.runId,
-              nodeRunId: input.nodeRunId,
-              attemptId: attempt.attemptId,
-              payload: event.payload,
-              createdAt: event.timestamp,
-            }),
-          applyAcceptedFact: ({ fact, now }) => {
-            if (fact.kind !== "message") return [];
-            const payload =
-              typeof fact.payload === "object" && fact.payload !== null
-                ? (fact.payload as Record<string, unknown>)
-                : {};
-            const content =
-              typeof payload.content === "string" ? payload.content.trim() : "";
-            if (!content) {
-              throw new ExecutionFactError(
-                "EXECUTION_ADAPTER_PROTOCOL",
-                "Reviewer message Fact requires non-empty content.",
-              );
-            }
-            const participant = database
-              .prepare(
-                `SELECT id FROM session_participants
-                  WHERE session_id = ? AND participant_type = 'ai-member'
-                    AND participant_ref = ?
-                  ORDER BY created_at, id LIMIT 1`,
-              )
-              .get(input.reviewerSessionId, input.reviewerAiMemberId) as
-              | { readonly id: string }
-              | undefined;
-            if (!participant) {
-              throw new ExecutionFactError(
-                "EXECUTION_ADAPTER_PROTOCOL",
-                "Reviewer message Fact lost its frozen Session participant.",
-              );
-            }
-            const messageId = randomUUID();
-            database
-              .prepare(
-                `INSERT INTO session_messages(
-                   id, session_id, participant_id, kind, content, created_at
-                 ) VALUES (?, ?, ?, 'text', ?, ?)`,
-              )
-              .run(
-                messageId,
-                input.reviewerSessionId,
-                participant.id,
-                content,
-                now,
-              );
-            return [messageId];
-          },
-        });
-        const sink: ExecutionEventSink = { record: baseSink.record };
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const execution = execute(sink, controller.signal);
-          const timed = new Promise<never>((_, reject) => {
-            timeout = setTimeout(() => {
-              controller.abort();
-              reject(
-                new PipelineRuntimeError(
-                  "EXECUTION_TIMEOUT",
-                  `Reviewer execution ${input.operationKey} exceeded ${input.timeoutSeconds}s.`,
-                ),
-              );
-            }, input.timeoutSeconds * 1_000);
-          });
-          const result = await Promise.race([execution, timed]);
-          if (timeout) clearTimeout(timeout);
-          if (result.status === "running") {
-            throw new PipelineRuntimeError(
-              "EXECUTION_ADAPTER_PROTOCOL",
-              "A Reviewer execute/reattach call cannot return running.",
-            );
-          }
-          if (controller.signal.aborted) {
-            await sink.record({
-              adapterSchemaVersion: 1,
-              factId: `${input.operationKey}:cancelled:${lease.executionEpoch}`,
-              ordinal:
-                Math.max(
-                  0,
-                  ...inspectExecution(database, {
-                    operationKey: input.operationKey,
-                  })
-                    .facts.filter(
-                      (fact) => fact.executionEpoch === lease.executionEpoch,
-                    )
-                    .map((fact) => fact.ordinal),
-                ) + 1,
-              kind: "cancelled",
-              schemaVersion: 1,
-              payload: {
-                code: "EXECUTION_CANCELLED",
-                message: "Reviewer execution was cancelled.",
-              },
-              evidenceRefs: [],
-            });
-            return {
-              status: "unknown",
-              code: "RECONCILE_UNKNOWN",
-              message:
-                "Reviewer execution was cancelled and requires provider reconciliation.",
-              evidence: [],
-            };
-          }
-          const ordinal =
-            Math.max(
-              0,
-              ...inspectExecution(database, {
-                operationKey: input.operationKey,
-              })
-                .facts.filter(
-                  (fact) => fact.executionEpoch === lease.executionEpoch,
-                )
-                .map((fact) => fact.ordinal),
-            ) + 1;
-          const receipt = await sink.record({
-            adapterSchemaVersion: 1,
-            factId: `${input.operationKey}:completed:${lease.executionEpoch}`,
-            ordinal,
-            kind: "completed",
-            schemaVersion: 1,
-            payload: { structuredResult: result },
-            evidenceRefs:
-              result.status === "succeeded"
-                ? result.isolationEvidence
-                : result.evidence,
-          });
-          if (receipt.status !== "accepted" && receipt.status !== "duplicate") {
-            throw new PipelineRuntimeError(
-              "EXECUTION_ADAPTER_PROTOCOL",
-              "Reviewer terminal Execution Fact was not accepted.",
-            );
-          }
-          return result;
-        } finally {
-          if (timeout) clearTimeout(timeout);
-          database
-            .prepare(
-              `UPDATE execution_leases SET released_at = COALESCE(released_at, ?)
-                WHERE id = ?`,
-            )
-            .run(clock().toISOString(), lease.leaseId);
-          if (
-            activeExecutions.get(attempt.attemptId)?.operationKey ===
-            input.operationKey
-          ) {
-            activeExecutions.delete(attempt.attemptId);
-          }
-          resolveDone();
-        }
-      };
-
-      if (reconciliation) {
-        const reconciliationLease = issueLease("reconciliation");
-        const sink = createExecutionFactSink({
-          database,
-          lease: reconciliationLease,
-          target: reconciliationLease.target,
-          runId: input.runId,
-          nodeRunId: input.nodeRunId,
-          attemptId: attempt.attemptId,
-          now: clock,
-          appendEvent: (event) =>
-            appendExecutionEvent({
-              ...event,
-              runId: input.runId,
-              nodeRunId: input.nodeRunId,
-              attemptId: attempt.attemptId,
-              payload: event.payload,
-              createdAt: event.timestamp,
-            }),
-        });
-        let result: ReviewerExecutionResult;
-        try {
-          result = input.adapter.reconcile
-            ? await input.adapter.reconcile(input.operationKey, sink)
-            : {
-                status: "unknown",
-                code: "RECONCILE_UNKNOWN",
-                message:
-                  "The Reviewer provider cannot safely reconcile a running operation.",
-                evidence: [],
-              };
-        } finally {
-          database
-            .prepare(
-              `UPDATE execution_leases SET released_at = COALESCE(released_at, ?)
-                WHERE id = ?`,
-            )
-            .run(clock().toISOString(), reconciliationLease.leaseId);
-        }
-        if (result.status !== "running") {
-          if (result.status === "unknown") return result;
-          return runWithLease(issueLease("execution"), async () => result);
-        }
-        if (
-          input.adapter.capabilities.reattachRunningOperation !== true ||
-          !input.adapter.reattach
-        ) {
-          return {
-            status: "unknown",
-            code: "RECONCILE_UNKNOWN",
-            message:
-              "The Reviewer provider reported a running operation but cannot reattach it.",
-            evidence: [result.providerExecutionRef],
-          };
-        }
-        return runWithLease(issueLease("execution"), (sink, signal) =>
-          input.adapter.reattach!(
-            input.request,
-            result.providerExecutionRef,
-            sink,
-            signal,
-          ),
-        );
-      }
-      return runWithLease(issueLease("execution"), (sink, signal) =>
-        input.adapter.execute(input.request, sink, signal),
-      );
-    };
+  let executeCodeReviewStage: PipelineRuntime["executeCodeReviewStage"];
   const appendRuntimeMutation = (input: {
     readonly action: string;
     readonly entityType: string;
@@ -1148,6 +775,15 @@ export const openPipelineRuntime = (
       });
     }
   };
+
+  executeCodeReviewStage = openCodeReviewExecutionRuntime({
+    database,
+    clock,
+    activeExecutions,
+    appendRuntimeMutation,
+    appendExecutionEvent,
+    runtimeError: (code, message) => new PipelineRuntimeError(code, message),
+  });
 
   const auditRecords = (
     input: {
@@ -7069,18 +6705,27 @@ export const openPipelineRuntime = (
         );
       }
       if (current.nodeStatus === "running") {
+        const requiresReconciliation =
+          input.reason === "code-review-reconciliation";
         const failedAttempt = database
           .prepare(
             `UPDATE node_attempts
-                SET status = 'failed', failure_code = ?, failure_message = ?,
-                    completed_at = ?
+                SET status = ?, recoverable = ?, failure_code = ?,
+                    failure_message = ?, completed_at = ?
               WHERE id = (
                 SELECT id FROM node_attempts
                  WHERE node_run_id = ? AND status = 'running'
               ORDER BY attempt_number DESC LIMIT 1
               )`,
           )
-          .run(input.failure.code, input.failure.message, now, input.nodeRunId);
+          .run(
+            requiresReconciliation ? "reconciling" : "failed",
+            requiresReconciliation ? 1 : 0,
+            input.failure.code,
+            input.failure.message,
+            requiresReconciliation ? null : now,
+            input.nodeRunId,
+          );
         if (failedAttempt.changes !== 1) {
           throw new PipelineRuntimeError(
             "CODE_REVIEW_BLOCK_STATE_INVALID",

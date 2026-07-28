@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { dirname, join, posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -217,6 +218,23 @@ const coreDirectoryCandidates = (): string[] => [
 const receiptHash = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+const dockerOperation = (
+  args: readonly string[],
+): Promise<{ readonly exitCode: number; readonly stdout: string }> =>
+  new Promise((resolve) => {
+    execFile("docker", [...args], (error, stdout) => {
+      resolve({
+        exitCode:
+          typeof error === "object" && error !== null && "code" in error
+            ? Number(error.code ?? 1)
+            : error
+              ? 1
+              : 0,
+        stdout: stdout.toString(),
+      });
+    });
+  });
+
 const findCoreDirectory = (): string => {
   const directory = coreDirectoryCandidates().find((candidate) =>
     existsSync(join(candidate, "index.js")),
@@ -273,6 +291,7 @@ export const createSandcastleExecutionRuntimeFromModules = (
       workspaceRef,
       operationKey,
       secretReferenceIds,
+      onOperationStarted,
     }) => {
       if (sandboxRef !== "docker" || !dockerModule) {
         throw new Error(
@@ -389,6 +408,11 @@ export const createSandcastleExecutionRuntimeFromModules = (
             `environment-inspection:${receipt.inspectedEnvironmentHash}`,
             `credentials:scope:${receipt.credentialScopeHash}`,
           );
+          await onOperationStarted?.({
+            providerId: "sandcastle-docker-reviewer",
+            providerOperationId,
+            evidence: [...evidence],
+          });
           return {
             ...handle,
             close: async () => {
@@ -415,6 +439,30 @@ export const createSandcastleExecutionRuntimeFromModules = (
         receipt,
         evidence,
       };
+    },
+    cancelReviewerOperation: async (providerOperationId) => {
+      const result = await dockerOperation(["rm", "-f", providerOperationId]);
+      if (result.exitCode === 0) return "cancelled";
+      const inspected = await dockerOperation([
+        "inspect",
+        "--format",
+        "{{.State.Running}}",
+        providerOperationId,
+      ]);
+      return inspected.exitCode === 0 ? "unknown" : "not-found";
+    },
+    inspectReviewerOperation: async (providerOperationId) => {
+      const result = await dockerOperation([
+        "inspect",
+        "--format",
+        "{{.State.Running}}",
+        providerOperationId,
+      ]);
+      if (result.exitCode !== 0) return "not-found";
+      const running = result.stdout.trim();
+      if (running === "true") return "running";
+      if (running === "false") return "not-running";
+      return "unknown";
     },
     run: async (options) => {
       const outputMarker = options.output as

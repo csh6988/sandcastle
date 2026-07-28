@@ -17,6 +17,11 @@ export interface SandcastleExecutionRuntime {
     readonly workspaceRef: string;
     readonly operationKey: string;
     readonly secretReferenceIds: readonly string[];
+    readonly onOperationStarted?: (input: {
+      readonly providerId: string;
+      readonly providerOperationId: string;
+      readonly evidence: readonly string[];
+    }) => Promise<void>;
   }) => {
     readonly sandbox: unknown;
     readonly providerId: string;
@@ -34,6 +39,12 @@ export interface SandcastleExecutionRuntime {
       readonly terminalProviderReceiptHash?: string;
     };
   };
+  readonly cancelReviewerOperation?: (
+    providerOperationId: string,
+  ) => Promise<"cancelled" | "not-found" | "unknown">;
+  readonly inspectReviewerOperation?: (
+    providerOperationId: string,
+  ) => Promise<"running" | "not-running" | "not-found" | "unknown">;
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;
     readonly commits?: readonly { readonly sha: string }[];

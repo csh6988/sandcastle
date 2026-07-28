@@ -74,6 +74,13 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           readonly secretReferenceIds: readonly string[];
         }
       | undefined;
+    let notifyReviewerOperationStarted:
+      | ((input: {
+          readonly providerId: string;
+          readonly providerOperationId: string;
+          readonly evidence: readonly string[];
+        }) => Promise<void>)
+      | undefined;
     const factKinds: string[] = [];
     const runtime: SandcastleExecutionRuntime = {
       resolveAgent: (_provider, _model, options) => {
@@ -82,7 +89,9 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       },
       resolveSandbox: () => ({ ordinary: true }),
       resolveReviewerSandbox: (request) => {
-        reviewerRequest = request;
+        const { onOperationStarted, ...frozenRequest } = request;
+        reviewerRequest = frozenRequest;
+        notifyReviewerOperationStarted = onOperationStarted;
         return {
           sandbox: { reviewer: true },
           providerId: "sandcastle-docker-reviewer",
@@ -102,6 +111,13 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
         };
       },
       run: async (options) => {
+        assert.ok(notifyReviewerOperationStarted);
+        await notifyReviewerOperationStarted({
+          providerId: "sandcastle-docker-reviewer",
+          providerOperationId: "docker-container-1",
+          evidence: ["mount:/review:readonly"],
+        });
+        assert.deepEqual(factKinds, ["provider-started"]);
         launcherPath = String(options.cwd);
         assert.equal(existsSync(launcherPath), true);
         assert.deepEqual(options.sandbox, { reviewer: true });
@@ -121,6 +137,51 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           schema: "reviewer-finding",
         });
         assert.doesNotMatch(String(options.prompt), /\/producer\/repository/);
+        const onRuntimeEvent = (
+          options.events as
+            | {
+                readonly onRuntimeEvent?: (event: unknown) => Promise<void>;
+              }
+            | undefined
+        )?.onRuntimeEvent;
+        assert.ok(onRuntimeEvent);
+        await onRuntimeEvent({
+          type: "message.delta",
+          runId: "core-run-1",
+          messageId: "message-1",
+          iteration: 1,
+          text: "Reviewer inspected the exact bundle.",
+          timestamp: new Date("2026-07-28T10:00:01.000Z"),
+        });
+        await onRuntimeEvent({
+          type: "tool.call",
+          runId: "core-run-1",
+          toolCallId: "tool-call-1",
+          iteration: 1,
+          name: "Read",
+          args: '{"path":"/review/inputs/manifest.json"}',
+          timestamp: new Date("2026-07-28T10:00:02.000Z"),
+        });
+        await onRuntimeEvent({
+          type: "tool.result",
+          runId: "core-run-1",
+          toolCallId: "tool-call-1",
+          iteration: 1,
+          content: "manifest loaded",
+          timestamp: new Date("2026-07-28T10:00:03.000Z"),
+        });
+        await onRuntimeEvent({
+          type: "usage.recorded",
+          runId: "core-run-1",
+          iteration: 1,
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+          },
+          model: "gpt-test",
+          timestamp: new Date("2026-07-28T10:00:04.000Z"),
+        });
         return {
           stdout: "Reviewer inspected the exact bundle.",
           iterations: [
@@ -171,10 +232,167 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       secretReferenceIds: [],
     });
     assert.equal(existsSync(launcherPath), false);
-    assert.deepEqual(factKinds, ["provider-started", "message", "usage"]);
+    assert.deepEqual(factKinds, [
+      "provider-started",
+      "message",
+      "tool-call",
+      "tool-result",
+      "usage",
+    ]);
     if (result.status !== "succeeded") return;
     assert.equal(result.isolation.readOnlyFilesystem, true);
     assert.equal(result.isolation.independentSessionStorage, true);
+  });
+
+  it("cancels and reconciles a live Reviewer provider operation without overstating restart reattachment", async () => {
+    let resolveRun!: (value: {
+      readonly output: {
+        readonly findings: readonly {
+          readonly severity: "info";
+          readonly summary: string;
+          readonly rationale: string;
+          readonly impact: string;
+          readonly evidenceRefs: readonly string[];
+          readonly suggestedOwner: string;
+          readonly blocking: false;
+        }[];
+      };
+    }) => void;
+    const runResult = new Promise<{
+      readonly output: {
+        readonly findings: readonly {
+          readonly severity: "info";
+          readonly summary: string;
+          readonly rationale: string;
+          readonly impact: string;
+          readonly evidenceRefs: readonly string[];
+          readonly suggestedOwner: string;
+          readonly blocking: false;
+        }[];
+      };
+    }>((resolve) => {
+      resolveRun = resolve;
+    });
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const cancelledRefs: string[] = [];
+    const inspectedRefs: string[] = [];
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => ({
+        sandbox: {},
+        providerId: "sandcastle-docker-reviewer",
+        evidence: ["provider-operation:docker-container-1"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+          providerOperationId: "docker-container-1",
+          inspectedReadOnlyReviewMount: true,
+          inspectedEnvironmentHash: "5".repeat(64),
+          inspectedAt: "2026-07-28T10:00:00.000Z",
+          terminalProviderStatus: "completed",
+          terminalProviderReceiptHash: "6".repeat(64),
+        },
+      }),
+      cancelReviewerOperation: async (providerOperationId) => {
+        cancelledRefs.push(providerOperationId);
+        return "cancelled";
+      },
+      inspectReviewerOperation: async (providerOperationId) => {
+        inspectedRefs.push(providerOperationId);
+        return "running";
+      },
+      run: async () => {
+        resolveStarted();
+        return runResult;
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+    const adapter = createSandcastleReviewerExecutionAdapter(runtime);
+    const sink = {
+      record: async (fact: { readonly factId: string }) => ({
+        status: "accepted" as const,
+        executionFactId: fact.factId,
+        effectIds: [],
+        canonicalPayloadHash: "a".repeat(64),
+      }),
+    };
+    const request = input();
+    const execution = adapter.execute(request, sink);
+    await started;
+
+    const reconciled = await adapter.reconcile?.(
+      request.operationKey,
+      sink,
+      "docker-container-1",
+    );
+    assert.deepEqual(reconciled, {
+      status: "running",
+      providerExecutionRef: "docker-container-1",
+    });
+    assert.deepEqual(inspectedRefs, []);
+    assert.equal(adapter.capabilities.reattachRunningOperation, false);
+    assert.equal(adapter.reattach, undefined);
+    assert.equal(await adapter.cancel?.(request.operationKey), "cancelled");
+    assert.deepEqual(cancelledRefs, ["docker-container-1"]);
+
+    resolveRun({
+      output: {
+        findings: [
+          {
+            severity: "info",
+            summary: "Reviewed",
+            rationale: "Exact inputs",
+            impact: "No blocker",
+            evidenceRefs: ["diff-1"],
+            suggestedOwner: "software-engineer",
+            blocking: false,
+          },
+        ],
+      },
+    });
+    assert.equal((await execution).status, "succeeded");
+  });
+
+  it("does not claim a hard-restarted Docker container is a reattachable Reviewer operation", async () => {
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => ({
+        sandbox: {},
+        providerId: "sandcastle-docker-reviewer",
+        evidence: ["provider-operation:docker-container-after-restart"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+        },
+      }),
+      inspectReviewerOperation: async () => "running",
+      run: async () => ({}),
+      runWorkspaceTask: async () => ({}),
+    };
+    const adapter = createSandcastleReviewerExecutionAdapter(runtime);
+
+    const result = await adapter.reconcile?.(
+      "code-review:review-1:initial-finding",
+      undefined,
+      "docker-container-after-restart",
+    );
+
+    assert.equal(result?.status, "unknown");
+    if (result?.status !== "unknown") return;
+    assert.equal(result.code, "RECONCILE_UNKNOWN");
+    assert.deepEqual(result.evidence, [
+      "provider-operation:docker-container-after-restart",
+      "provider-status:running",
+    ]);
   });
 
   it("fails closed for no-sandbox and bind-mount Reviewer execution", async () => {

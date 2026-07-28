@@ -129,11 +129,15 @@ describe("Sandcastle core Runtime loader", () => {
     );
 
     assert.equal(runtime.resolveSandbox("docker"), dockerSandbox);
+    const startedOperations: unknown[] = [];
     const reviewerSandbox = runtime.resolveReviewerSandbox?.({
       sandboxRef: "docker",
       workspaceRef: "/review-bundle",
       operationKey: "code-review:review-1:initial-finding",
       secretReferenceIds: [],
+      onOperationStarted: async (started) => {
+        startedOperations.push(started);
+      },
     });
     assert.ok(reviewerSandbox);
     const handle = await (
@@ -144,6 +148,24 @@ describe("Sandcastle core Runtime loader", () => {
       mounts: [],
       env: {},
     });
+    assert.deepEqual(startedOperations, [
+      {
+        providerId: "sandcastle-docker-reviewer",
+        providerOperationId: "reviewer-container-1",
+        evidence: [
+          "docker:ephemeral-container",
+          "mount:/review:readonly",
+          "home:/home/agent:container-private",
+          "cache:/home/agent/.cache:container-private",
+          "sessions:capture-disabled",
+          "inputs:/review:allowlisted",
+          "provider-operation:reviewer-container-1",
+          `mount-inspection:${reviewerSandbox.receipt.mountTableHash}`,
+          `environment-inspection:${reviewerSandbox.receipt.inspectedEnvironmentHash}`,
+          `credentials:scope:${reviewerSandbox.receipt.credentialScopeHash}`,
+        ],
+      },
+    ]);
     await handle.close();
     assert.equal(
       reviewerSandbox.receipt.providerOperationId,
