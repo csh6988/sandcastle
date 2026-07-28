@@ -3,9 +3,14 @@ import { describe, it } from "node:test";
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
 import { openIntegrationNodeHandler } from "./integrationNodeHandler.js";
 import type {
+  AggregateIntegrationReviewExecutor,
+  IntegrationValidationExecutor,
+} from "./integrationNodeHandler.js";
+import type {
   IntegrationGenerationView,
   IntegrationRuntime,
 } from "./integrationRuntime.js";
+import { IntegrationRuntimeError } from "./integrationRuntime.js";
 
 const validation = {
   id: `validation:${"a".repeat(64)}`,
@@ -13,6 +18,23 @@ const validation = {
   kind: "build-test" as const,
   identityHash: "a".repeat(64),
   condition: "npm test",
+  commands: [["npm", "test"]],
+  evidenceRefs: [],
+  responsibleWorkPackageVersionIds: ["package-v1"],
+};
+
+const unusedValidationExecutor: IntegrationValidationExecutor = {
+  reconcile: async () => ({ status: "not-applied" }),
+  execute: async () => {
+    throw new Error("validation executor must not run");
+  },
+};
+
+const unusedAggregateReviewExecutor: AggregateIntegrationReviewExecutor = {
+  reconcile: async () => ({ status: "not-applied" }),
+  execute: async () => {
+    throw new Error("aggregate Review executor must not run");
+  },
 };
 
 const generation = (
@@ -24,8 +46,15 @@ const generation = (
     state,
     manifestHash: "b".repeat(64),
     manifest: {
+      projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node-1",
+      packages: [
+        {
+          workPackageVersionId: "package-v1",
+          repositoryReference: "/repositories/api",
+        },
+      ],
       integrationConditions: ["npm test"],
       requiredValidations: [validation],
     },
@@ -101,11 +130,26 @@ describe("Integration Node Handler", () => {
     });
 
     assert.equal(validationInputs.length, 1);
+    assert.deepEqual(validationInputs, [
+      {
+        operationKey:
+          "integration:run-1:g1:validation:validation:" + "a".repeat(64),
+        generationId: "integration:run-1:g1",
+        manifestHash: "b".repeat(64),
+        repositoryReference: "/repositories/api",
+        integratedCommit: "1".repeat(40),
+        responsibleWorkPackageVersionIds: ["package-v1"],
+        validation,
+      },
+    ]);
     assert.deepEqual(aggregateInputs, [
       {
         operationKey: "integration:run-1:g1:aggregate-review",
         generationId: "integration:run-1:g1",
         manifestHash: "b".repeat(64),
+        projectId: "project-1",
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
         topicId: "integration-review:integration:run-1:g1",
         repositoryCommits: [
           { repositoryId: "/repositories/api", commit: "1".repeat(40) },
@@ -118,6 +162,119 @@ describe("Integration Node Handler", () => {
       ["integration.validation.record", "integration.aggregate-review.record"],
     );
     assert.equal(view.state, "passed");
+  });
+
+  it("uses frozen producer and consumer responsibility for Contract failure", async () => {
+    const contractValidation = {
+      id: `validation:${"c".repeat(64)}`,
+      repositoryReference: "/repositories/web",
+      kind: "contract" as const,
+      identityHash: "c".repeat(64),
+      commands: [["npm", "run", "test:contract"]],
+      evidenceRefs: ["contract-fixture"],
+      responsibleWorkPackageVersionIds: ["package-api-v1", "package-web-v1"],
+      contract: {
+        id: "contract-api",
+        version: "1",
+        hash: "d".repeat(64),
+        producerApplicationId: "application-api",
+        consumerApplicationId: "application-web",
+      },
+    };
+    let view = {
+      ...generation("validating"),
+      manifest: {
+        ...generation("validating").manifest,
+        packages: [
+          {
+            workPackageVersionId: "package-api-v1",
+            repositoryReference: "/repositories/api",
+          },
+          {
+            workPackageVersionId: "package-web-v1",
+            repositoryReference: "/repositories/web",
+          },
+          {
+            workPackageVersionId: "package-web-unrelated-v1",
+            repositoryReference: "/repositories/web",
+          },
+        ],
+        requiredValidations: [contractValidation],
+      },
+      repositoryResults: [
+        {
+          repositoryReference: "/repositories/web",
+          integratedCommit: "2".repeat(40),
+          validationRecords: [],
+        },
+      ],
+    } as unknown as IntegrationGenerationView;
+    const validationInputs: Array<{
+      readonly responsibleWorkPackageVersionIds: readonly string[];
+    }> = [];
+    const commands: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => view,
+        reconcilePending: () => 0,
+        blockPending: () => {
+          throw new Error("must not block");
+        },
+      } as unknown as IntegrationRuntime,
+      commandRegistry: {
+        execute: (envelope: {
+          readonly command: {
+            readonly responsibleWorkPackageVersionIds: readonly string[];
+          };
+        }) => {
+          commands.push(envelope.command);
+          view = { ...view, state: "failed" };
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      validationExecutor: {
+        reconcile: async () => ({ status: "not-applied" }),
+        execute: async (input) => {
+          validationInputs.push(input);
+          return {
+            status: "failed",
+            evidenceRefs: ["contract-fixture", "runtime-evidence"],
+            responsibleWorkPackageVersionIds: [
+              ...input.responsibleWorkPackageVersionIds,
+            ],
+            contractFailure: {
+              producerApplicationId: "application-api",
+              consumerApplicationId: "application-web",
+              contractId: "contract-api",
+              contractVersion: "1",
+              fixtureRef: "contract-fixture",
+              runtimeEvidenceRef: "runtime-evidence",
+            },
+          };
+        },
+      },
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.deepEqual(validationInputs[0]?.responsibleWorkPackageVersionIds, [
+      "package-api-v1",
+      "package-web-v1",
+    ]);
+    assert.deepEqual(
+      (
+        commands[0] as {
+          readonly responsibleWorkPackageVersionIds: readonly string[];
+        }
+      ).responsibleWorkPackageVersionIds,
+      ["package-api-v1", "package-web-v1"],
+    );
   });
 
   it("blocks through the Integration Runtime when executor reconciliation is unknown", async () => {
@@ -135,6 +292,7 @@ describe("Integration Node Handler", () => {
           return view;
         },
       } as unknown as IntegrationRuntime,
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
       validationExecutor: {
         reconcile: async () => ({
           status: "unknown",
@@ -222,4 +380,139 @@ describe("Integration Node Handler", () => {
       assert.match(failure.evidence.commandId, /integration:run-1:g1/);
     });
   }
+
+  it("durably blocks a deterministic generation start rejection with consumer evidence", async () => {
+    const blocked: unknown[] = [];
+    const envelopes: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: (envelope: unknown) => {
+          envelopes.push(envelope);
+          return {
+            status: "rejected",
+            error: {
+              code: "INTEGRATION_COVERAGE_INCOMPLETE",
+              message: "coverage is incomplete",
+            },
+            effectIds: [],
+          };
+        },
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [],
+        inspectPending: () => [],
+        executePending: () => {
+          throw new Error("must not execute");
+        },
+        reconcilePending: () => 0,
+        blockPending: () => {
+          throw new Error("no Generation was created");
+        },
+        blockStart: (input: unknown) => blocked.push(input),
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.equal(blocked.length, 1);
+    assert.deepEqual(blocked[0], {
+      generationId: "integration:run-1:g1",
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+      failure: {
+        code: "INTEGRATION_COVERAGE_INCOMPLETE",
+        message: "coverage is incomplete",
+        evidence: {
+          phase: "start",
+          commandId: "integration:run-1:integration-node-1:g1:start",
+        },
+      },
+    });
+    assert.equal(
+      (envelopes[0] as { readonly consumerId?: string }).consumerId,
+      "integration-node-handler",
+    );
+  });
+
+  it("leaves a STORE_BUSY generation start retryable without blocking", async () => {
+    let blocked = false;
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: () => ({
+          status: "rejected",
+          error: { code: "STORE_BUSY", message: "retry later" },
+          effectIds: [],
+        }),
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [],
+        inspectPending: () => [],
+        executePending: () => {
+          throw new Error("must not execute");
+        },
+        reconcilePending: () => 0,
+        blockPending: () => {
+          throw new Error("must not block");
+        },
+        blockStart: () => {
+          blocked = true;
+        },
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.equal(blocked, false);
+  });
+
+  it("converts deterministic execution errors into durable blocked evidence", async () => {
+    const view = generation("pending");
+    const blocked: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: { execute: () => ({ status: "succeeded" }) } as never,
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_COVERAGE_STALE",
+            "coverage changed before the Git effect",
+          );
+        },
+        reconcilePending: () => 0,
+        blockPending: (_generationId: string, failure: unknown) => {
+          blocked.push(failure);
+          return generation("blocked");
+        },
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.deepEqual(blocked, [
+      {
+        code: "INTEGRATION_COVERAGE_STALE",
+        message: "coverage changed before the Git effect",
+        evidence: {
+          phase: "execution",
+          generationId: "integration:run-1:g1",
+        },
+      },
+    ]);
+  });
 });

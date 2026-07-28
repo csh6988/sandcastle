@@ -1,6 +1,7 @@
 import { startCompanyRuntimeServer } from "./server.js";
 import {
   loadConfiguredExecutionAdapter,
+  loadConfiguredIntegrationValidationProvider,
   loadConfiguredInteractionExecutionAdapter,
   loadConfiguredReviewerExecutionAdapter,
 } from "./adapters/configuredExecutionAdapter.js";
@@ -17,6 +18,8 @@ const main = async (): Promise<void> => {
     await loadConfiguredInteractionExecutionAdapter();
   const reviewerExecutionAdapter =
     await loadConfiguredReviewerExecutionAdapter();
+  const integrationValidationProvider =
+    await loadConfiguredIntegrationValidationProvider();
   const acpToken = process.env.SANDCASTLE_COMPANY_RUNTIME_ACP_TOKEN;
   const acpClientId = process.env.SANDCASTLE_ACP_CLIENT_ID;
   if ((acpToken && !acpClientId) || (!acpToken && acpClientId)) {
@@ -52,6 +55,7 @@ const main = async (): Promise<void> => {
     executionAdapter,
     interactionExecutionAdapter,
     reviewerExecutionAdapter,
+    integrationValidationProvider,
   });
   const close = (): void => {
     void runtime.close();

@@ -1056,6 +1056,8 @@ const definitions = [
     "integration.generation.blocked",
     "integration.generation.failed",
     "integration.generation.completed",
+    "integration.operation.intent-recorded",
+    "integration.operation.finalized",
   ].map(
     (type) =>
       ({
@@ -1067,6 +1069,9 @@ const definitions = [
           "runId",
           "nodeRunId",
           "integrationGenerationId",
+          ...(type.startsWith("integration.operation.")
+            ? (["integrationOperationId", "commandId"] as const)
+            : []),
         ],
         payloadSchema: integrationEventPayloadSchema,
         retentionClass: "durable",

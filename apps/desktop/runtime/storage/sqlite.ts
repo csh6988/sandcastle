@@ -114,7 +114,10 @@ import {
   openCodeReviewNodeHandler,
   type CodeReviewNodeHandler,
 } from "../review/codeReviewNodeHandler.js";
-import type { ReviewerExecutionAdapter } from "../review/reviewerExecution.js";
+import {
+  blockingReviewerExecutionAdapter,
+  type ReviewerExecutionAdapter,
+} from "../review/reviewerExecution.js";
 import {
   openIntegrationRuntime,
   type GitIntegrationAdapter,
@@ -127,6 +130,11 @@ import {
   type IntegrationNodeHandler,
   type IntegrationValidationExecutor,
 } from "../integration/integrationNodeHandler.js";
+import {
+  openIsolatedIntegrationValidationExecutor,
+  type IntegrationValidationProvider,
+} from "../integration/integrationValidationExecutor.js";
+import { openAggregateIntegrationReviewExecutor } from "../integration/aggregateIntegrationReviewExecutor.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -268,9 +276,16 @@ export const openCompanyDatabase = (
     readonly integrationRuntime?: {
       readonly gitAdapter?: GitIntegrationAdapter;
       readonly validationExecutor?: IntegrationValidationExecutor;
+      readonly validationProvider?: IntegrationValidationProvider;
       readonly aggregateReviewExecutor?: AggregateIntegrationReviewExecutor;
       readonly failureInjection?: (
-        point: "after-intent" | "after-effect" | "during-failure-finalization",
+        point:
+          | "after-intent"
+          | "after-effect"
+          | "before-operation-intent"
+          | "during-operation-intent"
+          | "during-operation-finalization"
+          | "during-failure-finalization",
         operationId: string,
       ) => void;
     };
@@ -420,6 +435,9 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const reviewerExecutionAdapter =
+    options.codeReviewRuntime?.reviewerExecutionAdapter ??
+    blockingReviewerExecutionAdapter;
   const codeReviews = openCodeReviewRuntime(database, {
     events,
     reviewRuntime: review,
@@ -428,8 +446,7 @@ export const openCompanyDatabase = (
     artifacts: artifactRegistry,
     reviewerWorkspaceAdapter:
       options.codeReviewRuntime?.reviewerWorkspaceAdapter ??
-      (options.codeReviewRuntime?.reviewerExecutionAdapter?.capabilities
-        .executionBoundIsolation
+      (reviewerExecutionAdapter.capabilities.executionBoundIsolation
         ? openLocalReviewerWorkspaceAdapter(companyDir)
         : blockingReviewerWorkspaceAdapter),
     ...(options.clock ? { clock: options.clock } : {}),
@@ -437,6 +454,7 @@ export const openCompanyDatabase = (
   const integrations = openIntegrationRuntime(database, {
     events,
     codeReviews,
+    workPackages,
     pipelineRuntime,
     reviewRuntime: review,
     gitAdapter:
@@ -499,15 +517,25 @@ export const openCompanyDatabase = (
   const integrationNodeHandler = openIntegrationNodeHandler({
     commandRegistry,
     integrations,
-    ...(options.integrationRuntime?.validationExecutor
-      ? { validationExecutor: options.integrationRuntime.validationExecutor }
-      : {}),
-    ...(options.integrationRuntime?.aggregateReviewExecutor
-      ? {
-          aggregateReviewExecutor:
-            options.integrationRuntime.aggregateReviewExecutor,
-        }
-      : {}),
+    validationExecutor:
+      options.integrationRuntime?.validationExecutor ??
+      openIsolatedIntegrationValidationExecutor({
+        evidenceRoot: join(sandcastleDir, "integration-validation-evidence"),
+        ...(options.integrationRuntime?.validationProvider
+          ? { provider: options.integrationRuntime.validationProvider }
+          : {}),
+      }),
+    aggregateReviewExecutor:
+      options.integrationRuntime?.aggregateReviewExecutor ??
+      openAggregateIntegrationReviewExecutor({
+        database,
+        workspaceRoot: join(sandcastleDir, "integration-review-workspaces"),
+        reviewerExecutionAdapter,
+        interaction,
+        pipelineRuntime,
+        reviewRuntime: review,
+        ...(options.clock ? { clock: options.clock } : {}),
+      }),
   });
   pipelineRuntime.registerIntegrationExecutor(
     integrationNodeHandler.executeReady,

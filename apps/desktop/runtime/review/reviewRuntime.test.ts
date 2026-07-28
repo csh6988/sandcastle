@@ -10,6 +10,8 @@ import { companyRuntimeAddress } from "../address.js";
 import { createCompanyRuntimeClient } from "../client.js";
 import { startCompanyRuntimeServer } from "../server.js";
 import { ReviewInputManifestSchema } from "../interface.js";
+import { migrateCompanyDatabase } from "../storage/migrations.js";
+import { openReviewRuntime, ReviewRuntimeError } from "./reviewRuntime.js";
 
 const companyDirs: string[] = [];
 
@@ -843,6 +845,102 @@ describe("Review Runtime", () => {
     } finally {
       recovered.close();
     }
+  });
+
+  it("replays only an exact aggregate execution authority", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    database
+      .prepare(
+        `INSERT INTO interaction_sessions(
+           id, mode, project_id, run_id, node_run_id, status, created_at, closed_at
+         ) VALUES ('aggregate-session', 'run-collaboration', 'project-1',
+                   'run-1', 'integration-node', 'active', ?, NULL)`,
+      )
+      .run("2026-07-28T00:00:00.000Z");
+    database
+      .prepare(
+        `INSERT INTO session_participants(
+           id, session_id, participant_type, participant_ref, role, created_at
+         ) VALUES ('aggregate-participant', 'aggregate-session', 'ai-member',
+                   'reviewer-ai', 'aggregate-reviewer:generation-1', ?)`,
+      )
+      .run("2026-07-28T00:00:00.000Z");
+    const runtime = openReviewRuntime(database, {
+      events: { append: () => ({}) as never },
+      clock: () => new Date("2026-07-28T00:00:00.000Z"),
+    });
+    const input = {
+      commandId: "generation-1:aggregate-review:record",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "integration-node-handler",
+        authenticatedBy: "runtime" as const,
+      },
+      topicId: "integration-review:generation-1",
+      projectId: "project-1",
+      runId: "run-1",
+      manifest: {
+        scope: "aggregate" as const,
+        topicId: "integration-review:generation-1",
+        supportingArtifactVersionIds: [],
+        supportingSpecRevisionIds: [],
+        harnessSnapshotIds: [],
+        acceptanceCriteria: ["npm test"],
+        excludedContext: [
+          "hidden-prompts" as const,
+          "prior-reviewer-opinions" as const,
+          "private-transcripts" as const,
+        ],
+        integrationGenerationId: "generation-1",
+        integrationManifestHash: "a".repeat(64),
+        repositoryCommits: [
+          { repositoryId: "repository-1", commit: "b".repeat(40) },
+        ],
+      },
+      producer: {
+        aiMemberId: "developer-ai",
+        positionId: "developer-position",
+        sessionId: "developer-session",
+      },
+      reviewer: {
+        participantId: "aggregate-participant",
+        aiMemberId: "reviewer-ai",
+        positionId: "reviewer-position",
+        sessionId: "aggregate-session",
+      },
+      terminalExecutionFactId: "aggregate-terminal-fact",
+      result: "PASS" as const,
+      conditions: [],
+      evidenceRefs: [
+        "execution-fact:aggregate-terminal-fact",
+        "isolation-receipt",
+      ],
+    };
+
+    database.exec("BEGIN IMMEDIATE");
+    const first = runtime.recordAggregateExecutionInTransaction(input);
+    database.exec("COMMIT");
+    database.exec("BEGIN IMMEDIATE");
+    const replay = runtime.recordAggregateExecutionInTransaction(input);
+    database.exec("COMMIT");
+    assert.deepEqual(replay, first);
+
+    database.exec("BEGIN IMMEDIATE");
+    assert.throws(
+      () =>
+        runtime.recordAggregateExecutionInTransaction({
+          ...input,
+          result: "FAIL",
+        }),
+      (error: unknown) =>
+        error instanceof ReviewRuntimeError &&
+        error.code === "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+    );
+    database.exec("ROLLBACK");
+    assert.equal(runtime.inspect(input.topicId).gateResult?.result, "PASS");
+    database.close();
   });
 
   it("serves Review Commands and authoritative Views through the Runtime transport", async () => {

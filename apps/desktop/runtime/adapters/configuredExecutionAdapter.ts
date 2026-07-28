@@ -6,6 +6,7 @@ import {
   type SandcastleExecutionRuntime,
 } from "./sandcastleExecutionPort.js";
 import { createSandcastleReviewerExecutionAdapter } from "./sandcastleReviewerExecutionAdapter.js";
+import { createSandcastleIntegrationValidationProvider } from "../integration/integrationValidationExecutor.js";
 import {
   createHttpModelTransport,
   createModelOnlyInteractionExecutionAdapter,
@@ -37,6 +38,19 @@ export const loadConfiguredReviewerExecutionAdapter = async (
     throw new Error(`Unsupported Company Runtime execution adapter: ${mode}`);
   }
   return createSandcastleReviewerExecutionAdapter(await loadRuntime());
+};
+
+export const loadConfiguredIntegrationValidationProvider = async (
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
+) => {
+  const mode =
+    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "scripted";
+  if (mode === "scripted") return undefined;
+  if (mode !== "production") {
+    throw new Error(`Unsupported Company Runtime execution adapter: ${mode}`);
+  }
+  return createSandcastleIntegrationValidationProvider(await loadRuntime());
 };
 
 export const loadConfiguredInteractionExecutionAdapter = async (

@@ -4680,7 +4680,7 @@ const migrations: readonly CompanyMigration[] = [
         END;
         CREATE TRIGGER integration_repository_results_terminal_update
         BEFORE UPDATE ON integration_repository_results
-        WHEN OLD.state IN ('succeeded', 'failed', 'blocked') AND (
+        WHEN OLD.state IN ('succeeded', 'failed') AND (
           NEW.state IS NOT OLD.state
           OR NEW.expected_tip IS NOT OLD.expected_tip
           OR NEW.integrated_commit IS NOT OLD.integrated_commit

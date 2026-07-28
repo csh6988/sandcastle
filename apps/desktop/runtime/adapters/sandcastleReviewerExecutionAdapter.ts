@@ -8,6 +8,17 @@ import type {
   ReviewerExecutionInput,
   ReviewerExecutionResult,
 } from "../review/reviewerExecution.js";
+import type { ReviewInputManifest } from "../interface.js";
+
+type AggregateReviewManifest = Extract<
+  ReviewInputManifest,
+  { readonly scope: "aggregate" }
+>;
+
+const isAggregateManifest = (
+  manifest: ReviewerExecutionInput["manifest"] | AggregateReviewManifest,
+): manifest is AggregateReviewManifest =>
+  "scope" in manifest && manifest.scope === "aggregate";
 import type { SandcastleExecutionRuntime } from "./sandcastleExecutionPort.js";
 
 const git = (cwd: string, ...args: string[]): void => {
@@ -33,6 +44,22 @@ const createLauncherRepository = (): string => {
 };
 
 const promptFor = (input: ReviewerExecutionInput): string => {
+  const manifest = input.manifest as
+    | ReviewerExecutionInput["manifest"]
+    | AggregateReviewManifest;
+  if (isAggregateManifest(manifest)) {
+    return `# Independent Aggregate Integration Review
+
+You are a non-producer Reviewer in a fresh Session. Read only the allowlisted multi-Repository bundle mounted at /review and the frozen aggregate manifest. Verify the exact integrated commits against every acceptance criterion. Do not inspect hidden transcripts, mutable producer state, credentials, or external repositories.
+
+Return exactly one JSON object inside <reviewer_recheck>...</reviewer_recheck> tags:
+{
+  "result": "PASS|CONDITIONAL_PASS|FAIL",
+  "conditions": [],
+  "evidenceRefs": ["integration-generation-or-repository-commit-id"]
+}
+PASS and FAIL require an empty conditions array. Do not invent a PASS without inspecting the exact mounted commits.`;
+  }
   const outputTag =
     input.phase === "initial-finding" ? "reviewer_finding" : "reviewer_recheck";
   const task =
@@ -193,7 +220,15 @@ export const createSandcastleReviewerExecutionAdapter = (
       let sawUsageEvent = false;
       let recordQueue: Promise<void> = Promise.resolve();
       let recordFailure: unknown;
-      const evidenceRefs = [input.manifest.diffArtifactVersionId];
+      const manifest = input.manifest as
+        | ReviewerExecutionInput["manifest"]
+        | AggregateReviewManifest;
+      const evidenceRefs = isAggregateManifest(manifest)
+        ? [
+            manifest.integrationGenerationId,
+            ...manifest.repositoryCommits.map((entry) => entry.commit),
+          ]
+        : [manifest.diffArtifactVersionId];
       const enqueue = (
         fact: Parameters<NonNullable<typeof sink>["record"]>[0],
       ) => {

@@ -128,6 +128,62 @@ describe("Company Runtime command registry", () => {
       ).count,
       0,
     );
+    const storedReceipt = database
+      .prepare(
+        `SELECT result_json AS resultJson, result_hash AS resultHash,
+                effect_ids_json AS effectIdsJson
+           FROM command_deduplication
+          WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as {
+      readonly resultJson: string;
+      readonly resultHash: string;
+      readonly effectIdsJson: string;
+    };
+    database
+      .prepare(
+        "UPDATE command_deduplication SET result_json = ? WHERE command_id = ?",
+      )
+      .run(
+        JSON.stringify({
+          status: "rejected",
+          error: { code: "TAMPERED", message: "tampered" },
+          effectIds: [],
+        }),
+        envelope.commandId,
+      );
+    assert.throws(
+      () => registry.execute(envelope),
+      (error) =>
+        error instanceof CompanyCommandError &&
+        error.code === "COMMAND_RECEIPT_INVALID",
+    );
+    database
+      .prepare(
+        `UPDATE command_deduplication
+            SET result_json = ?, result_hash = ?
+          WHERE command_id = ?`,
+      )
+      .run(storedReceipt.resultJson, "c".repeat(64), envelope.commandId);
+    assert.throws(
+      () => registry.execute(envelope),
+      (error) =>
+        error instanceof CompanyCommandError &&
+        error.code === "COMMAND_RECEIPT_INVALID",
+    );
+    database
+      .prepare(
+        `UPDATE command_deduplication
+            SET result_hash = ?, effect_ids_json = ?
+          WHERE command_id = ?`,
+      )
+      .run(storedReceipt.resultHash, '["tampered-effect"]', envelope.commandId);
+    assert.throws(
+      () => registry.execute(envelope),
+      (error) =>
+        error instanceof CompanyCommandError &&
+        error.code === "COMMAND_RECEIPT_INVALID",
+    );
     database.close();
   });
 
@@ -171,6 +227,7 @@ describe("Company Runtime command registry", () => {
         startIntegrationInTransaction: () => undefined,
         blockIntegrationInTransaction: () => undefined,
         failIntegrationInTransaction: () => undefined,
+        requeueIntegrationRecoveryInTransaction: () => undefined,
         completeIntegrationInTransaction: () => undefined,
       },
       gitAdapter: {
@@ -249,7 +306,7 @@ describe("Company Runtime command registry", () => {
     const replay = registry.execute(envelope);
     assert.deepEqual(replay, first);
     assert.equal(first.status, "succeeded");
-    assert.equal(first.effectIds.length, 1);
+    assert.equal(first.effectIds.length, 2);
     assert.equal(
       Number(
         (
@@ -260,7 +317,7 @@ describe("Company Runtime command registry", () => {
             .get(envelope.commandId) as { readonly count: number }
         ).count,
       ),
-      1,
+      2,
     );
     assert.equal(
       events

@@ -4,6 +4,7 @@ import type {
 } from "./productionExecutionAdapter.js";
 import type { ExecutionFact } from "./scriptedExecutionAdapter.js";
 import { resolve, win32 } from "node:path";
+import type { IntegrationValidationProvider } from "../integration/integrationValidationExecutor.js";
 
 export interface SandcastleExecutionRuntime {
   readonly resolveAgent: (
@@ -45,6 +46,9 @@ export interface SandcastleExecutionRuntime {
   readonly inspectReviewerOperation?: (
     providerOperationId: string,
   ) => Promise<"running" | "not-running" | "not-found" | "unknown">;
+  readonly executeIntegrationValidation?: IntegrationValidationProvider["execute"];
+  readonly cancelIntegrationValidationOperation?: IntegrationValidationProvider["cancel"];
+  readonly inspectIntegrationValidationOperation?: IntegrationValidationProvider["inspect"];
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;
     readonly commits?: readonly { readonly sha: string }[];

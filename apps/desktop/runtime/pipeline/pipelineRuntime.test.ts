@@ -12,6 +12,7 @@ import {
   createScriptedExecutionAdapter,
   type ExecutionAdapterInput,
 } from "../adapters/scriptedExecutionAdapter.js";
+import { createScriptedReviewerExecutionAdapter } from "../review/reviewerExecution.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
 import { createNodeHandlerRegistry } from "./nodeHandlerRegistry.js";
 
@@ -133,6 +134,207 @@ const projectSpecGraph = (
   ],
 });
 
+describe("Pipeline aggregate Reviewer execution", () => {
+  it("uses Integration-owned execution facts and reconciliation receipts", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        {
+          id: "complete",
+          type: "complete",
+          name: "Complete",
+          handlerKindId: "run-complete@1",
+        },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    const adapter = createScriptedReviewerExecutionAdapter({
+      execute: () => ({
+        status: "succeeded",
+        providerId: "scripted-reviewer",
+        isolation: {
+          readOnlyFilesystem: true,
+          independentGitDatabase: true,
+          independentSessionStorage: true,
+          independentCredentialScope: true,
+          independentMutableCache: true,
+          inputAllowlist: true,
+          mechanism: "fixture",
+          mechanismVersion: "1",
+        },
+        isolationEvidence: ["aggregate-isolation"],
+        output: {
+          result: "PASS",
+          conditions: [],
+          evidenceRefs: ["integrated-commit"],
+        },
+      }),
+    });
+
+    try {
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const integration = started.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      )!;
+      const scheduler = new DatabaseSync(fixture.database.path);
+      try {
+        scheduler
+          .prepare("UPDATE department_runs SET status = 'running' WHERE id = ?")
+          .run(started.run.id);
+        scheduler
+          .prepare("UPDATE node_runs SET status = 'running' WHERE id = ?")
+          .run(integration.id);
+        scheduler
+          .prepare(
+            `INSERT OR IGNORE INTO node_attempts(
+               id, node_run_id, attempt_number, snapshot_revision_id, reason,
+               status, structured_result_json, failure_code, failure_message,
+               created_at, started_at, completed_at
+             ) VALUES ('integration-attempt-test', ?, 1, ?, 'initial', 'running',
+                       NULL, NULL, NULL, ?, ?, NULL)`,
+          )
+          .run(
+            integration.id,
+            started.snapshot.id,
+            new Date().toISOString(),
+            new Date().toISOString(),
+          );
+        scheduler
+          .prepare(
+            `UPDATE node_attempts
+                SET status = 'running', started_at = COALESCE(started_at, ?)
+              WHERE node_run_id = ?`,
+          )
+          .run(new Date().toISOString(), integration.id);
+        scheduler
+          .prepare("UPDATE node_runs SET attempt_count = 1 WHERE id = ?")
+          .run(integration.id);
+      } finally {
+        scheduler.close();
+      }
+      const session = fixture.database.interaction.createSession({
+        projectId: fixture.project.id,
+        mode: "run-collaboration",
+        runId: started.run.id,
+        nodeRunId: integration.id,
+      });
+      const participant = fixture.database.interaction.addParticipant({
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: fixture.position.aiMember.id,
+        role: "aggregate-reviewer:g1",
+      });
+      const request = {
+        operationKey: `${started.run.id}:g1:aggregate-review`,
+        phase: "fresh-recheck" as const,
+        manifest: {
+          scope: "aggregate",
+          topicId: "integration-review:g1",
+          supportingArtifactVersionIds: [],
+          supportingSpecRevisionIds: [],
+          harnessSnapshotIds: [],
+          acceptanceCriteria: ["npm test"],
+          excludedContext: [
+            "hidden-prompts",
+            "prior-reviewer-opinions",
+            "private-transcripts",
+          ],
+          integrationGenerationId: "g1",
+          integrationManifestHash: "a".repeat(64),
+          repositoryCommits: [
+            { repositoryId: "repository-1", commit: "1".repeat(40) },
+          ],
+        } as never,
+        workspaceRef: "/review",
+        reviewNodeRunId: integration.id,
+        reviewer: {
+          participantId: participant.id,
+          aiMemberId: fixture.position.aiMember.id,
+          positionId: fixture.position.id,
+          sessionId: session.id,
+        },
+        executionProfile: {
+          agentAdapterId: "scripted",
+          model: "scripted-v1",
+          sandboxRef: "no-sandbox",
+          secretReferenceIds: [],
+          timeoutSeconds: 60,
+          maxIterations: 1,
+        },
+        findings: [],
+        revision: null,
+      };
+      const input = {
+        runId: started.run.id,
+        nodeRunId: integration.id,
+        reviewerSessionId: session.id,
+        reviewerAiMemberId: fixture.position.aiMember.id,
+        operationKey: request.operationKey,
+        reconcileExisting: false,
+        timeoutSeconds: 60,
+        request,
+        adapter,
+      };
+
+      const executed =
+        await fixture.database.pipelineRuntime.executeIntegrationReviewStage(
+          input,
+        );
+      assert.equal(executed.status, "succeeded");
+      const reconciled =
+        await fixture.database.pipelineRuntime.executeIntegrationReviewStage({
+          ...input,
+          reconcileExisting: true,
+        });
+      assert.equal(reconciled.status, "succeeded");
+      assert.equal(
+        fixture.database.pipelineRuntime
+          .inspectExecution({
+            operationKey: request.operationKey,
+          })
+          .facts.some((fact) => fact.kind === "completed"),
+        true,
+      );
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        const receipt = raw
+          .prepare(
+            `SELECT command_id AS commandId, consumer_id AS consumerId
+               FROM command_deduplication
+              WHERE command_id LIKE 'integration-review:terminal-reconciliation:%'`,
+          )
+          .get() as
+          | { readonly commandId: string; readonly consumerId: string }
+          | undefined;
+        assert.ok(receipt);
+        assert.equal(receipt.consumerId, "integration-node-handler");
+      } finally {
+        raw.close();
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+});
+
 const formalizeAndStart = (input: {
   readonly database: ReturnType<typeof openCompanyDatabase>;
   readonly projectId: string;
@@ -231,6 +433,104 @@ const formalizeAndStart = (input: {
 };
 
 describe("Pipeline Runtime", () => {
+  it("requeues only Code Review and Integration projections for Integration defect recovery", () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "review",
+          type: "ai-task",
+          name: "Code Review",
+          positionId,
+          handlerKindId: "code-review@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "review" },
+        { from: "review", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    const raw = new DatabaseSync(fixture.database.path);
+    try {
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const review = started.nodes.find(
+        (node) => node.pipelineNodeId === "review",
+      )!;
+      const integration = started.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      )!;
+      raw
+        .prepare("UPDATE node_runs SET status = 'succeeded' WHERE id = ?")
+        .run(review.id);
+      raw
+        .prepare("UPDATE node_runs SET status = 'blocked' WHERE id = ?")
+        .run(integration.id);
+      raw
+        .prepare("UPDATE department_runs SET status = 'blocked' WHERE id = ?")
+        .run(started.run.id);
+      const attemptsBefore = Number(
+        (
+          raw
+            .prepare(
+              "SELECT COUNT(*) AS count FROM node_attempts WHERE node_run_id IN (?, ?)",
+            )
+            .get(review.id, integration.id) as { readonly count: number }
+        ).count,
+      );
+
+      fixture.database.pipelineRuntime.requeueIntegrationRecoveryInTransaction({
+        runId: started.run.id,
+        integrationNodeRunId: integration.id,
+        generationId: "generation-failed",
+      });
+
+      const recovered = fixture.database.pipelineRuntime.inspectRun(
+        started.run.id,
+      );
+      assert.equal(
+        recovered.nodes.find((node) => node.id === review.id)?.status,
+        "queued",
+      );
+      assert.equal(
+        recovered.nodes.find((node) => node.id === integration.id)?.status,
+        "queued",
+      );
+      assert.equal(recovered.run.status, "running");
+      assert.equal(
+        Number(
+          (
+            raw
+              .prepare(
+                "SELECT COUNT(*) AS count FROM node_attempts WHERE node_run_id IN (?, ?)",
+              )
+              .get(review.id, integration.id) as { readonly count: number }
+          ).count,
+        ),
+        attemptsBefore,
+      );
+    } finally {
+      raw.close();
+      fixture.database.close();
+    }
+  });
+
   it("dispatches integration@1 through the registered Runtime executor and preserves Pipeline ownership", async () => {
     const fixture = setup(undefined, (positionId) => ({
       nodes: [

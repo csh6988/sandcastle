@@ -190,6 +190,7 @@ export interface WorkPackageRuntime {
     readonly versionId: string;
     readonly baseCommit: string;
     readonly recoveryReason: string;
+    readonly dependencyVersionReplacements?: Readonly<Record<string, string>>;
   }) => WorkPackageGraphView;
   readonly recordSelfCheckInTransaction: (input: {
     readonly commandId: string;
@@ -1759,7 +1760,9 @@ export const openWorkPackageRuntime = (
       },
       dependencies: dependencies.map((dependency) => ({
         predecessorWorkPackageVersionId:
-          dependency.predecessorWorkPackageVersionId,
+          input.dependencyVersionReplacements?.[
+            dependency.predecessorWorkPackageVersionId
+          ] ?? dependency.predecessorWorkPackageVersionId,
         kind: dependency.kind,
         ...(dependency.contractId ? { contractId: dependency.contractId } : {}),
         ...(dependency.contractVersion
