@@ -852,6 +852,30 @@ export const openIntegrationRuntime = (
     authenticatedBy: "runtime",
   };
 
+  const nextGenerationNumber = (runId: string, nodeRunId: string): number => {
+    const persisted = database
+      .prepare(
+        `SELECT COALESCE(MAX(generation), 0) AS highest
+           FROM integration_generations
+          WHERE run_id = ? AND node_run_id = ?`,
+      )
+      .get(runId, nodeRunId) as { readonly highest: number };
+    const blockedIdentities = database
+      .prepare(
+        `SELECT entity_id AS id FROM runtime_audit_records
+          WHERE run_id = ? AND node_run_id = ?
+            AND action = 'integration.generation-blocked'`,
+      )
+      .all(runId, nodeRunId) as Array<{
+      readonly id: string;
+    }>;
+    const highestBlocked = blockedIdentities.reduce((current, entry) => {
+      const match = /:g(\d+)$/.exec(entry.id);
+      return match ? Math.max(current, Number(match[1])) : current;
+    }, 0);
+    return Math.max(Number(persisted.highest), highestBlocked) + 1;
+  };
+
   const startGeneration = (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
@@ -996,15 +1020,7 @@ export const openIntegrationRuntime = (
     }
     const generation = existing
       ? Number(existing.generation)
-      : Number(
-          (
-            database
-              .prepare(
-                "SELECT COALESCE(MAX(generation), 0) + 1 AS generation FROM integration_generations WHERE run_id = ?",
-              )
-              .get(input.command.runId) as { readonly generation: number }
-          ).generation,
-        );
+      : nextGenerationNumber(input.command.runId, input.command.nodeRunId);
     const integrationBranch = `integration/${input.command.runId}/g${generation}`;
     const manifest: IntegrationGenerationManifest = {
       schemaVersion: 1,
@@ -2959,25 +2975,7 @@ export const openIntegrationRuntime = (
 
   return {
     inspect,
-    nextGenerationNumber: (runId, nodeRunId) => {
-      const identities = database
-        .prepare(
-          `SELECT id FROM integration_generations
-            WHERE run_id = ? AND node_run_id = ?
-           UNION
-           SELECT entity_id AS id FROM runtime_audit_records
-            WHERE run_id = ? AND node_run_id = ?
-              AND action = 'integration.generation-blocked'`,
-        )
-        .all(runId, nodeRunId, runId, nodeRunId) as Array<{
-        readonly id: string;
-      }>;
-      const highest = identities.reduce((current, entry) => {
-        const match = /:g(\d+)$/.exec(entry.id);
-        return match ? Math.max(current, Number(match[1])) : current;
-      }, 0);
-      return highest + 1;
-    },
+    nextGenerationNumber,
     inspectPending: () => {
       const ids = database
         .prepare(

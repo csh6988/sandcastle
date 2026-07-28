@@ -122,6 +122,9 @@ const setup = (
     readonly producer: string;
     readonly reviewer: string;
   },
+  integrationRuntime?: NonNullable<
+    Parameters<typeof openCompanyDatabase>[1]
+  >["integrationRuntime"],
 ) => {
   const companyDir = mkdtempSync(join(tmpdir(), "sandcastle-code-review-"));
   companyDirs.push(companyDir);
@@ -153,6 +156,7 @@ const setup = (
       ...(adapter ? { reviewerWorkspaceAdapter: adapter } : {}),
       reviewerExecutionAdapter,
     },
+    ...(integrationRuntime ? { integrationRuntime } : {}),
   });
   const project = database.catalog.createProject({
     name: "Independent review",
@@ -376,7 +380,7 @@ const setup = (
     expectedArtifacts: ["canonical-diff"],
     selfCheckCommands: ["npm test"],
     codeReviewConditions: ["Independent PASS required"],
-    integrationConditions: ["No open cross-application obligations"],
+    integrationConditions: ["npm test"],
     riskTier: "medium",
     recoveryPolicy: "Create a fresh Version and Attempt.",
     execution: {
@@ -2053,8 +2057,7 @@ describe("Code Review Runtime", () => {
               WHERE fact_id LIKE '%:reconciled-completed'`,
           )
           .get() as
-          | { readonly leaseKind: string; readonly status: string }
-          | undefined;
+          { readonly leaseKind: string; readonly status: string } | undefined;
         assert.equal(reconciledFact?.leaseKind, "reconciliation");
         assert.equal(reconciledFact?.status, "accepted");
         assert.equal(
@@ -3999,6 +4002,357 @@ describe("Code Review Runtime", () => {
         (error: unknown) =>
           error instanceof CodeReviewRuntimeError &&
           error.code === "CODE_REVIEW_COVERAGE_STALE",
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("recovers through a fresh T15 authority before T16 creates a fresh g2 Generation", async () => {
+    const reviewerExecutionAdapter = createScriptedReviewerExecutionAdapter({
+      execute: (input) => ({
+        status: "succeeded",
+        providerId: "scripted-docker-reviewer",
+        isolation: {
+          readOnlyFilesystem: true,
+          independentGitDatabase: true,
+          independentSessionStorage: true,
+          independentCredentialScope: true,
+          independentMutableCache: true,
+          inputAllowlist: true,
+          mechanism: "scripted-docker-readonly",
+          mechanismVersion: "1",
+        },
+        isolationEvidence: [
+          "mount:/review:readonly",
+          `operation:${input.operationKey}`,
+        ],
+        output:
+          input.phase === "initial-finding"
+            ? {
+                findings: [
+                  {
+                    severity: "info",
+                    summary: "The exact recovered Diff was reviewed.",
+                    rationale: "The frozen recovered input is acceptable.",
+                    impact: "No blocking issue was found.",
+                    evidenceRefs: [input.manifest.selfCheck.id],
+                    suggestedOwner: "software-engineer",
+                    blocking: false,
+                  },
+                ],
+              }
+            : {
+                result: "PASS",
+                conditions: [],
+                evidenceRefs: [input.manifest.selfCheck.id],
+              },
+      }),
+    });
+    const fixture = setup(
+      readyReviewerWorkspaceAdapter,
+      reviewerExecutionAdapter,
+      undefined,
+      {
+        gitAdapter: {
+          execute: (input) => ({
+            status: "succeeded",
+            beforeTip: input.expectedTip,
+            afterTip: input.sourceCommit,
+            resultingCommit: input.sourceCommit,
+            receipt: { operationId: input.operationId },
+          }),
+          reconcile: () => ({ status: "not-applied" }),
+        },
+        validationExecutor: {
+          execute: async (input) => ({
+            status: "unknown",
+            code: "VALIDATION_RECONCILIATION_REQUIRED",
+            message:
+              "Keep the fresh Generation blocked after authority capture.",
+            evidence: { operationKey: input.operationKey },
+          }),
+          reconcile: async (input) => ({
+            status: "unknown",
+            code: "VALIDATION_RECONCILIATION_REQUIRED",
+            message:
+              "Keep the fresh Generation blocked after authority capture.",
+            evidence: { operationKey: input.operationKey },
+          }),
+        },
+      },
+    );
+    try {
+      const firstReview = completeGenericReview(fixture, "PASS");
+      const converged = fixture.execute("converge-before-t16-recovery", 4, {
+        type: "code-review.converge",
+        codeReviewId: firstReview.id,
+      });
+      assert.equal(converged.status, "succeeded");
+      const completedFirstReview = fixture.database.codeReviews
+        .inspect("review-run")
+        .find((review) => review.id === firstReview.id)!;
+      const oldCoverage =
+        fixture.database.codeReviews.readCompletedCoverage("review-run");
+      const oldAuthorityId = completedFirstReview.authority!.id;
+      const oldGateId = completedFirstReview.gateResult!.id;
+
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw.exec(`
+          INSERT INTO run_snapshot_revisions(
+            id, run_id, revision, schema_version, canonical_json, hash,
+            created_at, parent_revision
+          )
+          SELECT 'review-snapshot-recovered', run_id, revision + 1,
+                 schema_version, canonical_json, hash,
+                 '2026-07-28T11:00:00.000Z', revision
+            FROM run_snapshot_revisions WHERE id = 'review-snapshot';
+          UPDATE department_runs
+             SET snapshot_revision_id = 'review-snapshot-recovered'
+           WHERE id = 'review-run';
+        `);
+      } finally {
+        raw.close();
+      }
+      assert.equal(
+        fixture.database.codeReviews.inspect("review-run")[0]
+          ?.integrationEligible,
+        false,
+      );
+
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async () => undefined,
+      );
+      const beforeStaleIntegration =
+        fixture.database.pipelineRuntime.inspectRun("review-run");
+      await fixture.database.pipelineRuntime.executeReady({
+        runId: "review-run",
+        expectedRevision: beforeStaleIntegration.run.revision,
+      });
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        fixture.database.integrationNodeHandler.executeReady,
+      );
+      await fixture.database.integrationNodeHandler.executeReady({
+        runId: "review-run",
+        nodeRunId: "integration-node",
+      });
+      const staleBlocked =
+        fixture.database.pipelineRuntime.inspectRun("review-run");
+      assert.equal(
+        staleBlocked.nodes.find((node) => node.id === "integration-node")
+          ?.status,
+        "blocked",
+      );
+      assert.deepEqual(fixture.database.integrations.inspect("review-run"), []);
+      const staleReceipt = new DatabaseSync(fixture.database.path);
+      try {
+        const receipt = staleReceipt
+          .prepare(
+            `SELECT result_json AS resultJson FROM command_deduplication
+              WHERE command_id =
+                'integration:review-run:integration-node:g1:start'`,
+          )
+          .get() as { readonly resultJson: string } | undefined;
+        assert.ok(receipt);
+        assert.equal(JSON.parse(receipt.resultJson).status, "rejected");
+      } finally {
+        staleReceipt.close();
+      }
+
+      fixture.database.pipelineRuntime.requeueIntegrationRecoveryInTransaction({
+        runId: "review-run",
+        integrationNodeRunId: "integration-node",
+        generationId: "integration:review-run:g1",
+      });
+      const freshProducerSession = fixture.database.interaction.createSession({
+        projectId: fixture.projectId,
+        mode: "consultation",
+      });
+      fixture.database.interaction.addParticipant({
+        sessionId: freshProducerSession.id,
+        participantType: "ai-member",
+        participantRef: "software-engineer-member",
+        role: "developer",
+      });
+      const recovered = new DatabaseSync(fixture.database.path);
+      try {
+        recovered.exec("PRAGMA foreign_keys = OFF");
+        recovered
+          .prepare(
+            `INSERT INTO node_attempts(
+               id, node_run_id, attempt_number, snapshot_revision_id, reason,
+               status, created_at, started_at, completed_at, recoverable
+             ) VALUES ('review-attempt-recovered', 'review-node', 2,
+                       'review-snapshot-recovered', 'recovery', 'succeeded',
+                       ?, ?, ?, 0)`,
+          )
+          .run(
+            "2026-07-28T11:01:00.000Z",
+            "2026-07-28T11:01:00.000Z",
+            "2026-07-28T11:01:00.000Z",
+          );
+        recovered
+          .prepare(
+            `UPDATE node_runs SET attempt_count = 2, updated_at = ?
+              WHERE id = 'review-node'`,
+          )
+          .run("2026-07-28T11:01:00.000Z");
+        recovered.exec(`
+          INSERT INTO workspace_allocations(
+            id, project_id, application_id, execution_profile_id,
+            execution_profile_revision, operation_key, state, repository_root,
+            allocation_root, source_branch, base_commit, expected_source_tip,
+            capability_snapshot_json, capability_snapshot_hash,
+            provision_command_id, revision, created_at, updated_at,
+            work_package_version_id, node_attempt_id, interaction_session_id,
+            sandbox_identity, evidence_scope
+          )
+          SELECT 'review-allocation-recovered', project_id, application_id,
+                 execution_profile_id, execution_profile_revision,
+                 'review-operation-recovered', state, repository_root,
+                 allocation_root || '-recovered', 'sandcastle/review-recovered',
+                 base_commit, expected_source_tip, capability_snapshot_json,
+                 capability_snapshot_hash, 'review-provision-recovered',
+                 revision, '2026-07-28T11:01:00.000Z',
+                 '2026-07-28T11:01:00.000Z', work_package_version_id,
+                 'review-attempt-recovered', '${freshProducerSession.id}',
+                 'review-sandbox-recovered', 'review-evidence-recovered'
+            FROM workspace_allocations WHERE id = 'review-allocation';
+          INSERT INTO workspace_imports(
+            id, allocation_id, command_id, request_hash, state,
+            expected_source_tip, before_source_tip, result_commit,
+            object_set_hash, receipt_json, created_at, updated_at
+          )
+          SELECT 'review-import-recovered', 'review-allocation-recovered',
+                 'review-import-command-recovered', request_hash, state,
+                 expected_source_tip, before_source_tip, result_commit,
+                 object_set_hash, receipt_json, '2026-07-28T11:01:00.000Z',
+                 '2026-07-28T11:01:00.000Z'
+            FROM workspace_imports WHERE id = 'review-import';
+          INSERT INTO work_package_assignments(
+            id, work_package_version_id, node_attempt_id, position_id,
+            ai_member_id, agent_adapter_id, rationale_json, allocation_id,
+            interaction_session_id, sandbox_identity, evidence_scope, state,
+            created_at, updated_at
+          )
+          SELECT 'review-assignment-recovered', work_package_version_id,
+                 'review-attempt-recovered', position_id, ai_member_id,
+                 agent_adapter_id, rationale_json, 'review-allocation-recovered',
+                 '${freshProducerSession.id}', 'review-sandbox-recovered',
+                 'review-evidence-recovered', state,
+                 '2026-07-28T11:01:00.000Z', '2026-07-28T11:01:00.000Z'
+            FROM work_package_assignments WHERE id = 'review-assignment';
+          INSERT INTO work_package_self_checks(
+            id, assignment_id, node_attempt_id, status, report_json,
+            report_hash, created_at
+          )
+          SELECT 'review-self-check-recovered', 'review-assignment-recovered',
+                 'review-attempt-recovered', status, report_json, report_hash,
+                 '2026-07-28T11:01:00.000Z'
+            FROM work_package_self_checks WHERE id = 'review-self-check';
+        `);
+      } finally {
+        recovered.close();
+      }
+      const freshDiff = fixture.database.artifactRegistry.registerVersion({
+        projectId: fixture.projectId,
+        type: "canonical-diff",
+        schemaVersion: "1",
+        logicalName: "review-package-diff",
+        content: fixture.diffBytes,
+        status: "produced",
+        producer: {
+          runId: "review-run",
+          nodeRunId: "review-node",
+          nodeAttemptId: "review-attempt-recovered",
+          snapshotRevisionId: "review-snapshot-recovered",
+          aiMemberId: "software-engineer-member",
+          positionId: "software-engineer",
+          sessionId: freshProducerSession.id,
+          workPackageId: "review-package",
+        },
+      });
+      assert.notEqual(freshDiff.id, fixture.diff.id);
+      fixture.database.pipelineRuntime.releaseWorkPackageSuccessorsInTransaction(
+        {
+          runId: "review-run",
+          nodeRunId: "review-node",
+          assignmentId: "review-assignment-recovered",
+        },
+      );
+
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async () => undefined,
+      );
+      const beforeFreshReview =
+        fixture.database.pipelineRuntime.inspectRun("review-run");
+      await fixture.database.pipelineRuntime.executeReady({
+        runId: "review-run",
+        expectedRevision: beforeFreshReview.run.revision,
+      });
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        fixture.database.integrationNodeHandler.executeReady,
+      );
+      const reviews = fixture.database.codeReviews.inspect("review-run");
+      const freshReview = reviews.find(
+        (review) =>
+          review.manifest.snapshotRevisionId === "review-snapshot-recovered",
+      );
+      assert.ok(freshReview?.integrationEligible);
+      assert.notEqual(freshReview.id, firstReview.id);
+      assert.notEqual(freshReview.authority?.id, oldAuthorityId);
+      assert.notEqual(freshReview.gateResult?.id, oldGateId);
+      const freshCoverage =
+        fixture.database.codeReviews.readCompletedCoverage("review-run");
+      assert.notEqual(freshCoverage.coverageId, oldCoverage.coverageId);
+      assert.notEqual(freshCoverage.coverageHash, oldCoverage.coverageHash);
+      assert.equal(
+        freshCoverage.snapshotRevisionId,
+        "review-snapshot-recovered",
+      );
+
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async () => undefined,
+      );
+      const beforeFreshIntegration =
+        fixture.database.pipelineRuntime.inspectRun("review-run");
+      await fixture.database.pipelineRuntime.executeReady({
+        runId: "review-run",
+        expectedRevision: beforeFreshIntegration.run.revision,
+      });
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        fixture.database.integrationNodeHandler.executeReady,
+      );
+      await fixture.database.integrationNodeHandler.executeReady({
+        runId: "review-run",
+        nodeRunId: "integration-node",
+      });
+      const generations = fixture.database.integrations.inspect("review-run");
+      assert.equal(generations.length, 1);
+      const generation = generations[0]!;
+      assert.equal(generation.id, "integration:review-run:g2");
+      assert.equal(generation.manifest.generation, 2);
+      assert.equal(generation.manifest.coverageId, freshCoverage.coverageId);
+      assert.equal(
+        generation.manifest.coverageHash,
+        freshCoverage.coverageHash,
+      );
+      assert.equal(
+        generation.manifest.snapshotRevisionId,
+        "review-snapshot-recovered",
+      );
+      assert.equal(
+        generation.manifest.packages[0]?.authorityId,
+        freshReview.authority?.id,
+      );
+      assert.equal(
+        generation.manifest.packages[0]?.qualityGateResultId,
+        freshReview.gateResult?.id,
+      );
+      assert.notEqual(
+        generation.manifest.packages[0]?.authorityId,
+        oldAuthorityId,
       );
     } finally {
       fixture.database.close();

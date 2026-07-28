@@ -535,7 +535,12 @@ export const openCodeReviewNodeHandler = (
       .find(
         (candidate) =>
           candidate.manifest.workPackageVersionId ===
-          input.manifest.workPackageVersionId,
+            input.manifest.workPackageVersionId &&
+          candidate.manifest.snapshotRevisionId ===
+            input.manifest.snapshotRevisionId &&
+          candidate.manifest.nodeAttemptId === input.manifest.nodeAttemptId &&
+          candidate.manifest.diffArtifactVersionId ===
+            input.manifest.diffArtifactVersionId,
       );
     if (!review) {
       throw new CodeReviewNodeHandlerError(
