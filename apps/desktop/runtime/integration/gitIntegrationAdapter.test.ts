@@ -314,6 +314,33 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(symlinkRoot.code, "INTEGRATION_REPOSITORY_INVALID");
   });
 
+  it("rejects a Repository whose .git directory is a symlink without changing the target refs", () => {
+    const target = repository();
+    const attacker = repository();
+    rmSync(join(attacker.root, ".git"), { recursive: true, force: true });
+    symlinkSync(join(target.root, ".git"), join(attacker.root, ".git"));
+    assert.throws(() => git(target.root, "rev-parse", "integration/run-1/g1"));
+
+    const result = openLocalGitIntegrationAdapter().execute(
+      request({
+        root: attacker.root,
+        base: target.base,
+        sourceBranch: "work/api",
+        sourceCommit: target.api,
+        expectedTip: target.base,
+        operationId: "git-directory-symlink",
+      }),
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") return;
+    assert.equal(result.writeStatus, "not-started");
+    assert.equal(result.code, "INTEGRATION_REPOSITORY_INVALID");
+    assert.throws(() => git(target.root, "rev-parse", "integration/run-1/g1"));
+    assert.equal(git(target.root, "rev-parse", "main"), target.base);
+    assert.equal(git(target.root, "rev-parse", "work/api"), target.api);
+  });
+
   it("treats timeout and cancellation as unknown without writing the generation ref", () => {
     const fixture = repository();
     const cancelled = new AbortController();

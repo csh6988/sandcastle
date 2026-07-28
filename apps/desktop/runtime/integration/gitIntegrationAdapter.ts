@@ -193,6 +193,18 @@ const resolveRepository = (
       `Integration Repository ${repositoryReference} does not exist.`,
     );
   }
+  try {
+    const gitDirectory = lstatSync(join(root, ".git"));
+    if (gitDirectory.isSymbolicLink() || !gitDirectory.isDirectory()) {
+      throw new Error("unsafe Git directory");
+    }
+  } catch (error) {
+    if (isBoundaryError(error)) throw error;
+    throw new GitIntegrationAdapterError(
+      "INTEGRATION_REPOSITORY_INVALID",
+      "Integration Git effects require a canonical Repository with a non-symbolic .git directory.",
+    );
+  }
   let topLevel: string;
   let commonDir: string;
   try {
