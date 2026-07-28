@@ -100,6 +100,8 @@ const agUiRegistryFixture = [
   "integration.generation.blocked@1:custom",
   "integration.generation.failed@1:custom",
   "integration.generation.completed@1:custom",
+  "integration.operation.intent-recorded@1:custom",
+  "integration.operation.finalized@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",

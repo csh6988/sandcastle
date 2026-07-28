@@ -5,19 +5,22 @@ import {
 import type { ActorRef } from "../interface.js";
 import type {
   IntegrationGenerationManifest,
+  IntegrationGenerationView,
   IntegrationRuntime,
 } from "./integrationRuntime.js";
+import { IntegrationRuntimeError } from "./integrationRuntime.js";
 
-type ValidationInput = {
+export type IntegrationValidationInput = {
   readonly operationKey: string;
   readonly generationId: string;
   readonly manifestHash: string;
   readonly repositoryReference: string;
   readonly integratedCommit: string;
+  readonly responsibleWorkPackageVersionIds: readonly string[];
   readonly validation: IntegrationGenerationManifest["requiredValidations"][number];
 };
 
-type ValidationResult =
+export type IntegrationValidationResult =
   | { readonly status: "not-applied" }
   | {
       readonly status: "passed" | "failed";
@@ -40,14 +43,21 @@ type ValidationResult =
     };
 
 export interface IntegrationValidationExecutor {
-  readonly execute: (input: ValidationInput) => Promise<ValidationResult>;
-  readonly reconcile: (input: ValidationInput) => Promise<ValidationResult>;
+  readonly execute: (
+    input: IntegrationValidationInput,
+  ) => Promise<IntegrationValidationResult>;
+  readonly reconcile: (
+    input: IntegrationValidationInput,
+  ) => Promise<IntegrationValidationResult>;
 }
 
-type AggregateReviewInput = {
+export type AggregateIntegrationReviewInput = {
   readonly operationKey: string;
   readonly generationId: string;
   readonly manifestHash: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly nodeRunId: string;
   readonly topicId: string;
   readonly repositoryCommits: readonly {
     readonly repositoryId: string;
@@ -56,7 +66,7 @@ type AggregateReviewInput = {
   readonly acceptanceCriteria: readonly string[];
 };
 
-type AggregateReviewResult =
+export type AggregateIntegrationReviewResult =
   | { readonly status: "not-applied" }
   | {
       readonly status: "completed";
@@ -72,11 +82,11 @@ type AggregateReviewResult =
 
 export interface AggregateIntegrationReviewExecutor {
   readonly execute: (
-    input: AggregateReviewInput,
-  ) => Promise<AggregateReviewResult>;
+    input: AggregateIntegrationReviewInput,
+  ) => Promise<AggregateIntegrationReviewResult>;
   readonly reconcile: (
-    input: AggregateReviewInput,
-  ) => Promise<AggregateReviewResult>;
+    input: AggregateIntegrationReviewInput,
+  ) => Promise<AggregateIntegrationReviewResult>;
 }
 
 export interface IntegrationNodeHandler {
@@ -93,42 +103,18 @@ const actor: ActorRef = {
   authenticatedBy: "runtime",
 };
 
-const unavailableValidationExecutor: IntegrationValidationExecutor = {
-  execute: async () => ({
-    status: "unknown",
-    code: "INTEGRATION_VALIDATION_EXECUTOR_UNAVAILABLE",
-    message:
-      "The Runtime-owned Integration validation executor is unavailable.",
-    evidence: { configured: false },
-  }),
-  reconcile: async () => ({ status: "not-applied" }),
-};
-
-const unavailableAggregateReviewExecutor: AggregateIntegrationReviewExecutor = {
-  execute: async () => ({
-    status: "unknown",
-    code: "INTEGRATION_AGGREGATE_REVIEW_EXECUTOR_UNAVAILABLE",
-    message:
-      "The Runtime-owned aggregate independent Review executor is unavailable.",
-    evidence: { configured: false },
-  }),
-  reconcile: async () => ({ status: "not-applied" }),
-};
-
 export const openIntegrationNodeHandler = (options: {
   readonly commandRegistry: CompanyCommandRegistry;
   readonly integrations: IntegrationRuntime;
-  readonly validationExecutor?: IntegrationValidationExecutor;
-  readonly aggregateReviewExecutor?: AggregateIntegrationReviewExecutor;
+  readonly validationExecutor: IntegrationValidationExecutor;
+  readonly aggregateReviewExecutor: AggregateIntegrationReviewExecutor;
 }): IntegrationNodeHandler => {
-  const validationExecutor =
-    options.validationExecutor ?? unavailableValidationExecutor;
-  const aggregateReviewExecutor =
-    options.aggregateReviewExecutor ?? unavailableAggregateReviewExecutor;
+  const validationExecutor = options.validationExecutor;
+  const aggregateReviewExecutor = options.aggregateReviewExecutor;
 
   const executeCommand = (input: {
     readonly generationId: string;
-    readonly phase: "validation" | "aggregate-review";
+    readonly phase: "start" | "validation" | "aggregate-review";
     readonly commandId: string;
     readonly command: Parameters<
       CompanyCommandRegistry["execute"]
@@ -169,8 +155,39 @@ export const openIntegrationNodeHandler = (options: {
     }
   };
 
+  const blockStart = (input: {
+    readonly generationId: string;
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly code: string;
+    readonly message: string;
+    readonly commandId: string;
+  }): void => {
+    options.integrations.blockStart({
+      generationId: input.generationId,
+      runId: input.runId,
+      nodeRunId: input.nodeRunId,
+      failure: {
+        code: input.code,
+        message: input.message,
+        evidence: { phase: "start", commandId: input.commandId },
+      },
+    });
+  };
+
   const executeGeneration = async (generationId: string): Promise<void> => {
-    let generation = options.integrations.executePending(generationId);
+    let generation: IntegrationGenerationView;
+    try {
+      generation = options.integrations.executePending(generationId);
+    } catch (error) {
+      if (!(error instanceof IntegrationRuntimeError)) throw error;
+      options.integrations.blockPending(generationId, {
+        code: error.code,
+        message: error.message,
+        evidence: { phase: "execution", generationId },
+      });
+      return;
+    }
     if (generation.state === "validating") {
       for (const required of generation.manifest.requiredValidations) {
         generation = options.integrations
@@ -187,12 +204,14 @@ export const openIntegrationNodeHandler = (options: {
         ) {
           continue;
         }
-        const input: ValidationInput = {
+        const input: IntegrationValidationInput = {
           operationKey: `${generation.id}:validation:${required.id}`,
           generationId: generation.id,
           manifestHash: generation.manifestHash,
           repositoryReference: repository.repositoryReference,
           integratedCommit: repository.integratedCommit!,
+          responsibleWorkPackageVersionIds:
+            required.responsibleWorkPackageVersionIds,
           validation: required,
         };
         let result = await validationExecutor.reconcile(input);
@@ -247,10 +266,13 @@ export const openIntegrationNodeHandler = (options: {
       .find((candidate) => candidate.id === generationId)!;
     if (generation.state !== "aggregate-review") return;
     const topicId = `integration-review:${generation.id}`;
-    const input: AggregateReviewInput = {
+    const input: AggregateIntegrationReviewInput = {
       operationKey: `${generation.id}:aggregate-review`,
       generationId: generation.id,
       manifestHash: generation.manifestHash,
+      projectId: generation.manifest.projectId,
+      runId: generation.manifest.runId,
+      nodeRunId: generation.manifest.nodeRunId,
       topicId,
       repositoryCommits: generation.repositoryResults.map((repository) => ({
         repositoryId: repository.repositoryReference,
@@ -304,18 +326,55 @@ export const openIntegrationNodeHandler = (options: {
       if (!generation) {
         const generationNumber = options.integrations.inspect(runId).length + 1;
         const generationId = `integration:${runId}:g${generationNumber}`;
-        const result = options.commandRegistry.execute({
-          schemaVersion: 1,
-          commandId: `integration:${runId}:${nodeRunId}:g${generationNumber}:start`,
-          actor,
-          command: {
-            type: "integration.generation.start",
+        const commandId = `integration:${runId}:${nodeRunId}:g${generationNumber}:start`;
+        try {
+          const result = options.commandRegistry.execute({
+            schemaVersion: 1,
+            commandId,
+            actor,
+            consumerId: "integration-node-handler",
+            command: {
+              type: "integration.generation.start",
+              generationId,
+              runId,
+              nodeRunId,
+            },
+          });
+          if (result.status !== "succeeded") {
+            if (result.error.code === "STORE_BUSY") return;
+            blockStart({
+              generationId,
+              runId,
+              nodeRunId,
+              code: result.error.code,
+              message: result.error.message,
+              commandId,
+            });
+            return;
+          }
+        } catch (error) {
+          if (
+            error instanceof CompanyCommandError &&
+            error.code === "STORE_BUSY"
+          ) {
+            return;
+          }
+          blockStart({
             generationId,
             runId,
             nodeRunId,
-          },
-        });
-        if (result.status !== "succeeded") return;
+            code:
+              error instanceof CompanyCommandError
+                ? error.code
+                : "INTEGRATION_COMMAND_FAILED",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Integration Generation start failed.",
+            commandId,
+          });
+          return;
+        }
         generation = options.integrations
           .inspect(runId)
           .find((candidate) => candidate.id === generationId);

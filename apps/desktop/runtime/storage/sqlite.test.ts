@@ -2284,6 +2284,30 @@ describe("Company database backups", () => {
   });
 });
 
+describe("Company database Integration executor wiring", () => {
+  it("constructs the Runtime-owned validation and aggregate Review executors", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+
+    try {
+      assert.equal(
+        existsSync(
+          join(companyDir, ".sandcastle", "integration-validation-evidence"),
+        ),
+        true,
+      );
+      assert.equal(
+        existsSync(
+          join(companyDir, ".sandcastle", "integration-review-workspaces"),
+        ),
+        true,
+      );
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe("Company catalog", () => {
   it("installs and inspects the built-in Software R&D Department", () => {
     const companyDir = tempCompanyDir();

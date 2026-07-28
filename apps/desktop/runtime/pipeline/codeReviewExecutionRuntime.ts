@@ -35,6 +35,8 @@ export interface CodeReviewStageExecutionInput {
   readonly timeoutSeconds: number;
   readonly request: ReviewerExecutionInput;
   readonly adapter: ReviewerExecutionAdapter;
+  readonly handlerKindId: "code-review@1" | "integration@1";
+  readonly workerId: "code-review-node-handler" | "integration-node-handler";
 }
 
 interface RuntimeMutationInput {
@@ -84,17 +86,17 @@ export const openCodeReviewExecutionRuntime = (options: {
            FROM node_attempts
            JOIN node_runs ON node_runs.id = node_attempts.node_run_id
           WHERE node_runs.id = ? AND node_runs.run_id = ?
-            AND node_runs.handler_kind_id = 'code-review@1'
+            AND node_runs.handler_kind_id = ?
             AND node_attempts.status IN ('running', 'reconciling')
           ORDER BY node_attempts.attempt_number DESC LIMIT 1`,
       )
-      .get(input.nodeRunId, input.runId) as
+      .get(input.nodeRunId, input.runId, input.handlerKindId) as
       | { readonly attemptId: string }
       | undefined;
     if (!attempt) {
       throw runtimeError(
         "CODE_REVIEW_EXECUTION_STATE_INVALID",
-        `Code Review Node ${input.nodeRunId} has no active aggregate Attempt for Reviewer execution.`,
+        `Node ${input.nodeRunId} has no active Attempt for independent Reviewer execution.`,
       );
     }
 
@@ -170,7 +172,7 @@ export const openCodeReviewExecutionRuntime = (options: {
                execution_epoch, fence_token, worker_id, issued_at,
                expires_at, renewed_at, released_at, cancel_requested
              ) VALUES (?, 'node-attempt', ?, ?, ?, ?, ?,
-                       'code-review-node-handler', ?, ?, NULL, NULL, 0)`,
+                       ?, ?, ?, NULL, NULL, 0)`,
           )
           .run(
             leaseId,
@@ -179,6 +181,7 @@ export const openCodeReviewExecutionRuntime = (options: {
             input.operationKey,
             executionEpoch,
             lease.fenceToken,
+            input.workerId,
             issuedAtIso,
             new Date(
               issuedAt.getTime() + input.timeoutSeconds * 1_000,
@@ -484,7 +487,11 @@ export const openCodeReviewExecutionRuntime = (options: {
     const continueAfterTerminalReconciliation = (details: {
       readonly terminalExecutionFactId: string;
     }): void => {
-      const commandId = `code-review:terminal-reconciliation:${details.terminalExecutionFactId}`;
+      const commandPrefix =
+        input.workerId === "code-review-node-handler"
+          ? "code-review"
+          : "integration-review";
+      const commandId = `${commandPrefix}:terminal-reconciliation:${details.terminalExecutionFactId}`;
       const request = {
         operationKey: input.operationKey,
         runId: input.runId,
@@ -610,10 +617,9 @@ export const openCodeReviewExecutionRuntime = (options: {
             `INSERT INTO runtime_unit_of_work_context(
                slot, command_id, actor_type, actor_id, authenticated_by,
                consumer_id, schema_version
-             ) VALUES (1, ?, 'runtime-worker', 'code-review-node-handler',
-                       'runtime', 'code-review-node-handler', 1)`,
+             ) VALUES (1, ?, 'runtime-worker', ?, 'runtime', ?, 1)`,
           )
-          .run(commandId);
+          .run(commandId, input.workerId, input.workerId);
         const interrupted = database
           .prepare(
             `UPDATE node_attempts
@@ -741,12 +747,13 @@ export const openCodeReviewExecutionRuntime = (options: {
                command_id, actor_type, actor_id, authenticated_by, consumer_id,
                schema_version, request_hash, status, result_json, result_hash,
                effect_ids_json, completed_at
-             ) VALUES (?, 'runtime-worker', 'code-review-node-handler',
-                       'runtime', 'code-review-node-handler', 1, ?, 'completed',
+             ) VALUES (?, 'runtime-worker', ?, 'runtime', ?, 1, ?, 'completed',
                        ?, ?, ?, ?)`,
           )
           .run(
             commandId,
+            input.workerId,
+            input.workerId,
             requestHash,
             canonicalPipelineJson(receipt),
             pipelineHash(receipt),
@@ -781,7 +788,11 @@ export const openCodeReviewExecutionRuntime = (options: {
         | undefined;
       if (!current || current.attemptStatus !== "reconciling") return;
       const now = clock().toISOString();
-      const commandId = `code-review:execution-reattach:${reconciliationLeaseId}`;
+      const commandPrefix =
+        input.workerId === "code-review-node-handler"
+          ? "code-review"
+          : "integration-review";
+      const commandId = `${commandPrefix}:execution-reattach:${reconciliationLeaseId}`;
       const request = {
         operationKey: input.operationKey,
         runId: input.runId,
@@ -796,10 +807,9 @@ export const openCodeReviewExecutionRuntime = (options: {
             `INSERT INTO runtime_unit_of_work_context(
                slot, command_id, actor_type, actor_id, authenticated_by,
                consumer_id, schema_version
-             ) VALUES (1, ?, 'runtime-worker', 'code-review-node-handler',
-                       'runtime', 'code-review-node-handler', 1)`,
+             ) VALUES (1, ?, 'runtime-worker', ?, 'runtime', ?, 1)`,
           )
-          .run(commandId);
+          .run(commandId, input.workerId, input.workerId);
         const resumedAttempt = database
           .prepare(
             `UPDATE node_attempts
@@ -875,12 +885,13 @@ export const openCodeReviewExecutionRuntime = (options: {
                command_id, actor_type, actor_id, authenticated_by, consumer_id,
                schema_version, request_hash, status, result_json, result_hash,
                effect_ids_json, completed_at
-             ) VALUES (?, 'runtime-worker', 'code-review-node-handler',
-                       'runtime', 'code-review-node-handler', 1, ?, 'completed',
+             ) VALUES (?, 'runtime-worker', ?, 'runtime', ?, 1, ?, 'completed',
                        ?, ?, ?, ?)`,
           )
           .run(
             commandId,
+            input.workerId,
+            input.workerId,
             pipelineHash(request),
             canonicalPipelineJson(receipt),
             pipelineHash(receipt),

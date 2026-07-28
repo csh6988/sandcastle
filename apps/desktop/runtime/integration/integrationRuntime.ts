@@ -6,6 +6,7 @@ import type {
   CodeReviewRuntime,
   CompletedCodeReviewCoverage,
 } from "../review/codeReviewRuntime.js";
+import type { WorkPackageRuntime } from "../workspaces/workPackages.js";
 
 export type { CompletedCodeReviewCoverage } from "../review/codeReviewRuntime.js";
 
@@ -48,6 +49,7 @@ export type GitIntegrationResult =
     }
   | {
       readonly status: "conflict" | "failed";
+      readonly writeStatus: "not-started";
       readonly code: string;
       readonly message: string;
       readonly evidence: unknown;
@@ -65,6 +67,7 @@ export type GitIntegrationReconciliation =
   | Extract<GitIntegrationResult, { readonly status: "unknown" }>
   | {
       readonly status: "conflict";
+      readonly writeStatus: "not-started";
       readonly code: "INTEGRATION_CONFLICT";
       readonly message: string;
       readonly evidence: unknown;
@@ -100,6 +103,10 @@ export type IntegrationGenerationManifest = {
     readonly id: string;
     readonly version: string;
     readonly hash: string;
+    readonly producerApplicationId: string;
+    readonly consumerApplicationId: string;
+    readonly testCommands: readonly string[];
+    readonly evidenceRefs: readonly string[];
   }[];
   readonly integrationConditions: readonly string[];
   readonly requiredValidations: readonly {
@@ -107,6 +114,9 @@ export type IntegrationGenerationManifest = {
     readonly repositoryReference: string;
     readonly kind: "build-test" | "contract";
     readonly identityHash: string;
+    readonly commands: readonly (readonly string[])[];
+    readonly evidenceRefs: readonly string[];
+    readonly responsibleWorkPackageVersionIds: readonly string[];
     readonly condition?: string;
     readonly contract?: {
       readonly id: string;
@@ -250,6 +260,16 @@ export interface IntegrationRuntime {
       readonly evidence: unknown;
     },
   ) => IntegrationGenerationView;
+  readonly blockStart: (input: {
+    readonly generationId: string;
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly failure: {
+      readonly code: string;
+      readonly message: string;
+      readonly evidence: unknown;
+    };
+  }) => void;
 }
 
 const canonicalize = (value: unknown): unknown => {
@@ -360,9 +380,35 @@ const requiredValidationsFor = (
   ordered: readonly CompletedCodeReviewCoveragePackage[],
   contractVersions: ReadonlyMap<
     string,
-    { readonly id: string; readonly version: string; readonly hash: string }
+    CompletedCodeReviewCoveragePackage["contractVersions"][number]
   >,
 ): readonly RequiredIntegrationValidation[] => {
+  const commandFor = (value: string): readonly string[] | null => {
+    const tokens = value.trim().split(/\s+/);
+    if (
+      tokens.length < 2 ||
+      !["npm", "pnpm", "yarn", "bun"].includes(tokens[0]!) ||
+      tokens.some((token) => !/^[A-Za-z0-9._:@/=-]+$/.test(token))
+    ) {
+      return null;
+    }
+    if (tokens[1] === "test") return tokens;
+    if (tokens[1] === "run" && tokens.length >= 3) return tokens;
+    return null;
+  };
+  const freezeCommands = (
+    values: readonly string[],
+    label: string,
+  ): readonly (readonly string[])[] => {
+    const commands = values.map(commandFor);
+    if (commands.length === 0 || commands.some((command) => command === null)) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_VALIDATION_COMMANDS_REQUIRED",
+        `${label} must freeze one or more exact allowlisted package-manager test commands.`,
+      );
+    }
+    return commands as readonly (readonly string[])[];
+  };
   const items: RequiredIntegrationValidation[] = [];
   const repositories = new Map<string, Set<string>>();
   for (const entry of ordered) {
@@ -372,13 +418,32 @@ const requiredValidationsFor = (
     repositories.set(entry.repositoryReference, conditions);
   }
   for (const [repositoryReference, configured] of repositories) {
-    const conditions =
-      configured.size > 0 ? [...configured] : ["repository build and test"];
+    const conditions = [...configured];
+    if (conditions.length === 0) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_VALIDATION_COMMANDS_REQUIRED",
+        `Repository ${repositoryReference} has no frozen Integration validation command.`,
+      );
+    }
     for (const condition of conditions) {
+      const commands = freezeCommands(
+        [condition],
+        `Repository ${repositoryReference} Integration condition`,
+      );
       const identity = {
         kind: "build-test" as const,
         repositoryReference,
         condition,
+        commands,
+        evidenceRefs: [] as readonly string[],
+        responsibleWorkPackageVersionIds: ordered
+          .filter(
+            (entry) =>
+              entry.repositoryReference === repositoryReference &&
+              entry.integrationConditions.includes(condition),
+          )
+          .map((entry) => entry.workPackageVersionId)
+          .sort(),
       };
       const identityHash = sha256(canonicalJson(identity));
       items.push({
@@ -398,15 +463,34 @@ const requiredValidationsFor = (
           dependency.predecessorWorkPackageVersionId,
       )!;
       const contract = contractVersions.get(dependency.contractId!)!;
+      if (
+        contract.producerApplicationId !== producer.applicationId ||
+        contract.consumerApplicationId !== consumer.applicationId
+      ) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_CONTRACT_MISMATCH",
+          `Cross-application Contract ${contract.id}@${contract.version} does not bind the reviewed producer and consumer Applications.`,
+        );
+      }
+      const commands = freezeCommands(
+        contract.testCommands,
+        `Cross-application Contract ${contract.id}@${contract.version}`,
+      );
       const identity = {
         kind: "contract" as const,
         repositoryReference: consumer.repositoryReference,
+        commands,
+        evidenceRefs: [...contract.evidenceRefs].sort(),
+        responsibleWorkPackageVersionIds: [
+          producer.workPackageVersionId,
+          consumer.workPackageVersionId,
+        ].sort(),
         contract: {
           id: contract.id,
           version: contract.version,
           hash: contract.hash,
-          producerApplicationId: producer.applicationId,
-          consumerApplicationId: consumer.applicationId,
+          producerApplicationId: contract.producerApplicationId,
+          consumerApplicationId: contract.consumerApplicationId,
         },
       };
       const identityHash = sha256(canonicalJson(identity));
@@ -449,6 +533,11 @@ export const openIntegrationRuntime = (
         readonly generationId: string;
         readonly failure: { readonly code: string; readonly message: string };
       }) => void;
+      readonly requeueIntegrationRecoveryInTransaction: (input: {
+        readonly runId: string;
+        readonly integrationNodeRunId: string;
+        readonly generationId: string;
+      }) => void;
       readonly completeIntegrationInTransaction: (input: {
         readonly runId: string;
         readonly nodeRunId: string;
@@ -461,6 +550,10 @@ export const openIntegrationRuntime = (
       }) => void;
     };
     readonly gitAdapter: GitIntegrationAdapter;
+    readonly workPackages?: Pick<
+      WorkPackageRuntime,
+      "inspect" | "versionInTransaction" | "assignInTransaction"
+    >;
     readonly reviewRuntime?: {
       readonly inspect: (topicId: string) => {
         readonly gateResult: {
@@ -475,13 +568,57 @@ export const openIntegrationRuntime = (
       };
     };
     readonly failureInjection?: (
-      point: "after-intent" | "after-effect" | "during-failure-finalization",
+      point:
+        | "after-intent"
+        | "after-effect"
+        | "before-operation-intent"
+        | "during-operation-intent"
+        | "during-operation-finalization"
+        | "during-failure-finalization",
       operationId: string,
     ) => void;
     readonly clock?: () => Date;
   },
 ): IntegrationRuntime => {
   const clock = options.clock ?? (() => new Date());
+
+  const appendIntegrationAudit = (input: {
+    readonly commandId: string;
+    readonly actor: ActorRef;
+    readonly action: string;
+    readonly entityType: string;
+    readonly entityId: string;
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly before?: unknown;
+    readonly after: unknown;
+    readonly now: string;
+  }): void => {
+    database
+      .prepare(
+        `INSERT INTO runtime_audit_records(
+           id, action, entity_type, entity_id, run_id, node_run_id,
+           before_json, after_json, created_at, command_id, actor_type,
+           actor_id, authenticated_by, consumer_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   (SELECT consumer_id FROM runtime_unit_of_work_context WHERE slot = 1))`,
+      )
+      .run(
+        randomUUID(),
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.runId,
+        input.nodeRunId,
+        input.before === undefined ? null : canonicalJson(input.before),
+        canonicalJson(input.after),
+        input.now,
+        input.commandId,
+        input.actor.type,
+        input.actor.id,
+        input.actor.authenticatedBy,
+      );
+  };
 
   const readOne = (generationId: string): IntegrationGenerationView => {
     const row = database
@@ -677,6 +814,12 @@ export const openIntegrationRuntime = (
     return ids.map((entry) => readOne(entry.id));
   };
 
+  const integrationWorkerActor: ActorRef = {
+    type: "runtime-worker",
+    id: "integration-node-handler",
+    authenticatedBy: "runtime",
+  };
+
   const startGeneration = (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
@@ -711,10 +854,68 @@ export const openIntegrationRuntime = (
     }
     assertSha(reviewedCoverage.coverageHash, 64, "Code Review coverage hash");
     const ordered = topologicalOrder(reviewedCoverage.packages);
+    const recoveryDefects = database
+      .prepare(
+        `SELECT integration_defects.id,
+                integration_defects.responsibility_json AS responsibilityJson,
+                integration_generations.manifest_json AS manifestJson
+           FROM integration_defects
+           JOIN integration_generations
+             ON integration_generations.id = integration_defects.generation_id
+          WHERE integration_generations.run_id = ?
+            AND integration_generations.state = 'failed'
+            AND integration_defects.status = 'open'
+          ORDER BY integration_generations.generation, integration_defects.created_at,
+                   integration_defects.id`,
+      )
+      .all(input.command.runId) as Array<{
+      readonly id: string;
+      readonly responsibilityJson: string;
+      readonly manifestJson: string;
+    }>;
+    const activeWorkPackages = options.workPackages?.inspect(
+      input.command.runId,
+    );
+    for (const defect of recoveryDefects) {
+      const responsibility = parseJson<{
+        readonly workPackageVersionIds?: readonly string[];
+      }>(defect.responsibilityJson);
+      const priorManifest = parseJson<IntegrationGenerationManifest>(
+        defect.manifestJson,
+      );
+      for (const priorVersionId of responsibility.workPackageVersionIds ?? []) {
+        const priorPackage = priorManifest.packages.find(
+          (entry) => entry.workPackageVersionId === priorVersionId,
+        );
+        const replacement = priorPackage
+          ? ordered.find(
+              (entry) =>
+                entry.workPackageId === priorPackage.workPackageId &&
+                entry.workPackageVersionId !== priorVersionId,
+            )
+          : undefined;
+        const activeVersion = priorPackage
+          ? activeWorkPackages?.packages
+              .find((entry) => entry.id === priorPackage.workPackageId)
+              ?.versions.find((entry) => entry.status === "ready")
+          : undefined;
+        if (
+          !priorPackage ||
+          !replacement ||
+          (activeVersion &&
+            activeVersion.id !== replacement.workPackageVersionId)
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_REWORK_COVERAGE_STALE",
+            "A fresh Integration Generation requires replacement Work Package Versions with fresh exact Code Review coverage for every open Integration defect.",
+          );
+        }
+      }
+    }
     const repositoryBases = new Map<string, string>();
     const contractVersions = new Map<
       string,
-      { readonly id: string; readonly version: string; readonly hash: string }
+      CompletedCodeReviewCoveragePackage["contractVersions"][number]
     >();
     for (const entry of ordered) {
       assertSha(entry.baseCommit, 40, "Repository base commit");
@@ -731,10 +932,7 @@ export const openIntegrationRuntime = (
       for (const contract of entry.contractVersions) {
         assertSha(contract.hash, 64, "Contract hash");
         const prior = contractVersions.get(contract.id);
-        if (
-          prior &&
-          (prior.version !== contract.version || prior.hash !== contract.hash)
-        ) {
+        if (prior && canonicalJson(prior) !== canonicalJson(contract)) {
           throw new IntegrationRuntimeError(
             "INTEGRATION_CONTRACT_MISMATCH",
             `Cross-application Contract ${contract.id} has incompatible reviewed versions.`,
@@ -833,6 +1031,14 @@ export const openIntegrationRuntime = (
         now,
         now,
       );
+    for (const defect of recoveryDefects) {
+      database
+        .prepare(
+          `UPDATE integration_defects SET status = 'closed', closed_at = ?
+            WHERE id = ? AND status = 'open'`,
+        )
+        .run(now, defect.id);
+    }
     const insertRepository = database.prepare(
       `INSERT INTO integration_repository_results(
          id, generation_id, repository_reference, base_commit,
@@ -856,6 +1062,24 @@ export const openIntegrationRuntime = (
       runId: manifest.runId,
       nodeRunId: manifest.nodeRunId,
       generationId: manifest.generationId,
+    });
+    appendIntegrationAudit({
+      commandId: input.commandId,
+      actor: input.actor,
+      action: "integration.generation-started",
+      entityType: "integration-generation",
+      entityId: manifest.generationId,
+      runId: manifest.runId,
+      nodeRunId: manifest.nodeRunId,
+      after: {
+        generationId: manifest.generationId,
+        generation: manifest.generation,
+        coverageId: manifest.coverageId,
+        coverageHash: manifest.coverageHash,
+        manifestHash,
+        state: "pending",
+      },
+      now,
     });
     options.events.append({
       type: "integration.generation.started",
@@ -913,7 +1137,127 @@ export const openIntegrationRuntime = (
     return id;
   };
 
+  const reworkResponsiblePackages = (input: {
+    readonly commandId: string;
+    readonly view: IntegrationGenerationView;
+    readonly code: string;
+    readonly responsibility: unknown;
+  }): void => {
+    if (!options.workPackages) return;
+    const responsibleVersionIds =
+      typeof input.responsibility === "object" &&
+      input.responsibility !== null &&
+      "workPackageVersionIds" in input.responsibility &&
+      Array.isArray(input.responsibility.workPackageVersionIds)
+        ? input.responsibility.workPackageVersionIds.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+    if (responsibleVersionIds.length === 0) return;
+    const affectedVersionIds = new Set(responsibleVersionIds);
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const manifestPackage of input.view.manifest.packages) {
+        if (
+          !affectedVersionIds.has(manifestPackage.workPackageVersionId) &&
+          manifestPackage.dependencies.some((dependency) =>
+            affectedVersionIds.has(dependency.predecessorWorkPackageVersionId),
+          )
+        ) {
+          affectedVersionIds.add(manifestPackage.workPackageVersionId);
+          expanded = true;
+        }
+      }
+    }
+    let graph = options.workPackages.inspect(input.view.manifest.runId);
+    const replacements: Record<string, string> = {};
+    const assignableRoots: Array<{
+      readonly workPackageId: string;
+      readonly baseCommit: string;
+    }> = [];
+    for (const manifestPackage of input.view.manifest.packages) {
+      if (!affectedVersionIds.has(manifestPackage.workPackageVersionId)) {
+        continue;
+      }
+      const workPackage = graph.packages.find(
+        (entry) => entry.id === manifestPackage.workPackageId,
+      );
+      const activeVersion = workPackage?.versions.find(
+        (entry) => entry.status === "ready",
+      );
+      if (!workPackage || !activeVersion) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_REWORK_TARGET_INVALID",
+          `Responsible Work Package ${manifestPackage.workPackageId} has no active Version to rework.`,
+        );
+      }
+      if (activeVersion.id !== manifestPackage.workPackageVersionId) {
+        replacements[manifestPackage.workPackageVersionId] = activeVersion.id;
+        continue;
+      }
+      const versionId = `integration-rework:${input.view.id}:${manifestPackage.workPackageId}:v${activeVersion.version + 1}`;
+      const { execution: _execution, ...manifest } = activeVersion.manifest;
+      graph = options.workPackages.versionInTransaction({
+        commandId: input.commandId,
+        actor: integrationWorkerActor,
+        expectedRevision: workPackage.revision,
+        workPackageId: manifestPackage.workPackageId,
+        versionId,
+        dependencies: activeVersion.dependencies.map((dependency) => ({
+          predecessorWorkPackageVersionId:
+            replacements[dependency.predecessorWorkPackageVersionId] ??
+            dependency.predecessorWorkPackageVersionId,
+          kind: dependency.kind,
+          ...(dependency.contractId
+            ? { contractId: dependency.contractId }
+            : {}),
+          ...(dependency.contractVersion
+            ? { contractVersion: dependency.contractVersion }
+            : {}),
+          ...(dependency.evidenceRef
+            ? { evidenceRef: dependency.evidenceRef }
+            : {}),
+        })),
+        manifest: {
+          ...manifest,
+          recoveryPolicy: `Integration Generation ${input.view.id} failed: ${input.code}`,
+        },
+      });
+      replacements[manifestPackage.workPackageVersionId] = versionId;
+      if (
+        !manifestPackage.dependencies.some((dependency) =>
+          affectedVersionIds.has(dependency.predecessorWorkPackageVersionId),
+        )
+      ) {
+        assignableRoots.push({
+          workPackageId: manifestPackage.workPackageId,
+          baseCommit: manifestPackage.baseCommit,
+        });
+      }
+    }
+    for (const root of assignableRoots) {
+      const current = graph.packages.find(
+        (entry) => entry.id === root.workPackageId,
+      );
+      if (!current) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_REWORK_TARGET_INVALID",
+          `Responsible Work Package ${root.workPackageId} disappeared before assignment.`,
+        );
+      }
+      graph = options.workPackages.assignInTransaction({
+        commandId: input.commandId,
+        actor: integrationWorkerActor,
+        expectedRevision: current.revision,
+        workPackageId: root.workPackageId,
+        baseCommit: root.baseCommit,
+      });
+    }
+  };
+
   const failGeneration = (input: {
+    readonly commandId: string;
     readonly view: IntegrationGenerationView;
     readonly operationId?: string;
     readonly kind:
@@ -929,15 +1273,7 @@ export const openIntegrationRuntime = (
     readonly blocked?: boolean;
   }): void => {
     const now = clock().toISOString();
-    createDefect({
-      generationId: input.view.id,
-      ...(input.operationId ? { operationId: input.operationId } : {}),
-      kind: input.kind,
-      responsibility: input.responsibility,
-      evidence: input.evidence,
-      now,
-    });
-    database
+    const transition = database
       .prepare(
         `UPDATE integration_generations
             SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
@@ -950,17 +1286,53 @@ export const openIntegrationRuntime = (
         now,
         input.view.id,
       );
+    if (transition.changes !== 1) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_GENERATION_TERMINAL",
+        `Integration Generation ${input.view.id} cannot transition from ${input.view.state} to ${input.blocked ? "blocked" : "failed"}.`,
+      );
+    }
+    createDefect({
+      generationId: input.view.id,
+      ...(input.operationId ? { operationId: input.operationId } : {}),
+      kind: input.kind,
+      responsibility: input.responsibility,
+      evidence: input.evidence,
+      now,
+    });
     const pipelineFailure = {
       runId: input.view.manifest.runId,
       nodeRunId: input.view.manifest.nodeRunId,
       generationId: input.view.id,
       failure: { code: input.code, message: input.message },
     };
-    if (input.blocked) {
-      options.pipelineRuntime.blockIntegrationInTransaction(pipelineFailure);
-    } else {
-      options.pipelineRuntime.failIntegrationInTransaction(pipelineFailure);
+    options.pipelineRuntime.blockIntegrationInTransaction(pipelineFailure);
+    if (!input.blocked) {
+      reworkResponsiblePackages(input);
+      options.pipelineRuntime.requeueIntegrationRecoveryInTransaction({
+        runId: input.view.manifest.runId,
+        integrationNodeRunId: input.view.manifest.nodeRunId,
+        generationId: input.view.id,
+      });
     }
+    appendIntegrationAudit({
+      commandId: input.commandId,
+      actor: integrationWorkerActor,
+      action: input.blocked
+        ? "integration.generation-blocked"
+        : "integration.generation-failed",
+      entityType: "integration-generation",
+      entityId: input.view.id,
+      runId: input.view.manifest.runId,
+      nodeRunId: input.view.manifest.nodeRunId,
+      before: { state: input.view.state },
+      after: {
+        state: input.blocked ? "blocked" : "failed",
+        code: input.code,
+        message: input.message,
+      },
+      now,
+    });
     options.events.append({
       type: input.blocked
         ? "integration.generation.blocked"
@@ -971,6 +1343,7 @@ export const openIntegrationRuntime = (
         runId: input.view.manifest.runId,
         nodeRunId: input.view.manifest.nodeRunId,
         integrationGenerationId: input.view.id,
+        commandId: input.commandId,
         ...(input.operationId
           ? { integrationOperationId: input.operationId }
           : {}),
@@ -1062,6 +1435,455 @@ export const openIntegrationRuntime = (
     };
   };
 
+  const persistOperationUnitOfWork = (input: {
+    readonly commandId: string;
+    readonly request: unknown;
+    readonly view: IntegrationGenerationView;
+    readonly operationId: string;
+    readonly action:
+      | "integration.operation.intent-recorded"
+      | "integration.operation.finalized";
+    readonly payload: Readonly<Record<string, unknown>> & {
+      readonly generationId: string;
+      readonly state: IntegrationGenerationView["state"];
+    };
+    readonly failurePoint?:
+      | "during-operation-intent"
+      | "during-operation-finalization"
+      | "during-failure-finalization";
+    readonly mutate: (now: string) => void;
+    readonly appendAfterOperation?: (now: string) => void;
+  }):
+    | {
+        readonly kind: "applied";
+        readonly receipt: {
+          readonly status: "succeeded";
+          readonly value: {
+            readonly operationId: string;
+            readonly action: string;
+            readonly payload: Readonly<Record<string, unknown>>;
+          };
+          readonly effectIds: readonly string[];
+        };
+      }
+    | {
+        readonly kind: "replayed";
+        readonly receipt: {
+          readonly status: "succeeded";
+          readonly value: {
+            readonly operationId: string;
+            readonly action: string;
+            readonly payload: Readonly<Record<string, unknown>>;
+          };
+          readonly effectIds: readonly string[];
+        };
+      } => {
+    const now = clock().toISOString();
+    const requestHash = sha256(
+      canonicalJson({
+        schemaVersion: 1,
+        actor: integrationWorkerActor,
+        consumerId: "integration-node-handler",
+        request: input.request,
+      }),
+    );
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = database
+        .prepare(
+          `SELECT actor_type AS actorType, actor_id AS actorId,
+                  authenticated_by AS authenticatedBy,
+                  consumer_id AS consumerId, schema_version AS schemaVersion,
+                  request_hash AS requestHash, status,
+                  result_json AS resultJson, result_hash AS resultHash,
+                  effect_ids_json AS effectIdsJson
+             FROM command_deduplication WHERE command_id = ?`,
+        )
+        .get(input.commandId) as
+        | {
+            readonly actorType: string;
+            readonly actorId: string;
+            readonly authenticatedBy: string;
+            readonly consumerId: string;
+            readonly schemaVersion: number;
+            readonly requestHash: string;
+            readonly status: string;
+            readonly resultJson: string;
+            readonly resultHash: string;
+            readonly effectIdsJson: string;
+          }
+        | undefined;
+      if (existing) {
+        if (
+          existing.actorType !== integrationWorkerActor.type ||
+          existing.actorId !== integrationWorkerActor.id ||
+          existing.authenticatedBy !== integrationWorkerActor.authenticatedBy ||
+          existing.consumerId !== "integration-node-handler" ||
+          Number(existing.schemaVersion) !== 1 ||
+          existing.requestHash !== requestHash ||
+          existing.status !== "completed" ||
+          sha256(existing.resultJson) !== existing.resultHash
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_CONFLICT",
+            `Integration worker Unit of Work ${input.commandId} was reused with changed identity or result.`,
+          );
+        }
+        const receipt = parseJson<{
+          readonly status: string;
+          readonly value: unknown;
+          readonly effectIds: unknown;
+        }>(existing.resultJson);
+        const storedEffectIds = parseJson<unknown>(existing.effectIdsJson);
+        const actualEffectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(input.commandId) as Array<{ readonly id: string }>
+        ).map((entry) => entry.id);
+        const expectedValue = {
+          operationId: input.operationId,
+          action: input.action,
+          payload: input.payload,
+        };
+        if (
+          receipt.status !== "succeeded" ||
+          canonicalJson(receipt.value) !== canonicalJson(expectedValue) ||
+          !Array.isArray(receipt.effectIds) ||
+          !receipt.effectIds.every(
+            (effectId) => typeof effectId === "string",
+          ) ||
+          !Array.isArray(storedEffectIds) ||
+          !storedEffectIds.every((effectId) => typeof effectId === "string") ||
+          canonicalJson(receipt.effectIds) !== canonicalJson(storedEffectIds) ||
+          canonicalJson(storedEffectIds) !== canonicalJson(actualEffectIds)
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_CONFLICT",
+            `Integration worker Unit of Work ${input.commandId} has an invalid stored receipt authority.`,
+          );
+        }
+        database.exec("COMMIT");
+        return {
+          kind: "replayed",
+          receipt: {
+            status: "succeeded",
+            value: expectedValue,
+            effectIds: actualEffectIds,
+          },
+        };
+      }
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, 'integration-node-handler', 1)`,
+        )
+        .run(
+          input.commandId,
+          integrationWorkerActor.type,
+          integrationWorkerActor.id,
+          integrationWorkerActor.authenticatedBy,
+        );
+      input.mutate(now);
+      const auditId = `${input.commandId}:audit`;
+      database
+        .prepare(
+          `INSERT INTO runtime_audit_records(
+             id, action, entity_type, entity_id, run_id, node_run_id,
+             before_json, after_json, created_at, command_id, actor_type,
+             actor_id, authenticated_by, consumer_id
+           ) VALUES (?, ?, 'integration-operation', ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?,
+                     'integration-node-handler')`,
+        )
+        .run(
+          auditId,
+          input.action,
+          input.operationId,
+          input.view.manifest.runId,
+          input.view.manifest.nodeRunId,
+          canonicalJson(input.payload),
+          now,
+          input.commandId,
+          integrationWorkerActor.type,
+          integrationWorkerActor.id,
+          integrationWorkerActor.authenticatedBy,
+        );
+      options.events.append({
+        type: input.action,
+        scope: {
+          companyId: "company",
+          projectId: input.view.manifest.projectId,
+          runId: input.view.manifest.runId,
+          nodeRunId: input.view.manifest.nodeRunId,
+          integrationGenerationId: input.view.id,
+          integrationOperationId: input.operationId,
+          commandId: input.commandId,
+        },
+        payload: input.payload,
+        timestamp: now,
+      });
+      input.appendAfterOperation?.(now);
+      if (input.failurePoint) {
+        options.failureInjection?.(input.failurePoint, input.operationId);
+      }
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(input.commandId) as Array<{ readonly id: string }>
+      ).map((entry) => entry.id);
+      const receiptJson = canonicalJson({
+        status: "succeeded",
+        value: {
+          operationId: input.operationId,
+          action: input.action,
+          payload: input.payload,
+        },
+        effectIds,
+      });
+      database
+        .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+        .run();
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, 'integration-node-handler', 1, ?, 'completed',
+                     ?, ?, ?, ?)`,
+        )
+        .run(
+          input.commandId,
+          integrationWorkerActor.type,
+          integrationWorkerActor.id,
+          integrationWorkerActor.authenticatedBy,
+          requestHash,
+          receiptJson,
+          sha256(receiptJson),
+          canonicalJson(effectIds),
+          now,
+        );
+      database.exec("COMMIT");
+      return {
+        kind: "applied",
+        receipt: {
+          status: "succeeded",
+          value: {
+            operationId: input.operationId,
+            action: input.action,
+            payload: input.payload,
+          },
+          effectIds,
+        },
+      };
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+
+  const persistGenerationBlockUnitOfWork = (input: {
+    readonly commandId: string;
+    readonly prepareInTransaction: () => {
+      readonly request: unknown;
+      readonly projectId: string;
+      readonly runId: string;
+      readonly nodeRunId: string;
+      readonly generationId: string;
+      readonly before: unknown;
+      readonly after: Readonly<Record<string, unknown>> & {
+        readonly generationId: string;
+        readonly state: "blocked";
+        readonly code: string;
+        readonly message: string;
+      };
+      readonly mutationOwnsEvidence?: boolean;
+      readonly assertApplicable?: () => void;
+      readonly mutate: (now: string) => void;
+    };
+  }): void => {
+    const now = clock().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const prepared = input.prepareInTransaction();
+      const requestHash = sha256(
+        canonicalJson({
+          schemaVersion: 1,
+          actor: integrationWorkerActor,
+          consumerId: "integration-node-handler",
+          request: prepared.request,
+        }),
+      );
+      const existing = database
+        .prepare(
+          `SELECT actor_type AS actorType, actor_id AS actorId,
+                  authenticated_by AS authenticatedBy,
+                  consumer_id AS consumerId, schema_version AS schemaVersion,
+                  request_hash AS requestHash, status,
+                  result_json AS resultJson, result_hash AS resultHash,
+                  effect_ids_json AS effectIdsJson
+             FROM command_deduplication WHERE command_id = ?`,
+        )
+        .get(input.commandId) as
+        | {
+            readonly actorType: string;
+            readonly actorId: string;
+            readonly authenticatedBy: string;
+            readonly consumerId: string;
+            readonly schemaVersion: number;
+            readonly requestHash: string;
+            readonly status: string;
+            readonly resultJson: string;
+            readonly resultHash: string;
+            readonly effectIdsJson: string;
+          }
+        | undefined;
+      if (existing) {
+        if (
+          existing.actorType !== integrationWorkerActor.type ||
+          existing.actorId !== integrationWorkerActor.id ||
+          existing.authenticatedBy !== integrationWorkerActor.authenticatedBy ||
+          existing.consumerId !== "integration-node-handler" ||
+          Number(existing.schemaVersion) !== 1 ||
+          existing.requestHash !== requestHash ||
+          existing.status !== "completed" ||
+          sha256(existing.resultJson) !== existing.resultHash
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_CONFLICT",
+            `Integration generation Unit of Work ${input.commandId} was reused with changed identity or result.`,
+          );
+        }
+        const receipt = parseJson<{
+          readonly status: string;
+          readonly value: unknown;
+          readonly effectIds: unknown;
+        }>(existing.resultJson);
+        const storedEffectIds = parseJson<unknown>(existing.effectIdsJson);
+        const actualEffectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(input.commandId) as Array<{ readonly id: string }>
+        ).map((entry) => entry.id);
+        if (
+          receipt.status !== "succeeded" ||
+          canonicalJson(receipt.value) !==
+            canonicalJson({
+              generationId: prepared.generationId,
+              state: "blocked",
+            }) ||
+          !Array.isArray(receipt.effectIds) ||
+          !receipt.effectIds.every(
+            (effectId) => typeof effectId === "string",
+          ) ||
+          !Array.isArray(storedEffectIds) ||
+          !storedEffectIds.every((effectId) => typeof effectId === "string") ||
+          canonicalJson(receipt.effectIds) !== canonicalJson(storedEffectIds) ||
+          canonicalJson(storedEffectIds) !== canonicalJson(actualEffectIds)
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_CONFLICT",
+            `Integration generation Unit of Work ${input.commandId} has an invalid stored receipt authority.`,
+          );
+        }
+        database.exec("COMMIT");
+        return;
+      }
+      prepared.assertApplicable?.();
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, 'integration-node-handler', 1)`,
+        )
+        .run(
+          input.commandId,
+          integrationWorkerActor.type,
+          integrationWorkerActor.id,
+          integrationWorkerActor.authenticatedBy,
+        );
+      prepared.mutate(now);
+      if (!prepared.mutationOwnsEvidence) {
+        appendIntegrationAudit({
+          commandId: input.commandId,
+          actor: integrationWorkerActor,
+          action: "integration.generation-blocked",
+          entityType: "integration-generation",
+          entityId: prepared.generationId,
+          runId: prepared.runId,
+          nodeRunId: prepared.nodeRunId,
+          before: prepared.before,
+          after: prepared.after,
+          now,
+        });
+        options.events.append({
+          type: "integration.generation.blocked",
+          scope: {
+            companyId: "company",
+            projectId: prepared.projectId,
+            runId: prepared.runId,
+            nodeRunId: prepared.nodeRunId,
+            integrationGenerationId: prepared.generationId,
+            commandId: input.commandId,
+          },
+          payload: prepared.after,
+          timestamp: now,
+        });
+      }
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(input.commandId) as Array<{ readonly id: string }>
+      ).map((entry) => entry.id);
+      const resultJson = canonicalJson({
+        status: "succeeded",
+        value: { generationId: prepared.generationId, state: "blocked" },
+        effectIds,
+      });
+      database
+        .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+        .run();
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, 'integration-node-handler', 1, ?, 'completed',
+                     ?, ?, ?, ?)`,
+        )
+        .run(
+          input.commandId,
+          integrationWorkerActor.type,
+          integrationWorkerActor.id,
+          integrationWorkerActor.authenticatedBy,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(effectIds),
+          now,
+        );
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+
   const persistIntent = (input: {
     readonly view: IntegrationGenerationView;
     readonly entry: CompletedCodeReviewCoveragePackage;
@@ -1125,6 +1947,12 @@ export const openIntegrationRuntime = (
           WHERE id = ? AND state IN ('pending', 'running')`,
       )
       .run(now, input.view.id);
+    database
+      .prepare(
+        `UPDATE integration_operations SET state = 'running', updated_at = ?
+          WHERE id = ? AND state = 'intent'`,
+      )
+      .run(now, input.request.operationId);
   };
 
   const finalizeSucceededOperation = (input: {
@@ -1135,7 +1963,7 @@ export const openIntegrationRuntime = (
       GitIntegrationResult,
       { readonly status: "succeeded" }
     >;
-  }): void => {
+  }): boolean => {
     if (
       input.result.beforeTip !== input.request.expectedTip ||
       input.result.afterTip !== input.result.resultingCommit ||
@@ -1155,7 +1983,7 @@ export const openIntegrationRuntime = (
                 resulting_commit = ?, failure_code = NULL,
                 failure_message = NULL, updated_at = ?
           WHERE id = ? AND request_hash = ?
-            AND state IN ('intent', 'running')`,
+            AND state IN ('intent', 'running', 'unknown')`,
       )
       .run(
         receiptJson,
@@ -1168,7 +1996,8 @@ export const openIntegrationRuntime = (
     database
       .prepare(
         `UPDATE integration_repository_results
-            SET expected_tip = ?, integrated_commit = ?, updated_at = ?
+            SET state = 'running', expected_tip = ?, integrated_commit = ?,
+                failure_code = NULL, failure_message = NULL, updated_at = ?
           WHERE generation_id = ? AND repository_reference = ?`,
       )
       .run(
@@ -1178,6 +2007,67 @@ export const openIntegrationRuntime = (
         input.view.id,
         input.entry.repositoryReference,
       );
+    database
+      .prepare(
+        `UPDATE integration_generations
+            SET state = 'running', failure_code = NULL,
+                failure_message = NULL, updated_at = ?
+          WHERE id = ? AND state = 'blocked'`,
+      )
+      .run(now, input.view.id);
+    database
+      .prepare(
+        `UPDATE integration_defects SET status = 'closed', closed_at = ?
+          WHERE generation_id = ? AND integration_operation_id = ?
+            AND kind = 'reconciliation' AND status = 'open'`,
+      )
+      .run(now, input.view.id, input.request.operationId);
+    const succeeded = database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM integration_operations
+          WHERE generation_id = ? AND state = 'succeeded'`,
+      )
+      .get(input.view.id) as { readonly count: number };
+    if (succeeded.count === input.view.manifest.packages.length) {
+      database
+        .prepare(
+          `UPDATE integration_repository_results
+              SET state = 'validating', updated_at = ?
+            WHERE generation_id = ? AND state = 'running'`,
+        )
+        .run(now, input.view.id);
+      const advanced = database
+        .prepare(
+          `UPDATE integration_generations
+              SET state = 'validating', updated_at = ?
+            WHERE id = ? AND state = 'running'`,
+        )
+        .run(now, input.view.id);
+      return advanced.changes === 1;
+    }
+    return false;
+  };
+
+  const adapterFailure = (
+    error: unknown,
+  ): Extract<GitIntegrationResult, { status: "unknown" }> => {
+    const code =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+    const message =
+      error instanceof Error
+        ? error.message
+        : "The Integration Git Adapter failed without a provable result.";
+    return {
+      status: "unknown",
+      code: "RECONCILE_UNKNOWN",
+      message,
+      evidence: { causeCode: code ?? "INTEGRATION_ADAPTER_ERROR" },
+    };
   };
 
   const resolveOperation = (input: {
@@ -1203,107 +2093,194 @@ export const openIntegrationRuntime = (
           `Integration operation ${persisted.id} has changed immutable input.`,
         );
       }
-      result = options.gitAdapter.reconcile(input.request);
+      try {
+        result = options.gitAdapter.reconcile(input.request);
+      } catch (error) {
+        result = adapterFailure(error);
+      }
       if (result.status === "not-applied") {
-        result = options.gitAdapter.execute(input.request);
+        if (persisted.state === "unknown") return false;
+        try {
+          result = options.gitAdapter.execute(input.request);
+        } catch (error) {
+          result = adapterFailure(error);
+        }
       }
     } else {
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        persistIntent(input);
-        database.exec("COMMIT");
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
+      options.failureInjection?.(
+        "before-operation-intent",
+        input.request.operationId,
+      );
+      const intent = persistOperationUnitOfWork({
+        commandId: `integration-operation:${input.request.operationId}:intent`,
+        request: input.request,
+        view: input.view,
+        operationId: input.request.operationId,
+        action: "integration.operation.intent-recorded",
+        payload: {
+          generationId: input.view.id,
+          state: "running",
+          operationId: input.request.operationId,
+          repositoryReference: input.entry.repositoryReference,
+          workPackageVersionId: input.entry.workPackageVersionId,
+          requestHash: input.request.requestHash,
+        },
+        failurePoint: "during-operation-intent",
+        mutate: () => persistIntent(input),
+      });
+      if (intent.kind === "replayed") {
+        return resolveOperation({ ...input, view: readOne(input.view.id) });
       }
       options.failureInjection?.("after-intent", input.request.operationId);
-      database
-        .prepare(
-          `UPDATE integration_operations SET state = 'running', updated_at = ?
-            WHERE id = ? AND state = 'intent'`,
-        )
-        .run(clock().toISOString(), input.request.operationId);
-      result = options.gitAdapter.execute(input.request);
+      try {
+        result = options.gitAdapter.execute(input.request);
+      } catch (error) {
+        result = adapterFailure(error);
+      }
       options.failureInjection?.("after-effect", input.request.operationId);
     }
     if (result.status === "succeeded") {
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        finalizeSucceededOperation({
-          view: input.view,
-          entry: input.entry,
-          request: input.request,
-          result,
-        });
-        database.exec("COMMIT");
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
-      }
+      const outcomeHash = sha256(canonicalJson(result));
+      let advancedToValidation = false;
+      persistOperationUnitOfWork({
+        commandId: `integration-operation:${input.request.operationId}:finalize`,
+        request: { requestHash: input.request.requestHash, result },
+        view: input.view,
+        operationId: input.request.operationId,
+        action: "integration.operation.finalized",
+        payload: {
+          generationId: input.view.id,
+          state: "running",
+          operationId: input.request.operationId,
+          operationState: "succeeded",
+          repositoryReference: input.entry.repositoryReference,
+          resultingCommit: result.resultingCommit,
+          outcomeHash,
+        },
+        failurePoint: "during-operation-finalization",
+        mutate: () =>
+          (advancedToValidation = finalizeSucceededOperation({
+            view: input.view,
+            entry: input.entry,
+            request: input.request,
+            result,
+          })),
+        appendAfterOperation: (now) => {
+          if (!advancedToValidation) return;
+          appendIntegrationAudit({
+            commandId: `integration-operation:${input.request.operationId}:finalize`,
+            actor: integrationWorkerActor,
+            action: "integration.generation-validating",
+            entityType: "integration-generation",
+            entityId: input.view.id,
+            runId: input.view.manifest.runId,
+            nodeRunId: input.view.manifest.nodeRunId,
+            before: { state: "running" },
+            after: {
+              state: "validating",
+              manifestHash: input.view.manifestHash,
+            },
+            now,
+          });
+          options.events.append({
+            type: "integration.generation.validating",
+            scope: {
+              companyId: "company",
+              projectId: input.view.manifest.projectId,
+              runId: input.view.manifest.runId,
+              nodeRunId: input.view.manifest.nodeRunId,
+              integrationGenerationId: input.view.id,
+              commandId: `integration-operation:${input.request.operationId}:finalize`,
+            },
+            payload: {
+              generationId: input.view.id,
+              state: "validating",
+              manifestHash: input.view.manifestHash,
+            },
+            timestamp: now,
+          });
+        },
+      });
       return true;
     }
     const now = clock().toISOString();
     const isUnknown = result.status === "unknown";
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      database
-        .prepare(
-          `UPDATE integration_operations
-              SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
-            WHERE id = ? AND state IN ('intent', 'running')`,
-        )
-        .run(
-          isUnknown ? "unknown" : "failed",
-          result.code,
-          result.message,
-          now,
-          input.request.operationId,
-        );
-      database
-        .prepare(
-          `UPDATE integration_repository_results
-              SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
-            WHERE generation_id = ? AND repository_reference = ?`,
-        )
-        .run(
-          isUnknown ? "blocked" : "failed",
-          result.code,
-          result.message,
-          now,
-          input.view.id,
-          input.entry.repositoryReference,
-        );
-      options.failureInjection?.(
-        "during-failure-finalization",
-        input.request.operationId,
-      );
-      failGeneration({
-        view: input.view,
+    const outcomeHash = sha256(canonicalJson(result));
+    const finalizeCommandId = `integration-operation:${input.request.operationId}:${isUnknown ? "unknown" : "finalize"}`;
+    persistOperationUnitOfWork({
+      commandId: finalizeCommandId,
+      request: { requestHash: input.request.requestHash, result },
+      view: input.view,
+      operationId: input.request.operationId,
+      action: "integration.operation.finalized",
+      payload: {
+        generationId: input.view.id,
+        state: isUnknown ? "blocked" : "failed",
         operationId: input.request.operationId,
-        kind:
-          result.status === "conflict"
-            ? "git-conflict"
-            : isUnknown
-              ? "reconciliation"
-              : "git-conflict",
-        code: result.code,
-        message: result.message,
-        responsibility: {
-          workPackageIds: [input.entry.workPackageId],
-          workPackageVersionIds: [input.entry.workPackageVersionId],
-        },
-        evidence: result.evidence,
-        blocked: isUnknown,
-      });
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      throw error;
-    }
+        operationState: isUnknown ? "unknown" : "failed",
+        repositoryReference: input.entry.repositoryReference,
+        failureCode: result.code,
+        outcomeHash,
+      },
+      failurePoint: isUnknown
+        ? "during-operation-finalization"
+        : "during-failure-finalization",
+      mutate: () => {
+        database
+          .prepare(
+            `UPDATE integration_operations
+                SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
+              WHERE id = ? AND state IN ('intent', 'running')`,
+          )
+          .run(
+            isUnknown ? "unknown" : "failed",
+            result.code,
+            result.message,
+            now,
+            input.request.operationId,
+          );
+        database
+          .prepare(
+            `UPDATE integration_repository_results
+                SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
+              WHERE generation_id = ? AND repository_reference = ?`,
+          )
+          .run(
+            isUnknown ? "blocked" : "failed",
+            result.code,
+            result.message,
+            now,
+            input.view.id,
+            input.entry.repositoryReference,
+          );
+        failGeneration({
+          commandId: finalizeCommandId,
+          view: input.view,
+          operationId: input.request.operationId,
+          kind:
+            result.status === "conflict"
+              ? "git-conflict"
+              : isUnknown
+                ? "reconciliation"
+                : "git-conflict",
+          code: result.code,
+          message: result.message,
+          responsibility: {
+            workPackageIds: [input.entry.workPackageId],
+            workPackageVersionIds: [input.entry.workPackageVersionId],
+          },
+          evidence: result.evidence,
+          blocked: isUnknown,
+        });
+      },
+    });
     return false;
   };
 
-  const executePending = (generationId: string): IntegrationGenerationView => {
+  const executePending = (
+    generationId: string,
+    reconcileBlocked = false,
+  ): IntegrationGenerationView => {
     let view = readOne(generationId);
     if (["failed", "passed"].includes(view.state)) {
       throw new IntegrationRuntimeError(
@@ -1311,7 +2288,7 @@ export const openIntegrationRuntime = (
         `Integration Generation ${generationId} cannot continue from ${view.state}.`,
       );
     }
-    if (view.state === "blocked") return view;
+    if (view.state === "blocked" && !reconcileBlocked) return view;
     for (const [ordinal, entry] of view.manifest.packages.entries()) {
       view = readOne(generationId);
       const repository = view.repositoryResults.find(
@@ -1340,37 +2317,6 @@ export const openIntegrationRuntime = (
         return readOne(generationId);
       }
     }
-    const now = clock().toISOString();
-    database
-      .prepare(
-        `UPDATE integration_repository_results
-            SET state = 'validating', updated_at = ?
-          WHERE generation_id = ? AND state = 'running'`,
-      )
-      .run(now, generationId);
-    database
-      .prepare(
-        `UPDATE integration_generations
-            SET state = 'validating', updated_at = ?
-          WHERE id = ? AND state = 'running'`,
-      )
-      .run(now, generationId);
-    options.events.append({
-      type: "integration.generation.validating",
-      scope: {
-        companyId: "company",
-        projectId: view.manifest.projectId,
-        runId: view.manifest.runId,
-        nodeRunId: view.manifest.nodeRunId,
-        integrationGenerationId: view.id,
-      },
-      payload: {
-        generationId: view.id,
-        state: "validating",
-        manifestHash: view.manifestHash,
-      },
-      timestamp: now,
-    });
     return readOne(generationId);
   };
 
@@ -1600,6 +2546,7 @@ export const openIntegrationRuntime = (
           repository.id,
         );
       failGeneration({
+        commandId: input.commandId,
         view,
         kind: input.command.kind,
         code:
@@ -1686,6 +2633,18 @@ export const openIntegrationRuntime = (
             WHERE id = ? AND state = 'validating'`,
         )
         .run(now, view.id);
+      appendIntegrationAudit({
+        commandId: input.commandId,
+        actor: input.actor,
+        action: "integration.generation-aggregate-review",
+        entityType: "integration-generation",
+        entityId: view.id,
+        runId: view.manifest.runId,
+        nodeRunId: view.manifest.nodeRunId,
+        before: { state: "validating" },
+        after: { state: "aggregate-review", manifestHash: view.manifestHash },
+        now,
+      });
       options.events.append({
         type: "integration.generation.aggregate-review",
         scope: {
@@ -1786,6 +2745,7 @@ export const openIntegrationRuntime = (
             }),
           )
         : null;
+    const aggregateReviewId = randomUUID();
     database
       .prepare(
         `INSERT INTO integration_aggregate_reviews(
@@ -1794,7 +2754,7 @@ export const openIntegrationRuntime = (
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        randomUUID(),
+        aggregateReviewId,
         view.id,
         input.command.topicId,
         gate.id,
@@ -1805,8 +2765,26 @@ export const openIntegrationRuntime = (
         passAuthorityHash,
         now,
       );
+    appendIntegrationAudit({
+      commandId: input.commandId,
+      actor: input.actor,
+      action: "integration.aggregate-review-recorded",
+      entityType: "integration-aggregate-review",
+      entityId: aggregateReviewId,
+      runId: view.manifest.runId,
+      nodeRunId: view.manifest.nodeRunId,
+      after: {
+        generationId: view.id,
+        inputHash: aggregateManifestHash,
+        result: gate.result,
+        evidence,
+        passAuthorityHash,
+      },
+      now,
+    });
     if (!passAuthorityHash) {
       failGeneration({
+        commandId: input.commandId,
         view,
         kind: "aggregate",
         code: "INTEGRATION_AGGREGATE_REVIEW_FAILED",
@@ -1841,6 +2819,18 @@ export const openIntegrationRuntime = (
         repositoryReference: repository.repositoryReference,
         commit: repository.integratedCommit!,
       })),
+    });
+    appendIntegrationAudit({
+      commandId: input.commandId,
+      actor: input.actor,
+      action: "integration.generation-passed",
+      entityType: "integration-generation",
+      entityId: view.id,
+      runId: view.manifest.runId,
+      nodeRunId: view.manifest.nodeRunId,
+      before: { state: "aggregate-review" },
+      after: { state: "passed", passAuthorityHash },
+      now,
     });
     options.events.append({
       type: "integration.generation.completed",
@@ -1901,7 +2891,7 @@ export const openIntegrationRuntime = (
       const ids = database
         .prepare(
           `SELECT id FROM integration_generations
-            WHERE state IN ('running', 'validating', 'aggregate-review')
+            WHERE state IN ('pending', 'running', 'validating', 'aggregate-review')
             ORDER BY updated_at, id`,
         )
         .all() as Array<{ readonly id: string }>;
@@ -1913,33 +2903,112 @@ export const openIntegrationRuntime = (
       const ids = database
         .prepare(
           `SELECT DISTINCT generation_id AS id FROM integration_operations
-            WHERE state IN ('intent', 'running') ORDER BY updated_at, id`,
+            WHERE state IN ('intent', 'running', 'unknown') ORDER BY updated_at, id`,
         )
         .all() as Array<{ readonly id: string }>;
-      for (const entry of ids) executePending(entry.id);
+      for (const entry of ids) executePending(entry.id, true);
       return ids.length;
     },
     blockPending: (generationId, failure) => {
-      const view = readOne(generationId);
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        failGeneration({
-          view,
-          kind: "reconciliation",
-          code: failure.code,
-          message: failure.message,
-          responsibility: {
-            workPackageVersionIds: view.manifest.dependencyOrder,
-          },
-          evidence: failure.evidence,
-          blocked: true,
-        });
-        database.exec("COMMIT");
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
-      }
+      const commandId = `integration-generation:${generationId}:block-pending`;
+      persistGenerationBlockUnitOfWork({
+        commandId,
+        prepareInTransaction: () => {
+          const view = readOne(generationId);
+          return {
+            request: {
+              generationId,
+              manifestHash: view.manifestHash,
+              failure,
+            },
+            projectId: view.manifest.projectId,
+            runId: view.manifest.runId,
+            nodeRunId: view.manifest.nodeRunId,
+            generationId,
+            before: { state: view.state },
+            after: {
+              generationId,
+              state: "blocked" as const,
+              code: failure.code,
+              message: failure.message,
+              evidence: failure.evidence,
+            },
+            mutationOwnsEvidence: true,
+            assertApplicable: () => {
+              if (view.state === "passed" || view.state === "failed") {
+                throw new IntegrationRuntimeError(
+                  "INTEGRATION_GENERATION_TERMINAL",
+                  `Integration Generation ${generationId} is already ${view.state}.`,
+                );
+              }
+              if (view.state === "blocked") {
+                throw new IntegrationRuntimeError(
+                  "INTEGRATION_GENERATION_STATE_INVALID",
+                  `Blocked Integration Generation ${generationId} has no matching block receipt.`,
+                );
+              }
+            },
+            mutate: () => {
+              failGeneration({
+                commandId,
+                view,
+                kind: "reconciliation",
+                code: failure.code,
+                message: failure.message,
+                responsibility: {
+                  workPackageVersionIds: view.manifest.dependencyOrder,
+                },
+                evidence: failure.evidence,
+                blocked: true,
+              });
+            },
+          };
+        },
+      });
       return readOne(generationId);
+    },
+    blockStart: (input) => {
+      const run = database
+        .prepare(
+          `SELECT project_id AS projectId FROM department_runs WHERE id = ?`,
+        )
+        .get(input.runId) as { readonly projectId: string } | undefined;
+      if (!run) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_RUN_NOT_FOUND",
+          `Department Run ${input.runId} was not found.`,
+        );
+      }
+      const commandId = `integration-generation:${input.generationId}:block-start`;
+      persistGenerationBlockUnitOfWork({
+        commandId,
+        prepareInTransaction: () => ({
+          request: input,
+          projectId: run.projectId,
+          runId: input.runId,
+          nodeRunId: input.nodeRunId,
+          generationId: input.generationId,
+          before: { state: "not-started" },
+          after: {
+            generationId: input.generationId,
+            state: "blocked" as const,
+            code: input.failure.code,
+            message: input.failure.message,
+            evidence: input.failure.evidence,
+          },
+          mutate: () => {
+            options.pipelineRuntime.blockIntegrationInTransaction({
+              runId: input.runId,
+              nodeRunId: input.nodeRunId,
+              generationId: input.generationId,
+              failure: {
+                code: input.failure.code,
+                message: input.failure.message,
+              },
+            });
+          },
+        }),
+      });
     },
   };
 };

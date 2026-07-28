@@ -226,6 +226,17 @@ export interface PipelineRuntime {
     readonly request: ReviewerExecutionInput;
     readonly adapter: ReviewerExecutionAdapter;
   }) => Promise<ReviewerExecutionResult>;
+  readonly executeIntegrationReviewStage: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly reviewerSessionId: string;
+    readonly reviewerAiMemberId: string;
+    readonly operationKey: string;
+    readonly reconcileExisting: boolean;
+    readonly timeoutSeconds: number;
+    readonly request: ReviewerExecutionInput;
+    readonly adapter: ReviewerExecutionAdapter;
+  }) => Promise<ReviewerExecutionResult>;
   readonly controlRun: (input: {
     readonly runId: string;
     readonly expectedRevision: number;
@@ -335,6 +346,11 @@ export interface PipelineRuntime {
     readonly nodeRunId: string;
     readonly generationId: string;
     readonly failure: { readonly code: string; readonly message: string };
+  }) => void;
+  readonly requeueIntegrationRecoveryInTransaction: (input: {
+    readonly runId: string;
+    readonly integrationNodeRunId: string;
+    readonly generationId: string;
   }) => void;
   readonly completeIntegrationInTransaction: (input: {
     readonly runId: string;
@@ -654,6 +670,7 @@ export const openPipelineRuntime = (
       integrationExecutor = executor;
     };
   let executeCodeReviewStage: PipelineRuntime["executeCodeReviewStage"];
+  let executeIntegrationReviewStage: PipelineRuntime["executeIntegrationReviewStage"];
   const appendRuntimeMutation = (input: {
     readonly action: string;
     readonly entityType: string;
@@ -823,7 +840,7 @@ export const openPipelineRuntime = (
     }
   };
 
-  executeCodeReviewStage = openCodeReviewExecutionRuntime({
+  const executeReviewerStage = openCodeReviewExecutionRuntime({
     database,
     clock,
     activeExecutions,
@@ -831,6 +848,18 @@ export const openPipelineRuntime = (
     appendExecutionEvent,
     runtimeError: (code, message) => new PipelineRuntimeError(code, message),
   });
+  executeCodeReviewStage = (input) =>
+    executeReviewerStage({
+      ...input,
+      handlerKindId: "code-review@1",
+      workerId: "code-review-node-handler",
+    });
+  executeIntegrationReviewStage = (input) =>
+    executeReviewerStage({
+      ...input,
+      handlerKindId: "integration@1",
+      workerId: "integration-node-handler",
+    });
 
   const auditRecords = (
     input: {
@@ -7069,7 +7098,7 @@ export const openPipelineRuntime = (
   const blockIntegrationInTransaction: PipelineRuntime["blockIntegrationInTransaction"] =
     (input) => {
       const now = clock().toISOString();
-      database
+      const node = database
         .prepare(
           `UPDATE node_runs
               SET status = 'blocked', failure_code = ?, failure_message = ?,
@@ -7084,6 +7113,12 @@ export const openPipelineRuntime = (
           input.nodeRunId,
           input.runId,
         );
+      if (node.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_BLOCK_STATE_INVALID",
+          `Integration Node Run ${input.nodeRunId} is not blockable.`,
+        );
+      }
       database
         .prepare(
           `UPDATE node_attempts
@@ -7096,13 +7131,19 @@ export const openPipelineRuntime = (
             )`,
         )
         .run(input.failure.code, input.failure.message, now, input.nodeRunId);
-      database
+      const run = database
         .prepare(
           `UPDATE department_runs
               SET status = 'blocked', revision = revision + 1, updated_at = ?
             WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
         )
         .run(now, input.runId);
+      if (run.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_BLOCK_STATE_INVALID",
+          `Department Run ${input.runId} is not blockable.`,
+        );
+      }
       appendRuntimeMutation({
         action: "run.integration-blocked",
         entityType: "department-run",
@@ -7234,6 +7275,87 @@ export const openPipelineRuntime = (
           runStatus: "failed",
           generationId: input.generationId,
           failure: input.failure,
+        },
+        createdAt: now,
+      });
+    };
+
+  const requeueIntegrationRecoveryInTransaction: PipelineRuntime["requeueIntegrationRecoveryInTransaction"] =
+    (input) => {
+      const integration = database
+        .prepare(
+          `SELECT status FROM node_runs
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'`,
+        )
+        .get(input.integrationNodeRunId, input.runId) as
+        | { readonly status: string }
+        | undefined;
+      if (!integration || !["blocked", "failed"].includes(integration.status)) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_RECOVERY_STATE_INVALID",
+          `Integration Node Run ${input.integrationNodeRunId} is not blocked for recovery.`,
+        );
+      }
+      const reviews = database
+        .prepare(
+          `SELECT id, status FROM node_runs
+            WHERE run_id = ? AND handler_kind_id = 'code-review@1'
+            ORDER BY created_at, id`,
+        )
+        .all(input.runId) as Array<{
+        readonly id: string;
+        readonly status: string;
+      }>;
+      if (reviews.length !== 1 || reviews[0]!.status !== "succeeded") {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_RECOVERY_CODE_REVIEW_INVALID",
+          "Integration recovery requires the exact completed shared Code Review Node projection.",
+        );
+      }
+      const now = clock().toISOString();
+      const review = reviews[0]!;
+      const requeuedReview = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'queued', result_json = NULL, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND status = 'succeeded'`,
+        )
+        .run(now, review.id, input.runId);
+      const requeuedIntegration = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'queued', result_json = NULL, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'
+              AND status IN ('blocked', 'failed')`,
+        )
+        .run(now, input.integrationNodeRunId, input.runId);
+      if (requeuedReview.changes !== 1 || requeuedIntegration.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_RECOVERY_STATE_INVALID",
+          "Integration recovery projections changed concurrently.",
+        );
+      }
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('blocked', 'failed', 'running')`,
+        )
+        .run(now, input.runId);
+      appendRuntimeMutation({
+        action: "node.integration-recovery-requeued",
+        entityType: "node-run",
+        entityId: input.integrationNodeRunId,
+        eventType: "node.status.changed",
+        runId: input.runId,
+        nodeRunId: input.integrationNodeRunId,
+        before: { status: integration.status },
+        after: {
+          status: "queued",
+          generationId: input.generationId,
+          codeReviewNodeRunId: review.id,
         },
         createdAt: now,
       });
@@ -9866,6 +9988,7 @@ export const openPipelineRuntime = (
     registerCodeReviewExecutor,
     registerIntegrationExecutor,
     executeCodeReviewStage,
+    executeIntegrationReviewStage,
     reconcileWorkPackageImports,
     controlRun,
     cancelNodeAttempt,
@@ -9882,6 +10005,7 @@ export const openPipelineRuntime = (
     startIntegrationInTransaction,
     blockIntegrationInTransaction,
     failIntegrationInTransaction,
+    requeueIntegrationRecoveryInTransaction,
     completeIntegrationInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,

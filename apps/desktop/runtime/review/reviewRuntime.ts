@@ -4,6 +4,7 @@ import {
   ReviewInputManifestSchema,
   ReviewTopicViewSchema,
   type ActorRef,
+  type ReviewInputManifest,
   type ReviewEnvelopeCommand,
   type ReviewParticipantInput,
   type ReviewTopicView,
@@ -39,6 +40,32 @@ export interface ReviewRuntime {
     readonly actor: ActorRef;
     readonly topicId: string;
     readonly state: "blocked" | "active";
+  }) => ReviewTopicView;
+  readonly recordAggregateExecutionInTransaction: (input: {
+    readonly commandId: string;
+    readonly actor: ActorRef;
+    readonly topicId: string;
+    readonly projectId: string;
+    readonly runId: string;
+    readonly manifest: Extract<
+      ReviewInputManifest,
+      { readonly scope: "aggregate" }
+    >;
+    readonly producer: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+    };
+    readonly reviewer: {
+      readonly participantId: string;
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+    };
+    readonly terminalExecutionFactId: string;
+    readonly result: "PASS" | "CONDITIONAL_PASS" | "FAIL";
+    readonly conditions: readonly string[];
+    readonly evidenceRefs: readonly string[];
   }) => ReviewTopicView;
 }
 
@@ -722,6 +749,225 @@ export const openReviewRuntime = (
     options.mutationFailure?.("after-topic-mutation");
     return inspect(command.topicId);
   };
+
+  const recordAggregateExecutionInTransaction: ReviewRuntime["recordAggregateExecutionInTransaction"] =
+    (input) => {
+      const manifest = ReviewInputManifestSchema.parse(input.manifest);
+      if (
+        manifest.scope !== "aggregate" ||
+        manifest.topicId !== input.topicId
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEW_MANIFEST_TOPIC_MISMATCH",
+          "Aggregate Review execution must bind its exact Topic manifest.",
+        );
+      }
+      const manifestJson = canonicalJson(manifest);
+      const manifestHash = sha256(manifestJson);
+      const existing = database
+        .prepare(
+          `SELECT review_topics.project_id AS projectId,
+                  review_topics.run_id AS runId,
+                  review_topics.manifest_json AS manifestJson,
+                  review_topics.manifest_hash AS manifestHash,
+                  review_topics.producer_ai_member_id AS producerAiMemberId,
+                  review_topics.producer_position_id AS producerPositionId,
+                  review_topics.producer_session_id AS producerSessionId,
+                  review_participants.id AS reviewerParticipantId,
+                  review_participants.ai_member_id AS reviewerAiMemberId,
+                  review_participants.position_id AS reviewerPositionId,
+                  review_participants.session_id AS reviewerSessionId,
+                  quality_gate_results.id AS gateId,
+                  quality_gate_results.result AS result,
+                  quality_gate_results.conditions_json AS conditionsJson,
+                  quality_gate_results.evidence_refs_json AS evidenceRefsJson
+             FROM review_topics
+             LEFT JOIN review_participants
+               ON review_participants.topic_id = review_topics.id
+              AND review_participants.role = 'reviewer-participant'
+             LEFT JOIN quality_gate_results
+               ON quality_gate_results.topic_id = review_topics.id
+              AND quality_gate_results.kind = 'aggregate'
+            WHERE review_topics.id = ?`,
+        )
+        .get(input.topicId) as
+        | {
+            readonly projectId: string;
+            readonly runId: string;
+            readonly manifestJson: string;
+            readonly manifestHash: string;
+            readonly producerAiMemberId: string;
+            readonly producerPositionId: string;
+            readonly producerSessionId: string;
+            readonly reviewerParticipantId: string | null;
+            readonly reviewerAiMemberId: string | null;
+            readonly reviewerPositionId: string | null;
+            readonly reviewerSessionId: string | null;
+            readonly gateId: string | null;
+            readonly result: string | null;
+            readonly conditionsJson: string | null;
+            readonly evidenceRefsJson: string | null;
+          }
+        | undefined;
+      if (existing) {
+        if (
+          existing.projectId !== input.projectId ||
+          existing.runId !== input.runId ||
+          existing.manifestJson !== manifestJson ||
+          existing.manifestHash !== manifestHash ||
+          existing.producerAiMemberId !== input.producer.aiMemberId ||
+          existing.producerPositionId !== input.producer.positionId ||
+          existing.producerSessionId !== input.producer.sessionId ||
+          existing.reviewerParticipantId !== input.reviewer.participantId ||
+          existing.reviewerAiMemberId !== input.reviewer.aiMemberId ||
+          existing.reviewerPositionId !== input.reviewer.positionId ||
+          existing.reviewerSessionId !== input.reviewer.sessionId ||
+          existing.gateId !== `quality-gate-${input.topicId}` ||
+          existing.result !== input.result ||
+          existing.conditionsJson !== canonicalJson(input.conditions) ||
+          existing.evidenceRefsJson !== canonicalJson(input.evidenceRefs) ||
+          !input.evidenceRefs.includes(
+            `execution-fact:${input.terminalExecutionFactId}`,
+          )
+        ) {
+          throw new ReviewRuntimeError(
+            "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+            `Aggregate Review Topic ${input.topicId} already binds different execution authority.`,
+          );
+        }
+        return inspect(input.topicId);
+      }
+      const sessionParticipant = database
+        .prepare(
+          `SELECT 1 FROM session_participants
+            WHERE session_id = ? AND participant_type = 'ai-member'
+              AND participant_ref = ?`,
+        )
+        .get(input.reviewer.sessionId, input.reviewer.aiMemberId);
+      if (!sessionParticipant) {
+        throw new ReviewRuntimeError(
+          "REVIEWER_SESSION_INVALID",
+          "Aggregate Review execution requires a fresh persisted Reviewer Session.",
+        );
+      }
+      const now = clock().toISOString();
+      database
+        .prepare(
+          `INSERT INTO review_topics(
+             id, project_id, run_id, title, kind, status, revision,
+             manifest_json, manifest_hash, producer_ai_member_id,
+             producer_position_id, producer_session_id, quorum, budget_json,
+             stop_condition, escalation_policy, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'aggregate', ?, 1, ?, ?, ?, ?, ?, 1, ?,
+                     'blocking-findings-dispositioned', 'fail-with-evidence', ?, ?)`,
+        )
+        .run(
+          input.topicId,
+          input.projectId,
+          input.runId,
+          `Aggregate Integration Review ${manifest.integrationGenerationId}`,
+          input.result,
+          manifestJson,
+          manifestHash,
+          input.producer.aiMemberId,
+          input.producer.positionId,
+          input.producer.sessionId,
+          canonicalJson({
+            maxRounds: 1,
+            maxDurationSeconds: 3600,
+            maxTokens: 0,
+            maxCostCents: 0,
+          }),
+          now,
+          now,
+        );
+      const eligibility = {
+        topicId: input.topicId,
+        participantId: input.reviewer.participantId,
+        reviewerSessionId: input.reviewer.sessionId,
+        producerSessionId: input.producer.sessionId,
+        eligible: true,
+      };
+      database
+        .prepare(
+          `INSERT INTO review_participants(
+             id, topic_id, role, ai_member_id, position_id, session_id,
+             eligible, eligibility_reasons_json, eligibility_snapshot_json,
+             eligibility_snapshot_hash, created_at
+           ) VALUES (?, ?, 'reviewer-participant', ?, ?, ?, 1, '[]', ?, ?, ?)`,
+        )
+        .run(
+          input.reviewer.participantId,
+          input.topicId,
+          input.reviewer.aiMemberId,
+          input.reviewer.positionId,
+          input.reviewer.sessionId,
+          canonicalJson(eligibility),
+          sha256(canonicalJson(eligibility)),
+          now,
+        );
+      const gateId = `quality-gate-${input.topicId}`;
+      database
+        .prepare(
+          `INSERT INTO quality_gate_results(
+             id, topic_id, kind, manifest_json, manifest_hash, revision_id,
+             result, conditions_json, recheck_ids_json, evidence_refs_json,
+             created_at
+           ) VALUES (?, ?, 'aggregate', ?, ?, NULL, ?, ?, '[]', ?, ?)`,
+        )
+        .run(
+          gateId,
+          input.topicId,
+          manifestJson,
+          manifestHash,
+          input.result,
+          canonicalJson(input.conditions),
+          canonicalJson(input.evidenceRefs),
+          now,
+        );
+      appendMutation({
+        commandId: input.commandId,
+        actor: input.actor,
+        action: "review.aggregate-execution.recorded",
+        entityType: "review-topic",
+        entityId: input.topicId,
+        topicId: input.topicId,
+        projectId: input.projectId,
+        runId: input.runId,
+        eventType: "review.scheduled",
+        payload: {
+          topicId: input.topicId,
+          kind: "aggregate",
+          status: input.result,
+          revision: 1,
+          manifestHash,
+          eligibleReviewerCount: 1,
+          quorum: 1,
+        },
+        createdAt: now,
+      });
+      appendMutation({
+        commandId: input.commandId,
+        actor: input.actor,
+        action: "quality-gate.completed",
+        entityType: "quality-gate-result",
+        entityId: gateId,
+        topicId: input.topicId,
+        projectId: input.projectId,
+        runId: input.runId,
+        eventType: "quality-gate.completed",
+        qualityGateResultId: gateId,
+        payload: {
+          topicId: input.topicId,
+          qualityGateResultId: gateId,
+          result: input.result,
+          manifestHash,
+          revisionId: null,
+        },
+        createdAt: now,
+      });
+      return inspect(input.topicId);
+    };
 
   const topicRow = (topicId: string) => {
     const topic = database
@@ -1793,5 +2039,6 @@ export const openReviewRuntime = (
     list,
     dispatchInTransaction,
     transitionIndependentExecutionInTransaction,
+    recordAggregateExecutionInTransaction,
   };
 };

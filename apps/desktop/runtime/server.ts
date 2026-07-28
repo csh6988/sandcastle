@@ -30,6 +30,7 @@ import type { LocalAgentHost } from "./agent/agentCatalog.js";
 import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import type { ReviewerExecutionAdapter } from "./review/reviewerExecution.js";
+import type { IntegrationValidationProvider } from "./integration/integrationValidationExecutor.js";
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
@@ -42,6 +43,7 @@ export interface CompanyRuntimeServerOptions {
   readonly executionAdapter?: ExecutionAdapter;
   readonly interactionExecutionAdapter?: ModelOnlyInteractionExecutionAdapter;
   readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
+  readonly integrationValidationProvider?: IntegrationValidationProvider;
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
@@ -129,6 +131,13 @@ export const startCompanyRuntimeServer = async (
         ? {
             codeReviewRuntime: {
               reviewerExecutionAdapter: options.reviewerExecutionAdapter,
+            },
+          }
+        : {}),
+      ...(options.integrationValidationProvider
+        ? {
+            integrationRuntime: {
+              validationProvider: options.integrationValidationProvider,
             },
           }
         : {}),

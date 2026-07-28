@@ -859,6 +859,10 @@ const IntegrationCoveragePackageSchema = z
           id: z.string().trim().min(1),
           version: z.string().trim().min(1),
           hash: Sha256Schema,
+          producerApplicationId: z.string().trim().min(1),
+          consumerApplicationId: z.string().trim().min(1),
+          testCommands: z.array(z.string().trim().min(1)).min(1),
+          evidenceRefs: z.array(z.string().trim().min(1)).min(1),
         })
         .strict(),
     ),
@@ -872,6 +876,9 @@ const RequiredIntegrationValidationSchema = z
     repositoryReference: z.string().trim().min(1),
     kind: z.enum(["build-test", "contract"]),
     identityHash: Sha256Schema,
+    commands: z.array(z.array(z.string().trim().min(1)).min(2)).min(1),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+    responsibleWorkPackageVersionIds: z.array(z.string().trim().min(1)).min(1),
     condition: z.string().trim().min(1).optional(),
     contract: z
       .object({
@@ -916,6 +923,10 @@ export const IntegrationGenerationManifestSchema = z
           id: z.string().trim().min(1),
           version: z.string().trim().min(1),
           hash: Sha256Schema,
+          producerApplicationId: z.string().trim().min(1),
+          consumerApplicationId: z.string().trim().min(1),
+          testCommands: z.array(z.string().trim().min(1)).min(1),
+          evidenceRefs: z.array(z.string().trim().min(1)).min(1),
         })
         .strict(),
     ),

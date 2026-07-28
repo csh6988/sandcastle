@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { dirname, join, posix, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
@@ -92,6 +93,7 @@ interface DockerSandboxModule {
       readonly readonly?: boolean;
     }[];
     readonly env?: Record<string, string>;
+    readonly network?: string | readonly string[];
   }) => {
     readonly tag: "bind-mount";
     readonly name: string;
@@ -113,7 +115,15 @@ interface DockerSandboxModule {
         readonly stderr: string;
         readonly exitCode: number;
       }>;
-      readonly interactiveExec?: unknown;
+      readonly interactiveExec?: (
+        args: string[],
+        options: {
+          readonly stdin: NodeJS.ReadableStream;
+          readonly stdout: NodeJS.WritableStream;
+          readonly stderr: NodeJS.WritableStream;
+          readonly cwd?: string;
+        },
+      ) => Promise<{ readonly exitCode: number }>;
       readonly copyFileIn: unknown;
       readonly copyFileOut: unknown;
       readonly close: () => Promise<void>;
@@ -472,6 +482,244 @@ export const createSandcastleExecutionRuntimeFromModules = (
         receipt,
         evidence,
       };
+    },
+    executeIntegrationValidation: async (input) => {
+      if (!dockerModule) {
+        return {
+          status: "not-started",
+          code: "PROVIDER_ISOLATION_REQUIRED",
+          message:
+            "Integration validation requires the Docker Sandbox provider.",
+          evidence: { sandboxRef: "docker" },
+        };
+      }
+      const providerId = "sandcastle-docker-validation";
+      const evidenceRefs = [
+        "docker:ephemeral-container",
+        "docker:network:none",
+        "mount:/validation-input:readonly",
+        "workspace:/validation-workspace:container-private",
+        "home:/home/agent:container-private",
+        "credentials:none",
+      ];
+      const sandbox = dockerModule.docker({
+        env: {
+          HOME: "/home/agent",
+          XDG_CACHE_HOME: "/home/agent/.cache",
+          XDG_CONFIG_HOME: "/home/agent/.config",
+          XDG_DATA_HOME: "/home/agent/.local/share",
+          CI: "1",
+          NO_COLOR: "1",
+        },
+        network: "none",
+      });
+      let handle: Awaited<ReturnType<typeof sandbox.create>> | undefined;
+      try {
+        handle = await sandbox.create({
+          worktreePath: input.workspaceRef,
+          hostRepoPath: input.repositoryReference,
+          mounts: [
+            {
+              hostPath: input.workspaceRef,
+              sandboxPath: "/validation-input",
+              readonly: true,
+            },
+          ],
+          env: {},
+        });
+        if (!handle.interactiveExec) {
+          await handle.close();
+          return {
+            status: "not-started",
+            code: "PROVIDER_ISOLATION_REQUIRED",
+            message:
+              "The Docker validation provider does not support exact argv execution.",
+            evidence: { providerId },
+          };
+        }
+        const [operation, mount, writable, environment] = await Promise.all([
+          handle.exec("cat /etc/hostname"),
+          handle.exec(
+            `awk '$5 == "/validation-input" { print; exit }' /proc/self/mountinfo`,
+          ),
+          handle.exec(
+            "test -r /validation-input && test ! -w /validation-input",
+          ),
+          handle.exec(
+            `printf '%s\\n%s\\n%s\\n%s\\n' "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"`,
+          ),
+        ]);
+        const providerOperationId = operation.stdout.trim();
+        const environmentInspection = environment.stdout.trim().split("\n");
+        if (
+          operation.exitCode !== 0 ||
+          !providerOperationId ||
+          mount.exitCode !== 0 ||
+          !mount.stdout.trim() ||
+          writable.exitCode !== 0 ||
+          environment.exitCode !== 0 ||
+          environmentInspection.join("|") !==
+            "/home/agent|/home/agent/.cache|/home/agent/.config|/home/agent/.local/share"
+        ) {
+          await handle.close();
+          return {
+            status: "not-started",
+            code: "PROVIDER_ISOLATION_REQUIRED",
+            message:
+              "The Docker validation provider failed post-launch isolation inspection before executing repository commands.",
+            evidence: { providerId, providerOperationId },
+          };
+        }
+        evidenceRefs.push(
+          `provider-operation:${providerOperationId}`,
+          `mount-inspection:${receiptHash(mount.stdout.trim())}`,
+          `environment-inspection:${receiptHash(environmentInspection)}`,
+        );
+        try {
+          input.onOperationStarted({
+            providerId,
+            providerOperationId,
+            evidenceRefs: [...evidenceRefs],
+          });
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+
+        const executeArgv = async (
+          argv: readonly string[],
+          cwd?: string,
+        ): Promise<{
+          readonly exitCode: number;
+          readonly stdout: string;
+          readonly stderr: string;
+        }> => {
+          const stdin = new PassThrough();
+          const stdout = new PassThrough();
+          const stderr = new PassThrough();
+          let stdoutText = "";
+          let stderrText = "";
+          stdout.on("data", (chunk: Buffer) => {
+            stdoutText = `${stdoutText}${chunk.toString()}`.slice(-64 * 1024);
+          });
+          stderr.on("data", (chunk: Buffer) => {
+            stderrText = `${stderrText}${chunk.toString()}`.slice(-64 * 1024);
+          });
+          stdin.end();
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const result = await Promise.race([
+              handle!.interactiveExec!([...argv], {
+                stdin,
+                stdout,
+                stderr,
+                ...(cwd ? { cwd } : {}),
+              }),
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(
+                  () => reject(new Error("Integration validation timed out.")),
+                  input.timeoutMs,
+                );
+              }),
+            ]);
+            return {
+              exitCode: result.exitCode,
+              stdout: stdoutText,
+              stderr: stderrText,
+            };
+          } finally {
+            if (timeout) clearTimeout(timeout);
+          }
+        };
+
+        const prepared = await executeArgv([
+          "mkdir",
+          "-p",
+          "/validation-workspace",
+        ]);
+        if (prepared.exitCode !== 0) {
+          throw new Error(
+            `Failed to create private validation workspace: ${prepared.stderr}`,
+          );
+        }
+        const copied = await executeArgv([
+          "cp",
+          "-a",
+          "/validation-input/.",
+          "/validation-workspace",
+        ]);
+        if (copied.exitCode !== 0) {
+          throw new Error(
+            `Failed to populate private validation workspace: ${copied.stderr}`,
+          );
+        }
+        const outputs: string[] = [];
+        let exitCode = 0;
+        for (const command of input.commands) {
+          const result = await executeArgv(command, "/validation-workspace");
+          outputs.push(
+            `$ ${command.join(" ")}\n${result.stdout}\n${result.stderr}`.trim(),
+          );
+          if (result.exitCode !== 0) {
+            exitCode = result.exitCode;
+            break;
+          }
+        }
+        await handle.close();
+        handle = undefined;
+        const terminalReceiptHash = receiptHash({
+          schemaVersion: 1,
+          operationKey: input.operationKey,
+          providerId,
+          providerOperationId,
+          integratedCommit: input.integratedCommit,
+          commands: input.commands,
+          exitCode,
+          outputHash: receiptHash(outputs),
+          isolationEvidence: evidenceRefs,
+        });
+        return {
+          status: "completed",
+          exitCode,
+          providerId,
+          providerOperationId,
+          terminalReceiptHash,
+          evidenceRefs: [
+            ...evidenceRefs,
+            `provider-terminal:${terminalReceiptHash}`,
+          ],
+          output: outputs.join("\n\n").slice(-64 * 1024),
+        };
+      } catch (error) {
+        if (handle) {
+          try {
+            await handle.close();
+          } catch {
+            // The durable provider-started fence remains authoritative.
+          }
+        }
+        throw error;
+      }
+    },
+    cancelIntegrationValidationOperation: async (providerOperationId) => {
+      const result = await dockerOperation(["rm", "-f", providerOperationId]);
+      if (result.exitCode === 0) return "cancelled";
+      if (dockerOperationProvesNotFound(result)) return "not-found";
+      return "unknown";
+    },
+    inspectIntegrationValidationOperation: async (providerOperationId) => {
+      const result = await dockerOperation([
+        "inspect",
+        "--format",
+        "{{.State.Running}}",
+        providerOperationId,
+      ]);
+      if (result.exitCode !== 0) {
+        return dockerOperationProvesNotFound(result) ? "not-found" : "unknown";
+      }
+      if (result.stdout.trim() === "true") return "running";
+      if (result.stdout.trim() === "false") return "not-running";
+      return "unknown";
     },
     cancelReviewerOperation: async (providerOperationId) => {
       const result = await dockerOperation(["rm", "-f", providerOperationId]);

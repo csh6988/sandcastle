@@ -43,30 +43,30 @@ const isBoundaryError = (error: unknown): boolean =>
     "code" in error &&
     (error as { readonly code?: unknown }).code === "ETIMEDOUT");
 
-const gitEnvironment = (
-  overrides: NodeJS.ProcessEnv = {},
-): NodeJS.ProcessEnv => {
-  const env = { ...process.env };
-  for (const name of [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_NAMESPACE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG_COUNT",
-  ]) {
-    delete env[name];
-  }
-  return {
-    ...env,
+const gitEnvironment = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv =>
+  ({
+    ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+    ...(process.platform === "win32" && process.env.SystemRoot
+      ? { SystemRoot: process.env.SystemRoot }
+      : {}),
+    ...(process.platform === "win32" && process.env.PATHEXT
+      ? { PATHEXT: process.env.PATHEXT }
+      : {}),
+    ...(process.platform === "win32" && process.env.TEMP
+      ? { TEMP: process.env.TEMP }
+      : {}),
+    ...(process.platform === "win32" && process.env.TMP
+      ? { TMP: process.env.TMP }
+      : {}),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.hooksPath",
+    GIT_CONFIG_VALUE_0: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
     GIT_NO_REPLACE_OBJECTS: "1",
     ...overrides,
-  };
-};
+  }) satisfies NodeJS.ProcessEnv;
 
 const git = (
   repositoryRoot: string,
@@ -496,13 +496,24 @@ export const openLocalGitIntegrationAdapter = (
           error instanceof GitIntegrationAdapterError &&
           error.code !== "INTEGRATION_GIT_CANCELLED"
         ) {
-          throw error;
+          return {
+            status: "failed",
+            writeStatus: "not-started",
+            code: error.code,
+            message: error.message,
+            evidence: {
+              causeCode: error.code,
+              requestHash: input.requestHash,
+              expectedTip: input.expectedTip,
+            },
+          };
         }
         return unknown(error);
       }
       if (prepared.conflictFiles.length > 0) {
         return {
           status: "conflict",
+          writeStatus: "not-started",
           code: "INTEGRATION_GIT_CONFLICT",
           message:
             "The reviewed full-tree delta conflicts with the exact Integration branch tip.",
@@ -523,6 +534,7 @@ export const openLocalGitIntegrationAdapter = (
       ) {
         return {
           status: "failed",
+          writeStatus: "not-started",
           code: "INTEGRATION_CONFLICT",
           message: `Integration branch is at ${prepared.currentTip}, not expected tip ${input.expectedTip}.`,
           evidence: {
@@ -559,6 +571,7 @@ export const openLocalGitIntegrationAdapter = (
         }
         return {
           status: "failed",
+          writeStatus: "not-started",
           code: "INTEGRATION_CONFLICT",
           message: "Integration branch changed during compare-and-swap.",
           evidence: {
@@ -576,6 +589,7 @@ export const openLocalGitIntegrationAdapter = (
         if (prepared.conflictFiles.length > 0) {
           return {
             status: "conflict",
+            writeStatus: "not-started",
             code: "INTEGRATION_CONFLICT",
             message:
               "The Integration operation cannot be proven because its exact delta conflicts.",
@@ -593,6 +607,7 @@ export const openLocalGitIntegrationAdapter = (
         }
         return {
           status: "conflict",
+          writeStatus: "not-started",
           code: "INTEGRATION_CONFLICT",
           message:
             "Integration branch tip differs from both the expected and deterministic resulting commits.",

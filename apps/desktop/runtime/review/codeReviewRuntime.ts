@@ -130,6 +130,10 @@ export type CompletedCodeReviewCoverage = {
       readonly id: string;
       readonly version: string;
       readonly hash: string;
+      readonly producerApplicationId: string;
+      readonly consumerApplicationId: string;
+      readonly testCommands: readonly string[];
+      readonly evidenceRefs: readonly string[];
     }[];
     readonly integrationConditions: readonly string[];
   }[];
@@ -2101,7 +2105,11 @@ export const openCodeReviewRuntime = (
           .map((dependency) => {
             const contract = database
               .prepare(
-                `SELECT contracts.content_hash AS hash
+                `SELECT contracts.content_hash AS hash,
+                        contracts.producer_application_id AS producerApplicationId,
+                        contracts.consumer_application_id AS consumerApplicationId,
+                        contracts.test_commands_json AS testCommandsJson,
+                        contracts.evidence_refs_json AS evidenceRefsJson
                  FROM technical_baselines AS baselines
                  JOIN cross_application_contract_revisions AS contracts
                    ON contracts.proposal_revision_id = baselines.proposal_revision_id
@@ -2112,7 +2120,15 @@ export const openCodeReviewRuntime = (
                 packageRow.technicalBaselineId,
                 dependency.contractId,
                 dependency.contractVersion,
-              ) as { readonly hash: string } | undefined;
+              ) as
+              | {
+                  readonly hash: string;
+                  readonly producerApplicationId: string;
+                  readonly consumerApplicationId: string;
+                  readonly testCommandsJson: string;
+                  readonly evidenceRefsJson: string;
+                }
+              | undefined;
             if (!contract) {
               throw new CodeReviewRuntimeError(
                 "CODE_REVIEW_COVERAGE_STALE",
@@ -2123,6 +2139,14 @@ export const openCodeReviewRuntime = (
               id: dependency.contractId!,
               version: dependency.contractVersion!,
               hash: contract.hash,
+              producerApplicationId: contract.producerApplicationId,
+              consumerApplicationId: contract.consumerApplicationId,
+              testCommands: parseJson<readonly string[]>(
+                contract.testCommandsJson,
+              ),
+              evidenceRefs: parseJson<readonly string[]>(
+                contract.evidenceRefsJson,
+              ),
             };
           });
         const packageManifest = parseJson<{

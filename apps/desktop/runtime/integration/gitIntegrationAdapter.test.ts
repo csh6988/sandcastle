@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -11,21 +13,26 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import {
-  GitIntegrationAdapterError,
-  openLocalGitIntegrationAdapter,
-} from "./gitIntegrationAdapter.js";
+import { openLocalGitIntegrationAdapter } from "./gitIntegrationAdapter.js";
 
 const roots: string[] = [];
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   }
 });
 
 const git = (root: string, ...args: string[]): string =>
-  execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
 
 const repository = () => {
   const root = mkdtempSync(join(tmpdir(), "sandcastle-t16-git-"));
@@ -74,6 +81,28 @@ const request = (input: {
 });
 
 describe("Local Git Integration Adapter", () => {
+  it("does not execute Repository-local reference transaction hooks", () => {
+    const fixture = repository();
+    const marker = join(fixture.root, "hook-executed");
+    const hook = join(fixture.root, ".git", "hooks", "reference-transaction");
+    writeFileSync(hook, `#!/bin/sh\nprintf hook > '${marker}'\n`);
+    chmodSync(hook, 0o755);
+
+    const result = openLocalGitIntegrationAdapter().execute(
+      request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "operation-hook-safe",
+      }),
+    );
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(existsSync(marker), false);
+  });
+
   it("applies exact full base-to-source tree deltas with generation-ref CAS and exact replay", () => {
     const fixture = repository();
     const adapter = openLocalGitIntegrationAdapter();
@@ -192,23 +221,21 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
     assert.equal(git(fixture.root, "rev-parse", "work/web"), webConflict);
 
-    assert.throws(
-      () =>
-        adapter.execute({
-          ...request({
-            root: fixture.root,
-            base: fixture.base,
-            sourceBranch: "work/api",
-            sourceCommit: apiConflict,
-            expectedTip: fixture.base,
-            operationId: "protected-ref",
-          }),
-          integrationBranch: "main",
-        }),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REF_INVALID",
-    );
+    const protectedRef = adapter.execute({
+      ...request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: apiConflict,
+        expectedTip: fixture.base,
+        operationId: "protected-ref",
+      }),
+      integrationBranch: "main",
+    });
+    assert.equal(protectedRef.status, "failed");
+    if (protectedRef.status !== "failed") return;
+    assert.equal(protectedRef.writeStatus, "not-started");
+    assert.equal(protectedRef.code, "INTEGRATION_REF_INVALID");
   });
 
   it("rejects symbolic refs, linked Worktrees, nested roots, and leaf symlink Repository paths", () => {
@@ -229,12 +256,11 @@ describe("Local Git Integration Adapter", () => {
       "refs/heads/integration/run-1/g1",
       "refs/heads/main",
     );
-    assert.throws(
-      () => adapter.execute(baseRequest),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REF_INVALID",
-    );
+    const symbolicRef = adapter.execute(baseRequest);
+    assert.equal(symbolicRef.status, "failed");
+    if (symbolicRef.status !== "failed") return;
+    assert.equal(symbolicRef.writeStatus, "not-started");
+    assert.equal(symbolicRef.code, "INTEGRATION_REF_INVALID");
     assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
     git(
       fixture.root,
@@ -250,44 +276,42 @@ describe("Local Git Integration Adapter", () => {
     roots.push(linked);
     rmSync(linked, { recursive: true, force: true });
     git(fixture.root, "worktree", "add", linked, "integration/run-1/g1");
-    assert.throws(
-      () =>
-        adapter.execute(
-          request({
-            root: fixture.root,
-            base: fixture.base,
-            sourceBranch: "work/web",
-            sourceCommit: fixture.web,
-            expectedTip: applied.resultingCommit,
-            operationId: "operation-checked-out",
-          }),
-        ),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REF_INVALID",
+    const checkedOut = adapter.execute(
+      request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/web",
+        sourceCommit: fixture.web,
+        expectedTip: applied.resultingCommit,
+        operationId: "operation-checked-out",
+      }),
     );
+    assert.equal(checkedOut.status, "failed");
+    if (checkedOut.status !== "failed") return;
+    assert.equal(checkedOut.writeStatus, "not-started");
+    assert.equal(checkedOut.code, "INTEGRATION_REF_INVALID");
 
     const nested = join(fixture.root, "nested");
     mkdirSync(nested);
-    assert.throws(
-      () =>
-        adapter.execute({
-          ...baseRequest,
-          repositoryReference: nested,
-        }),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REPOSITORY_INVALID",
-    );
+    const nestedRoot = adapter.execute({
+      ...baseRequest,
+      repositoryReference: nested,
+    });
+    assert.equal(nestedRoot.status, "failed");
+    if (nestedRoot.status !== "failed") return;
+    assert.equal(nestedRoot.writeStatus, "not-started");
+    assert.equal(nestedRoot.code, "INTEGRATION_REPOSITORY_INVALID");
     const symlink = `${fixture.root}-symlink`;
     roots.push(symlink);
     symlinkSync(fixture.root, symlink);
-    assert.throws(
-      () => adapter.execute({ ...baseRequest, repositoryReference: symlink }),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REPOSITORY_INVALID",
-    );
+    const symlinkRoot = adapter.execute({
+      ...baseRequest,
+      repositoryReference: symlink,
+    });
+    assert.equal(symlinkRoot.status, "failed");
+    if (symlinkRoot.status !== "failed") return;
+    assert.equal(symlinkRoot.writeStatus, "not-started");
+    assert.equal(symlinkRoot.code, "INTEGRATION_REPOSITORY_INVALID");
   });
 
   it("treats timeout and cancellation as unknown without writing the generation ref", () => {
@@ -343,22 +367,20 @@ describe("Local Git Integration Adapter", () => {
     );
     assert.equal(result.status, "succeeded");
 
-    assert.throws(
-      () =>
-        openLocalGitIntegrationAdapter().execute({
-          ...request({
-            root: fixture.root,
-            base: fixture.base,
-            sourceBranch: "work/api",
-            sourceCommit: fixture.api,
-            expectedTip: fixture.base,
-            operationId: "windows-ref",
-          }),
-          integrationBranch: "integration\\run-1\\g1",
-        }),
-      (error: unknown) =>
-        error instanceof GitIntegrationAdapterError &&
-        error.code === "INTEGRATION_REF_INVALID",
-    );
+    const windowsRef = openLocalGitIntegrationAdapter().execute({
+      ...request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "windows-ref",
+      }),
+      integrationBranch: "integration\\run-1\\g1",
+    });
+    assert.equal(windowsRef.status, "failed");
+    if (windowsRef.status !== "failed") return;
+    assert.equal(windowsRef.writeStatus, "not-started");
+    assert.equal(windowsRef.code, "INTEGRATION_REF_INVALID");
   });
 });
