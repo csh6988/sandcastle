@@ -45,7 +45,8 @@ const openReceiptHarness = (input?: {
   const storage = new DatabaseSync(":memory:");
   migrateCompanyDatabase(storage);
   let persistedSession:
-    { readonly sessionId: string; readonly participantId: string } | undefined;
+    | { readonly sessionId: string; readonly participantId: string }
+    | undefined;
   const database = {
     exec: (sql: string) => storage.exec(sql),
     prepare: (sql: string) => {

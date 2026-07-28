@@ -2036,7 +2036,8 @@ describe("Company database migrations", () => {
             `SELECT version, name FROM schema_migrations WHERE version = 44`,
           )
           .get() as
-          { readonly version: number; readonly name: string } | undefined;
+          | { readonly version: number; readonly name: string }
+          | undefined;
         assert.equal(migration?.version, 44);
         assert.equal(migration?.name, "durable_code_review_execution");
         const exactEvidenceMigration = inspected
@@ -2044,7 +2045,8 @@ describe("Company database migrations", () => {
             `SELECT version, name FROM schema_migrations WHERE version = 45`,
           )
           .get() as
-          { readonly version: number; readonly name: string } | undefined;
+          | { readonly version: number; readonly name: string }
+          | undefined;
         assert.equal(exactEvidenceMigration?.version, 45);
         assert.equal(
           exactEvidenceMigration?.name,

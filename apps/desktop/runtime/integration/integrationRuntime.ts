@@ -175,7 +175,12 @@ export type IntegrationGenerationView = {
     readonly baseCommit: string;
     readonly integrationBranch: string;
     readonly state:
-      "pending" | "running" | "validating" | "succeeded" | "failed" | "blocked";
+      | "pending"
+      | "running"
+      | "validating"
+      | "succeeded"
+      | "failed"
+      | "blocked";
     readonly expectedTip: string;
     readonly integratedCommit: string | null;
     readonly validationRecords: readonly {
@@ -824,7 +829,9 @@ export const openIntegrationRuntime = (
             input: parseJson(String(aggregate.inputJson)),
             inputHash: String(aggregate.inputHash),
             result: String(aggregate.result) as
-              "PASS" | "CONDITIONAL_PASS" | "FAIL",
+              | "PASS"
+              | "CONDITIONAL_PASS"
+              | "FAIL",
             evidence: parseJson<readonly string[]>(
               String(aggregate.evidenceJson),
             ),
@@ -2368,7 +2375,8 @@ export const openIntegrationRuntime = (
           WHERE operation_key = ? AND generation_id = ? AND phase = ?`,
       )
       .get(input.operationKey, input.view.id, input.phase) as
-      { readonly state: string } | undefined;
+      | { readonly state: string }
+      | undefined;
     if (!stage || !["succeeded", "failed"].includes(stage.state)) {
       return input.view;
     }
@@ -2535,7 +2543,8 @@ export const openIntegrationRuntime = (
           WHERE generation_id = ? AND validation_id = ?`,
       )
       .get(view.id, input.command.validationId) as
-      { readonly recordHash: string } | undefined;
+      | { readonly recordHash: string }
+      | undefined;
     if (existingRecord) {
       if (existingRecord.recordHash !== recordHash) {
         throw new IntegrationRuntimeError(

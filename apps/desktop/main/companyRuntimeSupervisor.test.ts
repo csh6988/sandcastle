@@ -20,6 +20,9 @@ const createTestSupervisor = () =>
     runtimeEntry: fileURLToPath(
       new URL("../runtime/entry.ts", import.meta.url),
     ),
+    environment: {
+      SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "scripted",
+    },
     shutdownTimeoutMs: 5_000,
     startupTimeoutMs: 10_000,
   });

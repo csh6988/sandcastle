@@ -1165,7 +1165,8 @@ const migrations: readonly CompanyMigration[] = [
             WHERE id = 'software-rnd' AND built_in = 1`,
         )
         .get() as
-        { readonly activePipelineVersionId?: string | null } | undefined;
+        | { readonly activePipelineVersionId?: string | null }
+        | undefined;
       if (active?.activePipelineVersionId !== "software-rnd-pipeline-v1") {
         return;
       }
@@ -4849,7 +4850,8 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   const foreignKeysEnabled = Number(
     (
       database.prepare("PRAGMA foreign_keys").get() as
-        { readonly foreign_keys?: unknown } | undefined
+        | { readonly foreign_keys?: unknown }
+        | undefined
     )?.foreign_keys,
   );
   if (
