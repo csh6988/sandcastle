@@ -764,6 +764,126 @@ export const openReviewRuntime = (
       }
       const manifestJson = canonicalJson(manifest);
       const manifestHash = sha256(manifestJson);
+      const generation = database
+        .prepare(
+          `SELECT project_id AS projectId, run_id AS runId,
+                  node_run_id AS nodeRunId, manifest_hash AS manifestHash
+             FROM integration_generations WHERE id = ?`,
+        )
+        .get(manifest.integrationGenerationId) as
+        | {
+            readonly projectId: string;
+            readonly runId: string;
+            readonly nodeRunId: string;
+            readonly manifestHash: string;
+          }
+        | undefined;
+      if (
+        !generation ||
+        generation.projectId !== input.projectId ||
+        generation.runId !== input.runId ||
+        generation.manifestHash !== manifest.integrationManifestHash
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+          "Aggregate Review execution does not bind the exact Integration Generation authority.",
+        );
+      }
+      const producerLineage = database
+        .prepare(
+          `SELECT integration_operations.work_package_version_id AS workPackageVersionId,
+                  work_package_assignments.ai_member_id AS aiMemberId,
+                  work_package_assignments.position_id AS positionId,
+                  work_package_assignments.interaction_session_id AS sessionId
+             FROM integration_operations
+             JOIN work_package_assignments
+               ON work_package_assignments.work_package_version_id =
+                  integration_operations.work_package_version_id
+            WHERE integration_operations.generation_id = ?
+            ORDER BY aiMemberId, positionId, sessionId, workPackageVersionId`,
+        )
+        .all(manifest.integrationGenerationId) as Array<{
+        readonly workPackageVersionId: string;
+        readonly aiMemberId: string;
+        readonly positionId: string;
+        readonly sessionId: string;
+      }>;
+      const canonicalProducer = producerLineage[0];
+      if (
+        !canonicalProducer ||
+        canonicalProducer.aiMemberId !== input.producer.aiMemberId ||
+        canonicalProducer.positionId !== input.producer.positionId ||
+        canonicalProducer.sessionId !== input.producer.sessionId
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+          "Aggregate Review execution does not bind the canonical producer lineage.",
+        );
+      }
+      if (
+        producerLineage.some(
+          (producer) =>
+            producer.aiMemberId === input.reviewer.aiMemberId ||
+            producer.positionId === input.reviewer.positionId ||
+            producer.sessionId === input.reviewer.sessionId,
+        )
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEWER_INELIGIBLE",
+          "Aggregate Review execution requires a Reviewer independent from every Integration producer.",
+        );
+      }
+      const reviewerAuthority = database
+        .prepare(
+          `SELECT interaction_sessions.project_id AS projectId,
+                  interaction_sessions.run_id AS runId,
+                  interaction_sessions.node_run_id AS nodeRunId,
+                  interaction_sessions.mode,
+                  interaction_sessions.status,
+                  session_participants.participant_ref AS aiMemberId,
+                  session_participants.role,
+                  positions.ai_member_id AS positionAiMemberId
+             FROM interaction_sessions
+             JOIN session_participants
+               ON session_participants.session_id = interaction_sessions.id
+              AND session_participants.id = ?
+              AND session_participants.participant_type = 'ai-member'
+             JOIN positions ON positions.id = ?
+            WHERE interaction_sessions.id = ?`,
+        )
+        .get(
+          input.reviewer.participantId,
+          input.reviewer.positionId,
+          input.reviewer.sessionId,
+        ) as
+        | {
+            readonly projectId: string;
+            readonly runId: string | null;
+            readonly nodeRunId: string | null;
+            readonly mode: string;
+            readonly status: string;
+            readonly aiMemberId: string;
+            readonly role: string;
+            readonly positionAiMemberId: string;
+          }
+        | undefined;
+      if (
+        !reviewerAuthority ||
+        reviewerAuthority.projectId !== input.projectId ||
+        reviewerAuthority.runId !== input.runId ||
+        reviewerAuthority.nodeRunId !== generation.nodeRunId ||
+        reviewerAuthority.mode !== "run-collaboration" ||
+        reviewerAuthority.status !== "active" ||
+        reviewerAuthority.aiMemberId !== input.reviewer.aiMemberId ||
+        reviewerAuthority.positionAiMemberId !== input.reviewer.aiMemberId ||
+        reviewerAuthority.role !==
+          `aggregate-reviewer:${manifest.integrationGenerationId}`
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEWER_SESSION_INVALID",
+          "Aggregate Review execution requires an exact fresh Reviewer identity and Session.",
+        );
+      }
       const existing = database
         .prepare(
           `SELECT review_topics.project_id AS projectId,
@@ -837,19 +957,6 @@ export const openReviewRuntime = (
         }
         return inspect(input.topicId);
       }
-      const sessionParticipant = database
-        .prepare(
-          `SELECT 1 FROM session_participants
-            WHERE session_id = ? AND participant_type = 'ai-member'
-              AND participant_ref = ?`,
-        )
-        .get(input.reviewer.sessionId, input.reviewer.aiMemberId);
-      if (!sessionParticipant) {
-        throw new ReviewRuntimeError(
-          "REVIEWER_SESSION_INVALID",
-          "Aggregate Review execution requires a fresh persisted Reviewer Session.",
-        );
-      }
       const now = clock().toISOString();
       database
         .prepare(
@@ -884,9 +991,15 @@ export const openReviewRuntime = (
       const eligibility = {
         topicId: input.topicId,
         participantId: input.reviewer.participantId,
+        role: "reviewer-participant",
+        aiMemberId: input.reviewer.aiMemberId,
+        positionId: input.reviewer.positionId,
         reviewerSessionId: input.reviewer.sessionId,
-        producerSessionId: input.producer.sessionId,
+        integrationGenerationId: manifest.integrationGenerationId,
+        integrationManifestHash: manifest.integrationManifestHash,
+        producerLineage,
         eligible: true,
+        reasons: [],
       };
       database
         .prepare(

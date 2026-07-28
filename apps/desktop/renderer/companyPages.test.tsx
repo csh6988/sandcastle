@@ -19,6 +19,7 @@ import {
   ProjectDetailView,
   ProjectDetailWorkPackages,
   CodeReviewAuthorityPanel,
+  IntegrationGenerationPanel,
   CompanyInteractionPage,
   InteractionRunPanel,
   RUN_PROGRESS_POLL_INTERVAL_MS,
@@ -50,6 +51,7 @@ import type {
   TechnicalReviewStateView,
   ReviewTopicView,
   CodeReviewView,
+  IntegrationGenerationView,
 } from "../runtime/interface.js";
 import type {
   AgentCatalogView,
@@ -1902,6 +1904,197 @@ describe("Project detail", () => {
       "run-1",
     );
     assert.deepEqual(failed, []);
+  });
+
+  it("mounts authoritative Integration Generations on the selected Run Reviews tab", async (context) => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const selectedRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: { ...scriptedDepartmentRun.run, status: "completed" },
+    };
+    const integrationGeneration = {
+      id: "integration-generation-1",
+      manifest: {
+        generation: 1,
+        coverageId: "coverage-1",
+        snapshotRevisionId: selectedRun.snapshot.id,
+      },
+      manifestHash: "a".repeat(64),
+      state: "passed",
+      repositoryResults: [
+        {
+          id: "repository-result-1",
+          repositoryReference: "/work/checkout-web",
+          state: "succeeded",
+          expectedTip: "b".repeat(40),
+          integratedCommit: "c".repeat(40),
+          validationRecords: [
+            {
+              validationId: "validation-1",
+              kind: "build-test",
+              status: "passed",
+            },
+          ],
+        },
+      ],
+      operations: [{ state: "succeeded" }],
+      defects: [],
+      aggregateReview: { result: "PASS" },
+    } as unknown as IntegrationGenerationView;
+    const queries: unknown[] = [];
+    let openCount = 0;
+    let closeCount = 0;
+    const bridge = {
+      query: async (query: {
+        readonly type: string;
+        readonly runId?: string;
+      }) => {
+        queries.push(query);
+        if (query.type === "product.discovery.inspect") {
+          return {
+            view: {
+              project: {
+                id: project.id,
+                name: project.name,
+                goal: project.goal,
+                revision: 1,
+              },
+              proposal: null,
+              baselines: [],
+              formalRuns: [],
+            },
+          };
+        }
+        if (query.type === "work-packages.inspect") {
+          return {
+            view: {
+              projectId: project.id,
+              runId: selectedRun.run.id,
+              technicalBaselineId: "baseline-1",
+              packages: [],
+            },
+          };
+        }
+        if (query.type === "code-reviews.inspect") return { view: [] };
+        if (query.type === "integration-generations.inspect") {
+          return {
+            view: [integrationGeneration],
+            asOfSequence: 1,
+            viewSyncToken: "view-token-1",
+          };
+        }
+        throw new Error(`Unexpected query ${query.type}`);
+      },
+      execute: async () => ({
+        status: "succeeded",
+        value: {
+          acknowledged: true,
+          subscriptionGeneration: 1,
+          barrierSequence: 1,
+          auditId: "audit-1",
+        },
+        effectIds: [],
+      }),
+      openEventStream: async () => {
+        openCount += 1;
+        return {
+          subscriptionId: "subscription-1",
+          subscriptionGeneration: 1,
+          barrierSequence: 1,
+        };
+      },
+      closeEventStream: async () => {
+        closeCount += 1;
+      },
+      runtime: {
+        departments: async () => [],
+        runs: async () => [selectedRun],
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [],
+      },
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    });
+
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          initialTab="reviews"
+          onArchive={async () => project}
+          onBack={() => undefined}
+          onSave={async () => project}
+          project={project}
+          t={messages.en}
+        />,
+      );
+    });
+    await act(async () => undefined);
+
+    assert.equal(openCount, 1);
+    assert.equal(
+      queries.filter(
+        (query) =>
+          typeof query === "object" &&
+          query !== null &&
+          "type" in query &&
+          query.type === "integration-generations.inspect",
+      ).length,
+      1,
+    );
+    assert.match(
+      container.innerHTML,
+      /data-integration-generation="integration-generation-1"/,
+    );
+    assert.match(container.innerHTML, /Aggregate review: PASS/);
+
+    await act(async () => root.unmount());
+    assert.equal(closeCount, 1);
   });
 
   it("loads the selected Run Work Package graph through Project Detail and clears it after a failed replacement query", async (context) => {

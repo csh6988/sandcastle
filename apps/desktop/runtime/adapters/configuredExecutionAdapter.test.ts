@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   loadConfiguredExecutionAdapter,
+  loadConfiguredIntegrationValidationProvider,
   loadConfiguredReviewerExecutionAdapter,
 } from "./configuredExecutionAdapter.js";
 import type { SandcastleExecutionRuntime } from "./sandcastleExecutionPort.js";
@@ -32,7 +33,7 @@ describe("Configured Execution Adapter", () => {
     assert.equal(loads, 0);
   });
 
-  it("loads the Production Adapter only for the explicit production mode", async () => {
+  it("loads Production execution by default and keeps Scripted mode explicit", async () => {
     let loads = 0;
     const loadRuntime = async (): Promise<SandcastleExecutionRuntime> => {
       loads += 1;
@@ -44,18 +45,18 @@ describe("Configured Execution Adapter", () => {
       };
     };
 
-    const adapter = await loadConfiguredExecutionAdapter(
-      { SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "production" },
-      loadRuntime,
-    );
+    const adapter = await loadConfiguredExecutionAdapter({}, loadRuntime);
 
     assert.equal(typeof adapter?.execute, "function");
     const reviewerAdapter = await loadConfiguredReviewerExecutionAdapter(
-      { SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "production" },
+      {},
       loadRuntime,
     );
     assert.equal(typeof reviewerAdapter?.execute, "function");
-    assert.equal(loads, 2);
+    const validationProvider =
+      await loadConfiguredIntegrationValidationProvider({}, loadRuntime);
+    assert.equal(typeof validationProvider?.execute, "function");
+    assert.equal(loads, 3);
   });
 
   it("rejects an unknown execution mode instead of silently downgrading", async () => {

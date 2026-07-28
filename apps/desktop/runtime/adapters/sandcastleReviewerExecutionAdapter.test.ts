@@ -63,6 +63,72 @@ const input = (
 });
 
 describe("Sandcastle Reviewer Execution Adapter", () => {
+  it("directs aggregate Reviewers to cite the frozen manifest in the mounted bundle", async () => {
+    let prompt = "";
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => ({
+        sandbox: {},
+        providerId: "sandcastle-docker-reviewer",
+        evidence: ["mount:/review:readonly"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+          providerOperationId: "aggregate-container-1",
+          inspectedReadOnlyReviewMount: true,
+          inspectedEnvironmentHash: "5".repeat(64),
+          inspectedAt: "2026-07-28T10:00:00.000Z",
+          terminalProviderStatus: "completed",
+          terminalProviderReceiptHash: "6".repeat(64),
+        },
+      }),
+      run: async (options) => {
+        prompt = String(options.prompt);
+        return {
+          output: {
+            result: "PASS" as const,
+            conditions: [],
+            evidenceRefs: ["integration-generation-1"],
+          },
+        };
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+    const result = await createSandcastleReviewerExecutionAdapter(
+      runtime,
+    ).execute(
+      input({
+        operationKey: "integration-generation-1:aggregate-review",
+        phase: "fresh-recheck",
+        manifest: {
+          scope: "aggregate",
+          topicId: "integration-review:integration-generation-1",
+          supportingArtifactVersionIds: [],
+          supportingSpecRevisionIds: [],
+          harnessSnapshotIds: [],
+          acceptanceCriteria: ["npm test"],
+          excludedContext: [
+            "hidden-prompts",
+            "prior-reviewer-opinions",
+            "private-transcripts",
+          ],
+          integrationGenerationId: "integration-generation-1",
+          integrationManifestHash: "a".repeat(64),
+          repositoryCommits: [
+            { repositoryId: "repository-1", commit: "b".repeat(40) },
+          ],
+        } as never,
+      }),
+    );
+
+    assert.equal(result.status, "succeeded");
+    assert.match(prompt, /\/review\/inputs\/manifest\.json/);
+    assert.match(prompt, /cite.*manifest/i);
+  });
+
   it("runs a fresh Agent in a Docker reviewer Sandbox with only the read-only review bundle", async () => {
     let launcherPath = "";
     let captureSessions: boolean | undefined;

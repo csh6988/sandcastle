@@ -25,6 +25,7 @@ import { canonicalPipelineJson } from "../pipeline/canonicalPipeline.js";
 import type { CodeReviewView, CommandResult } from "../interface.js";
 import {
   blockingReviewerWorkspaceAdapter,
+  CodeReviewRuntimeError,
   type ReviewerWorkspaceAdapter,
 } from "./codeReviewRuntime.js";
 import { openLocalReviewerWorkspaceAdapter } from "./reviewerWorkspace.js";
@@ -3951,6 +3952,54 @@ describe("Code Review Runtime", () => {
         })),
       );
       raw.close();
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("does not repackage completed Code Review authority under a newer Run Snapshot", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const converged = fixture.execute(
+        "converge-before-snapshot-recovery",
+        4,
+        {
+          type: "code-review.converge",
+          codeReviewId: reviewed.id,
+        },
+      );
+      assert.equal(converged.status, "succeeded");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw.exec(`
+          INSERT INTO run_snapshot_revisions(
+            id, run_id, revision, schema_version, canonical_json, hash,
+            created_at, parent_revision
+          )
+          SELECT 'review-snapshot-recovered', run_id, revision + 1,
+                 schema_version, canonical_json, hash,
+                 '2026-07-28T10:30:00.000Z', revision
+            FROM run_snapshot_revisions WHERE id = 'review-snapshot';
+          UPDATE department_runs
+             SET snapshot_revision_id = 'review-snapshot-recovered'
+           WHERE id = 'review-run';
+        `);
+      } finally {
+        raw.close();
+      }
+
+      assert.equal(
+        fixture.database.codeReviews.inspect("review-run")[0]
+          ?.integrationEligible,
+        false,
+      );
+      assert.throws(
+        () => fixture.database.codeReviews.readCompletedCoverage("review-run"),
+        (error: unknown) =>
+          error instanceof CodeReviewRuntimeError &&
+          error.code === "CODE_REVIEW_COVERAGE_STALE",
+      );
     } finally {
       fixture.database.close();
     }

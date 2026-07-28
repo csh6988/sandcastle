@@ -552,7 +552,7 @@ export const openIntegrationRuntime = (
     readonly gitAdapter: GitIntegrationAdapter;
     readonly workPackages?: Pick<
       WorkPackageRuntime,
-      "inspect" | "versionInTransaction" | "assignInTransaction"
+      "inspect" | "reworkInTransaction"
     >;
     readonly reviewRuntime?: {
       readonly inspect: (topicId: string) => {
@@ -840,10 +840,31 @@ export const openIntegrationRuntime = (
     const reviewedCoverage = options.codeReviews.readCompletedCoverage(
       input.command.runId,
     );
-    if (reviewedCoverage.runId !== input.command.runId) {
+    const runAuthority = database
+      .prepare(
+        `SELECT project_id AS projectId,
+                snapshot_revision_id AS snapshotRevisionId
+           FROM department_runs WHERE id = ?`,
+      )
+      .get(input.command.runId) as
+      | { readonly projectId: string; readonly snapshotRevisionId: string }
+      | undefined;
+    if (
+      reviewedCoverage.runId !== input.command.runId ||
+      !runAuthority ||
+      reviewedCoverage.projectId !== runAuthority.projectId
+    ) {
       throw new IntegrationRuntimeError(
         "INTEGRATION_COVERAGE_CONFLICT",
         "Completed Code Review coverage belongs to a different Department Run.",
+      );
+    }
+    if (
+      reviewedCoverage.snapshotRevisionId !== runAuthority.snapshotRevisionId
+    ) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_COVERAGE_STALE",
+        "Completed Code Review coverage does not bind the current Run Snapshot.",
       );
     }
     if (reviewedCoverage.packages.length === 0) {
@@ -1172,10 +1193,6 @@ export const openIntegrationRuntime = (
     }
     let graph = options.workPackages.inspect(input.view.manifest.runId);
     const replacements: Record<string, string> = {};
-    const assignableRoots: Array<{
-      readonly workPackageId: string;
-      readonly baseCommit: string;
-    }> = [];
     for (const manifestPackage of input.view.manifest.packages) {
       if (!affectedVersionIds.has(manifestPackage.workPackageVersionId)) {
         continue;
@@ -1197,62 +1214,17 @@ export const openIntegrationRuntime = (
         continue;
       }
       const versionId = `integration-rework:${input.view.id}:${manifestPackage.workPackageId}:v${activeVersion.version + 1}`;
-      const { execution: _execution, ...manifest } = activeVersion.manifest;
-      graph = options.workPackages.versionInTransaction({
+      graph = options.workPackages.reworkInTransaction({
         commandId: input.commandId,
         actor: integrationWorkerActor,
         expectedRevision: workPackage.revision,
         workPackageId: manifestPackage.workPackageId,
         versionId,
-        dependencies: activeVersion.dependencies.map((dependency) => ({
-          predecessorWorkPackageVersionId:
-            replacements[dependency.predecessorWorkPackageVersionId] ??
-            dependency.predecessorWorkPackageVersionId,
-          kind: dependency.kind,
-          ...(dependency.contractId
-            ? { contractId: dependency.contractId }
-            : {}),
-          ...(dependency.contractVersion
-            ? { contractVersion: dependency.contractVersion }
-            : {}),
-          ...(dependency.evidenceRef
-            ? { evidenceRef: dependency.evidenceRef }
-            : {}),
-        })),
-        manifest: {
-          ...manifest,
-          recoveryPolicy: `Integration Generation ${input.view.id} failed: ${input.code}`,
-        },
+        baseCommit: manifestPackage.baseCommit,
+        recoveryReason: `Integration Generation ${input.view.id} failed: ${input.code}`,
+        dependencyVersionReplacements: { ...replacements },
       });
       replacements[manifestPackage.workPackageVersionId] = versionId;
-      if (
-        !manifestPackage.dependencies.some((dependency) =>
-          affectedVersionIds.has(dependency.predecessorWorkPackageVersionId),
-        )
-      ) {
-        assignableRoots.push({
-          workPackageId: manifestPackage.workPackageId,
-          baseCommit: manifestPackage.baseCommit,
-        });
-      }
-    }
-    for (const root of assignableRoots) {
-      const current = graph.packages.find(
-        (entry) => entry.id === root.workPackageId,
-      );
-      if (!current) {
-        throw new IntegrationRuntimeError(
-          "INTEGRATION_REWORK_TARGET_INVALID",
-          `Responsible Work Package ${root.workPackageId} disappeared before assignment.`,
-        );
-      }
-      graph = options.workPackages.assignInTransaction({
-        commandId: input.commandId,
-        actor: integrationWorkerActor,
-        expectedRevision: current.revision,
-        workPackageId: root.workPackageId,
-        baseCommit: root.baseCommit,
-      });
     }
   };
 

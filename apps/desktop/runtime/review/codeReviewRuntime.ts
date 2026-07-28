@@ -191,6 +191,22 @@ export const openCodeReviewRuntime = (
 
   const manifestIsCurrent = (manifest: CodeReviewManifest): boolean => {
     try {
+      const run = database
+        .prepare(
+          `SELECT runs.project_id AS projectId,
+                  runs.snapshot_revision_id AS snapshotRevisionId
+             FROM department_runs AS runs
+             JOIN run_snapshot_revisions AS snapshots
+               ON snapshots.id = runs.snapshot_revision_id
+              AND snapshots.run_id = runs.id
+            WHERE runs.id = ?`,
+        )
+        .get(manifest.runId) as
+        | {
+            readonly projectId: string;
+            readonly snapshotRevisionId: string;
+          }
+        | undefined;
       const workPackage = options.workPackages
         .inspect(manifest.runId)
         .packages.find((entry) => entry.id === manifest.workPackageId);
@@ -211,6 +227,8 @@ export const openCodeReviewRuntime = (
         sourceCommit: manifest.sourceCommit,
       });
       return (
+        run?.projectId === manifest.projectId &&
+        run.snapshotRevisionId === manifest.snapshotRevisionId &&
         activeVersion?.id === manifest.workPackageVersionId &&
         activeAssignment?.id === manifest.assignmentId &&
         activeAssignment.state === "self-check-passed" &&
@@ -480,6 +498,21 @@ export const openCodeReviewRuntime = (
            FROM code_review_authorities WHERE code_review_manifest_id = ?`,
       )
       .get(id) as Record<string, unknown> | undefined;
+    const authorityIdentity = database
+      .prepare(
+        `SELECT project_id AS projectId, run_id AS runId,
+                snapshot_revision_id AS snapshotRevisionId,
+                manifest_hash AS manifestHash
+           FROM code_review_authorities WHERE code_review_manifest_id = ?`,
+      )
+      .get(id) as
+      | {
+          readonly projectId: string;
+          readonly runId: string;
+          readonly snapshotRevisionId: string;
+          readonly manifestHash: string;
+        }
+      | undefined;
     const defects = database
       .prepare(
         `SELECT id, quality_gate_result_id AS qualityGateResultId, result,
@@ -533,6 +566,10 @@ export const openCodeReviewRuntime = (
         authority.workPackageVersionId === manifest.workPackageVersionId &&
         authority.sourceCommit === manifest.sourceCommit &&
         authority.diffHash === manifest.diffHash &&
+        authorityIdentity?.projectId === manifest.projectId &&
+        authorityIdentity.runId === manifest.runId &&
+        authorityIdentity.snapshotRevisionId === manifest.snapshotRevisionId &&
+        authorityIdentity.manifestHash === String(row.manifestHash) &&
         topic.gateResult?.kind === "code" &&
         topic.gateResult.result === "PASS" &&
         executionEvidenceIsExact({
@@ -1938,6 +1975,8 @@ export const openCodeReviewRuntime = (
         `SELECT node_runs.id AS nodeRunId,
                 node_runs.result_json AS nodeResultJson,
                 attempts.id AS nodeAttemptId,
+                attempts.status AS nodeAttemptStatus,
+                attempts.snapshot_revision_id AS attemptSnapshotRevisionId,
                 attempts.structured_result_json AS attemptResultJson,
                 runs.project_id AS projectId,
                 runs.snapshot_revision_id AS snapshotRevisionId
@@ -1946,7 +1985,6 @@ export const openCodeReviewRuntime = (
            JOIN node_attempts AS attempts ON attempts.id = (
              SELECT candidate.id FROM node_attempts AS candidate
               WHERE candidate.node_run_id = node_runs.id
-                AND candidate.status = 'succeeded'
               ORDER BY candidate.attempt_number DESC LIMIT 1
            )
           WHERE node_runs.run_id = ?
@@ -1958,6 +1996,8 @@ export const openCodeReviewRuntime = (
           readonly nodeRunId: string;
           readonly nodeResultJson: string;
           readonly nodeAttemptId: string;
+          readonly nodeAttemptStatus: string;
+          readonly attemptSnapshotRevisionId: string;
           readonly attemptResultJson: string;
           readonly projectId: string;
           readonly snapshotRevisionId: string;
@@ -1967,6 +2007,15 @@ export const openCodeReviewRuntime = (
       throw new CodeReviewRuntimeError(
         "CODE_REVIEW_COVERAGE_INCOMPLETE",
         `Department Run ${runId} has no completed code-review@1 Node Attempt.`,
+      );
+    }
+    if (
+      node.nodeAttemptStatus !== "succeeded" ||
+      node.attemptSnapshotRevisionId !== node.snapshotRevisionId
+    ) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_COVERAGE_STALE",
+        "Completed Code Review coverage does not bind the current Run Snapshot.",
       );
     }
     type CoverageResult = {
@@ -2031,6 +2080,8 @@ export const openCodeReviewRuntime = (
         if (
           !review?.authority ||
           !review.gateResult ||
+          review.manifest.snapshotRevisionId !==
+            node.attemptSnapshotRevisionId ||
           review.authority.id !== nodeResult.authorityIds[index] ||
           review.gateResult.id !== nodeResult.qualityGateResultIds[index] ||
           review.gateResult.kind !== "code" ||
@@ -2174,7 +2225,7 @@ export const openCodeReviewRuntime = (
       coverageHash: nodeResult.coverageHash,
       projectId: node.projectId,
       runId,
-      snapshotRevisionId: node.snapshotRevisionId,
+      snapshotRevisionId: node.attemptSnapshotRevisionId,
       nodeRunId: node.nodeRunId,
       nodeAttemptId: node.nodeAttemptId,
       packages,

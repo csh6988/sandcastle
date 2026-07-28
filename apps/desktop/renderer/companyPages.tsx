@@ -21,6 +21,7 @@ import type {
   TechnicalReviewStateView,
   WorkPackageGraphView,
   CodeReviewView,
+  IntegrationGenerationView,
   ProductProposalContent,
   ProjectEditorView,
   ReviewTopicView,
@@ -51,6 +52,11 @@ import {
   RunSupervisionPanel,
   type RunSupervisionConnection,
 } from "./runSupervision.js";
+import {
+  applyIntegrationGenerationFrame,
+  connectIntegrationGenerations,
+  type IntegrationGenerationConnection,
+} from "./integrationGenerationView.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2417,6 +2423,87 @@ export function ProjectDetailWorkPackages({
   return active && graph ? <WorkPackageGraphPanel graph={graph} /> : null;
 }
 
+export function IntegrationGenerationPanel({
+  generations,
+  diagnostic = null,
+  onResync,
+}: {
+  readonly generations: readonly IntegrationGenerationView[];
+  readonly diagnostic?: string | null;
+  readonly onResync?: () => void;
+}) {
+  return (
+    <section className="create-panel" data-integration-generations>
+      <h2>Integration Generations</h2>
+      {diagnostic ? (
+        <div className="warn" data-integration-diagnostic>
+          {diagnostic}
+          {onResync ? (
+            <button onClick={onResync} type="button">
+              Resync
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {generations.length === 0 ? (
+        <div className="empty-state">No Integration Generation yet.</div>
+      ) : (
+        generations.map((generation) => (
+          <article
+            data-integration-generation={generation.id}
+            key={generation.id}
+          >
+            <header>
+              <strong>
+                Generation {generation.manifest.generation} · {generation.state}
+              </strong>
+              <small>{generation.manifestHash}</small>
+            </header>
+            <p>
+              Coverage {generation.manifest.coverageId} · Snapshot{" "}
+              {generation.manifest.snapshotRevisionId}
+            </p>
+            <ul>
+              {generation.repositoryResults.map((repository) => (
+                <li
+                  data-integration-repository={repository.repositoryReference}
+                  key={repository.id}
+                >
+                  {repository.repositoryReference} · {repository.state} ·{" "}
+                  {repository.integratedCommit ?? repository.expectedTip}
+                  <ul>
+                    {repository.validationRecords.map((validation) => (
+                      <li key={validation.validationId}>
+                        {validation.kind} · {validation.status}
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+            <p data-integration-operations>
+              Operations:{" "}
+              {generation.operations.map((entry) => entry.state).join(", ") ||
+                "none"}
+            </p>
+            <p data-integration-defects>
+              Open defects:{" "}
+              {
+                generation.defects.filter((entry) => entry.status === "open")
+                  .length
+              }
+            </p>
+            <p data-integration-aggregate-review>
+              Aggregate review:{" "}
+              {generation.aggregateReview?.result ?? "pending"}
+            </p>
+          </article>
+        ))
+      )}
+    </section>
+  );
+}
+
 export function ProjectDetailView({
   project,
   t,
@@ -2476,9 +2563,24 @@ export function ProjectDetailView({
   const [runSupervisionDiagnostic, setRunSupervisionDiagnostic] = useState<
     string | null
   >(null);
-  const runSupervisionConnection = useRef<RunSupervisionConnection | null>(
-    null,
-  );
+  const [integrationGenerationState, setIntegrationGenerationState] = useState<{
+    readonly generation: number;
+    readonly view: readonly IntegrationGenerationView[];
+  }>({ generation: 0, view: [] });
+  const [integrationDiagnostic, setIntegrationDiagnostic] = useState<
+    string | null
+  >(null);
+  const runtimeViewConnection = useRef<
+    | {
+        readonly kind: "runs";
+        readonly connection: RunSupervisionConnection;
+      }
+    | {
+        readonly kind: "reviews";
+        readonly connection: IntegrationGenerationConnection;
+      }
+    | null
+  >(null);
   const [runDepartmentId, setRunDepartmentId] = useState("");
   const [runAgents, setRunAgents] = useState<AgentCatalogView["agents"]>([]);
   const [agentOverrideId, setAgentOverrideId] = useState("");
@@ -2590,51 +2692,72 @@ export function ProjectDetailView({
 
   useEffect(() => {
     let active = true;
-    const previous = runSupervisionConnection.current;
-    runSupervisionConnection.current = null;
-    if (previous) void previous.close();
-    if (!selectedRun) {
-      setRunSupervisionState({ generation: 0, view: null });
-      setRunSupervisionDiagnostic(null);
-      return;
-    }
-    setRunSupervisionState({ generation: 0, view: null });
-    setRunSupervisionDiagnostic("Synchronizing Runtime supervision…");
-    connectRunSupervision({
-      bridge: window.sandcastle,
-      runId: selectedRun.run.id,
-      onFrame: (frame) => {
-        if (active) {
-          setRunSupervisionState((current) =>
-            applyRunSupervisionFrame(current, frame),
-          );
-        }
-      },
-      onDiagnostic: (diagnostic) => {
-        if (active) setRunSupervisionDiagnostic(diagnostic);
-      },
-    })
-      .then(async (connection) => {
+    const synchronize = async (): Promise<void> => {
+      const previous = runtimeViewConnection.current;
+      runtimeViewConnection.current = null;
+      if (previous) await previous.connection.close();
+      if (!active || !selectedRun) return;
+      if (activeTab === "runs") {
+        setRunSupervisionState({ generation: 0, view: null });
+        setRunSupervisionDiagnostic("Synchronizing Runtime supervision…");
+        const connection = await connectRunSupervision({
+          bridge: window.sandcastle,
+          runId: selectedRun.run.id,
+          onFrame: (frame) => {
+            if (active) {
+              setRunSupervisionState((current) =>
+                applyRunSupervisionFrame(current, frame),
+              );
+            }
+          },
+          onDiagnostic: (diagnostic) => {
+            if (active) setRunSupervisionDiagnostic(diagnostic);
+          },
+        });
         if (!active) {
           await connection.close();
           return;
         }
-        runSupervisionConnection.current = connection;
-      })
-      .catch((nextError: unknown) => {
-        if (active) {
-          setRunSupervisionDiagnostic(
-            `Runtime unavailable; resync required: ${errorMessage(nextError)}`,
-          );
+        runtimeViewConnection.current = { kind: "runs", connection };
+        return;
+      }
+      if (activeTab === "reviews") {
+        setIntegrationGenerationState({ generation: 0, view: [] });
+        setIntegrationDiagnostic("Synchronizing Integration Generations…");
+        const connection = await connectIntegrationGenerations({
+          bridge: window.sandcastle,
+          runId: selectedRun.run.id,
+          onFrame: (frame) => {
+            if (active) {
+              setIntegrationGenerationState((current) =>
+                applyIntegrationGenerationFrame(current, frame),
+              );
+            }
+          },
+          onDiagnostic: (diagnostic) => {
+            if (active) setIntegrationDiagnostic(diagnostic);
+          },
+        });
+        if (!active) {
+          await connection.close();
+          return;
         }
-      });
+        runtimeViewConnection.current = { kind: "reviews", connection };
+      }
+    };
+    void synchronize().catch((nextError: unknown) => {
+      if (!active) return;
+      const message = `Runtime unavailable; resync required: ${errorMessage(nextError)}`;
+      if (activeTab === "reviews") setIntegrationDiagnostic(message);
+      if (activeTab === "runs") setRunSupervisionDiagnostic(message);
+    });
     return () => {
       active = false;
-      const connection = runSupervisionConnection.current;
-      runSupervisionConnection.current = null;
-      if (connection) void connection.close();
+      const current = runtimeViewConnection.current;
+      runtimeViewConnection.current = null;
+      if (current) void current.connection.close();
     };
-  }, [selectedRun?.run.id]);
+  }, [activeTab, selectedRun?.run.id]);
 
   useEffect(() => {
     let active = true;
@@ -3648,6 +3771,15 @@ export function ProjectDetailView({
       {activeTab === "reviews" ? (
         <>
           <CodeReviewAuthorityPanel reviews={codeReviews} />
+          <IntegrationGenerationPanel
+            diagnostic={integrationDiagnostic}
+            generations={integrationGenerationState.view}
+            onResync={() =>
+              void (runtimeViewConnection.current?.kind === "reviews"
+                ? runtimeViewConnection.current.connection.resync()
+                : undefined)
+            }
+          />
           <ReviewTopicsPanel topics={reviewTopics} />
         </>
       ) : null}
@@ -3862,7 +3994,9 @@ export function ProjectDetailView({
                       }
                       onPause={() => void controlRun("pause")}
                       onResync={() =>
-                        void runSupervisionConnection.current?.resync()
+                        void (runtimeViewConnection.current?.kind === "runs"
+                          ? runtimeViewConnection.current.connection.resync()
+                          : undefined)
                       }
                       onResume={() => void controlRun("resume")}
                       view={runSupervision}

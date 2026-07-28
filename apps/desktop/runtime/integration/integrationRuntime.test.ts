@@ -141,6 +141,15 @@ const setup = (
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
   database.exec("PRAGMA foreign_keys = OFF");
+  database
+    .prepare(
+      `INSERT INTO department_runs(
+         id, project_id, department_id, status, created_at,
+         pipeline_version_id, snapshot_revision_id, revision, updated_at
+       ) VALUES ('run-1', 'project-1', 'software-rnd', 'running', ?,
+                 'software-rnd-pipeline-v1', 'snapshot-1', 0, ?)`,
+    )
+    .run("2026-07-28T00:00:00.000Z", "2026-07-28T00:00:00.000Z");
   const gitCalls: unknown[] = [];
   const gitAdapter: GitIntegrationAdapter = options.gitAdapter ?? {
     execute: (input) => {
@@ -969,8 +978,7 @@ describe("Integration Runtime generation manifest", () => {
     let currentCoverage = coverage({
       packages: [...coverage().packages, uiPackage],
     });
-    const versionCalls: unknown[] = [];
-    const assignCalls: unknown[] = [];
+    const reworkCalls: unknown[] = [];
     const manifest = {
       objective: "Recover Integration",
       acceptanceCriteria: ["Fresh review passes"],
@@ -992,7 +1000,6 @@ describe("Integration Runtime generation manifest", () => {
         runtimeImportOnly: true as const,
       },
     };
-    const { execution: _execution, ...versionManifest } = manifest;
     const workPackageGraph: {
       projectId: string;
       runId: string;
@@ -1119,11 +1126,11 @@ describe("Integration Runtime generation manifest", () => {
       readCoverage: () => currentCoverage,
       workPackages: {
         inspect: () => workPackageGraph as unknown as WorkPackageGraphView,
-        versionInTransaction: (input) => {
-          versionCalls.push(input);
+        reworkInTransaction: (input) => {
+          reworkCalls.push(input);
           appendReworkAudit(
             input.commandId,
-            "work-package.version",
+            "work-package.reworked",
             input.workPackageId,
           );
           const workPackage = workPackageGraph.packages.find(
@@ -1139,31 +1146,19 @@ describe("Integration Runtime generation manifest", () => {
             status: "ready",
             manifest: {
               ...manifest,
-              ...input.manifest,
-              execution: manifest.execution,
+              recoveryPolicy: input.recoveryReason,
             } as typeof manifest,
-            dependencies: input.dependencies.map((dependency) => ({
+            dependencies: active.dependencies.map((dependency) => ({
               predecessorWorkPackageVersionId:
-                dependency.predecessorWorkPackageVersionId,
-              kind: dependency.kind as "contract" | "commit",
+                input.dependencyVersionReplacements?.[
+                  dependency.predecessorWorkPackageVersionId
+                ] ?? dependency.predecessorWorkPackageVersionId,
+              kind: dependency.kind,
               contractId: dependency.contractId ?? null,
               contractVersion: dependency.contractVersion ?? null,
               evidenceRef: dependency.evidenceRef ?? null,
             })),
           });
-          workPackage.revision += 1;
-          return workPackageGraph as unknown as WorkPackageGraphView;
-        },
-        assignInTransaction: (input) => {
-          assignCalls.push(input);
-          appendReworkAudit(
-            input.commandId,
-            "work-package.assign",
-            input.workPackageId,
-          );
-          const workPackage = workPackageGraph.packages.find(
-            (entry) => entry.id === input.workPackageId,
-          )!;
           workPackage.revision += 1;
           workPackage.state = "assigned";
           return workPackageGraph as unknown as WorkPackageGraphView;
@@ -1177,73 +1172,48 @@ describe("Integration Runtime generation manifest", () => {
     const failed = runtime.executePending("generation-rework");
 
     assert.equal(failed.state, "failed");
-    assert.equal(versionCalls.length, 3);
-    assert.deepEqual(versionCalls[0], {
+    assert.equal(reworkCalls.length, 3);
+    assert.deepEqual(reworkCalls[0], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 4,
       workPackageId: "package-api",
       versionId: "integration-rework:generation-rework:package-api:v2",
-      dependencies: [],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
-      },
+      baseCommit: commit("1"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {},
     });
-    assert.deepEqual(versionCalls[1], {
+    assert.deepEqual(reworkCalls[1], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 6,
       workPackageId: "package-web",
       versionId: "integration-rework:generation-rework:package-web:v2",
-      dependencies: [
-        {
-          predecessorWorkPackageVersionId:
-            "integration-rework:generation-rework:package-api:v2",
-          kind: "contract",
-          contractId: "contract-api",
-          contractVersion: "1",
-        },
-      ],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      baseCommit: commit("3"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {
+        "package-api-v1": "integration-rework:generation-rework:package-api:v2",
       },
     });
-    assert.deepEqual(versionCalls[2], {
+    assert.deepEqual(reworkCalls[2], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 8,
       workPackageId: "package-ui",
       versionId: "integration-rework:generation-rework:package-ui:v2",
-      dependencies: [
-        {
-          predecessorWorkPackageVersionId:
-            "integration-rework:generation-rework:package-web:v2",
-          kind: "commit",
-        },
-      ],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      baseCommit: commit("5"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {
+        "package-api-v1": "integration-rework:generation-rework:package-api:v2",
+        "package-web-v1": "integration-rework:generation-rework:package-web:v2",
       },
     });
-    assert.deepEqual(assignCalls, [
-      {
-        commandId:
-          "integration-operation:generation-rework:package-api-v1:finalize",
-        actor: runtimeActor,
-        expectedRevision: 5,
-        workPackageId: "package-api",
-        baseCommit: commit("1"),
-      },
-    ]);
     assert.equal(
       database
         .prepare(

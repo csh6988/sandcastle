@@ -979,7 +979,9 @@ export const openCodeReviewNodeHandler = (
       const existing = options.codeReviews
         .inspect(run.run.id)
         .find(
-          (review) => review.manifest.workPackageVersionId === activeVersion.id,
+          (review) =>
+            review.manifest.workPackageVersionId === activeVersion.id &&
+            review.manifest.snapshotRevisionId === run.snapshot.id,
         );
       if (existing) {
         if (!existing.authority && existing.defects.length === 0) {
@@ -1003,7 +1005,7 @@ export const openCodeReviewNodeHandler = (
         assignment.aiMemberId,
         assignment.positionId,
       );
-      const codeReviewId = `code-review:${activeVersion.id}:${diff.id}`;
+      const codeReviewId = `code-review:${activeVersion.id}:${diff.id}:${run.snapshot.id}`;
       requireSucceeded(
         options.commandRegistry.execute({
           schemaVersion: 1,
@@ -1047,6 +1049,7 @@ export const openCodeReviewNodeHandler = (
       .filter(
         (review) =>
           review.integrationEligible &&
+          review.manifest.snapshotRevisionId === run.snapshot.id &&
           activeVersionIds.includes(review.manifest.workPackageVersionId),
       )
       .sort((left, right) =>
@@ -1071,6 +1074,7 @@ export const openCodeReviewNodeHandler = (
       if (anchorPackage) {
         const coverageKey = sha256(
           canonicalJson({
+            snapshotRevisionId: run.snapshot.id,
             activeVersionIds,
             authorityIds: eligible.map((review) => review.authority!.id),
           }),
