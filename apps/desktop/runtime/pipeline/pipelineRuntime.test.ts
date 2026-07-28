@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import type { CompanyCommandRegistry } from "../commandRegistry.js";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 import type { DepartmentPipelineDraftGraph } from "../interface.js";
 import type { ExecutionEventSink } from "../execution/contract.js";
@@ -12,6 +13,11 @@ import {
   createScriptedExecutionAdapter,
   type ExecutionAdapterInput,
 } from "../adapters/scriptedExecutionAdapter.js";
+import { openIntegrationNodeHandler } from "../integration/integrationNodeHandler.js";
+import type {
+  IntegrationGenerationView,
+  IntegrationRuntime,
+} from "../integration/integrationRuntime.js";
 import { createScriptedReviewerExecutionAdapter } from "../review/reviewerExecution.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
 import { createNodeHandlerRegistry } from "./nodeHandlerRegistry.js";
@@ -1124,6 +1130,10 @@ describe("Pipeline Runtime", () => {
       );
       assert.equal(pausedIntegration?.attempts.at(-1)?.status, "reconciling");
 
+      let resumeDispatchCount = 0;
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(async () => {
+        resumeDispatchCount += 1;
+      });
       const resumed = await fixture.database.pipelineRuntime.controlRun({
         runId: whilePaused.run.id,
         expectedRevision: whilePaused.run.revision,
@@ -1145,6 +1155,257 @@ describe("Pipeline Runtime", () => {
       assert.equal(otherReconciliation?.status, "blocked");
       assert.equal(otherReconciliation?.attempts.at(-1)?.id, otherAttemptId);
       assert.equal(otherReconciliation?.attempts.at(-1)?.status, "reconciling");
+      assert.equal(resumeDispatchCount, 1);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("dispatches a terminal aggregate receipt after explicit Run resume", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        { id: "start", type: "start", name: "Start" },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    try {
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const integration = started.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.ok(integration);
+      const generationId = "generation-paused-aggregate";
+      const attemptId = `${integration.id}:attempt:1`;
+      const manifestHash = "b".repeat(64);
+      const baseCommit = "1".repeat(40);
+      const integratedCommit = "2".repeat(40);
+      const manifest = {
+        schemaVersion: 1 as const,
+        generationId,
+        generation: 1,
+        projectId: fixture.project.id,
+        runId: started.run.id,
+        snapshotRevisionId: started.snapshot.id,
+        nodeRunId: integration.id,
+        coverageId: "coverage-paused-aggregate",
+        coverageNodeRunId: integration.id,
+        coverageNodeAttemptId: attemptId,
+        coverageHash: "a".repeat(64),
+        repositories: [
+          {
+            repositoryReference: "/repositories/api",
+            baseCommit,
+            integrationBranch: `integration/${started.run.id}/g1`,
+          },
+        ],
+        packages: [],
+        dependencyOrder: [],
+        contractVersions: [],
+        integrationConditions: [],
+        requiredValidations: [],
+      };
+      let generation = {
+        id: generationId,
+        manifest,
+        manifestHash,
+        state: "aggregate-review",
+        repositoryResults: [
+          {
+            id: `${generationId}:repository:api`,
+            repositoryReference: "/repositories/api",
+            baseCommit,
+            integrationBranch: `integration/${started.run.id}/g1`,
+            state: "succeeded",
+            expectedTip: integratedCommit,
+            integratedCommit,
+            validationRecords: [],
+          },
+        ],
+        operations: [],
+        defects: [],
+        aggregateReview: null,
+        passAuthorityHash: null,
+      } as IntegrationGenerationView;
+      let stageTerminal = false;
+      let reconcileCount = 0;
+      let externalExecutionCount = 0;
+      let stageReceiptCount = 0;
+      const commandIds: string[] = [];
+      const terminalResult = {
+        status: "completed" as const,
+        topicId: `integration-review:${generationId}`,
+        qualityGateResultId: "aggregate-gate-paused",
+      };
+      const handler = openIntegrationNodeHandler({
+        commandRegistry: {
+          execute: (envelope: { readonly commandId: string }) => {
+            commandIds.push(envelope.commandId);
+            fixture.database.pipelineRuntime.completeIntegrationInTransaction({
+              runId: started.run.id,
+              nodeRunId: integration.id,
+              generationId,
+              passAuthorityHash: "c".repeat(64),
+              repositoryCommits: [
+                {
+                  repositoryReference: "/repositories/api",
+                  commit: integratedCommit,
+                },
+              ],
+            });
+            generation = { ...generation, state: "passed" };
+            return { status: "succeeded", value: generation, effectIds: [] };
+          },
+        } as unknown as CompanyCommandRegistry,
+        integrations: {
+          inspect: () => [generation],
+          executePending: () => generation,
+          isRunPaused: () =>
+            fixture.database.pipelineRuntime.inspectRun(started.run.id).run
+              .status === "paused",
+          claimExecutionStage: () =>
+            stageTerminal
+              ? ({ mode: "terminal", result: terminalResult } as const)
+              : ({ mode: "reconcile" } as const),
+          recordExecutionStageResult: () => {
+            stageReceiptCount += 1;
+            stageTerminal = true;
+          },
+          blockPending: () => {
+            throw new Error("terminal aggregate receipt must not block");
+          },
+        } as unknown as IntegrationRuntime,
+        validationExecutor: {
+          reconcile: async () => ({ status: "not-applied" }),
+          execute: async () => {
+            throw new Error("validation must not execute");
+          },
+        },
+        aggregateReviewExecutor: {
+          reconcile: async () => {
+            reconcileCount += 1;
+            return terminalResult;
+          },
+          execute: async () => {
+            externalExecutionCount += 1;
+            throw new Error("aggregate Reviewer must not be reissued");
+          },
+        },
+      });
+      const evidence = new DatabaseSync(fixture.database.path);
+      try {
+        const now = new Date().toISOString();
+        evidence
+          .prepare(
+            `UPDATE department_runs
+                SET status = 'paused', paused_from_status = 'running'
+              WHERE id = ?`,
+          )
+          .run(started.run.id);
+        evidence
+          .prepare(
+            `UPDATE node_runs
+                SET status = 'blocked', attempt_count = 1,
+                    failure_code = 'RECONCILE_UNKNOWN',
+                    failure_message = 'Aggregate result requires reconciliation.',
+                    updated_at = ?
+              WHERE id = ?`,
+          )
+          .run(now, integration.id);
+        evidence
+          .prepare(
+            `INSERT INTO node_attempts(
+               id, node_run_id, attempt_number, snapshot_revision_id, reason,
+               status, failure_code, failure_message, created_at, started_at,
+               recoverable
+             ) VALUES (?, ?, 1, ?, 'initial', 'reconciling',
+                       'RECONCILE_UNKNOWN',
+                       'Aggregate result requires reconciliation.', ?, ?, 1)`,
+          )
+          .run(attemptId, integration.id, started.snapshot.id, now, now);
+        evidence
+          .prepare(
+            `INSERT INTO integration_generations(
+               id, project_id, run_id, snapshot_revision_id, node_run_id,
+               generation, coverage_id, coverage_node_run_id,
+               coverage_node_attempt_id, coverage_hash, manifest_json,
+               manifest_hash, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?,
+                       'aggregate-review', ?, ?)`,
+          )
+          .run(
+            generationId,
+            fixture.project.id,
+            started.run.id,
+            started.snapshot.id,
+            integration.id,
+            manifest.coverageId,
+            integration.id,
+            attemptId,
+            manifest.coverageHash,
+            canonicalPipelineJson(manifest),
+            manifestHash,
+            now,
+            now,
+          );
+      } finally {
+        evidence.close();
+      }
+
+      await handler.executeReady({
+        runId: started.run.id,
+        nodeRunId: integration.id,
+      });
+      assert.equal(stageReceiptCount, 1);
+      assert.equal(reconcileCount, 1);
+      assert.equal(externalExecutionCount, 0);
+      assert.deepEqual(commandIds, []);
+
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        handler.executeReady,
+      );
+      const whilePaused = fixture.database.pipelineRuntime.inspectRun(
+        started.run.id,
+      );
+      const pausedIntegration = whilePaused.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.equal(whilePaused.run.status, "paused");
+      assert.equal(pausedIntegration?.status, "blocked");
+      assert.equal(pausedIntegration?.attempts.length, 1);
+      assert.equal(pausedIntegration?.attempts[0]?.id, attemptId);
+      assert.equal(pausedIntegration?.attempts[0]?.status, "reconciling");
+      const resumed = await fixture.database.pipelineRuntime.controlRun({
+        runId: whilePaused.run.id,
+        expectedRevision: whilePaused.run.revision,
+        action: "resume",
+      });
+      const completedIntegration = resumed.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.equal(completedIntegration?.status, "succeeded");
+      assert.equal(completedIntegration?.attempts.length, 1);
+      assert.equal(completedIntegration?.attempts[0]?.id, attemptId);
+      assert.equal(completedIntegration?.attempts[0]?.status, "succeeded");
+      assert.equal(stageReceiptCount, 1);
+      assert.equal(reconcileCount, 1);
+      assert.equal(externalExecutionCount, 0);
+      assert.deepEqual(commandIds, [
+        `${generationId}:aggregate-review:completed`,
+      ]);
     } finally {
       fixture.database.close();
     }

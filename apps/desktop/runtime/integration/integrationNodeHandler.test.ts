@@ -494,6 +494,94 @@ describe("Integration Node Handler", () => {
     );
   });
 
+  it("defers a reconciled aggregate PASS until the paused Run resumes", async () => {
+    let paused = true;
+    let view = generation("aggregate-review", true);
+    let stageTerminal = false;
+    let reconcileCount = 0;
+    let executeCount = 0;
+    const stageClaims: boolean[] = [];
+    const stageResults: unknown[] = [];
+    const commands: Array<{ readonly commandId: string }> = [];
+    const terminalResult = {
+      status: "completed" as const,
+      topicId: "integration-review:integration:run-1:g1",
+      qualityGateResultId: "aggregate-gate-1",
+    };
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: (envelope: { readonly commandId: string }) => {
+          commands.push(envelope);
+          view = generation("passed", true);
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => view,
+        reconcilePending: () => 0,
+        isRunPaused: () => paused,
+        claimExecutionStage: (input: { readonly createIfMissing: boolean }) => {
+          stageClaims.push(input.createIfMissing);
+          return stageTerminal
+            ? ({ mode: "terminal", result: terminalResult } as const)
+            : ({ mode: "reconcile" } as const);
+        },
+        recordExecutionStageResult: (input: unknown) => {
+          stageResults.push(input);
+          stageTerminal = true;
+        },
+        blockPending: () => {
+          throw new Error("terminal reconciliation must not block");
+        },
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: {
+        reconcile: async () => {
+          reconcileCount += 1;
+          return terminalResult;
+        },
+        execute: async () => {
+          executeCount += 1;
+          throw new Error("must not repeat aggregate Reviewer execution");
+        },
+      },
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.equal(view.state, "aggregate-review");
+    assert.equal(reconcileCount, 1);
+    assert.equal(executeCount, 0);
+    assert.deepEqual(stageClaims, [false]);
+    assert.equal(stageResults.length, 1);
+    assert.equal(
+      (stageResults[0] as { readonly state: string }).state,
+      "succeeded",
+    );
+    assert.equal(commands.length, 0);
+
+    paused = false;
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.equal(reconcileCount, 1);
+    assert.equal(executeCount, 0);
+    assert.deepEqual(stageClaims, [false, true]);
+    assert.equal(stageResults.length, 1);
+    assert.deepEqual(
+      commands.map((entry) => entry.commandId),
+      ["integration:run-1:g1:aggregate-review:completed"],
+    );
+    assert.equal(view.state, "passed");
+  });
+
   it("dispatches cancellation to the durable validation provider operation", async () => {
     const view = generation("validating");
     const request = {
