@@ -184,6 +184,7 @@ describe("Sandcastle core Runtime loader", () => {
       64,
     );
     assert.deepEqual(reviewerDockerOptions, {
+      network: "none",
       mounts: [
         {
           hostPath: "/review-bundle",
