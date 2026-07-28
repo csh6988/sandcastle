@@ -231,6 +231,82 @@ const formalizeAndStart = (input: {
 };
 
 describe("Pipeline Runtime", () => {
+  it("dispatches integration@1 through the registered Runtime executor and preserves Pipeline ownership", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    try {
+      const calls: Array<{
+        readonly runId: string;
+        readonly nodeRunId: string;
+      }> = [];
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async (input) => {
+          calls.push(input);
+          fixture.database.pipelineRuntime.startIntegrationInTransaction({
+            ...input,
+            generationId: "generation-1",
+          });
+          fixture.database.pipelineRuntime.completeIntegrationInTransaction({
+            ...input,
+            generationId: "generation-1",
+            passAuthorityHash: "a".repeat(64),
+            repositoryCommits: [
+              {
+                repositoryReference: "/repositories/api",
+                commit: "b".repeat(40),
+              },
+            ],
+          });
+        },
+      );
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const completed = await fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const integration = completed.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.equal(calls.length, 1);
+      assert.equal(integration?.status, "succeeded");
+      assert.deepEqual(integration?.result, {
+        generationId: "generation-1",
+        passAuthorityHash: "a".repeat(64),
+        repositoryCommits: [
+          {
+            repositoryReference: "/repositories/api",
+            commit: "b".repeat(40),
+          },
+        ],
+      });
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("persists Run creation audit and Runtime event records in the start transaction", () => {
     const { database, project, department } = setup();
     try {

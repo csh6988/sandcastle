@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 14;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 15;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -32,6 +32,9 @@ export interface RuntimeEventScope {
   readonly workspaceAllocationId?: string;
   readonly workPackageId?: string;
   readonly workPackageVersionId?: string;
+  readonly integrationGenerationId?: string;
+  readonly integrationOperationId?: string;
+  readonly defectId?: string;
   readonly permissionRequestId?: string;
   readonly memoryCandidateId?: string;
   readonly memoryEntryId?: string;
@@ -234,6 +237,21 @@ const codeReviewEventPayloadSchema = z
     codeReviewId: z.string().trim().min(1),
     workPackageId: z.string().trim().min(1),
     workPackageVersionId: z.string().trim().min(1),
+  })
+  .passthrough();
+
+const integrationEventPayloadSchema = z
+  .object({
+    generationId: z.string().trim().min(1),
+    state: z.enum([
+      "pending",
+      "running",
+      "validating",
+      "aggregate-review",
+      "blocked",
+      "failed",
+      "passed",
+    ]),
   })
   .passthrough();
 
@@ -1025,6 +1043,31 @@ const definitions = [
           "workPackageVersionId",
         ],
         payloadSchema: codeReviewEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  ...[
+    "integration.generation.started",
+    "integration.generation.validating",
+    "integration.generation.aggregate-review",
+    "integration.generation.blocked",
+    "integration.generation.failed",
+    "integration.generation.completed",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "nodeRunId",
+          "integrationGenerationId",
+        ],
+        payloadSchema: integrationEventPayloadSchema,
         retentionClass: "durable",
         agUiMapping: "custom",
         acpMapping: "custom",

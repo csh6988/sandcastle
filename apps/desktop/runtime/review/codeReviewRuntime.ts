@@ -82,6 +82,9 @@ export const blockingReviewerWorkspaceAdapter: ReviewerWorkspaceAdapter = {
 
 export interface CodeReviewRuntime {
   readonly inspect: (runId: string) => readonly CodeReviewView[];
+  readonly readCompletedCoverage: (
+    runId: string,
+  ) => CompletedCodeReviewCoverage;
   readonly dispatchInTransaction: (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
@@ -91,6 +94,46 @@ export interface CodeReviewRuntime {
   readonly reconcileReviewerWorkspace: (codeReviewId: string) => CodeReviewView;
   readonly reconcilePendingReviewerWorkspaces: () => void;
 }
+
+export type CompletedCodeReviewCoverage = {
+  readonly coverageId: string;
+  readonly coverageHash: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly snapshotRevisionId: string;
+  readonly nodeRunId: string;
+  readonly nodeAttemptId: string;
+  readonly packages: readonly {
+    readonly workPackageId: string;
+    readonly workPackageVersionId: string;
+    readonly applicationId: string;
+    readonly repositoryReference: string;
+    readonly baseCommit: string;
+    readonly sourceBranch: string;
+    readonly sourceCommit: string;
+    readonly diffHash: string;
+    readonly authorityId: string;
+    readonly qualityGateResultId: string;
+    readonly dependencies: readonly {
+      readonly predecessorWorkPackageVersionId: string;
+      readonly kind:
+        | "artifact"
+        | "commit"
+        | "contract"
+        | "readiness"
+        | "manual";
+      readonly contractId: string | null;
+      readonly contractVersion: string | null;
+      readonly evidenceRef: string | null;
+    }[];
+    readonly contractVersions: readonly {
+      readonly id: string;
+      readonly version: string;
+      readonly hash: string;
+    }[];
+    readonly integrationConditions: readonly string[];
+  }[];
+};
 
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -1883,8 +1926,240 @@ export const openCodeReviewRuntime = (
     ids.forEach((row) => reconcileReviewerWorkspace(row.id));
   };
 
+  const readCompletedCoverage = (
+    runId: string,
+  ): CompletedCodeReviewCoverage => {
+    const node = database
+      .prepare(
+        `SELECT node_runs.id AS nodeRunId,
+                node_runs.result_json AS nodeResultJson,
+                attempts.id AS nodeAttemptId,
+                attempts.structured_result_json AS attemptResultJson,
+                runs.project_id AS projectId,
+                runs.snapshot_revision_id AS snapshotRevisionId
+           FROM node_runs
+           JOIN department_runs AS runs ON runs.id = node_runs.run_id
+           JOIN node_attempts AS attempts ON attempts.id = (
+             SELECT candidate.id FROM node_attempts AS candidate
+              WHERE candidate.node_run_id = node_runs.id
+                AND candidate.status = 'succeeded'
+              ORDER BY candidate.attempt_number DESC LIMIT 1
+           )
+          WHERE node_runs.run_id = ?
+            AND node_runs.handler_kind_id = 'code-review@1'
+            AND node_runs.status = 'succeeded'`,
+      )
+      .get(runId) as
+      | {
+          readonly nodeRunId: string;
+          readonly nodeResultJson: string;
+          readonly nodeAttemptId: string;
+          readonly attemptResultJson: string;
+          readonly projectId: string;
+          readonly snapshotRevisionId: string;
+        }
+      | undefined;
+    if (!node) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_COVERAGE_INCOMPLETE",
+        `Department Run ${runId} has no completed code-review@1 Node Attempt.`,
+      );
+    }
+    type CoverageResult = {
+      readonly workPackageVersionIds: readonly string[];
+      readonly authorityIds: readonly string[];
+      readonly qualityGateResultIds: readonly string[];
+      readonly coverageHash: string;
+    };
+    const nodeResult = parseJson<CoverageResult>(node.nodeResultJson);
+    const attemptResult = parseJson<CoverageResult>(node.attemptResultJson);
+    if (canonicalJson(nodeResult) !== canonicalJson(attemptResult)) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_COVERAGE_CONFLICT",
+        "Completed Code Review Node and Attempt coverage results differ.",
+      );
+    }
+    const uniqueVersions = new Set(nodeResult.workPackageVersionIds);
+    const uniqueAuthorities = new Set(nodeResult.authorityIds);
+    const uniqueGates = new Set(nodeResult.qualityGateResultIds);
+    if (
+      nodeResult.workPackageVersionIds.length === 0 ||
+      nodeResult.workPackageVersionIds.length !==
+        nodeResult.authorityIds.length ||
+      nodeResult.workPackageVersionIds.length !==
+        nodeResult.qualityGateResultIds.length ||
+      uniqueVersions.size !== nodeResult.workPackageVersionIds.length ||
+      uniqueAuthorities.size !== nodeResult.authorityIds.length ||
+      uniqueGates.size !== nodeResult.qualityGateResultIds.length ||
+      [...nodeResult.workPackageVersionIds]
+        .sort()
+        .some((id, index) => id !== nodeResult.workPackageVersionIds[index])
+    ) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_COVERAGE_INVALID",
+        "Completed Code Review coverage must contain sorted, unique, one-to-one Version, Authority, and Gate identities.",
+      );
+    }
+    const expectedCoverageHash = sha256(
+      canonicalJson({
+        schemaVersion: 1,
+        runId,
+        nodeRunId: node.nodeRunId,
+        workPackageVersionIds: nodeResult.workPackageVersionIds,
+        authorityIds: nodeResult.authorityIds,
+        qualityGateResultIds: nodeResult.qualityGateResultIds,
+      }),
+    );
+    if (nodeResult.coverageHash !== expectedCoverageHash) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_COVERAGE_INVALID",
+        "Completed Code Review coverage hash does not match its exact authority tuple.",
+      );
+    }
+    const eligible = new Map(
+      inspect(runId)
+        .filter((review) => review.integrationEligible)
+        .map((review) => [review.manifest.workPackageVersionId, review]),
+    );
+    const packages = nodeResult.workPackageVersionIds.map(
+      (versionId, index) => {
+        const review = eligible.get(versionId);
+        if (
+          !review?.authority ||
+          !review.gateResult ||
+          review.authority.id !== nodeResult.authorityIds[index] ||
+          review.gateResult.id !== nodeResult.qualityGateResultIds[index] ||
+          review.gateResult.kind !== "code" ||
+          review.gateResult.result !== "PASS"
+        ) {
+          throw new CodeReviewRuntimeError(
+            "CODE_REVIEW_COVERAGE_STALE",
+            `Completed coverage authority for Work Package Version ${versionId} is no longer exact and eligible.`,
+          );
+        }
+        const packageRow = database
+          .prepare(
+            `SELECT versions.application_id AS applicationId,
+                  versions.repository_reference AS repositoryReference,
+                  versions.manifest_json AS manifestJson,
+                  allocations.source_branch AS sourceBranch,
+                  packages.technical_baseline_id AS technicalBaselineId
+             FROM work_package_versions AS versions
+             JOIN work_packages AS packages ON packages.id = versions.work_package_id
+             JOIN work_package_assignments AS assignments
+               ON assignments.id = ?
+             JOIN workspace_allocations AS allocations
+               ON allocations.id = assignments.allocation_id
+            WHERE versions.id = ? AND versions.status = 'ready'
+              AND packages.run_id = ?
+              AND assignments.work_package_version_id = versions.id`,
+          )
+          .get(review.manifest.assignmentId, versionId, runId) as
+          | {
+              readonly applicationId: string;
+              readonly repositoryReference: string;
+              readonly manifestJson: string;
+              readonly sourceBranch: string;
+              readonly technicalBaselineId: string;
+            }
+          | undefined;
+        if (!packageRow) {
+          throw new CodeReviewRuntimeError(
+            "CODE_REVIEW_COVERAGE_STALE",
+            `Work Package Version ${versionId} is no longer the active reviewed Version.`,
+          );
+        }
+        const dependencies = database
+          .prepare(
+            `SELECT predecessor_work_package_version_id AS predecessorWorkPackageVersionId,
+                  kind, contract_id AS contractId,
+                  contract_version AS contractVersion,
+                  evidence_ref AS evidenceRef
+             FROM work_package_dependencies
+            WHERE work_package_version_id = ?
+            ORDER BY predecessor_work_package_version_id, kind`,
+          )
+          .all(versionId) as Array<{
+          readonly predecessorWorkPackageVersionId: string;
+          readonly kind:
+            | "artifact"
+            | "commit"
+            | "contract"
+            | "readiness"
+            | "manual";
+          readonly contractId: string | null;
+          readonly contractVersion: string | null;
+          readonly evidenceRef: string | null;
+        }>;
+        const contractVersions = dependencies
+          .filter(
+            (dependency) =>
+              dependency.kind === "contract" &&
+              dependency.contractId &&
+              dependency.contractVersion,
+          )
+          .map((dependency) => {
+            const contract = database
+              .prepare(
+                `SELECT contracts.content_hash AS hash
+                 FROM technical_baselines AS baselines
+                 JOIN cross_application_contract_revisions AS contracts
+                   ON contracts.proposal_revision_id = baselines.proposal_revision_id
+                WHERE baselines.id = ? AND contracts.contract_id = ?
+                  AND contracts.version = ? AND contracts.compatibility = 'compatible'`,
+              )
+              .get(
+                packageRow.technicalBaselineId,
+                dependency.contractId,
+                dependency.contractVersion,
+              ) as { readonly hash: string } | undefined;
+            if (!contract) {
+              throw new CodeReviewRuntimeError(
+                "CODE_REVIEW_COVERAGE_STALE",
+                `Reviewed Contract ${String(dependency.contractId)}@${String(dependency.contractVersion)} is not accepted and compatible.`,
+              );
+            }
+            return {
+              id: dependency.contractId!,
+              version: dependency.contractVersion!,
+              hash: contract.hash,
+            };
+          });
+        const packageManifest = parseJson<{
+          readonly integrationConditions: readonly string[];
+        }>(packageRow.manifestJson);
+        return {
+          workPackageId: review.manifest.workPackageId,
+          workPackageVersionId: versionId,
+          applicationId: packageRow.applicationId,
+          repositoryReference: packageRow.repositoryReference,
+          baseCommit: review.manifest.baseCommit,
+          sourceBranch: packageRow.sourceBranch,
+          sourceCommit: review.manifest.sourceCommit,
+          diffHash: review.manifest.diffHash,
+          authorityId: review.authority.id,
+          qualityGateResultId: review.gateResult.id,
+          dependencies,
+          contractVersions,
+          integrationConditions: packageManifest.integrationConditions,
+        };
+      },
+    );
+    return {
+      coverageId: node.nodeAttemptId,
+      coverageHash: nodeResult.coverageHash,
+      projectId: node.projectId,
+      runId,
+      snapshotRevisionId: node.snapshotRevisionId,
+      nodeRunId: node.nodeRunId,
+      nodeAttemptId: node.nodeAttemptId,
+      packages,
+    };
+  };
+
   return {
     inspect,
+    readCompletedCoverage,
     dispatchInTransaction,
     reconcileReviewerWorkspace,
     reconcilePendingReviewerWorkspaces,

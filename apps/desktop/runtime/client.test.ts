@@ -13,6 +13,41 @@ import {
 import { RuntimeRequestSchema, type RuntimeResponse } from "./interface.js";
 import { scriptedDepartmentRun } from "./testing/runContract.js";
 
+const integrationGenerationView = {
+  id: "generation-1",
+  manifest: {
+    schemaVersion: 1 as const,
+    generationId: "generation-1",
+    generation: 1,
+    projectId: "project-1",
+    runId: "run-1",
+    snapshotRevisionId: "snapshot-1",
+    nodeRunId: "integration-node-1",
+    coverageId: "coverage-1",
+    coverageNodeRunId: "code-review-node-1",
+    coverageNodeAttemptId: "code-review-attempt-1",
+    coverageHash: "a".repeat(64),
+    repositories: [
+      {
+        repositoryReference: "/repositories/api",
+        baseCommit: "b".repeat(40),
+        integrationBranch: "integration/run-1/g1",
+      },
+    ],
+    packages: [],
+    dependencyOrder: [],
+    contractVersions: [],
+    integrationConditions: ["npm test"],
+  },
+  manifestHash: "c".repeat(64),
+  state: "validating" as const,
+  repositoryResults: [],
+  operations: [],
+  defects: [],
+  aggregateReview: null,
+  passAuthorityHash: null,
+};
+
 describe("Company Runtime client", () => {
   it("parses an authoritative Run Supervision Query View", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
@@ -367,6 +402,61 @@ describe("Company Runtime client", () => {
         : null,
       "code-reviews.inspect",
     );
+  });
+
+  it("parses Integration Generation Query and Command envelopes", async () => {
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        return {
+          id: request.id,
+          ok: true,
+          result:
+            request.kind === "query"
+              ? { view: [integrationGenerationView], asOfSequence: 22 }
+              : {
+                  status: "succeeded",
+                  value: integrationGenerationView,
+                  effectIds: ["audit-integration-1"],
+                },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+
+    const inspected = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "integration-query-1",
+      principal: {
+        type: "runtime-worker",
+        id: "integration-node-handler",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "integration-node-handler",
+      query: { type: "integration-generations.inspect", runId: "run-1" },
+    });
+    const started = await client.executeEnvelope({
+      schemaVersion: 1,
+      commandId: "integration-start-1",
+      actor: {
+        type: "runtime-worker",
+        id: "integration-node-handler",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "integration-node-handler",
+      command: {
+        type: "integration.generation.start",
+        generationId: "generation-1",
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
+      },
+    });
+
+    assert.equal(inspected.view[0]?.id, "generation-1");
+    assert.equal(started.status, "succeeded");
+    if (started.status === "succeeded") {
+      assert.equal(started.value.id, "generation-1");
+    }
   });
 
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
