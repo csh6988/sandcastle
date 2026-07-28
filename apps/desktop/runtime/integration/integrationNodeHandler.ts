@@ -1,4 +1,7 @@
-import type { CompanyCommandRegistry } from "../commandRegistry.js";
+import {
+  CompanyCommandError,
+  type CompanyCommandRegistry,
+} from "../commandRegistry.js";
 import type { ActorRef } from "../interface.js";
 import type {
   IntegrationGenerationManifest,
@@ -123,6 +126,49 @@ export const openIntegrationNodeHandler = (options: {
   const aggregateReviewExecutor =
     options.aggregateReviewExecutor ?? unavailableAggregateReviewExecutor;
 
+  const executeCommand = (input: {
+    readonly generationId: string;
+    readonly phase: "validation" | "aggregate-review";
+    readonly commandId: string;
+    readonly command: Parameters<
+      CompanyCommandRegistry["execute"]
+    >[0]["command"];
+  }): boolean => {
+    try {
+      const result = options.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: input.commandId,
+        actor,
+        consumerId: "integration-node-handler",
+        command: input.command,
+      });
+      if (result.status === "succeeded") return true;
+      if (result.error.code === "STORE_BUSY") return false;
+      options.integrations.blockPending(input.generationId, {
+        code: result.error.code,
+        message: result.error.message,
+        evidence: { phase: input.phase, commandId: input.commandId },
+      });
+      return false;
+    } catch (error) {
+      if (error instanceof CompanyCommandError && error.code === "STORE_BUSY") {
+        return false;
+      }
+      const failure =
+        error instanceof Error
+          ? { code: "INTEGRATION_COMMAND_FAILED", message: error.message }
+          : {
+              code: "INTEGRATION_COMMAND_FAILED",
+              message: "Integration Command execution failed.",
+            };
+      options.integrations.blockPending(input.generationId, {
+        ...failure,
+        evidence: { phase: input.phase, commandId: input.commandId },
+      });
+      return false;
+    }
+  };
+
   const executeGeneration = async (generationId: string): Promise<void> => {
     let generation = options.integrations.executePending(generationId);
     if (generation.state === "validating") {
@@ -169,26 +215,30 @@ export const openIntegrationNodeHandler = (options: {
           });
           return;
         }
-        options.commandRegistry.execute({
-          schemaVersion: 1,
-          commandId: `${input.operationKey}:${result.status}`,
-          actor,
-          command: {
-            type: "integration.validation.record",
+        const commandId = `${input.operationKey}:${result.status}`;
+        if (
+          !executeCommand({
             generationId: generation.id,
-            validationId: required.id,
-            repositoryReference: repository.repositoryReference,
-            status: result.status,
-            kind: required.kind,
-            evidenceRefs: [...result.evidenceRefs],
-            responsibleWorkPackageVersionIds: [
-              ...result.responsibleWorkPackageVersionIds,
-            ],
-            ...(result.contractFailure
-              ? { contractFailure: result.contractFailure }
-              : {}),
-          },
-        });
+            phase: "validation",
+            commandId,
+            command: {
+              type: "integration.validation.record",
+              generationId: generation.id,
+              validationId: required.id,
+              repositoryReference: repository.repositoryReference,
+              status: result.status,
+              kind: required.kind,
+              evidenceRefs: [...result.evidenceRefs],
+              responsibleWorkPackageVersionIds: [
+                ...result.responsibleWorkPackageVersionIds,
+              ],
+              ...(result.contractFailure
+                ? { contractFailure: result.contractFailure }
+                : {}),
+            },
+          })
+        )
+          return;
         if (result.status === "failed") return;
       }
     }
@@ -228,10 +278,11 @@ export const openIntegrationNodeHandler = (options: {
       });
       return;
     }
-    options.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.operationKey}:completed`,
-      actor,
+    const commandId = `${input.operationKey}:completed`;
+    executeCommand({
+      generationId: generation.id,
+      phase: "aggregate-review",
+      commandId,
       command: {
         type: "integration.aggregate-review.record",
         generationId: generation.id,

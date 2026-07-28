@@ -515,7 +515,6 @@ export const openCompanyDatabase = (
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
-  void integrationNodeHandler.reconcilePending();
 
   return {
     path,

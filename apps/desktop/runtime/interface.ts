@@ -863,27 +863,26 @@ const IntegrationCoveragePackageSchema = z
         .strict(),
     ),
     integrationConditions: z.array(z.string().trim().min(1)),
-    requiredValidations: z.array(
-      z
-        .object({
-          id: z.string().trim().min(1),
-          repositoryReference: z.string().trim().min(1),
-          kind: z.enum(["build-test", "contract"]),
-          identityHash: Sha256Schema,
-          condition: z.string().trim().min(1).optional(),
-          contract: z
-            .object({
-              id: z.string().trim().min(1),
-              version: z.string().trim().min(1),
-              hash: Sha256Schema,
-              producerApplicationId: z.string().trim().min(1),
-              consumerApplicationId: z.string().trim().min(1),
-            })
-            .strict()
-            .optional(),
-        })
-        .strict(),
-    ),
+  })
+  .strict();
+
+const RequiredIntegrationValidationSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    repositoryReference: z.string().trim().min(1),
+    kind: z.enum(["build-test", "contract"]),
+    identityHash: Sha256Schema,
+    condition: z.string().trim().min(1).optional(),
+    contract: z
+      .object({
+        id: z.string().trim().min(1),
+        version: z.string().trim().min(1),
+        hash: Sha256Schema,
+        producerApplicationId: z.string().trim().min(1),
+        consumerApplicationId: z.string().trim().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -921,6 +920,7 @@ export const IntegrationGenerationManifestSchema = z
         .strict(),
     ),
     integrationConditions: z.array(z.string().trim().min(1)),
+    requiredValidations: z.array(RequiredIntegrationValidationSchema),
   })
   .strict();
 
