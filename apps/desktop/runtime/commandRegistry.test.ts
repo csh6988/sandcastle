@@ -14,6 +14,8 @@ import { openProjectConfiguration } from "./project/projectConfiguration.js";
 import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
 import { migrateCompanyDatabase } from "./storage/migrations.js";
 import type { IntegrationRuntime } from "./integration/integrationRuntime.js";
+import { openIntegrationRuntime } from "./integration/integrationRuntime.js";
+import { openRuntimeEvents } from "./events/subscription.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -54,6 +56,7 @@ describe("Company Runtime command registry", () => {
             dependencyOrder: [],
             contractVersions: [],
             integrationConditions: [],
+            requiredValidations: [],
           },
           manifestHash: "b".repeat(64),
           state: "pending",
@@ -124,6 +127,159 @@ describe("Company Runtime command registry", () => {
           .get() as { readonly count: number }
       ).count,
       0,
+    );
+    database.close();
+  });
+
+  it("persists validation audit, event, receipt, and effectIds atomically and replays without duplicates", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const clock = () => new Date("2026-07-28T00:00:00.000Z");
+    const events = openRuntimeEvents(database, { clock });
+    const integrationRuntime = openIntegrationRuntime(database, {
+      events,
+      codeReviews: {
+        readCompletedCoverage: () => ({
+          coverageId: "coverage-1",
+          coverageHash: "a".repeat(64),
+          projectId: "project-1",
+          runId: "run-1",
+          snapshotRevisionId: "snapshot-1",
+          nodeRunId: "code-review-node-1",
+          nodeAttemptId: "code-review-attempt-1",
+          packages: [
+            {
+              workPackageId: "package-1",
+              workPackageVersionId: "package-v1",
+              applicationId: "application-1",
+              repositoryReference: "/repositories/api",
+              baseCommit: "1".repeat(40),
+              sourceBranch: "work/package-1",
+              sourceCommit: "2".repeat(40),
+              diffHash: "b".repeat(64),
+              authorityId: "authority-1",
+              qualityGateResultId: "gate-1",
+              dependencies: [],
+              contractVersions: [],
+              integrationConditions: ["npm test"],
+            },
+          ],
+        }),
+      },
+      pipelineRuntime: {
+        startIntegrationInTransaction: () => undefined,
+        blockIntegrationInTransaction: () => undefined,
+        failIntegrationInTransaction: () => undefined,
+        completeIntegrationInTransaction: () => undefined,
+      },
+      gitAdapter: {
+        execute: (input) => ({
+          status: "succeeded",
+          beforeTip: input.expectedTip,
+          afterTip: input.sourceCommit,
+          resultingCommit: input.sourceCommit,
+          receipt: { operationId: input.operationId },
+        }),
+        reconcile: () => ({ status: "not-applied" }),
+      },
+      clock,
+    });
+    const registry = openCompanyCommandRegistry(
+      database,
+      openProjectConfiguration(database),
+      undefined,
+      clock,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      integrationRuntime,
+    );
+    const runtimeActor = {
+      type: "runtime-worker" as const,
+      id: "integration-node-handler",
+      authenticatedBy: "runtime" as const,
+    };
+    const started = registry.execute({
+      schemaVersion: 1,
+      commandId: "integration-start-real",
+      actor: runtimeActor,
+      consumerId: "integration-node-handler",
+      command: {
+        type: "integration.generation.start",
+        generationId: "generation-real",
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
+      },
+    });
+    assert.equal(started.status, "succeeded");
+    integrationRuntime.executePending("generation-real");
+    const validationId =
+      integrationRuntime.inspect("run-1")[0]!.manifest.requiredValidations[0]!
+        .id;
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "integration-validation-real",
+      actor: runtimeActor,
+      consumerId: "integration-node-handler",
+      command: {
+        type: "integration.validation.record" as const,
+        generationId: "generation-real",
+        validationId,
+        repositoryReference: "/repositories/api",
+        status: "passed" as const,
+        kind: "build-test" as const,
+        evidenceRefs: ["build-log"],
+        responsibleWorkPackageVersionIds: [],
+      },
+    };
+    const first = registry.execute(envelope);
+    const replay = registry.execute(envelope);
+    assert.deepEqual(replay, first);
+    assert.equal(first.status, "succeeded");
+    assert.equal(first.effectIds.length, 1);
+    assert.equal(
+      Number(
+        (
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ?",
+            )
+            .get(envelope.commandId) as { readonly count: number }
+        ).count,
+      ),
+      1,
+    );
+    assert.equal(
+      events
+        .readAfter(0, 100)
+        .filter((event) => event.type === "integration.validation.recorded")
+        .length,
+      1,
+    );
+    assert.equal(
+      Number(
+        (
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+            )
+            .get(envelope.commandId) as { readonly count: number }
+        ).count,
+      ),
+      1,
     );
     database.close();
   });

@@ -58,6 +58,21 @@ export interface CompanyRuntimeServerHandle {
   readonly close: () => Promise<void>;
 }
 
+export const reconcileCompanyRuntimeStartup = async (
+  database: Pick<
+    CompanyDatabase,
+    | "pipelineRuntime"
+    | "interaction"
+    | "codeReviewNodeHandler"
+    | "integrationNodeHandler"
+  >,
+): Promise<void> => {
+  await database.pipelineRuntime.reconcilePendingExecutions();
+  await database.interaction.reconcilePendingTurns();
+  await database.codeReviewNodeHandler.reconcilePending();
+  await database.integrationNodeHandler.reconcilePending();
+};
+
 const tokenDigest = (token: string): Buffer =>
   createHash("sha256").update(token).digest();
 
@@ -122,9 +137,13 @@ export const startCompanyRuntimeServer = async (
     releaseLock();
     throw error;
   }
-  await database.pipelineRuntime.reconcilePendingExecutions();
-  await database.interaction.reconcilePendingTurns();
-  await database.codeReviewNodeHandler.reconcilePending();
+  try {
+    await reconcileCompanyRuntimeStartup(database);
+  } catch (error) {
+    database.close();
+    releaseLock();
+    throw error;
+  }
   const startedAt = new Date().toISOString();
   const trustedConnections = [
     {

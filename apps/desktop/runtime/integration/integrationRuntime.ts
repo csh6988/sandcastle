@@ -1539,6 +1539,28 @@ export const openIntegrationRuntime = (
         recordHash,
         now,
       );
+    database
+      .prepare(
+        `INSERT INTO runtime_audit_records(
+           id, action, entity_type, entity_id, run_id, node_run_id,
+           before_json, after_json, created_at, command_id, actor_type,
+           actor_id, authenticated_by, consumer_id
+         ) VALUES (?, 'integration.validation-record', 'integration-validation',
+                   ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?,
+                   (SELECT consumer_id FROM runtime_unit_of_work_context WHERE slot = 1))`,
+      )
+      .run(
+        randomUUID(),
+        `${view.id}:${input.command.validationId}`,
+        view.manifest.runId,
+        view.manifest.nodeRunId,
+        validationJson,
+        now,
+        input.commandId,
+        input.actor.type,
+        input.actor.id,
+        input.actor.authenticatedBy,
+      );
     options.events.append({
       type: "integration.validation.recorded",
       scope: {
@@ -1551,6 +1573,7 @@ export const openIntegrationRuntime = (
       },
       payload: {
         generationId: view.id,
+        state: input.command.status === "passed" ? "validating" : "failed",
         repositoryReference: input.command.repositoryReference,
         validationId: input.command.validationId,
         kind: input.command.kind,

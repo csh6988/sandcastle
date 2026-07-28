@@ -174,6 +174,15 @@ const integrationGenerationView = {
     dependencyOrder: [],
     contractVersions: [],
     integrationConditions: ["npm test"],
+    requiredValidations: [
+      {
+        id: "validation-1",
+        repositoryReference: "/repositories/api",
+        kind: "build-test" as const,
+        identityHash: "d".repeat(64),
+        condition: "npm test",
+      },
+    ],
   },
   manifestHash: "c".repeat(64),
   state: "validating" as const,
@@ -357,6 +366,10 @@ describe("Sandcastle preload bridge", () => {
     });
 
     assert.equal(inspected.view[0]?.manifestHash, "c".repeat(64));
+    assert.equal(
+      inspected.view[0]?.manifest.requiredValidations[0]?.id,
+      "validation-1",
+    );
     assert.equal(started.status, "succeeded");
     if (started.status === "succeeded") {
       assert.equal(started.value.id, "generation-1");

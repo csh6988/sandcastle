@@ -160,4 +160,66 @@ describe("Integration Node Handler", () => {
       },
     ]);
   });
+
+  for (const phase of ["validation", "aggregate-review"] as const) {
+    it(`blocks with evidence when the ${phase} Command is deterministically rejected`, async () => {
+      const view = generation(
+        phase === "validation" ? "validating" : "aggregate-review",
+        phase === "aggregate-review",
+      );
+      const blocked: unknown[] = [];
+      const handler = openIntegrationNodeHandler({
+        commandRegistry: {
+          execute: () => ({
+            status: "rejected",
+            error: { code: "COMMAND_REJECTED", message: `${phase} rejected` },
+            effectIds: [],
+          }),
+        } as unknown as CompanyCommandRegistry,
+        integrations: {
+          inspect: () => [view],
+          inspectPending: () => [view],
+          executePending: () => view,
+          reconcilePending: () => 0,
+          blockPending: (_id: string, failure: unknown) => {
+            blocked.push(failure);
+            return view;
+          },
+        } as unknown as IntegrationRuntime,
+        validationExecutor: {
+          reconcile: async () => ({ status: "not-applied" }),
+          execute: async () => ({
+            status: "passed",
+            evidenceRefs: ["evidence"],
+            responsibleWorkPackageVersionIds: [],
+          }),
+        },
+        aggregateReviewExecutor: {
+          reconcile: async () => ({ status: "not-applied" }),
+          execute: async () => ({
+            status: "completed",
+            topicId: "integration-review:integration:run-1:g1",
+            qualityGateResultId: "gate-1",
+          }),
+        },
+      });
+      await handler.executeReady({
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
+      });
+      assert.equal(blocked.length, 1);
+      const failure = blocked[0] as {
+        readonly code: string;
+        readonly message: string;
+        readonly evidence: {
+          readonly phase: string;
+          readonly commandId: string;
+        };
+      };
+      assert.equal(failure.code, "COMMAND_REJECTED");
+      assert.equal(failure.message, `${phase} rejected`);
+      assert.equal(failure.evidence.phase, phase);
+      assert.match(failure.evidence.commandId, /integration:run-1:g1/);
+    });
+  }
 });
