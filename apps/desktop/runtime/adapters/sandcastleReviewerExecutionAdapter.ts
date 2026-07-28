@@ -32,6 +32,8 @@ const createLauncherRepository = (): string => {
 };
 
 const promptFor = (input: ReviewerExecutionInput): string => {
+  const outputTag =
+    input.phase === "initial-finding" ? "reviewer_finding" : "reviewer_recheck";
   const task =
     input.phase === "initial-finding"
       ? "Return at least one precise finding, including non-blocking findings when the Diff is acceptable."
@@ -46,8 +48,10 @@ Read only the allowlisted bundle mounted at /review:
 
 Do not inspect the launcher repository, host paths, hidden transcripts, mutable producer state, or external repositories.
 Every evidenceRefs entry must name an ID from the frozen manifest.
+When manifest.priorReview is present, evaluate its Defect, Gate, findings, and resolution matrix; the fresh recheck must cite every requiredEvidenceRefs entry.
 
 ${task}
+Emit only one JSON object inside <${outputTag}>...</${outputTag}> tags.
 `;
 };
 
@@ -85,6 +89,8 @@ export const createSandcastleReviewerExecutionAdapter = (
       const reviewerSandbox = runtime.resolveReviewerSandbox({
         sandboxRef: input.executionProfile.sandboxRef,
         workspaceRef: input.workspaceRef,
+        operationKey: input.operationKey,
+        secretReferenceIds: input.executionProfile.secretReferenceIds,
       });
       const agent = runtime.resolveAgent(
         input.executionProfile.agentAdapterId,
@@ -125,6 +131,7 @@ export const createSandcastleReviewerExecutionAdapter = (
           independentCredentialScope: true,
           independentMutableCache: true,
           inputAllowlist: true,
+          ...reviewerSandbox.receipt,
           mechanism: "docker-readonly-review-bundle",
           mechanismVersion: "1",
         },

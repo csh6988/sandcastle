@@ -97,6 +97,8 @@ describe("Sandcastle core Runtime loader", () => {
       runtime.resolveReviewerSandbox?.({
         sandboxRef: "docker",
         workspaceRef: "/review-bundle",
+        operationKey: "code-review:review-1:initial-finding",
+        secretReferenceIds: [],
       }).sandbox,
       dockerSandbox,
     );
@@ -115,6 +117,16 @@ describe("Sandcastle core Runtime loader", () => {
         XDG_DATA_HOME: "/home/agent/.local/share",
       },
     });
+    assert.throws(
+      () =>
+        runtime.resolveReviewerSandbox?.({
+          sandboxRef: "docker",
+          workspaceRef: "/review-bundle",
+          operationKey: "code-review:review-1:initial-finding",
+          secretReferenceIds: ["reviewer-secret"],
+        }),
+      /operation-local materializer/,
+    );
     assert.throws(
       () => runtime.resolveSandbox("test-isolated"),
       /Unsupported Sandbox reference/,

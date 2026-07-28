@@ -69,6 +69,7 @@ export interface ReviewerExecutionInput {
     readonly agentAdapterId: string;
     readonly model: string;
     readonly sandboxRef: string;
+    readonly secretReferenceIds: readonly string[];
     readonly timeoutSeconds: number;
     readonly maxIterations: number;
   };
@@ -91,6 +92,10 @@ export type ReviewerExecutionResult =
         readonly independentCredentialScope: true;
         readonly independentMutableCache: true;
         readonly inputAllowlist: true;
+        readonly mountTableHash?: string;
+        readonly sessionScopeHash?: string;
+        readonly cacheScopeHash?: string;
+        readonly credentialScopeHash?: string;
         readonly mechanism: string;
         readonly mechanismVersion: string;
       };
@@ -146,7 +151,19 @@ export const createScriptedReviewerExecutionAdapter = (input: {
   },
   execute: async (request) => {
     input.onExecute?.(request);
-    return input.execute(request);
+    const result = await input.execute(request);
+    if (result.status !== "succeeded") return result;
+    return {
+      ...result,
+      isolation: {
+        ...result.isolation,
+        mountTableHash: result.isolation.mountTableHash ?? "1".repeat(64),
+        sessionScopeHash: result.isolation.sessionScopeHash ?? "2".repeat(64),
+        cacheScopeHash: result.isolation.cacheScopeHash ?? "3".repeat(64),
+        credentialScopeHash:
+          result.isolation.credentialScopeHash ?? "4".repeat(64),
+      },
+    };
   },
   reconcile: async () => ({
     status: "unknown",

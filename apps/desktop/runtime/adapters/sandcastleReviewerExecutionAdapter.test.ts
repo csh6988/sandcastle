@@ -53,6 +53,7 @@ const input = (
     agentAdapterId: "codex",
     model: "gpt-test",
     sandboxRef: "docker",
+    secretReferenceIds: [],
     timeoutSeconds: 60,
     maxIterations: 1,
   },
@@ -66,7 +67,12 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
     let launcherPath = "";
     let captureSessions: boolean | undefined;
     let reviewerRequest:
-      | { readonly sandboxRef: string; readonly workspaceRef: string }
+      | {
+          readonly sandboxRef: string;
+          readonly workspaceRef: string;
+          readonly operationKey: string;
+          readonly secretReferenceIds: readonly string[];
+        }
       | undefined;
     const runtime: SandcastleExecutionRuntime = {
       resolveAgent: (_provider, _model, options) => {
@@ -80,6 +86,12 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           sandbox: { reviewer: true },
           providerId: "sandcastle-docker-reviewer",
           evidence: ["mount:/review:readonly"],
+          receipt: {
+            mountTableHash: "1".repeat(64),
+            sessionScopeHash: "2".repeat(64),
+            cacheScopeHash: "3".repeat(64),
+            credentialScopeHash: "4".repeat(64),
+          },
         };
       },
       run: async (options) => {
@@ -90,6 +102,7 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           String(options.prompt),
           /\/review\/inputs\/manifest\.json/,
         );
+        assert.match(String(options.prompt), /<reviewer_finding>/);
         assert.doesNotMatch(String(options.prompt), /\/producer\/repository/);
         return {
           output: {
@@ -116,6 +129,8 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
     assert.deepEqual(reviewerRequest, {
       sandboxRef: "docker",
       workspaceRef: "/company/.sandcastle/reviewer-workspaces/review-1/exposed",
+      operationKey: "code-review:review-1:initial-finding",
+      secretReferenceIds: [],
     });
     assert.equal(existsSync(launcherPath), false);
     if (result.status !== "succeeded") return;
@@ -132,6 +147,12 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
         sandbox: {},
         providerId: "unexpected",
         evidence: [],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+        },
       }),
       run: async () => {
         runCalls += 1;
@@ -146,6 +167,36 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
         executionProfile: {
           ...input().executionProfile,
           sandboxRef: "no-sandbox",
+        },
+      }),
+    );
+    assert.equal(result.status, "blocked");
+    assert.equal(runCalls, 0);
+  });
+
+  it("blocks when Reviewer Secret References cannot be materialized into an operation-local credential scope", async () => {
+    let runCalls = 0;
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => {
+        throw new Error(
+          "Reviewer Secret References require an operation-local materializer.",
+        );
+      },
+      run: async () => {
+        runCalls += 1;
+        return {};
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+    const result = await createSandcastleReviewerExecutionAdapter(
+      runtime,
+    ).execute(
+      input({
+        executionProfile: {
+          ...input().executionProfile,
+          secretReferenceIds: ["reviewer-secret"],
         },
       }),
     );

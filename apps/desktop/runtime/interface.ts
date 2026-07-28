@@ -717,6 +717,44 @@ export const CodeReviewManifestSchema = z
     permissions: z.array(z.string().trim().min(1)),
     errorHandlingInputs: z.array(z.string().trim().min(1)),
     crossApplicationImpactInputs: z.array(z.string().trim().min(1)),
+    reviewerExecutionProfileId: z.string().trim().min(1).optional(),
+    reviewerCredentialReferenceIds: z
+      .array(z.string().trim().min(1))
+      .optional(),
+    priorReview: z
+      .object({
+        codeReviewId: z.string().trim().min(1),
+        topicId: z.string().trim().min(1),
+        qualityGateResultId: z.string().trim().min(1),
+        defectId: z.string().trim().min(1),
+        result: z.enum(["CONDITIONAL_PASS", "FAIL"]),
+        findingIds: z.array(z.string().trim().min(1)),
+        obligation: z.unknown(),
+        resolutionMatrix: z.array(
+          z
+            .object({
+              findingId: z.string().trim().min(1),
+              summary: z.string().trim().min(1),
+              evidenceRefs: z.array(z.string().trim().min(1)),
+              resolution: z
+                .object({
+                  disposition: z.enum([
+                    "accepted",
+                    "disputed",
+                    "resolved",
+                    "rejected",
+                  ]),
+                  response: z.string().trim().min(1),
+                  evidenceRefs: z.array(z.string().trim().min(1)),
+                })
+                .nullable(),
+            })
+            .strict(),
+        ),
+        requiredEvidenceRefs: z.array(z.string().trim().min(1)).min(1),
+      })
+      .strict()
+      .optional(),
     excludedContext: z.array(
       z.enum([
         "hidden-prompts",

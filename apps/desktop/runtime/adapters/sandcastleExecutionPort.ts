@@ -15,10 +15,18 @@ export interface SandcastleExecutionRuntime {
   readonly resolveReviewerSandbox?: (input: {
     readonly sandboxRef: string;
     readonly workspaceRef: string;
+    readonly operationKey: string;
+    readonly secretReferenceIds: readonly string[];
   }) => {
     readonly sandbox: unknown;
     readonly providerId: string;
     readonly evidence: readonly string[];
+    readonly receipt: {
+      readonly mountTableHash: string;
+      readonly sessionScopeHash: string;
+      readonly cacheScopeHash: string;
+      readonly credentialScopeHash: string;
+    };
   };
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;

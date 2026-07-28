@@ -61,7 +61,7 @@ const makeReadOnly = (path: string): void => {
     chmodSync(path, 0o555);
     return;
   }
-  chmodSync(path, 0o444);
+  chmodSync(path, 0o444 | (entry.mode & 0o111));
 };
 
 const makeWritableForCleanup = (path: string): void => {

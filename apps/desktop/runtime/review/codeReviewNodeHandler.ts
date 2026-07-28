@@ -361,6 +361,7 @@ export const openCodeReviewNodeHandler = (
       ...review.manifest.selfCheck.evidenceRefs,
       ...review.manifest.specRevisionIds,
       ...review.manifest.harnessSnapshotIds,
+      ...(review.manifest.priorReview?.requiredEvidenceRefs ?? []),
     ]);
 
   const assertEvidenceAllowed = (
@@ -393,6 +394,16 @@ export const openCodeReviewNodeHandler = (
     }
     const parsed = ReviewerRecheckOutputSchema.parse(output);
     assertEvidenceAllowed(review, parsed.evidenceRefs);
+    if (
+      review.manifest.priorReview?.requiredEvidenceRefs.some(
+        (reference) => !parsed.evidenceRefs.includes(reference),
+      )
+    ) {
+      throw new CodeReviewNodeHandlerError(
+        "CODE_REVIEW_OBLIGATION_OPEN",
+        "Fresh re-review must cite every frozen prior Defect, Gate, and finding before it can close the obligation.",
+      );
+    }
     return parsed;
   };
 
@@ -412,6 +423,14 @@ export const openCodeReviewNodeHandler = (
       result.providerId.trim().length === 0 ||
       result.isolationEvidence.length === 0 ||
       required.some((capability) => isolation[capability] !== true) ||
+      typeof isolation.mountTableHash !== "string" ||
+      isolation.mountTableHash.length !== 64 ||
+      typeof isolation.sessionScopeHash !== "string" ||
+      isolation.sessionScopeHash.length !== 64 ||
+      typeof isolation.cacheScopeHash !== "string" ||
+      isolation.cacheScopeHash.length !== 64 ||
+      typeof isolation.credentialScopeHash !== "string" ||
+      isolation.credentialScopeHash.length !== 64 ||
       result.isolation.mechanism.trim().length === 0 ||
       result.isolation.mechanismVersion.trim().length === 0
     ) {
@@ -632,6 +651,7 @@ export const openCodeReviewNodeHandler = (
   const profileFor = (
     run: DepartmentRunView,
     nodeRunId: string,
+    review: CodeReviewView,
   ): ReviewerExecutionInput["executionProfile"] => {
     const nodeRun = run.nodes.find((node) => node.id === nodeRunId);
     const pipelineNode = run.snapshot.payload.pipelineVersion.graph.nodes.find(
@@ -649,10 +669,21 @@ export const openCodeReviewNodeHandler = (
         "The Code Review Node has no frozen Execution Profile.",
       );
     }
+    if (
+      review.manifest.reviewerExecutionProfileId !== profile.id ||
+      JSON.stringify(review.manifest.reviewerCredentialReferenceIds ?? []) !==
+        JSON.stringify(profile.secretReferenceIds)
+    ) {
+      throw new CodeReviewNodeHandlerError(
+        "REVIEWER_CREDENTIAL_SCOPE_INVALID",
+        "Reviewer execution must use the exact frozen Code Review Execution Profile and Secret References.",
+      );
+    }
     return {
       agentAdapterId: profile.providerRef,
       model: profile.model,
       sandboxRef: profile.sandboxRef,
+      secretReferenceIds: profile.secretReferenceIds,
       timeoutSeconds: profile.limits.timeoutSeconds,
       maxIterations: profile.limits.maxIterations,
     };
@@ -706,7 +737,7 @@ export const openCodeReviewNodeHandler = (
     ) {
       return;
     }
-    const profile = profileFor(run, current.workspace.reviewNodeRunId);
+    const profile = profileFor(run, current.workspace.reviewNodeRunId, current);
     let topic = options.reviewRuntime.inspect(current.topicId);
     const initialParticipantId = `${current.id}:reviewer`;
     const freshParticipantId = `${current.id}:fresh-reviewer`;
@@ -722,6 +753,7 @@ export const openCodeReviewNodeHandler = (
         "The Code Review Topic lost its frozen Reviewer participants.",
       );
     }
+    const freshSessionRole = `fresh-code-recheck:${current.id}`;
     const persistedFreshStage = stageRow(current.id, "fresh-recheck");
     const existingFreshSession = database
       .prepare(
@@ -734,7 +766,7 @@ export const openCodeReviewNodeHandler = (
             AND sessions.status = 'active'
             AND participants.participant_type = 'ai-member'
             AND participants.participant_ref = ?
-            AND participants.role = 'fresh-code-recheck'
+            AND participants.role = ?
           ORDER BY sessions.created_at, sessions.id LIMIT 1`,
       )
       .get(
@@ -742,6 +774,7 @@ export const openCodeReviewNodeHandler = (
         current.manifest.runId,
         current.workspace.reviewNodeRunId,
         freshParticipant.aiMemberId,
+        freshSessionRole,
       ) as { readonly id: string } | undefined;
     let freshExecutionSessionId =
       persistedFreshStage?.sessionId ?? existingFreshSession?.id;
@@ -756,7 +789,7 @@ export const openCodeReviewNodeHandler = (
         sessionId: session.id,
         participantType: "ai-member",
         participantRef: freshParticipant.aiMemberId,
-        role: "fresh-code-recheck",
+        role: freshSessionRole,
       });
       freshExecutionSessionId = session.id;
     }

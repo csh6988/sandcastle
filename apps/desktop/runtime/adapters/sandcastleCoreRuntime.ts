@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -176,6 +177,9 @@ const coreDirectoryCandidates = (): string[] => [
   resolve(process.cwd(), "../../dist"),
 ];
 
+const receiptHash = (value: unknown): string =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
 const findCoreDirectory = (): string => {
   const directory = coreDirectoryCandidates().find((candidate) =>
     existsSync(join(candidate, "index.js")),
@@ -227,12 +231,43 @@ export const createSandcastleExecutionRuntimeFromModules = (
       if (sandboxRef === "docker" && dockerModule) return dockerModule.docker();
       throw new Error(`Unsupported Sandbox reference: ${sandboxRef}`);
     },
-    resolveReviewerSandbox: ({ sandboxRef, workspaceRef }) => {
+    resolveReviewerSandbox: ({
+      sandboxRef,
+      workspaceRef,
+      operationKey,
+      secretReferenceIds,
+    }) => {
       if (sandboxRef !== "docker" || !dockerModule) {
         throw new Error(
           "Independent Code Review requires the Docker Sandbox provider.",
         );
       }
+      if (secretReferenceIds.length > 0) {
+        throw new Error(
+          "Reviewer Secret References require an operation-local materializer; the bundled Docker Runtime does not expose one.",
+        );
+      }
+      const receipt = {
+        mountTableHash: receiptHash([
+          { hostPath: workspaceRef, sandboxPath: "/review", readonly: true },
+        ]),
+        sessionScopeHash: receiptHash({
+          operationKey,
+          captureSessions: false,
+          home: "/home/agent",
+        }),
+        cacheScopeHash: receiptHash({
+          operationKey,
+          cache: "/home/agent/.cache",
+          config: "/home/agent/.config",
+          data: "/home/agent/.local/share",
+        }),
+        credentialScopeHash: receiptHash({
+          operationKey,
+          secretReferenceIds,
+          credentialValuesMounted: false,
+        }),
+      };
       return {
         sandbox: dockerModule.docker({
           mounts: [
@@ -250,12 +285,14 @@ export const createSandcastleExecutionRuntimeFromModules = (
           },
         }),
         providerId: "sandcastle-docker-reviewer",
+        receipt,
         evidence: [
           "docker:ephemeral-container",
           "mount:/review:readonly",
           "home:/home/agent:container-private",
           "cache:/home/agent/.cache:container-private",
           "sessions:capture-disabled",
+          `credentials:scope:${receipt.credentialScopeHash}`,
           "inputs:/review:allowlisted",
         ],
       };

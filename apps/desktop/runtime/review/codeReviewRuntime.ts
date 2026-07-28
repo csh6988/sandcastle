@@ -126,6 +126,7 @@ export const openCodeReviewRuntime = (
       | "blockCodeReviewInTransaction"
       | "startCodeReviewInTransaction"
       | "completeCodeReviewInTransaction"
+      | "inspectRun"
     >;
     readonly artifacts: ArtifactRegistry;
     readonly reviewerWorkspaceAdapter?: ReviewerWorkspaceAdapter;
@@ -511,6 +512,7 @@ export const openCodeReviewRuntime = (
                 assignments.interaction_session_id AS producerSessionId,
                 assignments.state AS assignmentState,
                 assignments.allocation_id AS allocationId,
+                allocations.execution_profile_id AS producerExecutionProfileId,
                 allocations.base_commit AS baseCommit,
                 runs.snapshot_revision_id AS snapshotRevisionId,
                 self_checks.id AS selfCheckId,
@@ -694,6 +696,107 @@ export const openCodeReviewRuntime = (
       logRefs: string[];
       commitEvidence: string[];
     }>(String(graphRow.selfCheckReportJson));
+    const priorDefect = database
+      .prepare(
+        `SELECT defects.id, defects.code_review_manifest_id AS codeReviewId,
+                defects.quality_gate_result_id AS qualityGateResultId,
+                defects.result, defects.finding_ids_json AS findingIdsJson,
+                defects.obligation_json AS obligationJson,
+                manifests.topic_id AS topicId
+           FROM code_review_defects AS defects
+           JOIN code_review_manifests AS manifests
+             ON manifests.id = defects.code_review_manifest_id
+          WHERE defects.work_package_id = ?
+            AND defects.rework_work_package_version_id = ?
+            AND defects.status = 'rework-created'
+          ORDER BY defects.created_at, defects.id LIMIT 1`,
+      )
+      .get(input.command.workPackageId, String(graphRow.versionId)) as
+      | {
+          readonly id: string;
+          readonly codeReviewId: string;
+          readonly qualityGateResultId: string;
+          readonly result: "CONDITIONAL_PASS" | "FAIL";
+          readonly findingIdsJson: string;
+          readonly obligationJson: string;
+          readonly topicId: string;
+        }
+      | undefined;
+    const priorTopic = priorDefect
+      ? options.reviewRuntime.inspect(priorDefect.topicId)
+      : undefined;
+    const priorFindingIds = priorDefect
+      ? parseJson<string[]>(priorDefect.findingIdsJson)
+      : [];
+    const priorReview = priorDefect
+      ? {
+          codeReviewId: priorDefect.codeReviewId,
+          topicId: priorDefect.topicId,
+          qualityGateResultId: priorDefect.qualityGateResultId,
+          defectId: priorDefect.id,
+          result: priorDefect.result,
+          findingIds: priorFindingIds,
+          obligation: parseJson<unknown>(priorDefect.obligationJson),
+          resolutionMatrix: priorFindingIds.map((findingId) => {
+            const finding = priorTopic?.findings.find(
+              (candidate) => candidate.id === findingId,
+            );
+            if (!finding) {
+              throw new CodeReviewRuntimeError(
+                "CODE_REVIEW_OBLIGATION_INVALID",
+                `Prior Code Review finding ${findingId} is missing.`,
+              );
+            }
+            const resolution = priorTopic?.resolutions.find(
+              (candidate) => candidate.findingId === findingId,
+            );
+            return {
+              findingId,
+              summary: finding.summary,
+              evidenceRefs: finding.evidenceRefs,
+              resolution: resolution
+                ? {
+                    disposition: resolution.disposition,
+                    response: resolution.response,
+                    evidenceRefs: resolution.evidenceRefs,
+                  }
+                : null,
+            };
+          }),
+          requiredEvidenceRefs: [
+            priorDefect.id,
+            priorDefect.qualityGateResultId,
+            ...priorFindingIds,
+          ],
+        }
+      : undefined;
+    const run = options.pipelineRuntime.inspectRun(String(graphRow.runId));
+    const reviewNodeSnapshot = run.nodes.find(
+      (node) => node.id === reviewNodeRunId,
+    );
+    const reviewPipelineNode =
+      run.snapshot.payload.pipelineVersion.graph.nodes.find(
+        (node) => node.id === reviewNodeSnapshot?.pipelineNodeId,
+      );
+    const reviewerExecutionProfileId =
+      reviewPipelineNode?.executionProfileId ??
+      run.snapshot.payload.department.defaultExecutionProfileId;
+    const reviewerExecutionProfile =
+      run.snapshot.payload.executionProfiles.find(
+        (profile) => profile.id === reviewerExecutionProfileId,
+      );
+    if (!reviewerExecutionProfileId || !reviewerExecutionProfile) {
+      throw new CodeReviewRuntimeError(
+        "RUN_SNAPSHOT_INVALID",
+        "The frozen Code Review Node has no Reviewer Execution Profile.",
+      );
+    }
+    if (reviewerExecutionProfileId === graphRow.producerExecutionProfileId) {
+      throw new CodeReviewRuntimeError(
+        "REVIEWER_CREDENTIAL_SCOPE_INVALID",
+        "Independent Code Review requires a Reviewer Execution Profile distinct from the producer allocation profile.",
+      );
+    }
     const manifest = CodeReviewManifestSchema.parse({
       schemaVersion: 1,
       projectId: graphRow.projectId,
@@ -723,6 +826,10 @@ export const openCodeReviewRuntime = (
       permissions: packageManifest.allowedPermissions,
       errorHandlingInputs: [packageManifest.recoveryPolicy],
       crossApplicationImpactInputs: packageManifest.integrationConditions,
+      reviewerExecutionProfileId,
+      reviewerCredentialReferenceIds:
+        reviewerExecutionProfile.secretReferenceIds,
+      ...(priorReview ? { priorReview } : {}),
       excludedContext: [
         "hidden-prompts",
         "prior-reviewer-opinions",
@@ -810,9 +917,12 @@ export const openCodeReviewRuntime = (
         escalationPolicy: "fail-with-evidence",
       },
     });
-    database
-      .prepare("UPDATE review_topics SET status = 'blocked' WHERE id = ?")
-      .run(input.command.topicId);
+    options.reviewRuntime.transitionIndependentExecutionInTransaction({
+      commandId: input.commandId,
+      actor: input.actor,
+      topicId: input.command.topicId,
+      state: "blocked",
+    });
     database
       .prepare(
         `INSERT INTO code_review_manifests(
@@ -1032,6 +1142,67 @@ export const openCodeReviewRuntime = (
           "Only an immutable kind=code PASS can create Integration authority.",
         );
       }
+      const executionStages = database
+        .prepare(
+          `SELECT phase, operation_key AS operationKey, state,
+                  reviewer_participant_id AS participantId,
+                  reviewer_session_id AS sessionId, provider_id AS providerId,
+                  isolation_receipt_hash AS isolationReceiptHash,
+                  result_hash AS resultHash
+             FROM code_review_execution_stages
+            WHERE code_review_manifest_id = ?
+            ORDER BY phase`,
+        )
+        .all(current.id) as Array<{
+        readonly phase: "fresh-recheck" | "initial-finding";
+        readonly operationKey: string;
+        readonly state: string;
+        readonly participantId: string;
+        readonly sessionId: string;
+        readonly providerId: string | null;
+        readonly isolationReceiptHash: string | null;
+        readonly resultHash: string | null;
+      }>;
+      const initialExecution = executionStages.find(
+        (stage) => stage.phase === "initial-finding",
+      );
+      const freshExecution = executionStages.find(
+        (stage) => stage.phase === "fresh-recheck",
+      );
+      const executionIsValid = (
+        stage: (typeof executionStages)[number] | undefined,
+        expected: {
+          readonly phase: "fresh-recheck" | "initial-finding";
+          readonly participantId: string;
+          readonly sessionId: string;
+        },
+      ): boolean =>
+        stage?.state === "succeeded" &&
+        stage.phase === expected.phase &&
+        stage.operationKey === `code-review:${current.id}:${expected.phase}` &&
+        stage.participantId === expected.participantId &&
+        stage.sessionId === expected.sessionId &&
+        Boolean(stage.providerId) &&
+        Boolean(stage.isolationReceiptHash) &&
+        Boolean(stage.resultHash);
+      if (
+        executionStages.length !== 2 ||
+        !executionIsValid(initialExecution, {
+          phase: "initial-finding",
+          participantId: initialReviewerParticipantId,
+          sessionId: current.workspace.reviewerSessionId,
+        }) ||
+        !executionIsValid(freshExecution, {
+          phase: "fresh-recheck",
+          participantId: freshReviewerParticipantId,
+          sessionId: freshRecheck.reviewerSessionId,
+        })
+      ) {
+        throw new CodeReviewRuntimeError(
+          "REVIEWER_EXECUTION_REQUIRED",
+          "Integration authority requires exact succeeded initial and fresh Reviewer execution receipts.",
+        );
+      }
       const resolvedDefects = database
         .prepare(
           `SELECT id FROM code_review_defects
@@ -1043,6 +1214,22 @@ export const openCodeReviewRuntime = (
           current.manifest.workPackageId,
           current.manifest.workPackageVersionId,
         ) as Array<{ readonly id: string }>;
+      if (resolvedDefects.length > 0) {
+        const priorReview = current.manifest.priorReview;
+        if (
+          resolvedDefects.length !== 1 ||
+          !priorReview ||
+          priorReview.defectId !== resolvedDefects[0]?.id ||
+          priorReview.requiredEvidenceRefs.some(
+            (reference) => !freshRecheck.evidenceRefs.includes(reference),
+          )
+        ) {
+          throw new CodeReviewRuntimeError(
+            "CODE_REVIEW_OBLIGATION_OPEN",
+            "Fresh PASS cannot close a prior obligation unless the manifest freezes it and the recheck cites every required resolution evidence reference.",
+          );
+        }
+      }
       for (const defect of resolvedDefects) {
         const closed = database
           .prepare(
@@ -1086,14 +1273,28 @@ export const openCodeReviewRuntime = (
           "Open Code Review obligations for the Work Package block Integration authority.",
         );
       }
-      const independenceEvidenceHash =
-        current.workspace.independenceEvidenceHash;
-      if (!independenceEvidenceHash) {
+      const workspaceEvidenceHash = current.workspace.independenceEvidenceHash;
+      if (!workspaceEvidenceHash) {
         throw new CodeReviewRuntimeError(
           "PROVIDER_ISOLATION_REQUIRED",
           "Reviewer independence evidence is missing.",
         );
       }
+      const independenceEvidenceHash = sha256(
+        canonicalJson({
+          schemaVersion: 1,
+          workspaceEvidenceHash,
+          executions: executionStages.map((stage) => ({
+            phase: stage.phase,
+            operationKey: stage.operationKey,
+            participantId: stage.participantId,
+            sessionId: stage.sessionId,
+            providerId: stage.providerId,
+            isolationReceiptHash: stage.isolationReceiptHash,
+            resultHash: stage.resultHash,
+          })),
+        }),
+      );
       const authorityId = `code-review-authority:${input.command.codeReviewId}`;
       if (!manifestIsCurrent(current.manifest)) {
         throw new CodeReviewRuntimeError(
@@ -1324,13 +1525,12 @@ export const openCodeReviewRuntime = (
             now,
             current.id,
           );
-        database
-          .prepare(
-            `UPDATE review_topics SET status = 'independent-review',
-                    revision = revision + 1, updated_at = ?
-              WHERE id = ? AND status = 'blocked'`,
-          )
-          .run(now, current.topicId);
+        options.reviewRuntime.transitionIndependentExecutionInTransaction({
+          commandId,
+          actor,
+          topicId: current.topicId,
+          state: "active",
+        });
       } else {
         database
           .prepare(

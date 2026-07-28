@@ -34,6 +34,12 @@ export interface ReviewRuntime {
     readonly expectedRevision?: number;
     readonly command: ReviewEnvelopeCommand;
   }) => ReviewTopicView;
+  readonly transitionIndependentExecutionInTransaction: (input: {
+    readonly commandId: string;
+    readonly actor: ActorRef;
+    readonly topicId: string;
+    readonly state: "blocked" | "active";
+  }) => ReviewTopicView;
 }
 
 type EligibilityReason =
@@ -1734,5 +1740,58 @@ export const openReviewRuntime = (
     return unsupported(input.command);
   };
 
-  return { inspect, list, dispatchInTransaction };
+  const transitionIndependentExecutionInTransaction: ReviewRuntime["transitionIndependentExecutionInTransaction"] =
+    (input) => {
+      const topic = topicRow(input.topicId);
+      const from = input.state === "blocked" ? "independent-review" : "blocked";
+      const to = input.state === "blocked" ? "blocked" : "independent-review";
+      if (topic.status !== from) {
+        throw new ReviewRuntimeError(
+          "REVIEW_STATUS_INVALID",
+          `Review Topic ${topic.id} must be ${from} before it becomes ${to}.`,
+        );
+      }
+      const now = clock().toISOString();
+      const updated = database
+        .prepare(
+          `UPDATE review_topics SET status = ?, revision = revision + ?,
+                  updated_at = ?
+            WHERE id = ? AND status = ?`,
+        )
+        .run(to, input.state === "active" ? 1 : 0, now, topic.id, from);
+      if (updated.changes !== 1) {
+        throw new ReviewRuntimeError(
+          "REVIEW_STATUS_CONFLICT",
+          `Review Topic ${topic.id} changed before its independent execution transition.`,
+        );
+      }
+      appendMutation({
+        commandId: input.commandId,
+        actor: input.actor,
+        action:
+          input.state === "blocked"
+            ? "review.topic.blocked"
+            : "review.topic.activated",
+        entityType: "review-topic",
+        entityId: topic.id,
+        topicId: topic.id,
+        projectId: topic.projectId,
+        runId: topic.runId,
+        eventType: "review.scheduled",
+        payload: {
+          topicId: topic.id,
+          status: to,
+          reason: "independent-code-review-execution",
+        },
+        createdAt: now,
+      });
+      return inspect(topic.id);
+    };
+
+  return {
+    inspect,
+    list,
+    dispatchInTransaction,
+    transitionIndependentExecutionInTransaction,
+  };
 };
