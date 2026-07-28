@@ -319,7 +319,8 @@ export const openCompanyDatabase = (
       options.clock ?? (() => new Date()),
     );
     const integrity = database.prepare("PRAGMA quick_check").get() as
-      Record<string, unknown> | undefined;
+      | Record<string, unknown>
+      | undefined;
     if (!integrity || Object.values(integrity)[0] !== "ok") {
       throw new Error("Company database integrity check failed.");
     }

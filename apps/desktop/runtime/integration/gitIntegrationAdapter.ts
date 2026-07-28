@@ -246,6 +246,84 @@ const validateRefName = async (
   }
 };
 
+const gitStorageInvalid = (): GitIntegrationAdapterError =>
+  new GitIntegrationAdapterError(
+    "INTEGRATION_REPOSITORY_INVALID",
+    "Integration Git effects require ordinary in-Repository object, ref, and reflog storage without indirection.",
+  );
+
+const lstatIfPresent = (path: string) => {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw gitStorageInvalid();
+  }
+};
+
+const assertOrdinaryDirectory = (path: string, required: boolean): void => {
+  const entry = lstatIfPresent(path);
+  if (entry === null) {
+    if (required) throw gitStorageInvalid();
+    return;
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw gitStorageInvalid();
+  }
+};
+
+const assertOrdinaryFileIfPresent = (path: string): void => {
+  const entry = lstatIfPresent(path);
+  if (entry && (entry.isSymbolicLink() || !entry.isFile())) {
+    throw gitStorageInvalid();
+  }
+};
+
+const assertMissing = (path: string): void => {
+  if (lstatIfPresent(path)) throw gitStorageInvalid();
+};
+
+const assertOrdinaryAncestorDirectories = (
+  root: string,
+  relativeLeaf: string,
+  rootRequired: boolean,
+): void => {
+  const parts = relativeLeaf.split("/").slice(0, -1);
+  let current = root;
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    const entry = lstatIfPresent(current);
+    if (entry === null) {
+      if (index === 0 && rootRequired) throw gitStorageInvalid();
+      return;
+    }
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw gitStorageInvalid();
+    }
+  }
+};
+
+const assertSafeGitStorage = (
+  repositoryRoot: string,
+  refs: readonly string[],
+): void => {
+  const gitDirectory = join(repositoryRoot, ".git");
+  assertOrdinaryDirectory(gitDirectory, true);
+  assertOrdinaryDirectory(join(gitDirectory, "objects"), true);
+  assertOrdinaryDirectory(join(gitDirectory, "objects", "info"), false);
+  assertOrdinaryDirectory(join(gitDirectory, "objects", "pack"), false);
+  assertMissing(join(gitDirectory, "objects", "info", "alternates"));
+  assertMissing(join(gitDirectory, "commondir"));
+  assertOrdinaryFileIfPresent(join(gitDirectory, "packed-refs"));
+  for (const ref of refs) {
+    assertOrdinaryAncestorDirectories(gitDirectory, ref, true);
+    assertOrdinaryFileIfPresent(join(gitDirectory, ...ref.split("/")));
+    const reflog = `logs/${ref}`;
+    assertOrdinaryAncestorDirectories(gitDirectory, reflog, false);
+    assertOrdinaryFileIfPresent(join(gitDirectory, ...reflog.split("/")));
+  }
+};
+
 const resolveRepository = async (
   repositoryReference: string,
   boundary: GitExecutionBoundary,
@@ -380,6 +458,8 @@ const prepare = async (
     );
   }
   const sourceRef = `refs/heads/${input.sourceBranch}`;
+  const integrationRef = `refs/heads/${input.integrationBranch}`;
+  assertSafeGitStorage(repositoryRoot, [sourceRef, integrationRef]);
   if (await symbolicRefTarget(repositoryRoot, sourceRef, boundary)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
@@ -423,7 +503,6 @@ const prepare = async (
       "Integration base, source, and expected tip must be readable commits, and source must descend from the frozen base.",
     );
   }
-  const integrationRef = `refs/heads/${input.integrationBranch}`;
   if (await symbolicRefTarget(repositoryRoot, integrationRef, boundary)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
@@ -649,6 +728,9 @@ export const openLocalGitIntegrationAdapter = (
         }
         const expectedOld = prepared.currentTip ?? zeroCommit;
         try {
+          assertSafeGitStorage(prepared.repositoryRoot, [
+            prepared.integrationRef,
+          ]);
           await git(
             prepared.repositoryRoot,
             [
@@ -664,6 +746,19 @@ export const openLocalGitIntegrationAdapter = (
           );
         } catch (error) {
           if (isBoundaryError(error)) return unknown(error);
+          if (error instanceof GitIntegrationAdapterError) {
+            return {
+              status: "failed",
+              writeStatus: "not-started",
+              code: error.code,
+              message: error.message,
+              evidence: {
+                causeCode: error.code,
+                requestHash: input.requestHash,
+                expectedTip: input.expectedTip,
+              },
+            };
+          }
           const observed = await refTip(
             prepared.repositoryRoot,
             prepared.integrationRef,

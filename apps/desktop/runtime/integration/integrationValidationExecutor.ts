@@ -11,12 +11,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import type {
   IntegrationValidationExecutor,
   IntegrationValidationInput,
   IntegrationValidationResult,
 } from "./integrationNodeHandler.js";
+import { prepareExactIntegrationWorkspace } from "./integrationWorkspaceGit.js";
 
 const canonicalJson = (value: unknown): string =>
   JSON.stringify(value, (_key, entry) =>
@@ -142,10 +142,14 @@ export const openIsolatedIntegrationValidationExecutor = (options: {
   readonly evidenceRoot: string;
   readonly provider?: IntegrationValidationProvider;
   readonly timeoutMs?: number;
+  readonly workspaceGitTimeoutMs?: number;
+  readonly gitExecutable?: string;
 }): IntegrationValidationExecutor => {
   mkdirSync(options.evidenceRoot, { recursive: true, mode: 0o700 });
   const provider = options.provider ?? blockingIntegrationValidationProvider;
   const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+  const workspaceGitTimeoutMs = options.workspaceGitTimeoutMs ?? 30_000;
+  const activeWorkspacePreparations = new Map<string, AbortController>();
 
   const recordPath = (operationKey: string): string =>
     join(options.evidenceRoot, `${sha256(operationKey)}.json`);
@@ -296,48 +300,30 @@ export const openIsolatedIntegrationValidationExecutor = (options: {
     renameSync(temporary, target);
   };
 
-  const prepareWorkspace = (input: IntegrationValidationInput): string => {
+  const prepareWorkspace = async (
+    input: IntegrationValidationInput,
+  ): Promise<string> => {
     const workspace = join(
       options.evidenceRoot,
       `workspace-${sha256(input.operationKey)}`,
     );
-    if (!existsSync(workspace)) {
-      execFileSync(
-        "git",
-        [
-          "clone",
-          "--no-local",
-          "--no-checkout",
-          input.repositoryReference,
-          workspace,
-        ],
-        { stdio: "pipe" },
-      );
-      execFileSync(
-        "git",
-        ["-C", workspace, "checkout", "--detach", input.integratedCommit],
-        { stdio: "pipe" },
-      );
-    }
-    const exactCommit = execFileSync(
-      "git",
-      ["-C", workspace, "rev-parse", "HEAD"],
-      { encoding: "utf8", stdio: "pipe" },
-    ).trim();
-    if (exactCommit !== input.integratedCommit) {
-      throw new Error(
-        "The durable Integration validation workspace commit drifted.",
-      );
-    }
-    const dirty = execFileSync(
-      "git",
-      ["-C", workspace, "status", "--porcelain", "--untracked-files=all"],
-      { encoding: "utf8", stdio: "pipe" },
-    ).trim();
-    if (dirty) {
-      throw new Error(
-        "The durable Integration validation workspace tree drifted from the exact integrated commit.",
-      );
+    const controller = new AbortController();
+    activeWorkspacePreparations.set(input.operationKey, controller);
+    try {
+      await prepareExactIntegrationWorkspace({
+        repositoryReference: input.repositoryReference,
+        commit: input.integratedCommit,
+        workspace,
+        timeoutMs: workspaceGitTimeoutMs,
+        signal: controller.signal,
+        ...(options.gitExecutable
+          ? { gitExecutable: options.gitExecutable }
+          : {}),
+      });
+    } finally {
+      if (activeWorkspacePreparations.get(input.operationKey) === controller) {
+        activeWorkspacePreparations.delete(input.operationKey);
+      }
     }
     const makeReadOnly = (path: string): void => {
       const entry = lstatSync(path);
@@ -472,6 +458,7 @@ export const openIsolatedIntegrationValidationExecutor = (options: {
   return {
     reconcile,
     cancel: async (input) => {
+      activeWorkspacePreparations.get(input.operationKey)?.abort();
       const record = readRecord(input);
       if (record.status !== "valid" || record.value.state !== "started") {
         return reconcile(input);
@@ -514,7 +501,7 @@ export const openIsolatedIntegrationValidationExecutor = (options: {
         const result = await provider.execute({
           operationKey: input.operationKey,
           repositoryReference: input.repositoryReference,
-          workspaceRef: prepareWorkspace(input),
+          workspaceRef: await prepareWorkspace(input),
           integratedCommit: input.integratedCommit,
           commands: input.validation.commands,
           timeoutMs,

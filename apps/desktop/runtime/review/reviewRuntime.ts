@@ -10,6 +10,8 @@ import {
   type ReviewTopicView,
 } from "../interface.js";
 import type { RuntimeEvents } from "../events/subscription.js";
+import { aggregateEvidencePolicy } from "../integration/integrationAggregateEvidence.js";
+import type { IntegrationGenerationManifest } from "../integration/integrationRuntime.js";
 
 export class ReviewRuntimeError extends Error {
   constructor(
@@ -767,7 +769,8 @@ export const openReviewRuntime = (
       const generation = database
         .prepare(
           `SELECT project_id AS projectId, run_id AS runId,
-                  node_run_id AS nodeRunId, manifest_hash AS manifestHash
+                  node_run_id AS nodeRunId, manifest_hash AS manifestHash,
+                  manifest_json AS manifestJson
              FROM integration_generations WHERE id = ?`,
         )
         .get(manifest.integrationGenerationId) as
@@ -776,6 +779,7 @@ export const openReviewRuntime = (
             readonly runId: string;
             readonly nodeRunId: string;
             readonly manifestHash: string;
+            readonly manifestJson: string;
           }
         | undefined;
       if (
@@ -882,6 +886,31 @@ export const openReviewRuntime = (
         throw new ReviewRuntimeError(
           "REVIEWER_SESSION_INVALID",
           "Aggregate Review execution requires an exact fresh Reviewer identity and Session.",
+        );
+      }
+      const generationManifest = JSON.parse(
+        generation.manifestJson,
+      ) as IntegrationGenerationManifest;
+      const evidencePolicy = aggregateEvidencePolicy({
+        generationManifest,
+        manifestHash: generation.manifestHash,
+        repositoryCommits: manifest.repositoryCommits,
+      });
+      const terminalExecutionRef = `execution-fact:${input.terminalExecutionFactId}`;
+      const evidenceRefs = new Set(input.evidenceRefs);
+      if (
+        evidenceRefs.size !== input.evidenceRefs.length ||
+        !evidenceRefs.has(terminalExecutionRef) ||
+        input.evidenceRefs.some(
+          (ref) =>
+            ref !== terminalExecutionRef && !evidencePolicy.allowed.has(ref),
+        ) ||
+        (input.result === "PASS" &&
+          evidencePolicy.required.some((ref) => !evidenceRefs.has(ref)))
+      ) {
+        throw new ReviewRuntimeError(
+          "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+          "Aggregate Review evidence does not match the frozen Integration evidence allowlist.",
         );
       }
       const existing = database

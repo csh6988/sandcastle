@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeInteraction } from "../interaction.js";
 import type { ActorRef } from "../interface.js";
@@ -26,6 +25,9 @@ import type {
   AggregateIntegrationReviewInput,
   AggregateIntegrationReviewResult,
 } from "./integrationNodeHandler.js";
+import { prepareExactIntegrationWorkspace } from "./integrationWorkspaceGit.js";
+import { aggregateEvidencePolicy } from "./integrationAggregateEvidence.js";
+import { aggregateReviewManifestFor } from "./integrationAggregateManifest.js";
 
 const canonicalJson = (value: unknown): string =>
   JSON.stringify(value, (_key, entry) =>
@@ -120,10 +122,14 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     ReviewRuntime,
     "inspect" | "recordAggregateExecutionInTransaction"
   >;
+  readonly workspaceGitTimeoutMs?: number;
+  readonly gitExecutable?: string;
   readonly clock?: () => Date;
 }): AggregateIntegrationReviewExecutor => {
   const clock = options.clock ?? (() => new Date());
+  const workspaceGitTimeoutMs = options.workspaceGitTimeoutMs ?? 30_000;
   mkdirSync(options.workspaceRoot, { recursive: true, mode: 0o700 });
+  const activeWorkspacePreparations = new Map<string, AbortController>();
   const inFlight = new Map<
     string,
     {
@@ -144,22 +150,8 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     chmodSync(path, entry.mode & 0o555);
   };
 
-  const manifestFor = (input: AggregateIntegrationReviewInput) => ({
-    scope: "aggregate" as const,
-    topicId: input.topicId,
-    supportingArtifactVersionIds: [],
-    supportingSpecRevisionIds: [],
-    harnessSnapshotIds: [],
-    acceptanceCriteria: [...input.acceptanceCriteria],
-    excludedContext: [
-      "hidden-prompts" as const,
-      "prior-reviewer-opinions" as const,
-      "private-transcripts" as const,
-    ],
-    integrationGenerationId: input.generationId,
-    integrationManifestHash: input.manifestHash,
-    repositoryCommits: input.repositoryCommits.map((entry) => ({ ...entry })),
-  });
+  const manifestFor = (input: AggregateIntegrationReviewInput) =>
+    aggregateReviewManifestFor(input);
 
   const existingRecordAuthorityInTransaction = (
     input: AggregateIntegrationReviewInput,
@@ -298,7 +290,9 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     }
   };
 
-  const prepareWorkspace = (input: AggregateIntegrationReviewInput): string => {
+  const prepareWorkspace = async (
+    input: AggregateIntegrationReviewInput,
+  ): Promise<string> => {
     const root = join(options.workspaceRoot, sha256(input.operationKey));
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const assertDirectory = (path: string, label: string): void => {
@@ -327,16 +321,25 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     assertDirectory(root, "aggregate workspace root");
     const inputs = join(root, "inputs");
     const manifestPath = join(inputs, "manifest.json");
+    const generationManifestPath = join(inputs, "generation-manifest.json");
     const manifestJson = canonicalJson(manifestFor(input));
+    const generationManifestJson = canonicalJson(input.generationManifest);
     if (existsSync(manifestPath)) {
       assertDirectory(inputs, "aggregate workspace inputs");
       assertRegularFile(manifestPath, "aggregate workspace manifest");
+      assertRegularFile(
+        generationManifestPath,
+        "aggregate workspace Generation manifest",
+      );
       assertExactEntries(
         inputs,
-        ["manifest.json"],
+        ["generation-manifest.json", "manifest.json"],
         "aggregate workspace inputs",
       );
-      if (readFileSync(manifestPath, "utf8") !== manifestJson) {
+      if (
+        readFileSync(manifestPath, "utf8") !== manifestJson ||
+        readFileSync(generationManifestPath, "utf8") !== generationManifestJson
+      ) {
         throw new Error("existing aggregate workspace manifest drifted");
       }
     } else {
@@ -348,46 +351,38 @@ export const openAggregateIntegrationReviewExecutor = (options: {
         encoding: "utf8",
         mode: 0o600,
       });
+      writeFileSync(generationManifestPath, generationManifestJson, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
     }
-    for (const [index, repository] of input.repositoryCommits.entries()) {
-      const target = join(root, `repository-${index + 1}`);
-      if (existsSync(target)) {
-        assertDirectory(target, `aggregate workspace repository-${index + 1}`);
-        const current = execFileSync(
-          "git",
-          ["-C", target, "rev-parse", "HEAD"],
-          { encoding: "utf8", stdio: "pipe" },
-        ).trim();
-        if (current !== repository.commit) {
-          throw new Error("existing aggregate workspace commit drifted");
-        }
-        const dirty = execFileSync(
-          "git",
-          ["-C", target, "status", "--porcelain", "--untracked-files=all"],
-          { encoding: "utf8", stdio: "pipe" },
-        ).trim();
-        if (dirty) {
-          throw new Error("existing aggregate workspace tree drifted");
-        }
-      } else {
-        execFileSync(
-          "git",
-          [
-            "clone",
-            "--no-local",
-            "--no-checkout",
-            repository.repositoryId,
+    const controller = new AbortController();
+    activeWorkspacePreparations.set(input.operationKey, controller);
+    try {
+      for (const [index, repository] of input.repositoryCommits.entries()) {
+        const target = join(root, `repository-${index + 1}`);
+        if (existsSync(target)) {
+          assertDirectory(
             target,
-          ],
-          { stdio: "pipe" },
-        );
-        execFileSync(
-          "git",
-          ["-C", target, "checkout", "--detach", repository.commit],
-          { stdio: "pipe" },
-        );
+            `aggregate workspace repository-${index + 1}`,
+          );
+        }
+        await prepareExactIntegrationWorkspace({
+          repositoryReference: repository.repositoryId,
+          commit: repository.commit,
+          workspace: target,
+          timeoutMs: workspaceGitTimeoutMs,
+          signal: controller.signal,
+          ...(options.gitExecutable
+            ? { gitExecutable: options.gitExecutable }
+            : {}),
+        });
+        makeReadOnly(target);
       }
-      makeReadOnly(target);
+    } finally {
+      if (activeWorkspacePreparations.get(input.operationKey) === controller) {
+        activeWorkspacePreparations.delete(input.operationKey);
+      }
     }
     assertExactEntries(
       root,
@@ -555,7 +550,7 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     }
     let workspaceRef: string;
     try {
-      workspaceRef = prepareWorkspace(input);
+      workspaceRef = await prepareWorkspace(input);
     } catch (error) {
       return {
         status: "unknown",
@@ -624,11 +619,25 @@ export const openAggregateIntegrationReviewExecutor = (options: {
           "Aggregate Reviewer execution is missing its terminal Execution Fact authority.",
         );
       }
+      const evidencePolicy = aggregateEvidencePolicy({
+        generationManifest: input.generationManifest,
+        manifestHash: input.manifestHash,
+        repositoryCommits: input.repositoryCommits,
+      });
+      if (
+        output.evidenceRefs.some((ref) => !evidencePolicy.allowed.has(ref)) ||
+        (output.result === "PASS" &&
+          evidencePolicy.required.some(
+            (required) => !output.evidenceRefs.includes(required),
+          ))
+      ) {
+        throw new Error(
+          "Aggregate Reviewer evidence does not match the frozen Integration evidence allowlist.",
+        );
+      }
       const commandId = `${input.operationKey}:record`;
       const evidenceRefs = [
-        workspaceRef,
         `execution-fact:${result.terminalExecutionFactId}`,
-        ...result.isolationEvidence,
         ...output.evidenceRefs,
       ];
       const recordRequest: AggregateRecordRequest = {
@@ -801,5 +810,15 @@ export const openAggregateIntegrationReviewExecutor = (options: {
   return {
     reconcile: (input) => execute(input, true),
     execute: (input) => execute(input, false),
+    cancel: async (input) => {
+      activeWorkspacePreparations.get(input.operationKey)?.abort();
+      return {
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message:
+          "Aggregate Review workspace preparation cancellation requires exact reconciliation.",
+        evidence: { operationKey: input.operationKey },
+      };
+    },
   };
 };

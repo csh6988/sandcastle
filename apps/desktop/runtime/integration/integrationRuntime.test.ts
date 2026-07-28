@@ -11,6 +11,7 @@ import {
   type GitIntegrationAdapter,
   type GitIntegrationRequest,
 } from "./integrationRuntime.js";
+import { aggregateReviewManifestFor } from "./integrationAggregateManifest.js";
 
 const commit = (digit: string): string => digit.repeat(40);
 const hash = (digit: string): string => digit.repeat(64);
@@ -47,6 +48,15 @@ const coverage = (
       diffHash: hash("b"),
       authorityId: "authority-api",
       qualityGateResultId: "gate-api",
+      reviewContext: {
+        codeReviewManifestId: "code-review-api",
+        codeReviewManifestHash: hash("1"),
+        diffArtifactVersionId: "diff-api-v1",
+        specRevisionIds: ["spec-api-r1"],
+        harnessSnapshotIds: ["harness-api-r1"],
+        acceptanceCriteria: ["API behavior is accepted."],
+        selfCheckEvidenceRefs: ["self-check-api"],
+      },
       dependencies: [],
       contractVersions: [
         {
@@ -72,6 +82,15 @@ const coverage = (
       diffHash: hash("d"),
       authorityId: "authority-web",
       qualityGateResultId: "gate-web",
+      reviewContext: {
+        codeReviewManifestId: "code-review-web",
+        codeReviewManifestHash: hash("2"),
+        diffArtifactVersionId: "diff-web-v1",
+        specRevisionIds: ["spec-web-r1"],
+        harnessSnapshotIds: ["harness-web-r1"],
+        acceptanceCriteria: ["Web behavior is accepted."],
+        selfCheckEvidenceRefs: ["self-check-web"],
+      },
       dependencies: [
         {
           predecessorWorkPackageVersionId: "package-api-v1",
@@ -234,6 +253,8 @@ const setup = (
           nodeRunId: input.nodeRunId,
         });
       },
+      resumeIntegrationInTransaction: (input) =>
+        pipelineCalls.push({ kind: "resume", ...input }),
       failIntegrationInTransaction: (input) =>
         pipelineCalls.push({ kind: "fail", ...input }),
       completeIntegrationInTransaction: (input) =>
@@ -313,25 +334,31 @@ const aggregateManifest = (
     ReturnType<ReturnType<typeof openIntegrationRuntime>["executePending"]>
   >,
   topicId: string,
-) => ({
-  scope: "aggregate",
-  topicId,
-  supportingArtifactVersionIds: [],
-  supportingSpecRevisionIds: [],
-  harnessSnapshotIds: [],
-  acceptanceCriteria: view.manifest.integrationConditions,
-  excludedContext: [
-    "hidden-prompts",
-    "prior-reviewer-opinions",
-    "private-transcripts",
-  ],
-  integrationGenerationId: view.id,
-  integrationManifestHash: view.manifestHash,
-  repositoryCommits: view.repositoryResults.map((repository) => ({
-    repositoryId: repository.repositoryReference,
-    commit: repository.integratedCommit!,
-  })),
-});
+) =>
+  aggregateReviewManifestFor({
+    generationId: view.id,
+    manifestHash: view.manifestHash,
+    generationManifest: view.manifest,
+    topicId,
+    repositoryCommits: view.repositoryResults.map((repository) => ({
+      repositoryId: repository.repositoryReference,
+      commit: repository.integratedCommit!,
+    })),
+  });
+
+const aggregateEvidence = (
+  view: Awaited<
+    ReturnType<ReturnType<typeof openIntegrationRuntime>["executePending"]>
+  >,
+): readonly string[] => [
+  "execution-fact:aggregate-terminal-1",
+  `integration-generation:${view.id}`,
+  `integration-manifest:${view.manifestHash}`,
+  ...view.repositoryResults.map(
+    (repository) =>
+      `repository-commit:${repository.repositoryReference}:${repository.integratedCommit!}`,
+  ),
+];
 
 describe("Integration Runtime generation manifest", () => {
   it("freezes exact completed Code Review coverage in producer-first repository operations", async () => {
@@ -969,6 +996,15 @@ describe("Integration Runtime generation manifest", () => {
       diffHash: hash("e"),
       authorityId: "authority-ui",
       qualityGateResultId: "gate-ui",
+      reviewContext: {
+        codeReviewManifestId: "code-review-ui",
+        codeReviewManifestHash: hash("3"),
+        diffArtifactVersionId: "diff-ui-v1",
+        specRevisionIds: ["spec-ui-r1"],
+        harnessSnapshotIds: ["harness-ui-r1"],
+        acceptanceCriteria: ["UI behavior is accepted."],
+        selfCheckEvidenceRefs: ["self-check-ui"],
+      },
       dependencies: [
         {
           predecessorWorkPackageVersionId: "package-web-v1",
@@ -1631,7 +1667,7 @@ describe("Integration Runtime generation manifest", () => {
             };
       },
     };
-    const { database, runtime } = setup(
+    const { database, runtime, pipelineCalls } = setup(
       coverage({ packages: [coverage().packages[0]!] }),
       { gitAdapter: adapter },
     );
@@ -1681,6 +1717,23 @@ describe("Integration Runtime generation manifest", () => {
     );
     assert.equal(executeCount, 1);
     assert.equal(reconcileCount, 2);
+    assert.deepEqual(
+      pipelineCalls.filter(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          "kind" in call &&
+          call.kind === "resume",
+      ),
+      [
+        {
+          kind: "resume",
+          runId: "run-1",
+          nodeRunId: "integration-node-1",
+          generationId: "generation-unknown",
+        },
+      ],
+    );
     assert.equal(
       (await runtime.executePending("generation-unknown")).state,
       "validating",
@@ -1912,6 +1965,245 @@ describe("Integration Runtime generation manifest", () => {
             defect.kind === "reconciliation" && defect.status === "open",
         ),
       false,
+    );
+  });
+
+  it("persists aggregate Review recovery in SQLite and replays its terminal authority without re-execution", async () => {
+    const { database, runtime } = setup();
+    start(database, runtime, "generation-aggregate-recovery");
+    const validating = await runtime.executePending(
+      "generation-aggregate-recovery",
+    );
+    validateAll(database, runtime, validating.id);
+    const aggregate = runtime.inspect("run-1")[0]!;
+    assert.equal(aggregate.state, "aggregate-review");
+    const request = {
+      operationKey: `${aggregate.id}:aggregate-review`,
+      generationId: aggregate.id,
+      manifestHash: aggregate.manifestHash,
+      projectId: aggregate.manifest.projectId,
+      runId: aggregate.manifest.runId,
+      nodeRunId: aggregate.manifest.nodeRunId,
+      topicId: `integration-review:${aggregate.id}`,
+      repositoryCommits: aggregate.repositoryResults.map((repository) => ({
+        repositoryId: repository.repositoryReference,
+        commit: repository.integratedCommit!,
+      })),
+      acceptanceCriteria: aggregate.manifest.integrationConditions,
+    };
+
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: aggregate.id,
+        operationKey: request.operationKey,
+        phase: "aggregate-review",
+        targetKey: "aggregate-review",
+        request,
+        createIfMissing: true,
+      }),
+      { mode: "execute" },
+    );
+    const unknown = {
+      status: "unknown" as const,
+      code: "RECONCILE_UNKNOWN",
+      message: "Reviewer provider receipt is not yet queryable.",
+      evidence: { providerOperationId: "aggregate-review-provider-1" },
+    };
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "unknown",
+      result: unknown,
+    });
+    runtime.blockPending(aggregate.id, unknown);
+
+    assert.equal(runtime.inspect("run-1")[0]?.state, "blocked");
+    assert.equal(
+      runtime.inspectPending().some((entry) => entry.id === aggregate.id),
+      true,
+    );
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: aggregate.id,
+        operationKey: request.operationKey,
+        phase: "aggregate-review",
+        targetKey: "aggregate-review",
+        request,
+        createIfMissing: false,
+      }),
+      { mode: "reconcile" },
+    );
+    const completed = {
+      status: "completed" as const,
+      topicId: request.topicId,
+      qualityGateResultId: "aggregate-gate-1",
+    };
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "succeeded",
+      result: completed,
+    });
+
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: aggregate.id,
+        operationKey: request.operationKey,
+        phase: "aggregate-review",
+        targetKey: "aggregate-review",
+        request,
+        createIfMissing: false,
+      }),
+      { mode: "terminal", result: completed },
+    );
+    assert.equal(
+      Number(
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count FROM integration_execution_stages
+              WHERE operation_key = ? AND state = 'succeeded'`,
+          )
+          .get(request.operationKey)!.count,
+      ),
+      1,
+    );
+  });
+
+  it("rejects a terminal validation stage whose stored result hash was tampered", async () => {
+    const { database, runtime } = setup(
+      coverage({ packages: [coverage().packages[0]!] }),
+    );
+    start(database, runtime, "generation-validation-stage-tamper");
+    const validating = await runtime.executePending(
+      "generation-validation-stage-tamper",
+    );
+    const required = validating.manifest.requiredValidations[0]!;
+    const repository = validating.repositoryResults[0]!;
+    const request = {
+      operationKey: `${validating.id}:validation:${required.id}`,
+      generationId: validating.id,
+      manifestHash: validating.manifestHash,
+      repositoryReference: repository.repositoryReference,
+      integratedCommit: repository.integratedCommit!,
+      responsibleWorkPackageVersionIds:
+        required.responsibleWorkPackageVersionIds,
+      validation: required,
+    };
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: validating.id,
+        operationKey: request.operationKey,
+        phase: "validation",
+        targetKey: required.id,
+        request,
+        createIfMissing: true,
+      }),
+      { mode: "execute" },
+    );
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "succeeded",
+      result: {
+        status: "passed",
+        evidenceRefs: ["validation-log"],
+        responsibleWorkPackageVersionIds:
+          required.responsibleWorkPackageVersionIds,
+      },
+    });
+    database.exec("DROP TRIGGER integration_execution_stages_terminal_update");
+    database
+      .prepare(
+        `UPDATE integration_execution_stages
+            SET result_json = '{"status":"failed","evidenceRefs":[],"responsibleWorkPackageVersionIds":[]}'
+          WHERE operation_key = ?`,
+      )
+      .run(request.operationKey);
+
+    assert.throws(
+      () =>
+        runtime.claimExecutionStage({
+          generationId: validating.id,
+          operationKey: request.operationKey,
+          phase: "validation",
+          targetKey: required.id,
+          request,
+          createIfMissing: false,
+        }),
+      (error: unknown) =>
+        error instanceof IntegrationRuntimeError &&
+        error.code === "INTEGRATION_CONFLICT",
+    );
+  });
+
+  it("rejects a terminal aggregate stage whose result shape drifts from its request identity", async () => {
+    const { database, runtime } = setup();
+    start(database, runtime, "generation-aggregate-stage-tamper");
+    const validating = await runtime.executePending(
+      "generation-aggregate-stage-tamper",
+    );
+    validateAll(database, runtime, validating.id);
+    const aggregate = runtime.inspect("run-1")[0]!;
+    const request = {
+      operationKey: `${aggregate.id}:aggregate-review`,
+      generationId: aggregate.id,
+      manifestHash: aggregate.manifestHash,
+      projectId: aggregate.manifest.projectId,
+      runId: aggregate.manifest.runId,
+      nodeRunId: aggregate.manifest.nodeRunId,
+      topicId: `integration-review:${aggregate.id}`,
+      repositoryCommits: aggregate.repositoryResults.map((repository) => ({
+        repositoryId: repository.repositoryReference,
+        commit: repository.integratedCommit!,
+      })),
+      acceptanceCriteria: aggregate.manifest.integrationConditions,
+    };
+    runtime.claimExecutionStage({
+      generationId: aggregate.id,
+      operationKey: request.operationKey,
+      phase: "aggregate-review",
+      targetKey: "aggregate-review",
+      request,
+      createIfMissing: true,
+    });
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "succeeded",
+      result: {
+        status: "completed",
+        topicId: request.topicId,
+        qualityGateResultId: "aggregate-gate-1",
+      },
+    });
+    const forged = canonicalJson({
+      status: "completed",
+      topicId: "integration-review:forged",
+      qualityGateResultId: "aggregate-gate-1",
+    });
+    const forgedHash = createHash("sha256").update(forged).digest("hex");
+    database.exec("DROP TRIGGER integration_execution_stages_terminal_update");
+    database
+      .prepare(
+        `UPDATE integration_execution_stages
+            SET result_json = ?, result_hash = ?
+          WHERE operation_key = ?`,
+      )
+      .run(forged, forgedHash, request.operationKey);
+
+    assert.throws(
+      () =>
+        runtime.claimExecutionStage({
+          generationId: aggregate.id,
+          operationKey: request.operationKey,
+          phase: "aggregate-review",
+          targetKey: "aggregate-review",
+          request,
+          createIfMissing: false,
+        }),
+      (error: unknown) =>
+        error instanceof IntegrationRuntimeError &&
+        error.code === "INTEGRATION_CONFLICT",
     );
   });
 
@@ -2223,6 +2515,44 @@ describe("Integration Runtime generation manifest", () => {
     const integrated = await runtime.executePending("generation-pass");
     validateAll(database, runtime, "generation-pass");
     const manifest = aggregateManifest(integrated, "aggregate-topic");
+    for (const evidenceRefs of [
+      [...aggregateEvidence(integrated), "fabricated"],
+      aggregateEvidence(integrated).filter(
+        (ref) => !ref.startsWith("repository-commit:"),
+      ),
+    ]) {
+      gateResult = {
+        gateResult: {
+          id: "aggregate-gate-pass",
+          kind: "aggregate",
+          manifest,
+          manifestHash: createHash("sha256")
+            .update(canonicalJson(manifest))
+            .digest("hex"),
+          result: "PASS",
+          conditions: [],
+          evidenceRefs,
+        },
+      };
+      database.exec("BEGIN IMMEDIATE");
+      assert.throws(
+        () =>
+          runtime.dispatchInTransaction({
+            commandId: `generation-pass:aggregate:invalid:${evidenceRefs.length}`,
+            actor: runtimeActor,
+            command: {
+              type: "integration.aggregate-review.record",
+              generationId: "generation-pass",
+              topicId: "aggregate-topic",
+              qualityGateResultId: "aggregate-gate-pass",
+            },
+          }),
+        (error: unknown) =>
+          error instanceof IntegrationRuntimeError &&
+          error.code === "INTEGRATION_AGGREGATE_REVIEW_CONFLICT",
+      );
+      database.exec("ROLLBACK");
+    }
     gateResult = {
       gateResult: {
         id: "aggregate-gate-pass",
@@ -2233,7 +2563,7 @@ describe("Integration Runtime generation manifest", () => {
           .digest("hex"),
         result: "PASS",
         conditions: [],
-        evidenceRefs: ["aggregate-review-evidence"],
+        evidenceRefs: aggregateEvidence(integrated),
       },
     };
     database.exec("BEGIN IMMEDIATE");
@@ -2298,7 +2628,7 @@ describe("Integration Runtime generation manifest", () => {
           .digest("hex"),
         result: "CONDITIONAL_PASS",
         conditions: ["Resolve the aggregate defect."],
-        evidenceRefs: ["aggregate-review-evidence"],
+        evidenceRefs: aggregateEvidence(integrated),
       },
     };
     database.exec("BEGIN IMMEDIATE");

@@ -91,7 +91,8 @@ export const openCodeReviewExecutionRuntime = (options: {
           ORDER BY node_attempts.attempt_number DESC LIMIT 1`,
       )
       .get(input.nodeRunId, input.runId, input.handlerKindId) as
-      { readonly attemptId: string } | undefined;
+      | { readonly attemptId: string }
+      | undefined;
     if (!attempt) {
       throw runtimeError(
         "CODE_REVIEW_EXECUTION_STATE_INVALID",
@@ -177,7 +178,8 @@ export const openCodeReviewExecutionRuntime = (options: {
               ORDER BY execution_epoch DESC LIMIT 1`,
           )
           .get(input.operationKey) as
-          { readonly id: string; readonly expiresAt: string } | undefined;
+          | { readonly id: string; readonly expiresAt: string }
+          | undefined;
         if (current) {
           if (
             leaseKind !== "reconciliation" ||
@@ -332,7 +334,8 @@ export const openCodeReviewExecutionRuntime = (options: {
                 ORDER BY created_at, id LIMIT 1`,
             )
             .get(input.reviewerSessionId, input.reviewerAiMemberId) as
-            { readonly id: string } | undefined;
+            | { readonly id: string }
+            | undefined;
           if (!participant) {
             throw new ExecutionFactError(
               "EXECUTION_ADAPTER_PROTOCOL",

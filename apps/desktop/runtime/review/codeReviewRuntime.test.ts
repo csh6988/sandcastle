@@ -2057,7 +2057,8 @@ describe("Code Review Runtime", () => {
               WHERE fact_id LIKE '%:reconciled-completed'`,
           )
           .get() as
-          { readonly leaseKind: string; readonly status: string } | undefined;
+          | { readonly leaseKind: string; readonly status: string }
+          | undefined;
         assert.equal(reconciledFact?.leaseKind, "reconciliation");
         assert.equal(reconciledFact?.status, "accepted");
         assert.equal(

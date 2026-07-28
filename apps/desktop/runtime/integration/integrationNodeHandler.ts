@@ -67,6 +67,7 @@ export type AggregateIntegrationReviewInput = {
     readonly commit: string;
   }[];
   readonly acceptanceCriteria: readonly string[];
+  readonly generationManifest: IntegrationGenerationManifest;
 };
 
 export type AggregateIntegrationReviewResult =
@@ -88,6 +89,9 @@ export interface AggregateIntegrationReviewExecutor {
     input: AggregateIntegrationReviewInput,
   ) => Promise<AggregateIntegrationReviewResult>;
   readonly reconcile: (
+    input: AggregateIntegrationReviewInput,
+  ) => Promise<AggregateIntegrationReviewResult>;
+  readonly cancel?: (
     input: AggregateIntegrationReviewInput,
   ) => Promise<AggregateIntegrationReviewResult>;
 }
@@ -321,7 +325,14 @@ export const openIntegrationNodeHandler = (options: {
         repositoryId: repository.repositoryReference,
         commit: repository.integratedCommit!,
       })),
-      acceptanceCriteria: generation.manifest.integrationConditions,
+      acceptanceCriteria: [
+        ...new Set(
+          generation.manifest.packages.flatMap(
+            (entry) => entry.reviewContext.acceptanceCriteria,
+          ),
+        ),
+      ].sort(),
+      generationManifest: generation.manifest,
     };
     const stage = options.integrations.claimExecutionStage?.({
       generationId: generation.id,
@@ -483,9 +494,19 @@ export const openIntegrationNodeHandler = (options: {
         generation.id,
       );
       for (const stage of stages ?? []) {
-        if (stage.phase !== "validation") continue;
-        const request = stage.request as IntegrationValidationInput;
-        const result = await validationExecutor.cancel(request);
+        const request = stage.request as
+          | IntegrationValidationInput
+          | AggregateIntegrationReviewInput;
+        const result =
+          stage.phase === "validation"
+            ? await validationExecutor.cancel(
+                request as IntegrationValidationInput,
+              )
+            : aggregateReviewExecutor.cancel
+              ? await aggregateReviewExecutor.cancel(
+                  request as AggregateIntegrationReviewInput,
+                )
+              : { status: "not-applied" as const };
         if (result.status === "not-applied") continue;
         options.integrations.recordExecutionStageResult?.({
           operationKey: stage.operationKey,
@@ -493,7 +514,7 @@ export const openIntegrationNodeHandler = (options: {
           state:
             result.status === "unknown"
               ? "unknown"
-              : result.status === "passed"
+              : stage.phase === "aggregate-review" || result.status === "passed"
                 ? "succeeded"
                 : "failed",
           result,

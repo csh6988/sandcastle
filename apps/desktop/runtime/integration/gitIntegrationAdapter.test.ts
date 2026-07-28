@@ -350,6 +350,186 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(git(target.root, "rev-parse", "work/api"), target.api);
   });
 
+  it("rejects nested Git refs symlinks without changing the target Repository refs", async () => {
+    const target = repository();
+    const attackerParent = mkdtempSync(
+      join(tmpdir(), "sandcastle-t16-git-attacker-"),
+    );
+    roots.push(attackerParent);
+    const attacker = join(attackerParent, "repository");
+    execFileSync("git", ["clone", "--no-local", target.root, attacker], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const refsBefore = git(
+      target.root,
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/heads",
+      "refs/tags",
+    );
+    rmSync(join(attacker, ".git", "refs"), { recursive: true, force: true });
+    symlinkSync(
+      join(target.root, ".git", "refs"),
+      join(attacker, ".git", "refs"),
+    );
+
+    const result = await openLocalGitIntegrationAdapter().execute(
+      request({
+        root: attacker,
+        base: target.base,
+        sourceBranch: "work/api",
+        sourceCommit: target.api,
+        expectedTip: target.base,
+        operationId: "nested-refs-symlink",
+      }),
+    );
+
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") return;
+    assert.equal(result.writeStatus, "not-started");
+    assert.equal(result.code, "INTEGRATION_REPOSITORY_INVALID");
+    assert.equal(
+      git(
+        target.root,
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads",
+        "refs/tags",
+      ),
+      refsBefore,
+    );
+    assert.throws(() => git(target.root, "rev-parse", "integration/run-1/g1"));
+  });
+
+  it(
+    "revalidates target ref storage immediately before compare-and-swap",
+    { skip: process.platform === "win32" },
+    async () => {
+      const target = repository();
+      const attacker = repository();
+      const wrapperRoot = mkdtempSync(
+        join(tmpdir(), "sandcastle-t16-ref-swap-wrapper-"),
+      );
+      roots.push(wrapperRoot);
+      const marker = join(wrapperRoot, "refs-swapped");
+      const wrapper = join(wrapperRoot, "git-wrapper.mjs");
+      writeFileSync(
+        wrapper,
+        `#!/usr/bin/env node
+import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+const result = spawnSync("git", args, { stdio: "inherit" });
+if (result.status === 0 && args.includes("commit-tree")) {
+  rmSync(${JSON.stringify(join(attacker.root, ".git", "refs"))}, { recursive: true, force: true });
+  symlinkSync(${JSON.stringify(join(target.root, ".git", "refs"))}, ${JSON.stringify(join(attacker.root, ".git", "refs"))});
+  writeFileSync(${JSON.stringify(marker)}, "swapped\\n");
+}
+process.exit(result.status ?? 1);
+`,
+      );
+      chmodSync(wrapper, 0o755);
+      const refsBefore = git(
+        target.root,
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads",
+        "refs/tags",
+      );
+
+      const result = await openLocalGitIntegrationAdapter({
+        gitExecutable: wrapper,
+      }).execute(
+        request({
+          root: attacker.root,
+          base: attacker.base,
+          sourceBranch: "work/api",
+          sourceCommit: attacker.api,
+          expectedTip: attacker.base,
+          operationId: "ref-storage-swapped-before-cas",
+        }),
+      );
+
+      assert.equal(existsSync(marker), true);
+      assert.equal(result.status, "failed");
+      if (result.status !== "failed") return;
+      assert.equal(result.writeStatus, "not-started");
+      assert.equal(result.code, "INTEGRATION_REPOSITORY_INVALID");
+      assert.equal(
+        git(
+          target.root,
+          "for-each-ref",
+          "--format=%(objectname) %(refname)",
+          "refs/heads",
+          "refs/tags",
+        ),
+        refsBefore,
+      );
+      assert.throws(() =>
+        git(target.root, "rev-parse", "integration/run-1/g1"),
+      );
+    },
+  );
+
+  it(
+    "rejects object storage symlinks before attempting any object or ref write",
+    { skip: process.platform === "win32" },
+    async () => {
+      const target = repository();
+      const attacker = repository();
+      rmSync(join(attacker.root, ".git", "objects"), {
+        recursive: true,
+        force: true,
+      });
+      symlinkSync(
+        join(target.root, ".git", "objects"),
+        join(attacker.root, ".git", "objects"),
+      );
+      const wrapperRoot = mkdtempSync(
+        join(tmpdir(), "sandcastle-t16-object-write-wrapper-"),
+      );
+      roots.push(wrapperRoot);
+      const marker = join(wrapperRoot, "write-attempted");
+      const wrapper = join(wrapperRoot, "git-wrapper.mjs");
+      writeFileSync(
+        wrapper,
+        `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (["apply", "write-tree", "commit-tree", "update-ref"].some((command) => args.includes(command))) {
+  appendFileSync(${JSON.stringify(marker)}, "write\\n");
+}
+const result = spawnSync("git", args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+      );
+      chmodSync(wrapper, 0o755);
+
+      const result = await openLocalGitIntegrationAdapter({
+        gitExecutable: wrapper,
+      }).execute(
+        request({
+          root: attacker.root,
+          base: attacker.base,
+          sourceBranch: "work/api",
+          sourceCommit: attacker.api,
+          expectedTip: attacker.base,
+          operationId: "object-storage-symlink",
+        }),
+      );
+
+      assert.equal(result.status, "failed");
+      if (result.status !== "failed") return;
+      assert.equal(result.writeStatus, "not-started");
+      assert.equal(result.code, "INTEGRATION_REPOSITORY_INVALID");
+      assert.equal(existsSync(marker), false);
+      assert.throws(() =>
+        git(target.root, "rev-parse", "integration/run-1/g1"),
+      );
+    },
+  );
+
   it("treats timeout and cancellation as unknown without writing the generation ref", async () => {
     const fixture = repository();
     const cancelled = new AbortController();

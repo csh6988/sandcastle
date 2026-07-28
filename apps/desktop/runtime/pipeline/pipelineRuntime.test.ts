@@ -868,6 +868,134 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("keeps a paused Run visible while an in-flight Integration cancellation becomes unknown", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    let markActive!: () => void;
+    const active = new Promise<void>((resolve) => {
+      markActive = resolve;
+    });
+    let releaseExecution!: () => void;
+    const cancellationRecorded = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    let executeCount = 0;
+    try {
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async (input) => {
+          executeCount += 1;
+          fixture.database.pipelineRuntime.startIntegrationInTransaction({
+            ...input,
+            generationId: "generation-paused-unknown",
+          });
+          markActive();
+          await cancellationRecorded;
+        },
+      );
+      fixture.database.pipelineRuntime.registerIntegrationCancellationDispatcher(
+        async (input) => {
+          fixture.database.pipelineRuntime.blockIntegrationInTransaction({
+            ...input,
+            generationId: "generation-paused-unknown",
+            failure: {
+              code: "RECONCILE_UNKNOWN",
+              message: "Git cancellation outcome is not yet provable.",
+            },
+          });
+          releaseExecution();
+        },
+      );
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const executing = fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      await active;
+      const running = fixture.database.pipelineRuntime.inspectRun(
+        started.run.id,
+      );
+      const paused = await fixture.database.pipelineRuntime.controlRun({
+        runId: running.run.id,
+        expectedRevision: running.run.revision,
+        action: "pause",
+      });
+      await executing;
+
+      const pausedIntegration = paused.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.equal(paused.run.status, "paused");
+      assert.equal(pausedIntegration?.status, "blocked");
+      assert.equal(pausedIntegration?.attempts.at(-1)?.status, "reconciling");
+      assert.equal(pausedIntegration?.attempts.at(-1)?.recoverable, true);
+
+      const resumed = await fixture.database.pipelineRuntime.controlRun({
+        runId: paused.run.id,
+        expectedRevision: paused.run.revision,
+        action: "resume",
+      });
+      assert.equal(resumed.run.status, "blocked");
+      assert.equal(
+        resumed.nodes
+          .find((node) => node.pipelineNodeId === "integration")
+          ?.attempts.at(-1)?.status,
+        "reconciling",
+      );
+
+      fixture.database.pipelineRuntime.resumeIntegrationInTransaction({
+        runId: resumed.run.id,
+        nodeRunId: pausedIntegration!.id,
+        generationId: "generation-paused-unknown",
+      });
+      fixture.database.pipelineRuntime.completeIntegrationInTransaction({
+        runId: resumed.run.id,
+        nodeRunId: pausedIntegration!.id,
+        generationId: "generation-paused-unknown",
+        passAuthorityHash: "a".repeat(64),
+        repositoryCommits: [
+          {
+            repositoryReference: "/repositories/api",
+            commit: "b".repeat(40),
+          },
+        ],
+      });
+      const reconciled = fixture.database.pipelineRuntime.inspectRun(
+        resumed.run.id,
+      );
+      const completed = await fixture.database.pipelineRuntime.executeReady({
+        runId: reconciled.run.id,
+        expectedRevision: reconciled.run.revision,
+      });
+      assert.equal(completed.run.status, "completed");
+      assert.equal(executeCount, 1);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("persists Run creation audit and Runtime event records in the start transaction", () => {
     const { database, project, department } = setup();
     try {

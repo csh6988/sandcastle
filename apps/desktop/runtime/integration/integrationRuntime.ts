@@ -7,6 +7,8 @@ import type {
   CompletedCodeReviewCoverage,
 } from "../review/codeReviewRuntime.js";
 import type { WorkPackageRuntime } from "../workspaces/workPackages.js";
+import { aggregateEvidencePolicy } from "./integrationAggregateEvidence.js";
+import { aggregateReviewManifestFor } from "./integrationAggregateManifest.js";
 
 export type { CompletedCodeReviewCoverage } from "../review/codeReviewRuntime.js";
 
@@ -175,7 +177,12 @@ export type IntegrationGenerationView = {
     readonly baseCommit: string;
     readonly integrationBranch: string;
     readonly state:
-      "pending" | "running" | "validating" | "succeeded" | "failed" | "blocked";
+      | "pending"
+      | "running"
+      | "validating"
+      | "succeeded"
+      | "failed"
+      | "blocked";
     readonly expectedTip: string;
     readonly integratedCommit: string | null;
     readonly validationRecords: readonly {
@@ -318,6 +325,82 @@ const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isStringArray = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
+
+const assertTerminalExecutionStageResult = (input: {
+  readonly operationKey: string;
+  readonly phase: "validation" | "aggregate-review";
+  readonly state: string;
+  readonly request: unknown;
+  readonly resultJson: string;
+  readonly resultHash: string | null;
+}): unknown => {
+  if (sha256(input.resultJson) !== input.resultHash) {
+    throw new IntegrationRuntimeError(
+      "INTEGRATION_CONFLICT",
+      `Terminal Integration execution stage ${input.operationKey} has a corrupted result authority.`,
+    );
+  }
+  let result: unknown;
+  try {
+    result = parseJson<unknown>(input.resultJson);
+  } catch {
+    throw new IntegrationRuntimeError(
+      "INTEGRATION_CONFLICT",
+      `Terminal Integration execution stage ${input.operationKey} has invalid result JSON.`,
+    );
+  }
+  if (!isRecord(result) || !isRecord(input.request)) {
+    throw new IntegrationRuntimeError(
+      "INTEGRATION_CONFLICT",
+      `Terminal Integration execution stage ${input.operationKey} has an invalid result shape.`,
+    );
+  }
+  if (input.phase === "validation") {
+    const status = input.state === "succeeded" ? "passed" : "failed";
+    const contractFailure = result.contractFailure;
+    if (
+      result.status !== status ||
+      !isStringArray(result.evidenceRefs) ||
+      !isStringArray(result.responsibleWorkPackageVersionIds) ||
+      (contractFailure !== undefined &&
+        (!isRecord(contractFailure) ||
+          ![
+            "producerApplicationId",
+            "consumerApplicationId",
+            "contractId",
+            "contractVersion",
+            "fixtureRef",
+            "runtimeEvidenceRef",
+          ].every((key) => typeof contractFailure[key] === "string")))
+    ) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_CONFLICT",
+        `Terminal Integration validation stage ${input.operationKey} does not match its phase result contract.`,
+      );
+    }
+    return result;
+  }
+  if (
+    input.state !== "succeeded" ||
+    result.status !== "completed" ||
+    typeof result.topicId !== "string" ||
+    result.topicId !== input.request.topicId ||
+    typeof result.qualityGateResultId !== "string" ||
+    result.qualityGateResultId.length === 0
+  ) {
+    throw new IntegrationRuntimeError(
+      "INTEGRATION_CONFLICT",
+      `Terminal aggregate Integration Review stage ${input.operationKey} does not match its frozen request identity.`,
+    );
+  }
+  return result;
+};
 
 const assertRuntimeActor = (actor: ActorRef): void => {
   if (actor.type !== "runtime-worker" || actor.authenticatedBy !== "runtime") {
@@ -824,7 +907,9 @@ export const openIntegrationRuntime = (
             input: parseJson(String(aggregate.inputJson)),
             inputHash: String(aggregate.inputHash),
             result: String(aggregate.result) as
-              "PASS" | "CONDITIONAL_PASS" | "FAIL",
+              | "PASS"
+              | "CONDITIONAL_PASS"
+              | "FAIL",
             evidence: parseJson<readonly string[]>(
               String(aggregate.evidenceJson),
             ),
@@ -2194,13 +2279,21 @@ export const openIntegrationRuntime = (
           outcomeHash,
         },
         failurePoint: "during-operation-finalization",
-        mutate: () =>
-          (advancedToValidation = finalizeSucceededOperation({
+        mutate: () => {
+          advancedToValidation = finalizeSucceededOperation({
             view: input.view,
             entry: input.entry,
             request: input.request,
             result,
-          })),
+          });
+          if (input.view.state === "blocked") {
+            options.pipelineRuntime.resumeIntegrationInTransaction?.({
+              runId: input.view.manifest.runId,
+              nodeRunId: input.view.manifest.nodeRunId,
+              generationId: input.view.id,
+            });
+          }
+        },
         appendAfterOperation: (now) => {
           if (!advancedToValidation) return;
           appendIntegrationAudit({
@@ -2368,7 +2461,8 @@ export const openIntegrationRuntime = (
           WHERE operation_key = ? AND generation_id = ? AND phase = ?`,
       )
       .get(input.operationKey, input.view.id, input.phase) as
-      { readonly state: string } | undefined;
+      | { readonly state: string }
+      | undefined;
     if (!stage || !["succeeded", "failed"].includes(stage.state)) {
       return input.view;
     }
@@ -2535,7 +2629,8 @@ export const openIntegrationRuntime = (
           WHERE generation_id = ? AND validation_id = ?`,
       )
       .get(view.id, input.command.validationId) as
-      { readonly recordHash: string } | undefined;
+      | { readonly recordHash: string }
+      | undefined;
     if (existingRecord) {
       if (existingRecord.recordHash !== recordHash) {
         throw new IntegrationRuntimeError(
@@ -2788,29 +2883,38 @@ export const openIntegrationRuntime = (
       repositoryId: repository.repositoryReference,
       commit: repository.integratedCommit!,
     }));
-    const aggregateManifest = {
-      scope: "aggregate",
+    const aggregateManifest = aggregateReviewManifestFor({
+      generationId: view.id,
+      manifestHash: view.manifestHash,
+      generationManifest: view.manifest,
       topicId: input.command.topicId,
-      supportingArtifactVersionIds: [],
-      supportingSpecRevisionIds: [],
-      harnessSnapshotIds: [],
-      acceptanceCriteria: view.manifest.integrationConditions,
-      excludedContext: [
-        "hidden-prompts",
-        "prior-reviewer-opinions",
-        "private-transcripts",
-      ],
-      integrationGenerationId: view.id,
-      integrationManifestHash: view.manifestHash,
       repositoryCommits,
-    };
+    });
     const aggregateManifestHash = sha256(canonicalJson(aggregateManifest));
+    const evidencePolicy = aggregateEvidencePolicy({
+      generationManifest: view.manifest,
+      manifestHash: view.manifestHash,
+      repositoryCommits,
+    });
+    const gateEvidence = gate ? [...gate.evidenceRefs] : [];
+    const executionEvidence = gateEvidence.filter((ref) =>
+      ref.startsWith("execution-fact:"),
+    );
+    const evidenceIsExact =
+      new Set(gateEvidence).size === gateEvidence.length &&
+      executionEvidence.length === 1 &&
+      gateEvidence.every(
+        (ref) =>
+          ref === executionEvidence[0] || evidencePolicy.allowed.has(ref),
+      ) &&
+      evidencePolicy.required.every((ref) => gateEvidence.includes(ref));
     if (
       !gate ||
       gate.id !== input.command.qualityGateResultId ||
       gate.kind !== "aggregate" ||
       canonicalJson(gate.manifest) !== canonicalJson(aggregateManifest) ||
-      gate.manifestHash !== aggregateManifestHash
+      gate.manifestHash !== aggregateManifestHash ||
+      !evidenceIsExact
     ) {
       throw new IntegrationRuntimeError(
         "INTEGRATION_AGGREGATE_REVIEW_CONFLICT",
@@ -2818,7 +2922,7 @@ export const openIntegrationRuntime = (
       );
     }
     const now = clock().toISOString();
-    const evidence = [...gate.evidenceRefs].sort();
+    const evidence = gateEvidence.sort();
     const passAuthorityHash =
       gate.result === "PASS" && gate.conditions.length === 0
         ? sha256(
@@ -3038,7 +3142,7 @@ export const openIntegrationRuntime = (
             `SELECT generation_id AS generationId, phase,
                     target_key AS targetKey, request_json AS requestJson,
                     request_hash AS requestHash, state,
-                    result_json AS resultJson
+                    result_json AS resultJson, result_hash AS resultHash
                FROM integration_execution_stages WHERE operation_key = ?`,
           )
           .get(input.operationKey) as
@@ -3050,6 +3154,7 @@ export const openIntegrationRuntime = (
               readonly requestHash: string;
               readonly state: string;
               readonly resultJson: string | null;
+              readonly resultHash: string | null;
             }
           | undefined;
         if (!existing) {
@@ -3099,10 +3204,18 @@ export const openIntegrationRuntime = (
               `Terminal Integration execution stage ${input.operationKey} has no result authority.`,
             );
           }
+          const result = assertTerminalExecutionStageResult({
+            operationKey: input.operationKey,
+            phase: input.phase,
+            state: existing.state,
+            request: input.request,
+            resultJson: existing.resultJson,
+            resultHash: existing.resultHash,
+          });
           database.exec("COMMIT");
           return {
             mode: "terminal",
-            result: parseJson<unknown>(existing.resultJson),
+            result,
           } as const;
         }
         database

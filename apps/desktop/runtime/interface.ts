@@ -840,6 +840,18 @@ const IntegrationDependencySchema = z
   })
   .strict();
 
+const IntegrationReviewContextSchema = z
+  .object({
+    codeReviewManifestId: z.string().trim().min(1),
+    codeReviewManifestHash: Sha256Schema,
+    diffArtifactVersionId: z.string().trim().min(1),
+    specRevisionIds: z.array(z.string().trim().min(1)),
+    harnessSnapshotIds: z.array(z.string().trim().min(1)),
+    acceptanceCriteria: z.array(z.string().trim().min(1)),
+    selfCheckEvidenceRefs: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
 const IntegrationCoveragePackageSchema = z
   .object({
     workPackageId: z.string().trim().min(1),
@@ -852,6 +864,7 @@ const IntegrationCoveragePackageSchema = z
     diffHash: Sha256Schema,
     authorityId: z.string().trim().min(1),
     qualityGateResultId: z.string().trim().min(1),
+    reviewContext: IntegrationReviewContextSchema,
     dependencies: z.array(IntegrationDependencySchema),
     contractVersions: z.array(
       z

@@ -1025,7 +1025,8 @@ export const openPipelineRuntime = (
                 "SELECT execution_operation_key AS operationKey FROM node_attempts WHERE id = ?",
               )
               .get(input.attemptId) as
-              { readonly operationKey: string | null } | undefined
+              | { readonly operationKey: string | null }
+              | undefined
           )?.operationKey ?? null)
         : null);
     if (!operationKey) {
@@ -2292,7 +2293,8 @@ export const openPipelineRuntime = (
             WHERE id = ? AND run_id = ?`,
       )
       .get(input.sourceSnapshotRevisionId, input.sourceRunId) as
-      { readonly canonicalJson: string; readonly hash: string } | undefined;
+      | { readonly canonicalJson: string; readonly hash: string }
+      | undefined;
     if (!selected) {
       throw new PipelineRuntimeError(
         "RUN_SNAPSHOT_INVALID",
@@ -2364,7 +2366,8 @@ export const openPipelineRuntime = (
           LIMIT 1`,
       )
       .get(input.projectId, input.departmentId) as
-      { readonly id: string } | undefined;
+      | { readonly id: string }
+      | undefined;
     if (!row) {
       throw new PipelineRuntimeError(
         "RUN_NOT_FORMALIZED",
@@ -2808,7 +2811,8 @@ export const openPipelineRuntime = (
                  ORDER BY attempt_number DESC LIMIT 1`,
                 )
                 .get(sourceNode.id) as
-                { readonly terminalFactId: string } | undefined)
+                | { readonly terminalFactId: string }
+                | undefined)
             : undefined;
           const disposition = preserved
             ? sourceNode?.status === "skipped"
@@ -3259,7 +3263,8 @@ export const openPipelineRuntime = (
             WHERE id = ?`,
         )
         .get(assignment.runId) as
-        { readonly status: string; readonly revision: number } | undefined;
+        | { readonly status: string; readonly revision: number }
+        | undefined;
       const remainedBlocked =
         blockedRun.changes === 0 &&
         input.runStatusBefore === "blocked" &&
@@ -3565,7 +3570,8 @@ export const openPipelineRuntime = (
             WHERE id = ? AND run_id = ?`,
         )
         .get(input.nodeRunId, input.runId) as
-        { readonly pipelineNodeId: string } | undefined;
+        | { readonly pipelineNodeId: string }
+        | undefined;
       const joins = database
         .prepare(
           `SELECT id, required_dependency_ids_json AS requiredDependencyIdsJson
@@ -5180,9 +5186,15 @@ export const openPipelineRuntime = (
     readonly nodeRunId: string;
     readonly expectedNodeStatus: "ready" | "running" | "waiting-approval";
     readonly nextNodeStatus:
-      "running" | "succeeded" | "failed" | "waiting-approval";
+      | "running"
+      | "succeeded"
+      | "failed"
+      | "waiting-approval";
     readonly nextRunStatus:
-      "running" | "completed" | "failed" | "waiting-approval";
+      | "running"
+      | "completed"
+      | "failed"
+      | "waiting-approval";
     readonly incrementAttempt?: boolean;
     readonly completeAttempt?: boolean;
     readonly approvalDecision?: "approve" | "reject";
@@ -5371,7 +5383,8 @@ export const openPipelineRuntime = (
               WHERE id = ? AND run_id = ?`,
           )
           .get(input.nodeRunId, input.runId) as
-          { readonly pipelineNodeId: string } | undefined;
+          | { readonly pipelineNodeId: string }
+          | undefined;
         const joins = database
           .prepare(
             `SELECT id, required_dependency_ids_json AS requiredDependencyIdsJson
@@ -5749,7 +5762,8 @@ export const openPipelineRuntime = (
               WHERE run_id = ? AND pipeline_node_id = ?`,
           )
           .get(view.run.id, skippedNodeId) as
-          { readonly id: string } | undefined;
+          | { readonly id: string }
+          | undefined;
         if (skipped) {
           appendRuntimeMutation({
             action: "node.skip",
@@ -6527,7 +6541,8 @@ export const openPipelineRuntime = (
             WHERE id = ? AND run_id = ?`,
         )
         .get(input.nodeRunId, input.runId) as
-        { readonly attemptCount: number; readonly status: string } | undefined;
+        | { readonly attemptCount: number; readonly status: string }
+        | undefined;
       if (!node || node.status !== "ready") {
         throw new PipelineRuntimeError(
           "NODE_STATE_INVALID",
@@ -7179,8 +7194,9 @@ export const openPipelineRuntime = (
       const run = database
         .prepare(
           `UPDATE department_runs
-              SET status = 'blocked', revision = revision + 1, updated_at = ?
-            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+              SET status = CASE WHEN status = 'paused' THEN status ELSE 'blocked' END,
+                  revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked', 'paused')`,
         )
         .run(now, input.runId);
       if (run.changes !== 1) {
@@ -7233,8 +7249,9 @@ export const openPipelineRuntime = (
       const run = database
         .prepare(
           `UPDATE department_runs
-              SET status = 'running', revision = revision + 1, updated_at = ?
-            WHERE id = ? AND status = 'blocked'`,
+              SET status = CASE WHEN status = 'paused' THEN status ELSE 'running' END,
+                  revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('blocked', 'paused')`,
         )
         .run(now, input.runId);
       if (node.changes !== 1 || attempt.changes !== 1 || run.changes !== 1) {
@@ -7388,7 +7405,8 @@ export const openPipelineRuntime = (
             WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'`,
         )
         .get(input.integrationNodeRunId, input.runId) as
-        { readonly status: string } | undefined;
+        | { readonly status: string }
+        | undefined;
       if (!integration || !["blocked", "failed"].includes(integration.status)) {
         throw new PipelineRuntimeError(
           "INTEGRATION_RECOVERY_STATE_INVALID",

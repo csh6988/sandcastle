@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,6 +17,7 @@ import { describe, it } from "node:test";
 import { createScriptedReviewerExecutionAdapter } from "../review/reviewerExecution.js";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import { openAggregateIntegrationReviewExecutor } from "./aggregateIntegrationReviewExecutor.js";
+import type { IntegrationGenerationManifest } from "./integrationRuntime.js";
 
 const git = (root: string, args: readonly string[]): string =>
   execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
@@ -31,8 +33,97 @@ const canonicalJson = (value: unknown): string =>
       : entry,
   );
 
+const aggregateInput = (input: {
+  readonly operationKey: string;
+  readonly generationId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly nodeRunId: string;
+  readonly topicId: string;
+  readonly repositoryCommits: readonly {
+    readonly repositoryId: string;
+    readonly commit: string;
+  }[];
+  readonly acceptanceCriteria: readonly string[];
+}) => {
+  const repository = input.repositoryCommits[0]!;
+  const reviewContext = {
+    codeReviewManifestId: "code-review-1",
+    codeReviewManifestHash: "b".repeat(64),
+    diffArtifactVersionId: "diff-artifact-1",
+    specRevisionIds: ["spec-revision-1"],
+    harnessSnapshotIds: ["harness-snapshot-1"],
+    acceptanceCriteria: [...input.acceptanceCriteria],
+    selfCheckEvidenceRefs: ["self-check-evidence-1"],
+  };
+  const generationManifest: IntegrationGenerationManifest = {
+    schemaVersion: 1,
+    generationId: input.generationId,
+    generation: 1,
+    projectId: input.projectId,
+    runId: input.runId,
+    snapshotRevisionId: "snapshot-1",
+    nodeRunId: input.nodeRunId,
+    coverageId: "coverage-1",
+    coverageNodeRunId: "code-review-node-1",
+    coverageNodeAttemptId: "code-review-attempt-1",
+    coverageHash: "a".repeat(64),
+    repositories: [
+      {
+        repositoryReference: repository.repositoryId,
+        baseCommit: repository.commit,
+        integrationBranch: `integration/${input.runId}/g1`,
+      },
+    ],
+    packages: [
+      {
+        workPackageId: "package-1",
+        workPackageVersionId: "package-v1",
+        applicationId: "application-1",
+        repositoryReference: repository.repositoryId,
+        baseCommit: repository.commit,
+        sourceBranch: "sandcastle/package-v1/attempt-1",
+        sourceCommit: repository.commit,
+        diffHash: "c".repeat(64),
+        authorityId: "authority-1",
+        qualityGateResultId: "code-gate-1",
+        reviewContext,
+        dependencies: [],
+        contractVersions: [],
+        integrationConditions: ["npm test"],
+      },
+    ],
+    dependencyOrder: ["package-v1"],
+    contractVersions: [],
+    integrationConditions: ["npm test"],
+    requiredValidations: [
+      {
+        id: `validation:${"d".repeat(64)}`,
+        repositoryReference: repository.repositoryId,
+        kind: "build-test",
+        identityHash: "d".repeat(64),
+        commands: [["npm", "test"]],
+        evidenceRefs: ["validation-evidence-1"],
+        responsibleWorkPackageVersionIds: ["package-v1"],
+        condition: "npm test",
+      },
+    ],
+  };
+  return {
+    ...input,
+    manifestHash: createHash("sha256")
+      .update(canonicalJson(generationManifest))
+      .digest("hex"),
+    generationManifest,
+  };
+};
+
 const openReceiptHarness = (input?: {
   readonly waitForConcurrentExecutions?: boolean;
+  readonly fabricatedEvidence?: boolean;
+  readonly omitRepositoryEvidence?: boolean;
+  readonly gitExecutable?: string;
+  readonly workspaceGitTimeoutMs?: number;
 }) => {
   const repository = mkdtempSync(join(tmpdir(), "aggregate-receipt-repo-"));
   git(repository, ["init", "-q"]);
@@ -45,7 +136,8 @@ const openReceiptHarness = (input?: {
   const storage = new DatabaseSync(":memory:");
   migrateCompanyDatabase(storage);
   let persistedSession:
-    { readonly sessionId: string; readonly participantId: string } | undefined;
+    | { readonly sessionId: string; readonly participantId: string }
+    | undefined;
   const database = {
     exec: (sql: string) => storage.exec(sql),
     prepare: (sql: string) => {
@@ -78,12 +170,27 @@ const openReceiptHarness = (input?: {
     releaseExecutions = resolve;
   });
   const reviewerExecutionAdapter = createScriptedReviewerExecutionAdapter({
-    execute: async () => {
+    execute: async (request) => {
       adapterExecutions += 1;
       if (input?.waitForConcurrentExecutions) {
         signalExecutionStarted?.();
         await concurrentExecutions;
       }
+      const manifest = request.manifest as unknown as {
+        readonly integrationGenerationId: string;
+        readonly integrationManifestHash: string;
+        readonly repositoryCommits: readonly {
+          readonly repositoryId: string;
+          readonly commit: string;
+        }[];
+      };
+      const canonicalEvidence = [
+        `integration-generation:${manifest.integrationGenerationId}`,
+        `integration-manifest:${manifest.integrationManifestHash}`,
+        ...manifest.repositoryCommits.map(
+          (entry) => `repository-commit:${entry.repositoryId}:${entry.commit}`,
+        ),
+      ];
       return {
         status: "succeeded",
         providerId: "scripted-reviewer",
@@ -102,7 +209,11 @@ const openReceiptHarness = (input?: {
         output: {
           result: "PASS",
           conditions: [],
-          evidenceRefs: [integratedCommit],
+          evidenceRefs: input?.fabricatedEvidence
+            ? ["fabricated"]
+            : input?.omitRepositoryEvidence
+              ? canonicalEvidence.slice(0, 2)
+              : canonicalEvidence,
         },
       };
     },
@@ -141,6 +252,10 @@ const openReceiptHarness = (input?: {
   const executor = openAggregateIntegrationReviewExecutor({
     database,
     workspaceRoot,
+    ...(input?.gitExecutable ? { gitExecutable: input.gitExecutable } : {}),
+    ...(input?.workspaceGitTimeoutMs
+      ? { workspaceGitTimeoutMs: input.workspaceGitTimeoutMs }
+      : {}),
     reviewerExecutionAdapter,
     interaction: {
       createSession: () => ({ id: "aggregate-session" }) as never,
@@ -208,11 +323,83 @@ const openReceiptHarness = (input?: {
 };
 
 describe("Aggregate Integration Review executor", () => {
+  it(
+    "cancels hung aggregate workspace preparation without starting or retrying the Reviewer",
+    { skip: process.platform === "win32" },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "aggregate-git-cancel-"));
+      const gitPath = execFileSync("which", ["git"], {
+        encoding: "utf8",
+      }).trim();
+      const checkoutLog = join(root, "checkout.log");
+      const wrapper = join(root, "git-wrapper.sh");
+      writeFileSync(
+        wrapper,
+        `#!/bin/sh
+case " $* " in
+  *" checkout "*)
+    printf checkout >> '${checkoutLog}'
+    trap 'exit 143' TERM INT
+    while :; do sleep 1; done
+    ;;
+esac
+exec '${gitPath}' "$@"
+`,
+        { mode: 0o755 },
+      );
+      const harness = openReceiptHarness({
+        gitExecutable: wrapper,
+        workspaceGitTimeoutMs: 10_000,
+      });
+      const input = aggregateInput({
+        operationKey: "generation-cancel:aggregate-review",
+        generationId: "generation-cancel",
+        projectId: "project-1",
+        runId: "run-1",
+        nodeRunId: "integration-node",
+        topicId: "integration-review:generation-cancel",
+        repositoryCommits: [
+          {
+            repositoryId: harness.repository,
+            commit: harness.integratedCommit,
+          },
+        ],
+        acceptanceCriteria: ["npm test"],
+      });
+
+      const executing = harness.executor.execute(input);
+      for (
+        let attempt = 0;
+        attempt < 100 && !existsSync(checkoutLog);
+        attempt++
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(existsSync(checkoutLog), true);
+      const cancelled = await harness.executor.cancel!(input);
+      const terminal = await executing;
+
+      assert.equal(cancelled.status, "unknown");
+      assert.equal(terminal.status, "unknown");
+      assert.deepEqual(await harness.executor.reconcile(input), {
+        status: "not-applied",
+      });
+      assert.equal(readFileSync(checkoutLog, "utf8"), "checkout");
+      assert.equal(harness.adapterExecutions(), 0);
+      assert.equal(harness.recordMutations(), 0);
+    },
+  );
+
   it("uses the real Reviewer execution seam with an exact read-only multi-Repository bundle", async () => {
     const repository = mkdtempSync(join(tmpdir(), "aggregate-review-repo-"));
     git(repository, ["init", "-q"]);
     git(repository, ["config", "user.email", "runtime@example.test"]);
     git(repository, ["config", "user.name", "Runtime"]);
+    writeFileSync(join(repository, "prior.txt"), "must not be exposed\n");
+    git(repository, ["add", "prior.txt"]);
+    git(repository, ["commit", "-qm", "prior history"]);
+    const priorCommit = git(repository, ["rev-parse", "HEAD"]);
+    git(repository, ["rm", "-q", "prior.txt"]);
     writeFileSync(join(repository, "result.txt"), "reviewed\n");
     git(repository, ["add", "result.txt"]);
     git(repository, ["commit", "-qm", "reviewed"]);
@@ -220,6 +407,7 @@ describe("Aggregate Integration Review executor", () => {
     let recordedManifest: unknown;
     let adapterManifest: unknown;
     let bundledManifest: unknown;
+    let bundledGenerationManifest: unknown;
     let selectedReviewer: string | undefined;
     let adapterExecutions = 0;
     const reviewerExecutionAdapter = createScriptedReviewerExecutionAdapter({
@@ -232,28 +420,51 @@ describe("Aggregate Integration Review executor", () => {
             "utf8",
           ),
         );
+        bundledGenerationManifest = JSON.parse(
+          readFileSync(
+            join(request.workspaceRef, "inputs", "generation-manifest.json"),
+            "utf8",
+          ),
+        );
       },
-      execute: () => ({
-        status: "succeeded",
-        providerId: "scripted-reviewer",
-        isolation: {
-          readOnlyFilesystem: true,
-          independentGitDatabase: true,
-          independentSessionStorage: true,
-          independentCredentialScope: true,
-          independentMutableCache: true,
-          inputAllowlist: true,
-          mechanism: "fixture",
-          mechanismVersion: "1",
-        },
-        isolationEvidence: ["isolation-receipt"],
-        terminalExecutionFactId: "aggregate-terminal-fact",
-        output: {
-          result: "PASS",
-          conditions: [],
-          evidenceRefs: [integratedCommit],
-        },
-      }),
+      execute: (request) => {
+        const manifest = request.manifest as unknown as {
+          readonly integrationGenerationId: string;
+          readonly integrationManifestHash: string;
+          readonly repositoryCommits: readonly {
+            readonly repositoryId: string;
+            readonly commit: string;
+          }[];
+        };
+        return {
+          status: "succeeded",
+          providerId: "scripted-reviewer",
+          isolation: {
+            readOnlyFilesystem: true,
+            independentGitDatabase: true,
+            independentSessionStorage: true,
+            independentCredentialScope: true,
+            independentMutableCache: true,
+            inputAllowlist: true,
+            mechanism: "fixture",
+            mechanismVersion: "1",
+          },
+          isolationEvidence: ["isolation-receipt"],
+          terminalExecutionFactId: "aggregate-terminal-fact",
+          output: {
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: [
+              `integration-generation:${manifest.integrationGenerationId}`,
+              `integration-manifest:${manifest.integrationManifestHash}`,
+              ...manifest.repositoryCommits.map(
+                (entry) =>
+                  `repository-commit:${entry.repositoryId}:${entry.commit}`,
+              ),
+            ],
+          },
+        };
+      },
     });
     const fakeDatabase = {
       exec: () => undefined,
@@ -347,10 +558,9 @@ describe("Aggregate Integration Review executor", () => {
         },
       },
     });
-    const input = {
+    const input = aggregateInput({
       operationKey: "generation-1:aggregate-review",
       generationId: "generation-1",
-      manifestHash: "a".repeat(64),
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node",
@@ -359,7 +569,7 @@ describe("Aggregate Integration Review executor", () => {
         { repositoryId: repository, commit: integratedCommit },
       ],
       acceptanceCriteria: ["npm test"],
-    };
+    });
 
     const result = await executor.execute(input);
 
@@ -372,9 +582,9 @@ describe("Aggregate Integration Review executor", () => {
     assert.deepEqual(bundledManifest, {
       scope: "aggregate",
       topicId: input.topicId,
-      supportingArtifactVersionIds: [],
-      supportingSpecRevisionIds: [],
-      harnessSnapshotIds: [],
+      supportingArtifactVersionIds: ["diff-artifact-1"],
+      supportingSpecRevisionIds: ["spec-revision-1"],
+      harnessSnapshotIds: ["harness-snapshot-1"],
       acceptanceCriteria: ["npm test"],
       excludedContext: [
         "hidden-prompts",
@@ -387,6 +597,7 @@ describe("Aggregate Integration Review executor", () => {
         { repositoryId: repository, commit: integratedCommit },
       ],
     });
+    assert.deepEqual(bundledGenerationManifest, input.generationManifest);
     assert.equal(
       (adapterManifest as { readonly scope: string }).scope,
       "aggregate",
@@ -397,6 +608,13 @@ describe("Aggregate Integration Review executor", () => {
       workspaceRoot,
       createHash("sha256").update(input.operationKey).digest("hex"),
       "repository-1",
+    );
+    assert.equal(git(workspace, ["remote"]), "");
+    assert.equal(git(workspace, ["for-each-ref", "--format=%(refname)"]), "");
+    assert.throws(() =>
+      execFileSync("git", ["-C", workspace, "cat-file", "-e", priorCommit], {
+        stdio: "pipe",
+      }),
     );
     chmodSync(workspace, 0o700);
     chmodSync(join(workspace, "result.txt"), 0o600);
@@ -534,10 +752,9 @@ describe("Aggregate Integration Review executor", () => {
         },
       },
     });
-    const input = {
+    const input = aggregateInput({
       operationKey: "generation-1:aggregate-review",
       generationId: "generation-1",
-      manifestHash: "a".repeat(64),
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node",
@@ -546,7 +763,7 @@ describe("Aggregate Integration Review executor", () => {
         { repositoryId: repository, commit: integratedCommit },
       ],
       acceptanceCriteria: ["npm test"],
-    };
+    });
 
     await executor.execute(input);
     await executor.reconcile(input);
@@ -557,10 +774,9 @@ describe("Aggregate Integration Review executor", () => {
 
   it("rejects a symlinked aggregate manifest input before Reviewer execution", async () => {
     const harness = openReceiptHarness();
-    const input = {
+    const input = aggregateInput({
       operationKey: "generation-symlink:aggregate-review",
       generationId: "generation-symlink",
-      manifestHash: "a".repeat(64),
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node",
@@ -572,7 +788,7 @@ describe("Aggregate Integration Review executor", () => {
         },
       ],
       acceptanceCriteria: ["npm test"],
-    };
+    });
     const bundleRoot = join(
       harness.workspaceRoot,
       createHash("sha256").update(input.operationKey).digest("hex"),
@@ -610,10 +826,9 @@ describe("Aggregate Integration Review executor", () => {
 
   it("replays the exact aggregate record authority and rejects changed input", async () => {
     const harness = openReceiptHarness();
-    const input = {
+    const input = aggregateInput({
       operationKey: "generation-receipt:aggregate-review",
       generationId: "generation-receipt",
-      manifestHash: "a".repeat(64),
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node",
@@ -625,7 +840,7 @@ describe("Aggregate Integration Review executor", () => {
         },
       ],
       acceptanceCriteria: ["npm test"],
-    };
+    });
 
     const first = await harness.executor.execute(input);
     const replay = await harness.executor.execute(input);
@@ -654,12 +869,41 @@ describe("Aggregate Integration Review executor", () => {
     );
   });
 
+  it("rejects fabricated or incomplete PASS evidence before recording aggregate authority", async () => {
+    for (const mode of ["fabricated", "missing-repository"] as const) {
+      const harness = openReceiptHarness(
+        mode === "fabricated"
+          ? { fabricatedEvidence: true }
+          : { omitRepositoryEvidence: true },
+      );
+      const input = aggregateInput({
+        operationKey: `generation-${mode}:aggregate-review`,
+        generationId: `generation-${mode}`,
+        projectId: "project-1",
+        runId: "run-1",
+        nodeRunId: "integration-node",
+        topicId: `integration-review:generation-${mode}`,
+        repositoryCommits: [
+          {
+            repositoryId: harness.repository,
+            commit: harness.integratedCommit,
+          },
+        ],
+        acceptanceCriteria: ["npm test"],
+      });
+
+      const result = await harness.executor.execute(input);
+
+      assert.equal(result.status, "unknown");
+      assert.equal(harness.recordMutations(), 0);
+    }
+  });
+
   it("returns one aggregate authority when concurrent recorders finish together", async () => {
     const harness = openReceiptHarness({ waitForConcurrentExecutions: true });
-    const input = {
+    const input = aggregateInput({
       operationKey: "generation-concurrent:aggregate-review",
       generationId: "generation-concurrent",
-      manifestHash: "b".repeat(64),
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node",
@@ -671,7 +915,7 @@ describe("Aggregate Integration Review executor", () => {
         },
       ],
       acceptanceCriteria: ["npm test"],
-    };
+    });
 
     const leftPromise = harness.executor.execute(input);
     await harness.executionStarted;
