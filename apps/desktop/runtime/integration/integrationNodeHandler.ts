@@ -225,13 +225,16 @@ export const openIntegrationNodeHandler = (options: {
             required.responsibleWorkPackageVersionIds,
           validation: required,
         };
+        const paused =
+          options.integrations.isRunPaused?.(generation.manifest.runId) ??
+          false;
         const stage = options.integrations.claimExecutionStage?.({
           generationId: generation.id,
           operationKey: input.operationKey,
           phase: "validation",
           targetKey: required.id,
           request: input,
-          createIfMissing: generation.state !== "blocked",
+          createIfMissing: generation.state !== "blocked" && !paused,
         });
         if (stage?.mode === "missing") return;
         let result =
@@ -241,6 +244,7 @@ export const openIntegrationNodeHandler = (options: {
               ? await validationExecutor.execute(input)
               : await validationExecutor.reconcile(input);
         if (stage?.mode !== "terminal" && result.status === "not-applied") {
+          if (paused) return;
           result = await validationExecutor.execute(input);
         }
         if (result.status === "not-applied") {
@@ -334,13 +338,15 @@ export const openIntegrationNodeHandler = (options: {
       ].sort(),
       generationManifest: generation.manifest,
     };
+    const paused =
+      options.integrations.isRunPaused?.(generation.manifest.runId) ?? false;
     const stage = options.integrations.claimExecutionStage?.({
       generationId: generation.id,
       operationKey: input.operationKey,
       phase: "aggregate-review",
       targetKey: "aggregate-review",
       request: input,
-      createIfMissing: generation.state !== "blocked",
+      createIfMissing: generation.state !== "blocked" && !paused,
     });
     if (stage?.mode === "missing") return;
     let result =
@@ -350,6 +356,7 @@ export const openIntegrationNodeHandler = (options: {
           ? await aggregateReviewExecutor.execute(input)
           : await aggregateReviewExecutor.reconcile(input);
     if (stage?.mode !== "terminal" && result.status === "not-applied") {
+      if (paused) return;
       result = await aggregateReviewExecutor.execute(input);
     }
     if (result.status === "not-applied") {
