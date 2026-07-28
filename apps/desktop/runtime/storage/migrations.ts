@@ -4419,16 +4419,25 @@ const migrations: readonly CompanyMigration[] = [
         "integration_generations",
         "integration_repository_results",
         "integration_operations",
+        "integration_validation_records",
         "integration_defects",
         "integration_aggregate_reviews",
         "integration_generations_run_idx",
         "integration_operations_state_idx",
+        "integration_validation_records_generation_idx",
         "integration_defects_generation_idx",
         "integration_generations_identity_update",
         "integration_generations_immutable_delete",
         "integration_operations_identity_update",
         "integration_operations_succeeded_update",
         "integration_operations_immutable_delete",
+        "integration_repository_results_identity_update",
+        "integration_repository_results_terminal_update",
+        "integration_repository_results_immutable_delete",
+        "integration_validation_records_immutable_update",
+        "integration_validation_records_immutable_delete",
+        "integration_defects_evidence_update",
+        "integration_defects_immutable_delete",
         "integration_aggregate_reviews_immutable_update",
         "integration_aggregate_reviews_immutable_delete",
       ] as const;
@@ -4555,6 +4564,21 @@ const migrations: readonly CompanyMigration[] = [
           closed_at TEXT
         ) STRICT;
 
+        CREATE TABLE integration_validation_records (
+          id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+          repository_result_id TEXT NOT NULL REFERENCES integration_repository_results(id),
+          validation_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('build-test', 'contract')),
+          status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+          evidence_json TEXT NOT NULL,
+          responsibility_json TEXT NOT NULL,
+          contract_failure_json TEXT,
+          record_hash TEXT NOT NULL CHECK (length(record_hash) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE (generation_id, validation_id)
+        ) STRICT;
+
         CREATE TABLE integration_aggregate_reviews (
           id TEXT PRIMARY KEY,
           generation_id TEXT NOT NULL UNIQUE REFERENCES integration_generations(id),
@@ -4574,6 +4598,8 @@ const migrations: readonly CompanyMigration[] = [
           ON integration_generations(run_id, generation, created_at);
         CREATE INDEX integration_operations_state_idx
           ON integration_operations(state, updated_at, id);
+        CREATE INDEX integration_validation_records_generation_idx
+          ON integration_validation_records(generation_id, repository_result_id, validation_id);
         CREATE INDEX integration_defects_generation_idx
           ON integration_defects(generation_id, status, created_at, id);
 
@@ -4639,6 +4665,64 @@ const migrations: readonly CompanyMigration[] = [
         BEFORE DELETE ON integration_operations
         BEGIN
           SELECT RAISE(ABORT, 'Integration operation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_repository_results_identity_update
+        BEFORE UPDATE ON integration_repository_results
+        WHEN NEW.id <> OLD.id
+          OR NEW.generation_id <> OLD.generation_id
+          OR NEW.repository_reference <> OLD.repository_reference
+          OR NEW.base_commit <> OLD.base_commit
+          OR NEW.integration_branch <> OLD.integration_branch
+          OR NEW.created_at <> OLD.created_at
+          OR (OLD.integrated_commit IS NOT NULL AND NEW.integrated_commit IS NOT OLD.integrated_commit)
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration Repository result identity is immutable');
+        END;
+        CREATE TRIGGER integration_repository_results_terminal_update
+        BEFORE UPDATE ON integration_repository_results
+        WHEN OLD.state IN ('succeeded', 'failed', 'blocked') AND (
+          NEW.state IS NOT OLD.state
+          OR NEW.expected_tip IS NOT OLD.expected_tip
+          OR NEW.integrated_commit IS NOT OLD.integrated_commit
+          OR NEW.validation_json IS NOT OLD.validation_json
+          OR NEW.failure_code IS NOT OLD.failure_code
+          OR NEW.failure_message IS NOT OLD.failure_message
+          OR NEW.updated_at IS NOT OLD.updated_at
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Terminal Integration Repository result is immutable');
+        END;
+        CREATE TRIGGER integration_repository_results_immutable_delete
+        BEFORE DELETE ON integration_repository_results
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration Repository result evidence is immutable');
+        END;
+        CREATE TRIGGER integration_validation_records_immutable_update
+        BEFORE UPDATE ON integration_validation_records
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration validation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_validation_records_immutable_delete
+        BEFORE DELETE ON integration_validation_records
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration validation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_defects_evidence_update
+        BEFORE UPDATE ON integration_defects
+        WHEN NEW.id <> OLD.id
+          OR NEW.generation_id <> OLD.generation_id
+          OR NEW.integration_operation_id IS NOT OLD.integration_operation_id
+          OR NEW.kind <> OLD.kind
+          OR NEW.responsibility_json <> OLD.responsibility_json
+          OR NEW.evidence_json <> OLD.evidence_json
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration defect evidence is immutable');
+        END;
+        CREATE TRIGGER integration_defects_immutable_delete
+        BEFORE DELETE ON integration_defects
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration defect evidence is immutable');
         END;
         CREATE TRIGGER integration_aggregate_reviews_immutable_update
         BEFORE UPDATE ON integration_aggregate_reviews

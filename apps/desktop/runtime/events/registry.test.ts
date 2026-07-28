@@ -95,6 +95,7 @@ const agUiRegistryFixture = [
   "code-review.defect.closed@1:custom",
   "integration.generation.started@1:custom",
   "integration.generation.validating@1:custom",
+  "integration.validation.recorded@1:custom",
   "integration.generation.aggregate-review@1:custom",
   "integration.generation.blocked@1:custom",
   "integration.generation.failed@1:custom",

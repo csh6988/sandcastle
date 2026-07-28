@@ -330,6 +330,12 @@ export interface PipelineRuntime {
       readonly message: string;
     };
   }) => void;
+  readonly failIntegrationInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly generationId: string;
+    readonly failure: { readonly code: string; readonly message: string };
+  }) => void;
   readonly completeIntegrationInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -7171,6 +7177,68 @@ export const openPipelineRuntime = (
       });
     };
 
+  const failIntegrationInTransaction: PipelineRuntime["failIntegrationInTransaction"] =
+    (input) => {
+      const now = clock().toISOString();
+      const node = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'failed', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'
+              AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'failed', recoverable = 0, failure_code = ?,
+                  failure_message = ?, completed_at = ?
+            WHERE id = (
+              SELECT id FROM node_attempts WHERE node_run_id = ?
+                AND status IN ('running', 'reconciling')
+              ORDER BY attempt_number DESC LIMIT 1
+            )`,
+        )
+        .run(input.failure.code, input.failure.message, now, input.nodeRunId);
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'failed', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      if (node.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_FAIL_STATE_INVALID",
+          `Integration Node Run ${input.nodeRunId} cannot fail from its current state.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "node.integration-failed",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.failed",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: {
+          status: "failed",
+          runStatus: "failed",
+          generationId: input.generationId,
+          failure: input.failure,
+        },
+        createdAt: now,
+      });
+    };
+
   const releaseWorkPackageSuccessorsInTransaction: PipelineRuntime["releaseWorkPackageSuccessorsInTransaction"] =
     (input) => {
       const assignment = database
@@ -9813,6 +9881,7 @@ export const openPipelineRuntime = (
     completeCodeReviewInTransaction,
     startIntegrationInTransaction,
     blockIntegrationInTransaction,
+    failIntegrationInTransaction,
     completeIntegrationInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,

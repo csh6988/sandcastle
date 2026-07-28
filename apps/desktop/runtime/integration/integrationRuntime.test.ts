@@ -102,7 +102,7 @@ const setup = (
       };
     };
     readonly failureInjection?: (
-      point: "after-intent" | "after-effect",
+      point: "after-intent" | "after-effect" | "during-failure-finalization",
       operationId: string,
     ) => void;
   } = {},
@@ -139,6 +139,7 @@ const setup = (
     pipelineRuntime: {
       startIntegrationInTransaction: (input) => pipelineCalls.push(input),
       blockIntegrationInTransaction: (input) => pipelineCalls.push(input),
+      failIntegrationInTransaction: (input) => pipelineCalls.push(input),
       completeIntegrationInTransaction: (input) => pipelineCalls.push(input),
     },
     gitAdapter,
@@ -176,10 +177,13 @@ const validateAll = (
   runtime: ReturnType<typeof openIntegrationRuntime>,
   generationId: string,
 ) => {
-  for (const [index, repositoryReference] of [
-    "/repositories/api",
-    "/repositories/web",
-  ].entries()) {
+  const view = runtime
+    .inspect("run-1")
+    .find((entry) => entry.id === generationId)!;
+  for (const [
+    index,
+    validation,
+  ] of view.manifest.requiredValidations.entries()) {
     database.exec("BEGIN IMMEDIATE");
     runtime.dispatchInTransaction({
       commandId: `${generationId}:validate:${index}`,
@@ -187,9 +191,10 @@ const validateAll = (
       command: {
         type: "integration.validation.record",
         generationId,
-        repositoryReference,
+        validationId: validation.id,
+        repositoryReference: validation.repositoryReference,
         status: "passed",
-        kind: "build-test",
+        kind: validation.kind,
         evidenceRefs: [`validation-${index}`],
         responsibleWorkPackageVersionIds: [],
       },
@@ -264,6 +269,10 @@ describe("Integration Runtime generation manifest", () => {
       ["package-api-v1", "package-web-v1"],
     );
     assert.match(view.manifestHash, /^[a-f0-9]{64}$/);
+    assert.deepEqual(
+      view.manifest.requiredValidations.map((validation) => validation.kind),
+      ["build-test", "contract", "build-test"],
+    );
     assert.equal(view.state, "pending");
   });
 
@@ -338,6 +347,10 @@ describe("Integration Runtime generation manifest", () => {
       command: {
         type: "integration.validation.record",
         generationId: "generation-execution",
+        validationId: integrated.manifest.requiredValidations.find(
+          (validation) =>
+            validation.repositoryReference === "/repositories/api",
+        )!.id,
         repositoryReference: "/repositories/api",
         status: "passed",
         kind: "build-test",
@@ -349,12 +362,37 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(firstValidation.state, "validating");
 
     database.exec("BEGIN IMMEDIATE");
-    const fullyValidated = runtime.dispatchInTransaction({
+    const secondValidation = runtime.dispatchInTransaction({
       commandId: "validate-web",
       actor: runtimeActor,
       command: {
         type: "integration.validation.record",
         generationId: "generation-execution",
+        validationId: integrated.manifest.requiredValidations.find(
+          (validation) =>
+            validation.repositoryReference === "/repositories/web" &&
+            validation.kind === "build-test",
+        )!.id,
+        repositoryReference: "/repositories/web",
+        status: "passed",
+        kind: "build-test",
+        evidenceRefs: ["contract-fixture", "runtime-evidence"],
+        responsibleWorkPackageVersionIds: [],
+      },
+    });
+    database.exec("COMMIT");
+    assert.equal(secondValidation.state, "validating");
+
+    database.exec("BEGIN IMMEDIATE");
+    const fullyValidated = runtime.dispatchInTransaction({
+      commandId: "validate-contract",
+      actor: runtimeActor,
+      command: {
+        type: "integration.validation.record",
+        generationId: "generation-execution",
+        validationId: integrated.manifest.requiredValidations.find(
+          (validation) => validation.kind === "contract",
+        )!.id,
         repositoryReference: "/repositories/web",
         status: "passed",
         kind: "contract",
@@ -364,11 +402,20 @@ describe("Integration Runtime generation manifest", () => {
     });
     database.exec("COMMIT");
     assert.equal(fullyValidated.state, "aggregate-review");
+    assert.equal(
+      fullyValidated.repositoryResults.find(
+        (repository) => repository.repositoryReference === "/repositories/web",
+      )?.validationRecords.length,
+      2,
+    );
     assert.deepEqual(
       eventCalls.filter((event) => event.type.startsWith("integration.")),
       [
         { type: "integration.generation.started" },
         { type: "integration.generation.validating" },
+        { type: "integration.validation.recorded" },
+        { type: "integration.validation.recorded" },
+        { type: "integration.validation.recorded" },
         { type: "integration.generation.aggregate-review" },
       ],
     );
@@ -481,6 +528,102 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(runtime.reconcilePending(), 1);
     assert.equal(runtime.inspect("run-1")[0]?.state, "validating");
     assert.equal(executeCount, 2);
+  });
+
+  it("reconciles a frozen started request after mutable Code Review coverage is superseded", () => {
+    let currentCoverage = coverage({ packages: [coverage().packages[0]!] });
+    let applied: GitIntegrationRequest | undefined;
+    let crash = true;
+    const adapter: GitIntegrationAdapter = {
+      execute: (input) => {
+        applied = input;
+        return {
+          status: "succeeded",
+          beforeTip: input.expectedTip,
+          afterTip: input.sourceCommit,
+          resultingCommit: input.sourceCommit,
+          receipt: { operationId: input.operationId },
+        };
+      },
+      reconcile: (input) =>
+        applied
+          ? {
+              status: "succeeded",
+              beforeTip: input.expectedTip,
+              afterTip: input.sourceCommit,
+              resultingCommit: input.sourceCommit,
+              receipt: { operationId: input.operationId },
+            }
+          : { status: "not-applied" },
+    };
+    const { database, runtime } = setup(currentCoverage, {
+      gitAdapter: adapter,
+      readCoverage: () => currentCoverage,
+      failureInjection: (point) => {
+        if (point === "after-effect" && crash) {
+          crash = false;
+          throw new Error("crash after effect");
+        }
+      },
+    });
+    start(database, runtime, "generation-superseded-reconcile");
+    assert.throws(
+      () => runtime.executePending("generation-superseded-reconcile"),
+      /crash after effect/,
+    );
+    currentCoverage = coverage({
+      coverageId: "review-attempt-2",
+      coverageHash: hash("9"),
+      packages: [coverage().packages[0]!],
+    });
+
+    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(runtime.inspect("run-1")[0]?.state, "validating");
+  });
+
+  it("rolls back the complete failure finalization UoW and recovers it on restart", () => {
+    let crash = true;
+    const adapter: GitIntegrationAdapter = {
+      execute: () => ({
+        status: "conflict",
+        code: "INTEGRATION_GIT_CONFLICT",
+        message: "conflict",
+        evidence: { conflictFiles: ["api.ts"] },
+      }),
+      reconcile: () => ({
+        status: "conflict",
+        code: "INTEGRATION_CONFLICT",
+        message: "conflict",
+        evidence: { conflictFiles: ["api.ts"] },
+      }),
+    };
+    const { database, runtime } = setup(
+      coverage({ packages: [coverage().packages[0]!] }),
+      {
+        gitAdapter: adapter,
+        failureInjection: (point) => {
+          if (point === "during-failure-finalization" && crash) {
+            crash = false;
+            throw new Error("crash during failure finalization");
+          }
+        },
+      },
+    );
+    start(database, runtime, "generation-failure-uow");
+    assert.throws(
+      () => runtime.executePending("generation-failure-uow"),
+      /crash during failure finalization/,
+    );
+    const preRestart = runtime.inspect("run-1")[0]!;
+    assert.equal(preRestart.state, "running");
+    assert.equal(preRestart.operations[0]?.state, "running");
+    assert.deepEqual(preRestart.defects, []);
+
+    assert.equal(runtime.reconcilePending(), 1);
+    const recovered = runtime.inspect("run-1")[0]!;
+    assert.equal(recovered.state, "failed");
+    assert.equal(recovered.operations[0]?.state, "failed");
+    assert.equal(recovered.defects.length, 1);
   });
 
   it("replays an identical generation manifest and rejects changed coverage for the same identity", () => {
@@ -601,6 +744,11 @@ describe("Integration Runtime generation manifest", () => {
       command: {
         type: "integration.validation.record",
         generationId: "generation-contract-failure",
+        validationId: runtime
+          .inspect("run-1")[0]!
+          .manifest.requiredValidations.find(
+            (validation) => validation.kind === "contract",
+          )!.id,
         repositoryReference: "/repositories/web",
         status: "failed",
         kind: "contract",
@@ -628,6 +776,47 @@ describe("Integration Runtime generation manifest", () => {
       ).workPackageVersionIds,
       ["package-api-v1", "package-web-v1"],
     );
+  });
+
+  it("rejects contract failure evidence on passed or build-test validation records", () => {
+    const { database, runtime } = setup();
+    start(database, runtime, "generation-invalid-contract-evidence");
+    const integrated = runtime.executePending(
+      "generation-invalid-contract-evidence",
+    );
+    const buildValidation = integrated.manifest.requiredValidations.find(
+      (validation) => validation.kind === "build-test",
+    )!;
+    database.exec("BEGIN IMMEDIATE");
+    assert.throws(
+      () =>
+        runtime.dispatchInTransaction({
+          commandId: "invalid-contract-evidence",
+          actor: runtimeActor,
+          command: {
+            type: "integration.validation.record",
+            generationId: integrated.id,
+            validationId: buildValidation.id,
+            repositoryReference: buildValidation.repositoryReference,
+            status: "passed",
+            kind: "build-test",
+            evidenceRefs: ["evidence"],
+            responsibleWorkPackageVersionIds: [],
+            contractFailure: {
+              producerApplicationId: "application-api",
+              consumerApplicationId: "application-web",
+              contractId: "contract-api",
+              contractVersion: "1",
+              fixtureRef: "fixture",
+              runtimeEvidenceRef: "runtime",
+            },
+          },
+        }),
+      (error: unknown) =>
+        error instanceof IntegrationRuntimeError &&
+        error.code === "INTEGRATION_CONTRACT_EVIDENCE_INVALID",
+    );
+    database.exec("ROLLBACK");
   });
 
   it("binds aggregate independent PASS to exact integrated commits and creates downstream authority", () => {
@@ -680,6 +869,7 @@ describe("Integration Runtime generation manifest", () => {
       passed.aggregateReview?.qualityGateResultId,
       "aggregate-gate-pass",
     );
+    assert.deepEqual(passed.aggregateReview?.input, manifest);
     assert.equal(
       pipelineCalls.some(
         (call) =>

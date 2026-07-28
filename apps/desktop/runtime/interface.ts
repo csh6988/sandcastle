@@ -863,6 +863,27 @@ const IntegrationCoveragePackageSchema = z
         .strict(),
     ),
     integrationConditions: z.array(z.string().trim().min(1)),
+    requiredValidations: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          repositoryReference: z.string().trim().min(1),
+          kind: z.enum(["build-test", "contract"]),
+          identityHash: Sha256Schema,
+          condition: z.string().trim().min(1).optional(),
+          contract: z
+            .object({
+              id: z.string().trim().min(1),
+              version: z.string().trim().min(1),
+              hash: Sha256Schema,
+              producerApplicationId: z.string().trim().min(1),
+              consumerApplicationId: z.string().trim().min(1),
+            })
+            .strict()
+            .optional(),
+        })
+        .strict(),
+    ),
   })
   .strict();
 
@@ -937,6 +958,21 @@ export const IntegrationGenerationViewSchema = z
             .string()
             .regex(/^[a-f0-9]{40}$/)
             .nullable(),
+          validationRecords: z.array(
+            z
+              .object({
+                validationId: z.string().trim().min(1),
+                kind: z.enum(["build-test", "contract"]),
+                status: z.enum(["passed", "failed"]),
+                recordHash: Sha256Schema,
+                evidenceRefs: z.array(z.string().trim().min(1)),
+                responsibleWorkPackageVersionIds: z.array(
+                  z.string().trim().min(1),
+                ),
+                contractFailure: z.unknown().nullable(),
+              })
+              .strict(),
+          ),
         })
         .strict(),
     ),
@@ -1001,6 +1037,7 @@ export const IntegrationGenerationViewSchema = z
         id: z.string().trim().min(1),
         topicId: z.string().trim().min(1),
         qualityGateResultId: z.string().trim().min(1),
+        input: z.unknown(),
         inputHash: Sha256Schema,
         result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
         evidence: z.array(z.string().trim().min(1)),
@@ -3791,6 +3828,7 @@ export const IntegrationValidationRecordEnvelopeCommandSchema = z
   .object({
     type: z.literal("integration.validation.record"),
     generationId: z.string().trim().min(1),
+    validationId: z.string().trim().min(1),
     repositoryReference: z.string().trim().min(1),
     status: z.enum(["passed", "failed"]),
     kind: z.enum(["build-test", "contract"]),
