@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 12;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 13;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -226,6 +226,14 @@ const workPackageEventPayloadSchema = z
       "blocked",
       "failed",
     ]),
+  })
+  .passthrough();
+
+const codeReviewEventPayloadSchema = z
+  .object({
+    codeReviewId: z.string().trim().min(1),
+    workPackageId: z.string().trim().min(1),
+    workPackageVersionId: z.string().trim().min(1),
   })
   .passthrough();
 
@@ -986,6 +994,32 @@ const definitions = [
           "workPackageVersionId",
         ],
         payloadSchema: workPackageEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  ...[
+    "code-review.planned",
+    "code-review.workspace.ready",
+    "code-review.workspace.blocked",
+    "code-review.workspace.unknown",
+    "code-review.authority.created",
+    "code-review.defect.created",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "topicId",
+          "workPackageId",
+          "workPackageVersionId",
+        ],
+        payloadSchema: codeReviewEventPayloadSchema,
         retentionClass: "durable",
         agUiMapping: "custom",
         acpMapping: "custom",

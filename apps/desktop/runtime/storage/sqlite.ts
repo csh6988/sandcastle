@@ -103,6 +103,11 @@ import {
   openWorkPackageRuntime,
   type WorkPackageRuntime,
 } from "../workspaces/workPackages.js";
+import {
+  openCodeReviewRuntime,
+  type CodeReviewRuntime,
+  type ReviewerWorkspaceAdapter,
+} from "../review/codeReviewRuntime.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -126,6 +131,7 @@ export interface CompanyDatabase {
   readonly workspaces: WorkspaceRuntime;
   readonly supervision: RuntimeSupervision;
   readonly workPackages: WorkPackageRuntime;
+  readonly codeReviews: CodeReviewRuntime;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -232,6 +238,9 @@ export const openCompanyDatabase = (
     };
     readonly reviewRuntime?: {
       readonly mutationFailure?: (point: ReviewMutationFailurePoint) => void;
+    };
+    readonly codeReviewRuntime?: {
+      readonly reviewerWorkspaceAdapter?: ReviewerWorkspaceAdapter;
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -379,6 +388,20 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const codeReviews = openCodeReviewRuntime(database, {
+    events,
+    reviewRuntime: review,
+    workPackages,
+    pipelineRuntime,
+    artifacts: artifactRegistry,
+    ...(options.codeReviewRuntime?.reviewerWorkspaceAdapter
+      ? {
+          reviewerWorkspaceAdapter:
+            options.codeReviewRuntime.reviewerWorkspaceAdapter,
+        }
+      : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -405,9 +428,11 @@ export const openCompanyDatabase = (
     memory,
     options.memoryRuntime?.commandFailure,
     workPackages,
+    codeReviews,
   );
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
+  codeReviews.reconcilePendingReviewerWorkspaces();
 
   return {
     path,
@@ -431,6 +456,7 @@ export const openCompanyDatabase = (
     workspaces,
     supervision,
     workPackages,
+    codeReviews,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

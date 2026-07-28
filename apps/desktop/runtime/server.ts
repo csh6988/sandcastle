@@ -359,6 +359,12 @@ export const startCompanyRuntimeServer = async (
                   if (allocation?.state === "planned") {
                     database.workspaces.executeProvision(allocation.id);
                   }
+                } else if (
+                  request.envelope.command.type === "code-review.start"
+                ) {
+                  database.codeReviews.reconcileReviewerWorkspace(
+                    request.envelope.command.codeReviewId,
+                  );
                 }
               }
               sendResponse(socket, {
@@ -399,6 +405,8 @@ export const startCompanyRuntimeServer = async (
                     return database.review.inspect(query.topicId);
                   case "review.topics.list":
                     return database.review.list(query);
+                  case "code-reviews.inspect":
+                    return database.codeReviews.inspect(query.runId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -475,6 +483,8 @@ export const startCompanyRuntimeServer = async (
                   return database.review.inspect(request.query.topicId);
                 case "review.topics.list":
                   return database.review.list(request.query);
+                case "code-reviews.inspect":
+                  return database.codeReviews.inspect(request.query.runId);
                 case "departments.list":
                   return database.catalog.departments();
                 case "department.inspect":

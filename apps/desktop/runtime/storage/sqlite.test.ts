@@ -453,6 +453,10 @@ describe("Company database migrations", () => {
               name: "reviewed_memory_candidates_entries_and_snapshot_selections",
             },
             { version: 42, name: "work_package_execution" },
+            {
+              version: 43,
+              name: "independent_code_review_authority",
+            },
           ],
         );
         assert.deepEqual(
@@ -1815,6 +1819,114 @@ describe("Company database migrations", () => {
     assert.throws(
       () => openCompanyDatabase(companyDir),
       /Existing Work Package schema is incompatible:.*workspace_allocations/,
+    );
+  });
+
+  it("adopts a complete compatible Code Review schema when replaying migration 43", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const previous = new DatabaseSync(databasePath);
+    previous.exec(`
+      DELETE FROM schema_migrations WHERE version = 43;
+      UPDATE schema_metadata SET value = '42' WHERE key = 'schema_version';
+      PRAGMA user_version = 42;
+    `);
+    previous.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(databasePath);
+      try {
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT 1 FROM schema_migrations WHERE version = 43 AND name = 'independent_code_review_authority'",
+            )
+            .get() !== undefined,
+          true,
+        );
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'code_review_authorities'",
+            )
+            .get() !== undefined,
+          true,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("transactionally rejects a partial Code Review schema", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const partial = new DatabaseSync(databasePath);
+    partial.exec(`
+      DROP TRIGGER code_review_authorities_immutable_delete;
+      DELETE FROM schema_migrations WHERE version = 43;
+      UPDATE schema_metadata SET value = '42' WHERE key = 'schema_version';
+      PRAGMA user_version = 42;
+    `);
+    partial.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Code Review schema is incompatible: code_review_authorities_immutable_delete/,
+    );
+    const inspected = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get() as { readonly value: string }
+        ).value,
+        "42",
+      );
+      assert.equal(
+        inspected
+          .prepare("SELECT 1 FROM schema_migrations WHERE version = 43")
+          .get(),
+        undefined,
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("rejects a same-name Code Review index with incompatible SQL", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const databasePath = initialized.path;
+    initialized.close();
+
+    const incompatible = new DatabaseSync(databasePath);
+    incompatible.exec(`
+      DROP INDEX code_review_defects_package_idx;
+      CREATE INDEX code_review_defects_package_idx
+        ON code_review_defects(status);
+      DELETE FROM schema_migrations WHERE version = 43;
+      UPDATE schema_metadata SET value = '42' WHERE key = 'schema_version';
+      PRAGMA user_version = 42;
+    `);
+    incompatible.close();
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing Code Review schema is incompatible: code_review_defects_package_idx/,
     );
   });
 

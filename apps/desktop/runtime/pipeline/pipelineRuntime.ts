@@ -258,6 +258,14 @@ export interface PipelineRuntime {
       readonly message: string;
     };
   }) => void;
+  readonly blockCodeReviewInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly failure: {
+      readonly code: string;
+      readonly message: string;
+    };
+  }) => void;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -6554,6 +6562,85 @@ export const openPipelineRuntime = (
       });
     };
 
+  const blockCodeReviewInTransaction: PipelineRuntime["blockCodeReviewInTransaction"] =
+    (input) => {
+      const current = database
+        .prepare(
+          `SELECT node_runs.status AS nodeStatus,
+                  node_runs.handler_kind_id AS handlerKindId,
+                  department_runs.status AS runStatus,
+                  department_runs.revision AS runRevision
+             FROM node_runs
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.nodeRunId, input.runId) as
+        | {
+            readonly nodeStatus: string;
+            readonly handlerKindId: string;
+            readonly runStatus: string;
+            readonly runRevision: number;
+          }
+        | undefined;
+      if (!current || current.handlerKindId !== "code-review@1") {
+        throw new PipelineRuntimeError(
+          "CODE_REVIEW_NODE_NOT_FOUND",
+          `Code Review Node Run ${input.nodeRunId} was not found in Department Run ${input.runId}.`,
+        );
+      }
+      const now = clock().toISOString();
+      const blockedNode = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'blocked', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ?
+              AND handler_kind_id = 'code-review@1'
+              AND status IN ('queued', 'ready', 'blocked')`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      const blockedRun = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'blocked', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      if (blockedNode.changes !== 1 || blockedRun.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "CODE_REVIEW_BLOCK_STATE_INVALID",
+          `Code Review isolation failure cannot block Node Run ${input.nodeRunId} from ${current.nodeStatus} or Department Run ${input.runId} from ${current.runStatus}.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "run.code-review-blocked",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.blocked",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: {
+          status: current.runStatus,
+          revision: current.runRevision,
+          nodeStatus: current.nodeStatus,
+        },
+        after: {
+          status: "blocked",
+          revision: current.runRevision + 1,
+          nodeStatus: "blocked",
+          reason: "code-review-isolation",
+          failure: input.failure,
+        },
+        createdAt: now,
+      });
+    };
+
   const releaseWorkPackageSuccessorsInTransaction: PipelineRuntime["releaseWorkPackageSuccessorsInTransaction"] =
     (input) => {
       const assignment = database
@@ -9156,6 +9243,7 @@ export const openPipelineRuntime = (
     claimReadyAttempt,
     prepareWorkPackageAttemptInTransaction,
     blockWorkPackageAttemptInTransaction,
+    blockCodeReviewInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,

@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 42;
+export const CURRENT_SCHEMA_VERSION = 43;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4101,6 +4101,130 @@ const migrations: readonly CompanyMigration[] = [
           SELECT RAISE(ABORT, 'Work Package self-check evidence is immutable');
         END;
       `);
+    },
+  },
+  {
+    version: 43,
+    name: "independent_code_review_authority",
+    migrate: (database) => {
+      const schemaSql = {
+        code_review_manifests: `CREATE TABLE code_review_manifests (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          run_id TEXT NOT NULL REFERENCES department_runs(id),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          work_package_id TEXT NOT NULL REFERENCES work_packages(id),
+          work_package_version_id TEXT NOT NULL REFERENCES work_package_versions(id),
+          assignment_id TEXT NOT NULL REFERENCES work_package_assignments(id),
+          node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+          workspace_import_id TEXT NOT NULL REFERENCES workspace_imports(id),
+          diff_artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(id),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT`,
+        reviewer_workspace_intents: `CREATE TABLE reviewer_workspace_intents (
+          id TEXT PRIMARY KEY,
+          code_review_manifest_id TEXT NOT NULL UNIQUE REFERENCES code_review_manifests(id),
+          operation_key TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (state IN ('intent', 'ready', 'blocked', 'unknown')),
+          reviewer_ai_member_id TEXT NOT NULL REFERENCES ai_members(id),
+          reviewer_position_id TEXT NOT NULL REFERENCES positions(id),
+          reviewer_session_id TEXT NOT NULL UNIQUE REFERENCES interaction_sessions(id),
+          review_node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+          provider_id TEXT,
+          workspace_ref TEXT,
+          capability_snapshot_json TEXT,
+          capability_snapshot_hash TEXT,
+          independence_evidence_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        ) STRICT`,
+        code_review_defects: `CREATE TABLE code_review_defects (
+          id TEXT PRIMARY KEY,
+          code_review_manifest_id TEXT NOT NULL REFERENCES code_review_manifests(id),
+          quality_gate_result_id TEXT NOT NULL REFERENCES quality_gate_results(id),
+          work_package_id TEXT NOT NULL REFERENCES work_packages(id),
+          result TEXT NOT NULL CHECK (result IN ('CONDITIONAL_PASS', 'FAIL')),
+          finding_ids_json TEXT NOT NULL,
+          obligation_json TEXT NOT NULL,
+          rework_work_package_version_id TEXT,
+          status TEXT NOT NULL CHECK (status IN ('open', 'rework-created', 'closed')),
+          created_at TEXT NOT NULL
+        ) STRICT`,
+        code_review_authorities: `CREATE TABLE code_review_authorities (
+          id TEXT PRIMARY KEY,
+          code_review_manifest_id TEXT NOT NULL UNIQUE REFERENCES code_review_manifests(id),
+          quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          run_id TEXT NOT NULL REFERENCES department_runs(id),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          work_package_id TEXT NOT NULL REFERENCES work_packages(id),
+          work_package_version_id TEXT NOT NULL REFERENCES work_package_versions(id),
+          assignment_id TEXT NOT NULL REFERENCES work_package_assignments(id),
+          node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+          repository_reference TEXT NOT NULL,
+          base_commit TEXT NOT NULL CHECK (length(base_commit) = 40),
+          source_commit TEXT NOT NULL CHECK (length(source_commit) = 40),
+          workspace_import_id TEXT NOT NULL REFERENCES workspace_imports(id),
+          diff_artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(id),
+          diff_hash TEXT NOT NULL CHECK (length(diff_hash) = 64),
+          self_check_id TEXT NOT NULL REFERENCES work_package_self_checks(id),
+          self_check_hash TEXT NOT NULL CHECK (length(self_check_hash) = 64),
+          topic_id TEXT NOT NULL REFERENCES review_topics(id),
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          reviewer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          independence_evidence_hash TEXT NOT NULL CHECK (length(independence_evidence_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT`,
+        code_review_manifests_package_idx:
+          "CREATE INDEX code_review_manifests_package_idx ON code_review_manifests(work_package_id, created_at, id)",
+        code_review_defects_package_idx:
+          "CREATE INDEX code_review_defects_package_idx ON code_review_defects(work_package_id, status, created_at, id)",
+        code_review_manifests_immutable_update:
+          "CREATE TRIGGER code_review_manifests_immutable_update BEFORE UPDATE ON code_review_manifests BEGIN SELECT RAISE(ABORT, 'Code Review manifest is immutable'); END",
+        code_review_manifests_immutable_delete:
+          "CREATE TRIGGER code_review_manifests_immutable_delete BEFORE DELETE ON code_review_manifests BEGIN SELECT RAISE(ABORT, 'Code Review manifest is immutable'); END",
+        code_review_authorities_immutable_update:
+          "CREATE TRIGGER code_review_authorities_immutable_update BEFORE UPDATE ON code_review_authorities BEGIN SELECT RAISE(ABORT, 'Code Review authority is immutable'); END",
+        code_review_authorities_immutable_delete:
+          "CREATE TRIGGER code_review_authorities_immutable_delete BEFORE DELETE ON code_review_authorities BEGIN SELECT RAISE(ABORT, 'Code Review authority is immutable'); END",
+      } as const;
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const existingObjects = database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE name LIKE 'code_review%'
+              OR name LIKE 'reviewer_workspace%'`,
+        )
+        .all() as Array<{ readonly name: string }>;
+      if (existingObjects.length > 0) {
+        const incompatible = Object.entries(schemaSql)
+          .filter(([name, expected]) => {
+            const row = database
+              .prepare("SELECT sql FROM sqlite_schema WHERE name = ?")
+              .get(name) as { readonly sql: string | null } | undefined;
+            return (
+              !row?.sql || normalizeSql(row.sql) !== normalizeSql(expected)
+            );
+          })
+          .map(([name]) => name);
+        if (incompatible.length > 0) {
+          throw new Error(
+            `Existing Code Review schema is incompatible: ${incompatible.join(", ")}`,
+          );
+        }
+        return;
+      }
+      database.exec(`${Object.values(schemaSql).join(";\n")};`);
     },
   },
 ];

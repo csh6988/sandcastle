@@ -18,6 +18,7 @@ import {
   PositionDrawerEditor,
   ProjectDetailView,
   ProjectDetailWorkPackages,
+  CodeReviewAuthorityPanel,
   CompanyInteractionPage,
   InteractionRunPanel,
   RUN_PROGRESS_POLL_INTERVAL_MS,
@@ -37,6 +38,7 @@ import {
   projectCreationInputInvalid,
   startProjectDepartmentRun,
   inspectProjectRunWorkPackages,
+  inspectProjectRunCodeReviews,
   confirmProjectProductBaseline,
   recoveryOverrideInputProvided,
 } from "./companyPages.js";
@@ -47,6 +49,7 @@ import type {
   ProductReviewStateView,
   TechnicalReviewStateView,
   ReviewTopicView,
+  CodeReviewView,
 } from "../runtime/interface.js";
 import type {
   AgentCatalogView,
@@ -1810,6 +1813,95 @@ describe("Project detail", () => {
       renderToStaticMarkup(<ProjectDetailWorkPackages active graph={failed} />),
       "",
     );
+  });
+
+  it("rebuilds Code Review authority from the selected Run Query View", async () => {
+    const codeReview: CodeReviewView = {
+      id: "code-review-1",
+      topicId: "code-review-topic-1",
+      manifest: {
+        schemaVersion: 1,
+        projectId: "project-1",
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        workPackageId: "work-package-1",
+        workPackageVersionId: "work-package-version-1",
+        assignmentId: "assignment-1",
+        nodeRunId: "node-run-1",
+        nodeAttemptId: "node-attempt-1",
+        repositoryReference: "/tmp/repository",
+        baseCommit: "a".repeat(40),
+        workspaceImportId: "workspace-import-1",
+        sourceCommit: "b".repeat(40),
+        diffArtifactVersionId: "diff-artifact-version-1",
+        diffHash: "c".repeat(64),
+        specRevisionIds: ["application-spec:r1"],
+        harnessSnapshotIds: ["harness:tdd@1"],
+        acceptanceCriteria: ["Independent PASS gates Integration."],
+        selfCheck: {
+          id: "self-check-1",
+          hash: "d".repeat(64),
+          commands: ["npm test"],
+          logRefs: ["artifact:self-check-log"],
+          evidenceRefs: ["artifact:self-check-evidence"],
+        },
+        permissions: ["repository.read"],
+        errorHandlingInputs: [],
+        crossApplicationImpactInputs: [],
+        excludedContext: ["producer-workspace"],
+      },
+      manifestHash: "e".repeat(64),
+      workspace: {
+        id: "reviewer-workspace-1",
+        operationKey: "code-review:code-review-1:workspace",
+        state: "ready",
+        reviewerAiMemberId: "reviewer-member",
+        reviewerPositionId: "reviewer-position",
+        reviewerSessionId: "reviewer-session-1",
+        reviewNodeRunId: "code-review-node-1",
+        providerId: "isolated-reviewer",
+        workspaceRef: "reviewer-workspace:1",
+        capabilitySnapshotHash: "f".repeat(64),
+        independenceEvidenceHash: "1".repeat(64),
+        failureCode: null,
+        failureMessage: null,
+      },
+      gateResult: null,
+      authority: null,
+      defects: [],
+      integrationEligible: false,
+    };
+    const queries: unknown[] = [];
+    const loaded = await inspectProjectRunCodeReviews(
+      {
+        query: async (query) => {
+          queries.push(query);
+          return { view: [codeReview] };
+        },
+      },
+      "run-1",
+    );
+
+    assert.deepEqual(queries, [
+      { type: "code-reviews.inspect", runId: "run-1" },
+    ]);
+    assert.equal(loaded[0]?.manifest.sourceCommit, "b".repeat(40));
+    const markup = renderToStaticMarkup(
+      <CodeReviewAuthorityPanel reviews={loaded} />,
+    );
+    assert.match(markup, /data-code-review-authority/);
+    assert.match(markup, /work-package-version-1/);
+    assert.match(markup, /Awaiting independent PASS/);
+
+    const failed = await inspectProjectRunCodeReviews(
+      {
+        query: async () => {
+          throw new Error("query failed");
+        },
+      },
+      "run-1",
+    );
+    assert.deepEqual(failed, []);
   });
 
   it("loads the selected Run Work Package graph through Project Detail and clears it after a failed replacement query", async (context) => {

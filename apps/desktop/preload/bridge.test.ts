@@ -93,6 +93,62 @@ const workspaceAllocationView = {
   updatedAt: "2026-07-27T00:00:00.000Z",
 };
 
+const codeReviewView = {
+  id: "code-review-1",
+  topicId: "code-review-topic-1",
+  manifest: {
+    schemaVersion: 1 as const,
+    projectId: "project-1",
+    runId: "run-1",
+    snapshotRevisionId: "snapshot-1",
+    workPackageId: "work-package-1",
+    workPackageVersionId: "work-package-version-1",
+    assignmentId: "assignment-1",
+    nodeRunId: "node-run-1",
+    nodeAttemptId: "node-attempt-1",
+    repositoryReference: "/tmp/repository",
+    baseCommit: "a".repeat(40),
+    workspaceImportId: "workspace-import-1",
+    sourceCommit: "b".repeat(40),
+    diffArtifactVersionId: "diff-artifact-version-1",
+    diffHash: "c".repeat(64),
+    specRevisionIds: ["application-spec:r1"],
+    harnessSnapshotIds: ["harness:tdd@1"],
+    acceptanceCriteria: ["Independent PASS gates Integration."],
+    selfCheck: {
+      id: "self-check-1",
+      hash: "d".repeat(64),
+      commands: ["npm test"],
+      logRefs: ["artifact:self-check-log"],
+      evidenceRefs: ["artifact:self-check-evidence"],
+    },
+    permissions: ["repository.read"],
+    errorHandlingInputs: [],
+    crossApplicationImpactInputs: [],
+    excludedContext: ["producer-workspace" as const],
+  },
+  manifestHash: "e".repeat(64),
+  workspace: {
+    id: "reviewer-workspace-1",
+    operationKey: "code-review:code-review-1:workspace",
+    state: "ready" as const,
+    reviewerAiMemberId: "reviewer-member",
+    reviewerPositionId: "reviewer-position",
+    reviewerSessionId: "reviewer-session-1",
+    reviewNodeRunId: "code-review-node-1",
+    providerId: "isolated-reviewer",
+    workspaceRef: "reviewer-workspace:1",
+    capabilitySnapshotHash: "f".repeat(64),
+    independenceEvidenceHash: "1".repeat(64),
+    failureCode: null,
+    failureMessage: null,
+  },
+  gateResult: null,
+  authority: null,
+  defects: [],
+  integrationEligible: false,
+};
+
 describe("Sandcastle preload bridge", () => {
   it("parses Workspace command results through the typed tunnel", async () => {
     const bridge = createSandcastleBridge(async (channel) => {
@@ -196,6 +252,47 @@ describe("Sandcastle preload bridge", () => {
     if (cancelled.status === "succeeded") {
       assert.equal(cancelled.value.run.id, scriptedDepartmentRun.run.id);
     }
+  });
+
+  it("parses Code Review Query Views and Commands through the typed tunnel", async () => {
+    const requests: unknown[] = [];
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      requests.push(payload);
+      const request = payload as { readonly operation?: string };
+      return request.operation === "query"
+        ? { view: [codeReviewView], asOfSequence: 21 }
+        : {
+            status: "succeeded",
+            value: codeReviewView,
+            effectIds: ["audit-code-review-1"],
+          };
+    });
+
+    const inspected = await bridge.query({
+      type: "code-reviews.inspect",
+      runId: "run-1",
+    });
+    const converged = await bridge.execute({
+      commandId: "code-review-converge-1",
+      expectedRevision: 3,
+      command: {
+        type: "code-review.converge",
+        codeReviewId: "code-review-1",
+      },
+    });
+
+    assert.equal(inspected.view[0]?.manifest.sourceCommit, "b".repeat(40));
+    assert.equal(converged.status, "succeeded");
+    if (converged.status === "succeeded") {
+      assert.equal(converged.value.id, "code-review-1");
+    }
+    assert.deepEqual(
+      requests.map(
+        (request) => (request as { readonly operation?: string }).operation,
+      ),
+      ["query", "execute"],
+    );
   });
 
   it("exposes Interaction Prompt without leaking Electron IPC", async () => {
