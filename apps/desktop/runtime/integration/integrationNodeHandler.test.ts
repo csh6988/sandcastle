@@ -176,6 +176,65 @@ describe("Integration Node Handler", () => {
     assert.equal(view.state, "passed");
   });
 
+  it("does not start validation while the Run is paused and continues after resume", async () => {
+    let paused = true;
+    let view = generation("validating");
+    let validationExecutions = 0;
+    const stageClaims: boolean[] = [];
+    const handler = openIntegrationNodeHandler({
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => view,
+        reconcilePending: () => 0,
+        isRunPaused: () => paused,
+        claimExecutionStage: (input: { readonly createIfMissing: boolean }) => {
+          stageClaims.push(input.createIfMissing);
+          return input.createIfMissing
+            ? ({ mode: "execute" } as const)
+            : ({ mode: "missing" } as const);
+        },
+        recordExecutionStageResult: () => undefined,
+        blockPending: () => {
+          throw new Error("must not block");
+        },
+      } as unknown as IntegrationRuntime,
+      commandRegistry: {
+        execute: () => {
+          view = generation("passed", true);
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      validationExecutor: {
+        reconcile: async () => ({ status: "not-applied" }),
+        execute: async () => {
+          validationExecutions += 1;
+          return {
+            status: "passed",
+            evidenceRefs: ["validation-terminal"],
+            responsibleWorkPackageVersionIds: ["package-v1"],
+          };
+        },
+      },
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+    assert.equal(validationExecutions, 0);
+    assert.deepEqual(stageClaims, [false]);
+
+    paused = false;
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+    assert.equal(validationExecutions, 1);
+    assert.deepEqual(stageClaims, [false, true]);
+  });
+
   it("uses frozen producer and consumer responsibility for Contract failure", async () => {
     const contractValidation = {
       id: `validation:${"c".repeat(64)}`,

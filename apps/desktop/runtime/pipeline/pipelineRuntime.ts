@@ -6041,6 +6041,75 @@ export const openPipelineRuntime = (
             `Department Run ${input.runId} is not paused.`,
           );
         }
+        const resumableIntegrations = database
+          .prepare(
+            `SELECT node_runs.id AS nodeRunId,
+                    node_attempts.id AS attemptId,
+                    integration_generations.id AS generationId
+               FROM node_runs
+               JOIN node_attempts
+                 ON node_attempts.id = (
+                   SELECT latest.id FROM node_attempts AS latest
+                    WHERE latest.node_run_id = node_runs.id
+                      AND latest.status = 'reconciling'
+                    ORDER BY latest.attempt_number DESC LIMIT 1
+                 )
+               JOIN integration_generations
+                 ON integration_generations.run_id = node_runs.run_id
+                AND integration_generations.node_run_id = node_runs.id
+              WHERE node_runs.run_id = ?
+                AND node_runs.handler_kind_id = 'integration@1'
+                AND node_runs.status = 'blocked'
+                AND integration_generations.state IN (
+                  'running', 'validating', 'aggregate-review'
+                )`,
+          )
+          .all(input.runId) as Array<{
+          readonly nodeRunId: string;
+          readonly attemptId: string;
+          readonly generationId: string;
+        }>;
+        for (const integration of resumableIntegrations) {
+          const node = database
+            .prepare(
+              `UPDATE node_runs
+                  SET status = 'running', failure_code = NULL,
+                      failure_message = NULL, updated_at = ?
+                WHERE id = ? AND run_id = ? AND status = 'blocked'`,
+            )
+            .run(now, integration.nodeRunId, input.runId);
+          const attempt = database
+            .prepare(
+              `UPDATE node_attempts
+                  SET status = 'running', recoverable = 0,
+                      failure_code = NULL, failure_message = NULL,
+                      completed_at = NULL
+                WHERE id = ? AND node_run_id = ? AND status = 'reconciling'`,
+            )
+            .run(integration.attemptId, integration.nodeRunId);
+          if (node.changes !== 1 || attempt.changes !== 1) {
+            throw new PipelineRuntimeError(
+              "INTEGRATION_RESUME_STATE_INVALID",
+              `Integration Node Run ${integration.nodeRunId} changed before Run resume.`,
+            );
+          }
+          appendRuntimeMutation({
+            action: "node.integration-reconciled",
+            entityType: "node-run",
+            entityId: integration.nodeRunId,
+            eventType: "node.status.changed",
+            additionalEventType: "node.started",
+            runId: input.runId,
+            nodeRunId: integration.nodeRunId,
+            before: { status: "blocked" },
+            after: {
+              status: "running",
+              runStatus: "running",
+              generationId: integration.generationId,
+            },
+            createdAt: now,
+          });
+        }
         const resumed = database
           .prepare(
             `UPDATE department_runs
@@ -6051,6 +6120,7 @@ export const openPipelineRuntime = (
                      WHERE node_runs.run_id = department_runs.id
                        AND node_attempts.status = 'reconciling'
                   ) THEN 'blocked'
+                  WHEN ? = 1 THEN 'running'
                   WHEN EXISTS (
                     SELECT 1 FROM node_runs
                      WHERE node_runs.run_id = department_runs.id
@@ -6063,7 +6133,12 @@ export const openPipelineRuntime = (
               WHERE id = ? AND revision = ? AND status = 'paused'
                 AND paused_from_status IS NOT NULL`,
           )
-          .run(now, input.runId, input.expectedRevision);
+          .run(
+            resumableIntegrations.length > 0 ? 1 : 0,
+            now,
+            input.runId,
+            input.expectedRevision,
+          );
         if (resumed.changes !== 1) {
           throw new PipelineRuntimeError(
             "VERSION_CONFLICT",
@@ -7225,6 +7300,10 @@ export const openPipelineRuntime = (
   const resumeIntegrationInTransaction: PipelineRuntime["resumeIntegrationInTransaction"] =
     (input) => {
       const now = clock().toISOString();
+      const runStatus = database
+        .prepare("SELECT status FROM department_runs WHERE id = ?")
+        .get(input.runId) as { readonly status: string } | undefined;
+      if (runStatus?.status === "paused") return;
       const node = database
         .prepare(
           `UPDATE node_runs

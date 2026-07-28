@@ -996,6 +996,160 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("keeps a resumed Integration blocked by another reconciling Attempt", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        { id: "start", type: "start", name: "Start" },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        {
+          id: "other",
+          type: "ai-task",
+          name: "Other reconciliation",
+          positionId,
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "other" },
+        { from: "other", to: "complete" },
+      ],
+    }));
+    try {
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const integration = started.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      const other = started.nodes.find(
+        (node) => node.pipelineNodeId === "other",
+      );
+      assert.ok(integration);
+      assert.ok(other);
+      const integrationAttemptId = `${integration.id}:attempt:1`;
+      const otherAttemptId = `${other.id}:attempt:1`;
+      const evidence = new DatabaseSync(fixture.database.path);
+      try {
+        const now = new Date().toISOString();
+        evidence
+          .prepare(
+            `UPDATE department_runs
+                SET status = 'paused', paused_from_status = 'blocked'
+              WHERE id = ?`,
+          )
+          .run(started.run.id);
+        evidence
+          .prepare(
+            `UPDATE node_runs
+                SET status = 'blocked', attempt_count = 1,
+                    failure_code = 'RECONCILE_UNKNOWN',
+                    failure_message = 'Outcome is not yet provable.',
+                    updated_at = ?
+              WHERE id IN (?, ?)`,
+          )
+          .run(now, integration.id, other.id);
+        const insertAttempt = evidence.prepare(
+          `INSERT INTO node_attempts(
+             id, node_run_id, attempt_number, snapshot_revision_id, reason,
+             status, failure_code, failure_message, created_at, started_at,
+             recoverable
+           ) VALUES (?, ?, 1, ?, 'initial', 'reconciling',
+                     'RECONCILE_UNKNOWN', 'Outcome is not yet provable.', ?, ?, 1)`,
+        );
+        insertAttempt.run(
+          integrationAttemptId,
+          integration.id,
+          started.snapshot.id,
+          now,
+          now,
+        );
+        insertAttempt.run(
+          otherAttemptId,
+          other.id,
+          started.snapshot.id,
+          now,
+          now,
+        );
+        evidence
+          .prepare(
+            `INSERT INTO integration_generations(
+               id, project_id, run_id, snapshot_revision_id, node_run_id,
+               generation, coverage_id, coverage_node_run_id,
+               coverage_node_attempt_id, coverage_hash, manifest_json,
+               manifest_hash, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, '{}', ?, 'validating', ?, ?)`,
+          )
+          .run(
+            "generation-paused-mixed",
+            fixture.project.id,
+            started.run.id,
+            started.snapshot.id,
+            integration.id,
+            "coverage-paused-mixed",
+            integration.id,
+            integrationAttemptId,
+            "a".repeat(64),
+            "b".repeat(64),
+            now,
+            now,
+          );
+      } finally {
+        evidence.close();
+      }
+
+      fixture.database.pipelineRuntime.resumeIntegrationInTransaction({
+        runId: started.run.id,
+        nodeRunId: integration.id,
+        generationId: "generation-paused-mixed",
+      });
+      const whilePaused = fixture.database.pipelineRuntime.inspectRun(
+        started.run.id,
+      );
+      const pausedIntegration = whilePaused.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      assert.equal(whilePaused.run.status, "paused");
+      assert.equal(pausedIntegration?.status, "blocked");
+      assert.equal(
+        pausedIntegration?.attempts.at(-1)?.id,
+        integrationAttemptId,
+      );
+      assert.equal(pausedIntegration?.attempts.at(-1)?.status, "reconciling");
+
+      const resumed = await fixture.database.pipelineRuntime.controlRun({
+        runId: whilePaused.run.id,
+        expectedRevision: whilePaused.run.revision,
+        action: "resume",
+      });
+      const resumedIntegration = resumed.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      );
+      const otherReconciliation = resumed.nodes.find(
+        (node) => node.pipelineNodeId === "other",
+      );
+      assert.equal(resumed.run.status, "blocked");
+      assert.equal(resumedIntegration?.status, "running");
+      assert.equal(
+        resumedIntegration?.attempts.at(-1)?.id,
+        integrationAttemptId,
+      );
+      assert.equal(resumedIntegration?.attempts.at(-1)?.status, "running");
+      assert.equal(otherReconciliation?.status, "blocked");
+      assert.equal(otherReconciliation?.attempts.at(-1)?.id, otherAttemptId);
+      assert.equal(otherReconciliation?.attempts.at(-1)?.status, "reconciling");
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("persists Run creation audit and Runtime event records in the start transaction", () => {
     const { database, project, department } = setup();
     try {

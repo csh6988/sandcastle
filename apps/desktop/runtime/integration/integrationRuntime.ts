@@ -249,6 +249,7 @@ export type IntegrationEnvelopeCommand =
 
 export interface IntegrationRuntime {
   readonly inspect: (runId: string) => readonly IntegrationGenerationView[];
+  readonly isRunPaused?: (runId: string) => boolean;
   readonly nextGenerationNumber: (runId: string, nodeRunId: string) => number;
   readonly inspectPending: () => readonly IntegrationGenerationView[];
   readonly dispatchInTransaction: (input: {
@@ -3079,6 +3080,12 @@ export const openIntegrationRuntime = (
 
   return {
     inspect,
+    isRunPaused: (runId) =>
+      (
+        database
+          .prepare("SELECT status FROM department_runs WHERE id = ?")
+          .get(runId) as { readonly status: string } | undefined
+      )?.status === "paused",
     nextGenerationNumber,
     inspectPending: () => {
       const ids = database
