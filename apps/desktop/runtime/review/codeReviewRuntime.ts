@@ -13,6 +13,7 @@ import {
 import type { WorkPackageRuntime } from "../workspaces/workPackages.js";
 import type { PipelineRuntime } from "../pipeline/pipelineRuntime.js";
 import type { ReviewRuntime } from "./reviewRuntime.js";
+import { readCanonicalGitDiff } from "./reviewerWorkspace.js";
 
 export class CodeReviewRuntimeError extends Error {
   constructor(
@@ -100,7 +101,7 @@ const canonicalize = (value: unknown): unknown => {
 const canonicalJson = (value: unknown): string =>
   JSON.stringify(canonicalize(value));
 
-const sha256 = (value: string): string =>
+const sha256 = (value: string | Buffer): string =>
   createHash("sha256").update(value).digest("hex");
 
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
@@ -122,7 +123,9 @@ export const openCodeReviewRuntime = (
     readonly workPackages: WorkPackageRuntime;
     readonly pipelineRuntime: Pick<
       PipelineRuntime,
-      "blockCodeReviewInTransaction"
+      | "blockCodeReviewInTransaction"
+      | "startCodeReviewInTransaction"
+      | "completeCodeReviewInTransaction"
     >;
     readonly artifacts: ArtifactRegistry;
     readonly reviewerWorkspaceAdapter?: ReviewerWorkspaceAdapter;
@@ -132,6 +135,66 @@ export const openCodeReviewRuntime = (
   const clock = options.clock ?? (() => new Date());
   const adapter =
     options.reviewerWorkspaceAdapter ?? blockingReviewerWorkspaceAdapter;
+
+  const manifestIsCurrent = (manifest: CodeReviewManifest): boolean => {
+    try {
+      const workPackage = options.workPackages
+        .inspect(manifest.runId)
+        .packages.find((entry) => entry.id === manifest.workPackageId);
+      const activeVersion = workPackage?.versions.find(
+        (version) => version.status === "ready",
+      );
+      const activeAssignment = activeVersion?.assignments.at(-1);
+      const activeImport = activeAssignment?.allocation.imports
+        .filter((entry) => entry.state === "succeeded")
+        .at(-1);
+      const artifact = options.artifacts.inspect(
+        manifest.diffArtifactVersionId,
+      ).version;
+      const artifactBytes = options.artifacts.readContent(artifact.id);
+      const diff = readCanonicalGitDiff({
+        repositoryReference: manifest.repositoryReference,
+        baseCommit: manifest.baseCommit,
+        sourceCommit: manifest.sourceCommit,
+      });
+      return (
+        activeVersion?.id === manifest.workPackageVersionId &&
+        activeAssignment?.id === manifest.assignmentId &&
+        activeAssignment.state === "self-check-passed" &&
+        activeAssignment.nodeAttemptId === manifest.nodeAttemptId &&
+        activeAssignment.selfCheck?.id === manifest.selfCheck.id &&
+        activeAssignment.selfCheck.status === "passed" &&
+        activeAssignment.selfCheck.reportHash === manifest.selfCheck.hash &&
+        activeImport?.id === manifest.workspaceImportId &&
+        activeImport.resultCommit === manifest.sourceCommit &&
+        artifact.type === "canonical-diff" &&
+        artifact.schemaVersion === "1" &&
+        artifact.contentKind === "managed-file" &&
+        artifact.status !== "superseded" &&
+        artifact.integrityStatus === "verified" &&
+        artifact.contentHash === manifest.diffHash &&
+        artifact.contentHash === sha256(diff) &&
+        artifact.producer.runId === manifest.runId &&
+        artifact.producer.nodeAttemptId === manifest.nodeAttemptId &&
+        artifact.producer.workPackageId === manifest.workPackageId &&
+        artifactBytes.equals(diff)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const packageHasOpenDefect = (workPackageId: string): boolean =>
+    Number(
+      (
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count FROM code_review_defects
+              WHERE work_package_id = ? AND status <> 'closed'`,
+          )
+          .get(workPackageId) as { readonly count: number }
+      ).count,
+    ) > 0;
 
   const appendMutation = (input: {
     readonly commandId: string;
@@ -154,8 +217,9 @@ export const openCodeReviewRuntime = (
         `INSERT INTO runtime_audit_records(
            id, action, entity_type, entity_id, run_id, node_run_id,
            before_json, after_json, created_at, command_id, actor_type,
-           actor_id, authenticated_by
-         ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+           actor_id, authenticated_by, consumer_id
+         ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?,
+                   (SELECT consumer_id FROM runtime_unit_of_work_context WHERE slot = 1))`,
       )
       .run(
         randomUUID(),
@@ -284,7 +348,14 @@ export const openCodeReviewRuntime = (
       })),
       integrationEligible:
         authority !== undefined &&
-        defects.every((defect) => defect.status === "closed"),
+        authority.qualityGateResultId === topic.gateResult?.id &&
+        authority.workPackageVersionId === manifest.workPackageVersionId &&
+        authority.sourceCommit === manifest.sourceCommit &&
+        authority.diffHash === manifest.diffHash &&
+        topic.gateResult?.kind === "code" &&
+        topic.gateResult.result === "PASS" &&
+        manifestIsCurrent(manifest) &&
+        !packageHasOpenDefect(manifest.workPackageId),
     });
   };
 
@@ -434,13 +505,32 @@ export const openCodeReviewRuntime = (
     const artifact = options.artifacts.inspect(
       input.command.diffArtifactVersionId,
     ).version;
+    const artifactBytes = options.artifacts.readContent(artifact.id);
+    let canonicalDiff: Buffer;
+    try {
+      canonicalDiff = readCanonicalGitDiff({
+        repositoryReference: String(graphRow.repositoryReference),
+        baseCommit: String(graphRow.baseCommit),
+        sourceCommit: workspaceImport.resultCommit,
+      });
+    } catch {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_DIFF_INVALID",
+        "The canonical Diff cannot be reproduced from the frozen Repository commits.",
+      );
+    }
     if (
+      artifact.type !== "canonical-diff" ||
+      artifact.schemaVersion !== "1" ||
+      artifact.contentKind !== "managed-file" ||
       artifact.projectId !== graphRow.projectId ||
       artifact.producer.runId !== graphRow.runId ||
       artifact.producer.nodeAttemptId !== graphRow.nodeAttemptId ||
       artifact.producer.workPackageId !== input.command.workPackageId ||
       artifact.status === "superseded" ||
-      artifact.integrityStatus !== "verified"
+      artifact.integrityStatus !== "verified" ||
+      artifact.contentHash !== sha256(canonicalDiff) ||
+      !artifactBytes.equals(canonicalDiff)
     ) {
       throw new CodeReviewRuntimeError(
         "CODE_REVIEW_DIFF_INVALID",
@@ -455,6 +545,20 @@ export const openCodeReviewRuntime = (
       throw new CodeReviewRuntimeError(
         "REVIEWER_INELIGIBLE",
         "The producer AI member or Position cannot review its own Work Package.",
+      );
+    }
+    const freshReviewerAiMemberId = positionMember(
+      input.command.freshReviewerPositionId,
+    );
+    if (
+      freshReviewerAiMemberId === graphRow.producerAiMemberId ||
+      input.command.freshReviewerPositionId === graphRow.producerPositionId ||
+      freshReviewerAiMemberId === reviewerAiMemberId ||
+      input.command.freshReviewerPositionId === input.command.reviewerPositionId
+    ) {
+      throw new CodeReviewRuntimeError(
+        "REVIEWER_INELIGIBLE",
+        "Fresh re-review requires a second non-producer AI member and Position.",
       );
     }
     const moderatorAiMemberId = positionMember(
@@ -490,6 +594,14 @@ export const openCodeReviewRuntime = (
       nodeRunId: reviewNodeRunId,
       aiMemberId: moderatorAiMemberId,
       role: "review-moderator",
+      now,
+    });
+    const freshReviewerSessionId = createSession({
+      projectId: String(graphRow.projectId),
+      runId: String(graphRow.runId),
+      nodeRunId: reviewNodeRunId,
+      aiMemberId: freshReviewerAiMemberId,
+      role: "fresh-code-reviewer",
       now,
     });
     const packageManifest = parseJson<{
@@ -602,6 +714,13 @@ export const openCodeReviewRuntime = (
             positionId: input.command.reviewerPositionId,
             sessionId: reviewerSessionId,
           },
+          {
+            id: `${input.command.codeReviewId}:fresh-reviewer`,
+            role: "reviewer-participant",
+            aiMemberId: freshReviewerAiMemberId,
+            positionId: input.command.freshReviewerPositionId,
+            sessionId: freshReviewerSessionId,
+          },
         ],
         quorum: 1,
         budget: {
@@ -661,6 +780,10 @@ export const openCodeReviewRuntime = (
         now,
         now,
       );
+    options.pipelineRuntime.startCodeReviewInTransaction({
+      runId: manifest.runId,
+      nodeRunId: reviewNodeRunId,
+    });
     appendMutation({
       commandId: input.commandId,
       actor: input.actor,
@@ -717,6 +840,59 @@ export const openCodeReviewRuntime = (
     ) {
       return current;
     }
+    const review = options.reviewRuntime.inspect(current.topicId);
+    const initialReviewerParticipantId = `${current.id}:reviewer`;
+    const freshReviewerParticipantId = `${current.id}:fresh-reviewer`;
+    const initialFinding = review.findings.find(
+      (finding) =>
+        finding.reviewerParticipantId === initialReviewerParticipantId &&
+        finding.reviewerSessionId === current.workspace.reviewerSessionId,
+    );
+    const revision = review.revisions.find(
+      (candidate) => candidate.id === current.gateResult?.revisionId,
+    );
+    const freshRecheck = review.rechecks.find(
+      (candidate) =>
+        current.gateResult?.recheckIds.includes(candidate.id) &&
+        candidate.reviewerParticipantId === freshReviewerParticipantId,
+    );
+    const freshParticipant = review.participants.find(
+      (participant) => participant.id === freshReviewerParticipantId,
+    );
+    const freshSession = freshRecheck
+      ? (database
+          .prepare(
+            `SELECT mode, run_id AS runId, node_run_id AS nodeRunId, status
+               FROM interaction_sessions WHERE id = ?`,
+          )
+          .get(freshRecheck.reviewerSessionId) as
+          | {
+              readonly mode: string;
+              readonly runId: string | null;
+              readonly nodeRunId: string | null;
+              readonly status: string;
+            }
+          | undefined)
+      : undefined;
+    if (
+      !initialFinding ||
+      !freshParticipant?.eligibility.eligible ||
+      !freshRecheck ||
+      !revision ||
+      revision.subjectKind !== "canonical-diff" ||
+      revision.subjectId !== current.manifest.diffArtifactVersionId ||
+      revision.subjectHash !== current.manifest.diffHash ||
+      revision.producerAiMemberId === freshParticipant.aiMemberId ||
+      freshSession?.mode !== "run-collaboration" ||
+      freshSession.runId !== current.manifest.runId ||
+      freshSession.nodeRunId !== current.workspace.reviewNodeRunId ||
+      freshSession.status !== "active"
+    ) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_REVIEW_PROTOCOL_INVALID",
+        "Code Review convergence requires an initial independent Finding and a fresh eligible re-review Session bound to the Code Review Node.",
+      );
+    }
     const graph = options.workPackages.inspect(current.manifest.runId);
     const workPackage = graph.packages.find(
       (entry) => entry.id === current.manifest.workPackageId,
@@ -761,10 +937,58 @@ export const openCodeReviewRuntime = (
           "Only an immutable kind=code PASS can create Integration authority.",
         );
       }
-      if (current.defects.some((defect) => defect.status !== "closed")) {
+      const resolvedDefects = database
+        .prepare(
+          `SELECT id FROM code_review_defects
+            WHERE work_package_id = ? AND status = 'rework-created'
+              AND rework_work_package_version_id = ?
+            ORDER BY created_at, id`,
+        )
+        .all(
+          current.manifest.workPackageId,
+          current.manifest.workPackageVersionId,
+        ) as Array<{ readonly id: string }>;
+      for (const defect of resolvedDefects) {
+        const closed = database
+          .prepare(
+            `UPDATE code_review_defects SET status = 'closed'
+              WHERE id = ? AND status = 'rework-created'`,
+          )
+          .run(defect.id);
+        if (closed.changes !== 1) {
+          throw new CodeReviewRuntimeError(
+            "CODE_REVIEW_OBLIGATION_OPEN",
+            `Code Review Defect ${defect.id} changed before resolution.`,
+          );
+        }
+        appendMutation({
+          commandId: input.commandId,
+          actor: input.actor,
+          action: "code-review.defect.closed",
+          entityType: "code-review-defect",
+          entityId: defect.id,
+          projectId: current.manifest.projectId,
+          runId: current.manifest.runId,
+          topicId: current.topicId,
+          workPackageId: current.manifest.workPackageId,
+          workPackageVersionId: current.manifest.workPackageVersionId,
+          qualityGateResultId: gate.id,
+          eventType: "code-review.defect.closed",
+          payload: {
+            codeReviewId: current.id,
+            defectId: defect.id,
+            workPackageId: current.manifest.workPackageId,
+            workPackageVersionId: current.manifest.workPackageVersionId,
+            qualityGateResultId: gate.id,
+            status: "closed",
+          },
+          createdAt: now,
+        });
+      }
+      if (packageHasOpenDefect(current.manifest.workPackageId)) {
         throw new CodeReviewRuntimeError(
           "CODE_REVIEW_OBLIGATION_OPEN",
-          "Open Code Review obligations block Integration authority.",
+          "Open Code Review obligations for the Work Package block Integration authority.",
         );
       }
       const independenceEvidenceHash =
@@ -813,6 +1037,12 @@ export const openCodeReviewRuntime = (
           independenceEvidenceHash,
           now,
         );
+      options.pipelineRuntime.completeCodeReviewInTransaction({
+        runId: current.manifest.runId,
+        nodeRunId: current.workspace.reviewNodeRunId,
+        authorityId,
+        qualityGateResultId: gate.id,
+      });
       appendMutation({
         commandId: input.commandId,
         actor: input.actor,
@@ -874,6 +1104,15 @@ export const openCodeReviewRuntime = (
         input.command.reworkVersionId,
         now,
       );
+    options.pipelineRuntime.blockCodeReviewInTransaction({
+      runId: current.manifest.runId,
+      nodeRunId: current.workspace.reviewNodeRunId,
+      reason: "code-review-rework",
+      failure: {
+        code: `CODE_REVIEW_${gate.result}`,
+        message: `Code Review ${gate.result} requires a fresh Work Package rework Attempt.`,
+      },
+    });
     options.workPackages.reworkInTransaction({
       commandId: input.commandId,
       actor: input.actor,
@@ -938,8 +1177,30 @@ export const openCodeReviewRuntime = (
       id: "code-review-workspace-reconciler",
       authenticatedBy: "runtime",
     };
+    const consumerId = "code-review-workspace-reconciler";
+    const requestJson = canonicalJson({
+      codeReviewId: current.id,
+      operationKey: current.workspace.operationKey,
+      manifestHash: current.manifestHash,
+      result,
+    });
+    const requestHash = sha256(requestJson);
     database.exec("BEGIN IMMEDIATE");
     try {
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, ?, 1)`,
+        )
+        .run(
+          commandId,
+          actor.type,
+          actor.id,
+          actor.authenticatedBy,
+          consumerId,
+        );
       if (result.status === "ready") {
         const capabilitiesJson = canonicalJson(result.capabilities);
         const evidenceJson = canonicalJson(result.evidence);
@@ -1022,6 +1283,45 @@ export const openCodeReviewRuntime = (
         },
         createdAt: now,
       });
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(commandId) as Array<{ readonly id: string }>
+      ).map((entry) => entry.id);
+      const resultJson = canonicalJson({
+        status: "succeeded",
+        value: {
+          codeReviewId: current.id,
+          workspaceState: result.status,
+        },
+        effectIds,
+      });
+      database
+        .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+        .run();
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, 'completed', ?, ?, ?, ?)`,
+        )
+        .run(
+          commandId,
+          actor.type,
+          actor.id,
+          actor.authenticatedBy,
+          consumerId,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(effectIds),
+          now,
+        );
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");

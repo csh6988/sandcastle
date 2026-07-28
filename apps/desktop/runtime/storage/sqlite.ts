@@ -77,6 +77,7 @@ import {
   type ReviewMutationFailurePoint,
   type ReviewRuntime,
 } from "../review/reviewRuntime.js";
+import { openLocalReviewerWorkspaceAdapter } from "../review/reviewerWorkspace.js";
 import {
   openProductReviewRuntime,
   type ProductGatePromotionFailurePoint,
@@ -394,12 +395,9 @@ export const openCompanyDatabase = (
     workPackages,
     pipelineRuntime,
     artifacts: artifactRegistry,
-    ...(options.codeReviewRuntime?.reviewerWorkspaceAdapter
-      ? {
-          reviewerWorkspaceAdapter:
-            options.codeReviewRuntime.reviewerWorkspaceAdapter,
-        }
-      : {}),
+    reviewerWorkspaceAdapter:
+      options.codeReviewRuntime?.reviewerWorkspaceAdapter ??
+      openLocalReviewerWorkspaceAdapter(companyDir),
     ...(options.clock ? { clock: options.clock } : {}),
   });
   memory = openRuntimeMemory(database, {

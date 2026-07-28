@@ -87,6 +87,7 @@ const agUiRegistryFixture = [
   "code-review.workspace.unknown@1:custom",
   "code-review.authority.created@1:custom",
   "code-review.defect.created@1:custom",
+  "code-review.defect.closed@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",

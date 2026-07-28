@@ -261,10 +261,21 @@ export interface PipelineRuntime {
   readonly blockCodeReviewInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
+    readonly reason?: "code-review-isolation" | "code-review-rework";
     readonly failure: {
       readonly code: string;
       readonly message: string;
     };
+  }) => void;
+  readonly startCodeReviewInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+  }) => void;
+  readonly completeCodeReviewInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly authorityId: string;
+    readonly qualityGateResultId: string;
   }) => void;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
@@ -582,7 +593,8 @@ export const openPipelineRuntime = (
       const commandContext = database
         .prepare(
           `SELECT command_id AS commandId, actor_type AS actorType,
-                  actor_id AS actorId, authenticated_by AS authenticatedBy
+                  actor_id AS actorId, authenticated_by AS authenticatedBy,
+                  consumer_id AS consumerId
              FROM runtime_unit_of_work_context WHERE slot = 1`,
         )
         .get() as
@@ -591,6 +603,7 @@ export const openPipelineRuntime = (
             readonly actorType: string;
             readonly actorId: string;
             readonly authenticatedBy: string;
+            readonly consumerId: string | null;
           }
         | undefined;
       database
@@ -598,8 +611,8 @@ export const openPipelineRuntime = (
           `INSERT INTO runtime_audit_records(
              id, action, entity_type, entity_id, run_id, node_run_id,
              before_json, after_json, created_at, command_id, actor_type,
-             actor_id, authenticated_by
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             actor_id, authenticated_by, consumer_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           randomUUID(),
@@ -615,6 +628,7 @@ export const openPipelineRuntime = (
           commandContext?.actorType ?? null,
           commandContext?.actorId ?? null,
           commandContext?.authenticatedBy ?? null,
+          commandContext?.consumerId ?? null,
         );
     }
     const runScope = input.runId
@@ -6596,7 +6610,7 @@ export const openPipelineRuntime = (
                   updated_at = ?
             WHERE id = ? AND run_id = ?
               AND handler_kind_id = 'code-review@1'
-              AND status IN ('queued', 'ready', 'blocked')`,
+              AND status IN ('queued', 'ready', 'running', 'blocked')`,
         )
         .run(
           input.failure.code,
@@ -6618,6 +6632,26 @@ export const openPipelineRuntime = (
           `Code Review isolation failure cannot block Node Run ${input.nodeRunId} from ${current.nodeStatus} or Department Run ${input.runId} from ${current.runStatus}.`,
         );
       }
+      if (current.nodeStatus === "running") {
+        const failedAttempt = database
+          .prepare(
+            `UPDATE node_attempts
+                SET status = 'failed', failure_code = ?, failure_message = ?,
+                    completed_at = ?
+              WHERE id = (
+                SELECT id FROM node_attempts
+                 WHERE node_run_id = ? AND status = 'running'
+              ORDER BY attempt_number DESC LIMIT 1
+              )`,
+          )
+          .run(input.failure.code, input.failure.message, now, input.nodeRunId);
+        if (failedAttempt.changes !== 1) {
+          throw new PipelineRuntimeError(
+            "CODE_REVIEW_BLOCK_STATE_INVALID",
+            `Code Review Node Run ${input.nodeRunId} has no running Attempt to block.`,
+          );
+        }
+      }
       appendRuntimeMutation({
         action: "run.code-review-blocked",
         entityType: "department-run",
@@ -6634,9 +6668,155 @@ export const openPipelineRuntime = (
           status: "blocked",
           revision: current.runRevision + 1,
           nodeStatus: "blocked",
-          reason: "code-review-isolation",
+          reason: input.reason ?? "code-review-isolation",
           failure: input.failure,
         },
+        createdAt: now,
+      });
+    };
+
+  const startCodeReviewInTransaction: PipelineRuntime["startCodeReviewInTransaction"] =
+    (input) => {
+      const current = database
+        .prepare(
+          `SELECT node_runs.status AS nodeStatus,
+                  node_runs.attempt_count AS attemptCount,
+                  node_runs.handler_kind_id AS handlerKindId,
+                  department_runs.status AS runStatus,
+                  department_runs.snapshot_revision_id AS snapshotRevisionId
+             FROM node_runs
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.nodeRunId, input.runId) as
+        | {
+            readonly nodeStatus: string;
+            readonly attemptCount: number;
+            readonly handlerKindId: string;
+            readonly runStatus: string;
+            readonly snapshotRevisionId: string;
+          }
+        | undefined;
+      if (
+        !current ||
+        current.handlerKindId !== "code-review@1" ||
+        !["ready", "blocked"].includes(current.nodeStatus) ||
+        !["ready", "running", "blocked"].includes(current.runStatus)
+      ) {
+        throw new PipelineRuntimeError(
+          "CODE_REVIEW_START_STATE_INVALID",
+          `Code Review Node Run ${input.nodeRunId} cannot start from its current Pipeline state.`,
+        );
+      }
+      const now = clock().toISOString();
+      const startedNode = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'running', attempt_count = attempt_count + 1,
+                  result_json = NULL, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'code-review@1'
+              AND status IN ('ready', 'blocked')`,
+        )
+        .run(now, input.nodeRunId, input.runId);
+      const startedRun = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      if (startedNode.changes !== 1 || startedRun.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "CODE_REVIEW_START_STATE_INVALID",
+          `Code Review Node Run ${input.nodeRunId} changed before start.`,
+        );
+      }
+      const attemptId = randomUUID();
+      database
+        .prepare(
+          `INSERT INTO node_attempts(
+             id, node_run_id, attempt_number, snapshot_revision_id, reason,
+             status, structured_result_json, failure_code, failure_message,
+             created_at, started_at, completed_at
+           ) VALUES (?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(
+          attemptId,
+          input.nodeRunId,
+          current.attemptCount + 1,
+          current.snapshotRevisionId,
+          current.attemptCount === 0 ? "initial" : "retry",
+          now,
+          now,
+        );
+      appendRuntimeMutation({
+        action: "node.code-review-start",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.started",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        nodeAttemptId: attemptId,
+        before: { status: current.nodeStatus },
+        after: { status: "running", runStatus: "running" },
+        createdAt: now,
+      });
+    };
+
+  const completeCodeReviewInTransaction: PipelineRuntime["completeCodeReviewInTransaction"] =
+    (input) => {
+      const now = clock().toISOString();
+      const result = {
+        authorityId: input.authorityId,
+        qualityGateResultId: input.qualityGateResultId,
+      };
+      const completedNode = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'succeeded', result_json = ?, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'code-review@1'
+              AND status = 'running'`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId, input.runId);
+      const completedAttempt = database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'succeeded', structured_result_json = ?,
+                  failure_code = NULL, failure_message = NULL, completed_at = ?
+            WHERE id = (
+              SELECT id FROM node_attempts
+               WHERE node_run_id = ? AND status = 'running'
+            ORDER BY attempt_number DESC LIMIT 1
+            )`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId);
+      if (completedNode.changes !== 1 || completedAttempt.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "CODE_REVIEW_COMPLETE_STATE_INVALID",
+          `Code Review Node Run ${input.nodeRunId} has no running Attempt to complete.`,
+        );
+      }
+      refreshQueuedNodes(input.runId, now);
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, input.runId);
+      appendRuntimeMutation({
+        action: "node.code-review-complete",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.succeeded",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: { status: "succeeded", runStatus: "running", ...result },
         createdAt: now,
       });
     };
@@ -6672,6 +6852,10 @@ export const openPipelineRuntime = (
     const row = database
       .prepare(
         `SELECT CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM node_runs
+                     WHERE id = ? AND handler_kind_id = 'code-review@1'
+                  ) THEN 0
                   WHEN NOT EXISTS (
                     SELECT 1 FROM work_package_versions
                      WHERE work_package_versions.node_run_id = ?
@@ -6691,7 +6875,9 @@ export const openPipelineRuntime = (
                   ELSE 0
                 END AS executable`,
       )
-      .get(nodeRunId, nodeRunId) as { readonly executable: number };
+      .get(nodeRunId, nodeRunId, nodeRunId) as {
+      readonly executable: number;
+    };
     return Number(row.executable) === 1;
   };
 
@@ -9244,6 +9430,8 @@ export const openPipelineRuntime = (
     prepareWorkPackageAttemptInTransaction,
     blockWorkPackageAttemptInTransaction,
     blockCodeReviewInTransaction,
+    startCodeReviewInTransaction,
+    completeCodeReviewInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,

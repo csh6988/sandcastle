@@ -1006,6 +1006,7 @@ const definitions = [
     "code-review.workspace.unknown",
     "code-review.authority.created",
     "code-review.defect.created",
+    "code-review.defect.closed",
   ].map(
     (type) =>
       ({

@@ -544,7 +544,7 @@ A bounded **Discussion topic** attached to a product proposal, technical design,
 _Avoid_: "free-form debate" (the topic has a finite quality objective), "approval chat" (discussion is evidence for a gate, not the authority), merging participant answers into one anonymous opinion
 
 **Independent Code Review**:
-A formal review of one exact Work Package Version and its Runtime-imported source commit by an eligible non-producer in a fresh Session and isolated read-only **Reviewer Workspace**. It produces evidence for a code-kind **Quality Gate Result** and cannot silently downgrade to self-review or shared writable execution.
+A formal review of one exact Work Package Version and its Runtime-imported source commit. One eligible non-producer records the initial independent finding in an isolated read-only **Reviewer Workspace**, and a second distinct eligible non-producer supplies the fresh recheck from a new Session bound to the Code Review Node. It produces evidence for a code-kind **Quality Gate Result** and cannot silently downgrade to self-review or shared writable execution.
 _Avoid_: developer self-check, peer chat, serial review in the producer Workspace
 
 **Code Review manifest**:
@@ -556,7 +556,7 @@ The isolated read-only Workspace used by an independent Reviewer with a fresh Se
 _Avoid_: Developer Workspace, bind mount, no-sandbox review, shared writable checkout
 
 **Code Review authority**:
-The immutable Integration authority created only from a fresh independent code-kind `PASS` bound to the current exact Work Package Version, source commit, Diff hash, and Reviewer independence evidence, with no open obligation.
+The immutable Integration authority created only from a fresh independent code-kind `PASS` bound to the current exact Work Package Version, source commit, canonical Diff bytes/hash, and Reviewer independence evidence, with no package-level open obligation. Eligibility is revalidated when queried rather than cached from the moment of approval.
 _Avoid_: review status, `CONDITIONAL_PASS`, developer self-check, historical PASS
 
 **Quality Gate Result**:

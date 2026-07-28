@@ -1,5 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -8,7 +20,11 @@ import { afterEach, describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 import { CURRENT_SCHEMA_VERSION } from "../storage/migrations.js";
 import type { CodeReviewView, CommandResult } from "../interface.js";
-import type { ReviewerWorkspaceAdapter } from "./codeReviewRuntime.js";
+import {
+  blockingReviewerWorkspaceAdapter,
+  type ReviewerWorkspaceAdapter,
+} from "./codeReviewRuntime.js";
+import { openLocalReviewerWorkspaceAdapter } from "./reviewerWorkspace.js";
 
 const companyDirs: string[] = [];
 
@@ -44,9 +60,70 @@ const readyReviewerWorkspaceAdapter: ReviewerWorkspaceAdapter = {
 const hash = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
+const git = (repositoryRoot: string, ...args: string[]): string =>
+  execFileSync("git", ["-C", repositoryRoot, ...args], {
+    encoding: "utf8",
+  }).trim();
+
+const canonicalDiff = (
+  repositoryRoot: string,
+  baseCommit: string,
+  sourceCommit: string,
+): Buffer =>
+  execFileSync(
+    "git",
+    [
+      "-C",
+      repositoryRoot,
+      "diff",
+      "--binary",
+      "--full-index",
+      "--no-ext-diff",
+      "--no-textconv",
+      baseCommit,
+      sourceCommit,
+      "--",
+    ],
+    { encoding: "buffer" },
+  );
+
+const makeWritableForCleanup = (path: string): void => {
+  const entry = lstatSync(path);
+  if (entry.isSymbolicLink()) return;
+  if (entry.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const child of readdirSync(path)) {
+      makeWritableForCleanup(join(path, child));
+    }
+    return;
+  }
+  chmodSync(path, 0o600);
+};
+
 const setup = (adapter?: ReviewerWorkspaceAdapter) => {
   const companyDir = mkdtempSync(join(tmpdir(), "sandcastle-code-review-"));
   companyDirs.push(companyDir);
+  const repositoryRoot = join(companyDir, "repository");
+  mkdirSync(repositoryRoot);
+  execFileSync("git", ["init", "-q", repositoryRoot]);
+  git(repositoryRoot, "config", "user.name", "Code Review Test");
+  git(repositoryRoot, "config", "user.email", "review@test.invalid");
+  mkdirSync(join(repositoryRoot, "src"));
+  writeFileSync(
+    join(repositoryRoot, "src", "reviewed.ts"),
+    "export const reviewed = false;\n",
+  );
+  git(repositoryRoot, "add", "src/reviewed.ts");
+  git(repositoryRoot, "commit", "-qm", "base");
+  const baseCommit = git(repositoryRoot, "rev-parse", "HEAD");
+  writeFileSync(
+    join(repositoryRoot, "src", "reviewed.ts"),
+    "export const reviewed = true;\n",
+  );
+  git(repositoryRoot, "add", "src/reviewed.ts");
+  git(repositoryRoot, "commit", "-qm", "source");
+  const sourceCommit = git(repositoryRoot, "rev-parse", "HEAD");
+  const diffBytes = canonicalDiff(repositoryRoot, baseCommit, sourceCommit);
   const database = openCompanyDatabase(companyDir, {
     ...(adapter
       ? { codeReviewRuntime: { reviewerWorkspaceAdapter: adapter } }
@@ -62,7 +139,7 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
     name: project.name,
     goal: project.goal,
     sharedContext: "Review one exact Runtime-imported source commit.",
-    repositoryReferences: ["/tmp/review-repository"],
+    repositoryReferences: [repositoryRoot],
   });
   const application = database.commandRegistry.execute({
     schemaVersion: 1,
@@ -78,7 +155,7 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
       type: "application.register",
       applicationId: "review-application",
       projectId: project.id,
-      repositoryReference: "/tmp/review-repository",
+      repositoryReference: repositoryRoot,
       applicationKey: "review-application",
       ownership: "software-rnd",
       buildCommand: "npm run build",
@@ -87,8 +164,6 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
   });
   assert.equal(application.status, "succeeded");
   const now = "2026-07-28T10:00:00.000Z";
-  const baseCommit = "1".repeat(40);
-  const sourceCommit = "2".repeat(40);
   const snapshotPayload = {
     positions: [
       {
@@ -193,6 +268,16 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
       .run(now, now, "a".repeat(64), "b".repeat(64));
     raw
       .prepare(
+        `INSERT INTO node_runs(
+           id, run_id, pipeline_node_id, node_type, status, attempt_count,
+           required_dependency_ids_json, created_at, updated_at,
+           handler_kind_id, input_schema_hash, output_schema_hash
+         ) VALUES ('integration-node', 'review-run', 'integration', 'ai-task',
+                   'queued', 0, '["review"]', ?, ?, 'integration@1', ?, ?)`,
+      )
+      .run(now, now, "c".repeat(64), "d".repeat(64));
+    raw
+      .prepare(
         `INSERT INTO node_attempts(
            id, node_run_id, attempt_number, snapshot_revision_id, reason,
            status, created_at, started_at, completed_at, recoverable
@@ -225,10 +310,15 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
            repository_reference, node_run_id, manifest_json, manifest_hash,
            status, created_at
          ) VALUES ('review-package-v1', 'review-package', 1,
-                   'review-application', '/tmp/review-repository',
+                   'review-application', ?,
                    'review-node', ?, ?, 'ready', ?)`,
       )
-      .run(JSON.stringify(manifest), hash(JSON.stringify(manifest)), now);
+      .run(
+        repositoryRoot,
+        JSON.stringify(manifest),
+        hash(JSON.stringify(manifest)),
+        now,
+      );
     raw
       .prepare(
         `INSERT INTO workspace_allocations(
@@ -241,13 +331,15 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
            sandbox_identity, evidence_scope
          ) VALUES ('review-allocation', ?, 'review-application',
                    'software-rnd-local-isolated-git', 0, 'review-operation',
-                   'ready', '/tmp/review-repository', '/tmp/review-allocation',
+                   'ready', ?, ?,
                    'sandcastle/review', ?, ?, '{}', ?, 'review-provision', 1,
                    ?, ?, 'review-package-v1', 'review-attempt', ?,
                    'review-sandbox', 'review-evidence')`,
       )
       .run(
         project.id,
+        repositoryRoot,
+        join(companyDir, "allocation"),
         baseCommit,
         baseCommit,
         "7".repeat(64),
@@ -303,7 +395,7 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
     type: "canonical-diff",
     schemaVersion: "1",
     logicalName: "review-package-diff",
-    content: "diff --git a/src/reviewed.ts b/src/reviewed.ts\n+reviewed\n",
+    content: diffBytes,
     status: "produced",
     producer: {
       runId: "review-run",
@@ -333,7 +425,12 @@ const setup = (adapter?: ReviewerWorkspaceAdapter) => {
   return {
     companyDir,
     database,
+    projectId: project.id,
     diff,
+    repositoryRoot,
+    baseCommit,
+    sourceCommit,
+    diffBytes,
     producerSessionId: producerSession.id,
     execute,
   };
@@ -349,6 +446,7 @@ const startCommand = (
   workPackageId: "review-package",
   diffArtifactVersionId: fixture.diff.id,
   reviewerPositionId: "reviewer",
+  freshReviewerPositionId: "software-architect",
   moderatorPositionId: "evaluator",
   ...overrides,
 });
@@ -356,11 +454,44 @@ const startCommand = (
 const completeGenericReview = (
   fixture: ReturnType<typeof setup>,
   result: "PASS" | "CONDITIONAL_PASS" | "FAIL",
+  options: {
+    readonly omitInitialFinding?: boolean;
+    readonly freshSessionMode?: "consultation" | "run-collaboration";
+  } = {},
 ) => {
   const started = fixture.execute("start-review", 4, startCommand(fixture));
   assert.equal(started.status, "succeeded");
   const ready =
     fixture.database.codeReviews.reconcileReviewerWorkspace("code-review-1");
+  if (!options.omitInitialFinding) {
+    const initialFinding = fixture.database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: `review-finding-${result}`,
+      actor: {
+        type: "runtime-worker",
+        id: "reviewer-member",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "code-review-test",
+      expectedRevision: 2,
+      command: {
+        type: "review.finding.submit",
+        topicId: ready.topicId,
+        findingId: `review-finding-${result}`,
+        reviewerParticipantId: "code-review-1:reviewer",
+        reviewerSessionId: ready.workspace.reviewerSessionId,
+        severity: "info",
+        summary: "The exact canonical diff was independently inspected.",
+        rationale: "Record the required independent finding before revision.",
+        impact: "No blocking issue was found in the reviewed input.",
+        evidenceRefs: [ready.manifest.diffArtifactVersionId],
+        suggestedOwner: "software-engineer",
+        blocking: false,
+      },
+    });
+    assert.equal(initialFinding.status, "succeeded");
+  }
+  const ownerExpectedRevision = options.omitInitialFinding ? 2 : 3;
   const ownerResult = fixture.database.commandRegistry.execute({
     schemaVersion: 1,
     commandId: `review-revision-${result}`,
@@ -370,7 +501,7 @@ const completeGenericReview = (
       authenticatedBy: "runtime",
     },
     consumerId: "code-review-test",
-    expectedRevision: 2,
+    expectedRevision: ownerExpectedRevision,
     command: {
       type: "review.revision.submit",
       topicId: ready.topicId,
@@ -386,14 +517,27 @@ const completeGenericReview = (
     },
   });
   assert.equal(ownerResult.status, "succeeded");
+  const freshParticipant = fixture.database.review
+    .inspect(ready.topicId)
+    .participants.find(
+      (participant) => participant.id === "code-review-1:fresh-reviewer",
+    );
+  assert.ok(freshParticipant);
   const freshSession = fixture.database.interaction.createSession({
     projectId: ready.manifest.projectId,
-    mode: "consultation",
+    mode: options.freshSessionMode ?? "run-collaboration",
+    ...((options.freshSessionMode ?? "run-collaboration") ===
+    "run-collaboration"
+      ? {
+          runId: ready.manifest.runId,
+          nodeRunId: ready.workspace.reviewNodeRunId,
+        }
+      : {}),
   });
   fixture.database.interaction.addParticipant({
     sessionId: freshSession.id,
     participantType: "ai-member",
-    participantRef: "reviewer-member",
+    participantRef: freshParticipant.aiMemberId,
     role: "fresh-code-reviewer",
   });
   const recheck = fixture.database.commandRegistry.execute({
@@ -401,17 +545,17 @@ const completeGenericReview = (
     commandId: `review-recheck-${result}`,
     actor: {
       type: "runtime-worker",
-      id: "reviewer-member",
+      id: freshParticipant.aiMemberId,
       authenticatedBy: "runtime",
     },
     consumerId: "code-review-test",
-    expectedRevision: 3,
+    expectedRevision: ownerExpectedRevision + 1,
     command: {
       type: "review.recheck.submit",
       topicId: ready.topicId,
       recheckId: `review-recheck-${result}`,
       revisionId: `review-revision-${result}`,
-      reviewerParticipantId: "code-review-1:reviewer",
+      reviewerParticipantId: freshParticipant.id,
       reviewerSessionId: freshSession.id,
       result,
       conditions:
@@ -427,7 +571,13 @@ const completeGenericReview = (
 
 afterEach(() => {
   for (const directory of companyDirs.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
+    if (lstatSync(directory).isDirectory()) makeWritableForCleanup(directory);
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 20,
+    });
   }
 });
 
@@ -459,13 +609,22 @@ describe("Code Review Runtime", () => {
       assert.equal(ready.manifest.workPackageVersionId, "review-package-v1");
       assert.equal(ready.manifest.assignmentId, "review-assignment");
       assert.equal(ready.manifest.workspaceImportId, "review-import");
-      assert.equal(ready.manifest.sourceCommit, "2".repeat(40));
+      assert.equal(ready.manifest.sourceCommit, fixture.sourceCommit);
       assert.equal(ready.manifest.diffArtifactVersionId, fixture.diff.id);
       assert.equal(ready.manifest.diffHash, fixture.diff.contentHash);
       assert.equal(ready.manifest.selfCheck.id, "review-self-check");
       assert.notEqual(
         ready.workspace.reviewerSessionId,
         fixture.producerSessionId,
+      );
+      assert.deepEqual(ready.gateResult, null);
+      assert.equal(
+        fixture.database.review
+          .inspect(ready.topicId)
+          .participants.filter(
+            (participant) => participant.role === "reviewer-participant",
+          ).length,
+        2,
       );
       assert.equal(ready.workspace.reviewNodeRunId, "code-review-node");
       assert.equal(
@@ -500,8 +659,168 @@ describe("Code Review Runtime", () => {
     }
   });
 
-  it("blocks formal review when reviewer isolation cannot be proven and preserves replay", () => {
+  it("rejects a Diff Artifact with the wrong type, schema, content kind, or canonical bytes", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const producer = fixture.diff.producer;
+      const wrongType = fixture.database.artifactRegistry.registerVersion({
+        projectId: fixture.projectId,
+        type: "implementation-log",
+        schemaVersion: "1",
+        logicalName: "wrong-type-diff",
+        content: fixture.diffBytes,
+        status: "produced",
+        producer,
+      });
+      const wrongSchema = fixture.database.artifactRegistry.registerVersion({
+        projectId: fixture.projectId,
+        type: "canonical-diff",
+        schemaVersion: "2",
+        logicalName: "wrong-schema-diff",
+        content: fixture.diffBytes,
+        status: "produced",
+        producer,
+      });
+      const wrongBytes = fixture.database.artifactRegistry.registerVersion({
+        projectId: fixture.projectId,
+        type: "canonical-diff",
+        schemaVersion: "1",
+        logicalName: "wrong-bytes-diff",
+        content: "not the canonical Git diff\n",
+        status: "produced",
+        producer,
+      });
+      const repositoryObject = fixture.database.artifactRegistry.register({
+        projectId: fixture.projectId,
+        type: "canonical-diff",
+        schemaVersion: "1",
+        logicalName: "wrong-content-kind-diff",
+        content: {
+          kind: "repository-object",
+          repositoryRef: fixture.repositoryRoot,
+          commitId: fixture.sourceCommit,
+          objectId: fixture.sourceCommit,
+          objectKind: "commit",
+        },
+        producer: { projectId: fixture.projectId, ...producer },
+      });
+      const wrongContentKind = fixture.database.artifactRegistry.finalize({
+        registrationId: repositoryObject.registrationId,
+      });
+
+      for (const [suffix, diffArtifactVersionId] of [
+        ["type", wrongType.id],
+        ["schema", wrongSchema.id],
+        ["bytes", wrongBytes.id],
+        ["content-kind", wrongContentKind.id],
+      ] as const) {
+        const result = fixture.execute(
+          `reject-diff-${suffix}`,
+          4,
+          startCommand(fixture, {
+            codeReviewId: `code-review-${suffix}`,
+            topicId: `code-review-topic-${suffix}`,
+            diffArtifactVersionId,
+          }),
+        );
+        assert.equal(result.status, "rejected");
+        if (result.status === "rejected") {
+          assert.equal(result.error.code, "CODE_REVIEW_DIFF_INVALID");
+        }
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("provisions the default local Reviewer Workspace at the exact commit with an independent read-only Git database", () => {
     const fixture = setup();
+    try {
+      const started = fixture.execute(
+        "start-local-review",
+        4,
+        startCommand(fixture),
+      );
+      assert.equal(started.status, "succeeded");
+      const ready =
+        fixture.database.codeReviews.reconcileReviewerWorkspace(
+          "code-review-1",
+        );
+      assert.equal(ready.workspace.state, "ready");
+      assert.equal(ready.workspace.providerId, "local-isolated-reviewer");
+      assert.ok(ready.workspace.workspaceRef);
+      const sourcePath = join(ready.workspace.workspaceRef!, "source");
+      assert.equal(git(sourcePath, "rev-parse", "HEAD"), fixture.sourceCommit);
+      assert.equal(git(sourcePath, "remote"), "");
+      assert.notEqual(
+        realpathSync(
+          join(sourcePath, git(sourcePath, "rev-parse", "--git-common-dir")),
+        ),
+        realpathSync(
+          join(
+            fixture.repositoryRoot,
+            git(fixture.repositoryRoot, "rev-parse", "--git-common-dir"),
+          ),
+        ),
+      );
+      assert.equal(
+        statSync(join(sourcePath, "src", "reviewed.ts")).mode & 0o222,
+        0,
+      );
+      assert.deepEqual(
+        JSON.parse(
+          readFileSync(
+            join(ready.workspace.workspaceRef!, "inputs", "manifest.json"),
+            "utf8",
+          ),
+        ),
+        JSON.parse(JSON.stringify(ready.manifest)),
+      );
+      assert.deepEqual(
+        readFileSync(
+          join(ready.workspace.workspaceRef!, "inputs", "canonical.diff"),
+        ),
+        fixture.diffBytes,
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("blocks the local Reviewer Workspace when the frozen Repository path is missing", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const started = fixture.execute(
+        "start-missing-local-repository",
+        4,
+        startCommand(fixture),
+      );
+      assert.equal(started.status, "succeeded");
+      if (started.status !== "succeeded") return;
+      const adapter = openLocalReviewerWorkspaceAdapter(fixture.companyDir);
+      const result = adapter.provision({
+        operationKey: "missing-local-repository",
+        manifest: {
+          ...started.value.manifest,
+          repositoryReference: join(fixture.companyDir, "missing-repository"),
+        },
+        reviewer: {
+          aiMemberId: "reviewer-member",
+          positionId: "reviewer",
+          sessionId: started.value.workspace.reviewerSessionId,
+        },
+      });
+      assert.equal(result.status, "blocked");
+      if (result.status === "blocked") {
+        assert.equal(result.code, "PROVIDER_ISOLATION_REQUIRED");
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("blocks formal review when reviewer isolation cannot be proven and preserves replay", () => {
+    const fixture = setup(blockingReviewerWorkspaceAdapter);
     try {
       const first = fixture.execute(
         "start-blocked-review",
@@ -538,7 +857,7 @@ describe("Code Review Runtime", () => {
       assert.ok(runBlocked);
       assert.deepEqual(runBlocked.payload, {
         status: "blocked",
-        revision: 1,
+        revision: 2,
         nodeStatus: "blocked",
         reason: "code-review-isolation",
         failure: {
@@ -547,6 +866,72 @@ describe("Code Review Runtime", () => {
             "No reviewer provider proved an independent read-only Workspace, Session storage, credentials, and mutable cache.",
         },
       });
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        assert.deepEqual(
+          {
+            ...(raw
+              .prepare(
+                `SELECT status, failure_code AS failureCode
+                 FROM node_attempts WHERE node_run_id = 'code-review-node'
+             ORDER BY attempt_number DESC LIMIT 1`,
+              )
+              .get() as Record<string, unknown>),
+          },
+          {
+            status: "failed",
+            failureCode: "PROVIDER_ISOLATION_REQUIRED",
+          },
+        );
+        assert.deepEqual(
+          {
+            ...(raw
+              .prepare(
+                `SELECT command_id AS commandId, actor_type AS actorType,
+                        actor_id AS actorId, authenticated_by AS authenticatedBy,
+                        consumer_id AS consumerId
+                   FROM runtime_audit_records
+                  WHERE action = 'run.code-review-blocked'
+               ORDER BY created_at DESC, id DESC LIMIT 1`,
+              )
+              .get() as Record<string, unknown>),
+          },
+          {
+            commandId: "reconcile:code-review:code-review-1:workspace",
+            actorType: "runtime-worker",
+            actorId: "code-review-workspace-reconciler",
+            authenticatedBy: "runtime",
+            consumerId: "code-review-workspace-reconciler",
+          },
+        );
+        assert.deepEqual(
+          {
+            ...(raw
+              .prepare(
+                `SELECT status, consumer_id AS consumerId
+                   FROM command_deduplication WHERE command_id = ?`,
+              )
+              .get("reconcile:code-review:code-review-1:workspace") as Record<
+              string,
+              unknown
+            >),
+          },
+          {
+            status: "completed",
+            consumerId: "code-review-workspace-reconciler",
+          },
+        );
+        assert.equal(
+          raw
+            .prepare(
+              "SELECT 1 FROM runtime_unit_of_work_context WHERE slot = 1",
+            )
+            .get(),
+          undefined,
+        );
+      } finally {
+        raw.close();
+      }
     } finally {
       fixture.database.close();
     }
@@ -564,6 +949,30 @@ describe("Code Review Runtime", () => {
       assert.equal(converged.status, "succeeded");
       if (converged.status !== "succeeded") return;
       assert.equal(converged.value.integrationEligible, true);
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        assert.deepEqual(
+          {
+            ...(raw
+              .prepare(
+                `SELECT
+                 (SELECT status FROM node_runs WHERE id = 'code-review-node') AS reviewStatus,
+                 (SELECT status FROM node_attempts
+                   WHERE node_run_id = 'code-review-node'
+                ORDER BY attempt_number DESC LIMIT 1) AS attemptStatus,
+                 (SELECT status FROM node_runs WHERE id = 'integration-node') AS successorStatus`,
+              )
+              .get() as Record<string, unknown>),
+          },
+          {
+            reviewStatus: "succeeded",
+            attemptStatus: "succeeded",
+            successorStatus: "ready",
+          },
+        );
+      } finally {
+        raw.close();
+      }
       assert.equal(
         converged.value.authority?.qualityGateResultId,
         reviewed.gateResult?.id,
@@ -590,7 +999,10 @@ describe("Code Review Runtime", () => {
           .length,
         1,
       );
-      assert.equal(converged.value.authority?.sourceCommit, "2".repeat(40));
+      assert.equal(
+        converged.value.authority?.sourceCommit,
+        fixture.sourceCommit,
+      );
       assert.equal(
         converged.value.authority?.diffHash,
         fixture.diff.contentHash,
@@ -612,6 +1024,50 @@ describe("Code Review Runtime", () => {
     }
   });
 
+  it("rejects convergence without an initial independent Finding", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS", {
+        omitInitialFinding: true,
+      });
+      const converged = fixture.execute("reject-missing-finding", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "rejected");
+      if (converged.status === "rejected") {
+        assert.equal(
+          converged.error.code,
+          "CODE_REVIEW_REVIEW_PROTOCOL_INVALID",
+        );
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("rejects convergence when the fresh re-review Session is not bound to the Code Review Node", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS", {
+        freshSessionMode: "consultation",
+      });
+      const converged = fixture.execute("reject-unbound-recheck", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "rejected");
+      if (converged.status === "rejected") {
+        assert.equal(
+          converged.error.code,
+          "CODE_REVIEW_REVIEW_PROTOCOL_INVALID",
+        );
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("turns FAIL into a Defect and a fresh Work Package Version, Attempt, allocation, and Session", () => {
     const fixture = setup(readyReviewerWorkspaceAdapter);
     try {
@@ -627,6 +1083,30 @@ describe("Code Review Runtime", () => {
       assert.equal(converged.value.integrationEligible, false);
       assert.equal(converged.value.authority, null);
       assert.equal(converged.value.defects[0]?.result, "FAIL");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        assert.deepEqual(
+          {
+            ...(raw
+              .prepare(
+                `SELECT
+                 (SELECT status FROM node_runs WHERE id = 'code-review-node') AS reviewStatus,
+                 (SELECT status FROM node_attempts
+                   WHERE node_run_id = 'code-review-node'
+                ORDER BY attempt_number DESC LIMIT 1) AS attemptStatus,
+                 (SELECT status FROM node_runs WHERE id = 'integration-node') AS successorStatus`,
+              )
+              .get() as Record<string, unknown>),
+          },
+          {
+            reviewStatus: "blocked",
+            attemptStatus: "failed",
+            successorStatus: "queued",
+          },
+        );
+      } finally {
+        raw.close();
+      }
       assert.equal(
         converged.value.defects[0]?.reworkWorkPackageVersionId,
         "review-package-v2",
@@ -712,6 +1192,233 @@ describe("Code Review Runtime", () => {
     }
   });
 
+  it("makes an existing Authority ineligible when its Version is later superseded", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const converged = fixture.execute("converge-before-supersede", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "succeeded");
+      if (converged.status !== "succeeded") return;
+      assert.equal(converged.value.integrationEligible, true);
+
+      fixture.database.workPackages.reworkInTransaction({
+        commandId: "supersede-after-authority",
+        actor: runtimeActor,
+        expectedRevision: 4,
+        workPackageId: reviewed.manifest.workPackageId,
+        versionId: "review-package-v2",
+        baseCommit: reviewed.manifest.sourceCommit,
+        recoveryReason: "Invalidate historical Code Review authority.",
+      });
+
+      const historical = fixture.database.codeReviews.inspect("review-run")[0]!;
+      assert.ok(historical.authority);
+      assert.equal(historical.integrationEligible, false);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("makes an existing Authority ineligible while any Code Review obligation is open", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const converged = fixture.execute("converge-before-obligation", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "succeeded");
+      if (converged.status !== "succeeded") return;
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw
+          .prepare(
+            `INSERT INTO review_topics(
+               id, project_id, run_id, title, kind, status, revision,
+               manifest_json, manifest_hash, producer_ai_member_id,
+               producer_position_id, producer_session_id, quorum, budget_json,
+               rounds_used, duration_seconds_used, tokens_used, cost_cents_used,
+               stop_condition, escalation_policy, created_at, updated_at
+             )
+             SELECT 'historical-code-review-topic', project_id, run_id, title,
+                    kind, status, revision, manifest_json, manifest_hash,
+                    producer_ai_member_id, producer_position_id,
+                    producer_session_id, quorum, budget_json, rounds_used,
+                    duration_seconds_used, tokens_used, cost_cents_used,
+                    stop_condition, escalation_policy, created_at, updated_at
+               FROM review_topics WHERE id = ?`,
+          )
+          .run(reviewed.topicId);
+        raw
+          .prepare(
+            `INSERT INTO code_review_manifests(
+               id, topic_id, project_id, run_id, snapshot_revision_id,
+               work_package_id, work_package_version_id, assignment_id,
+               node_attempt_id, workspace_import_id, diff_artifact_version_id,
+               manifest_json, manifest_hash, created_at
+             )
+             SELECT 'historical-code-review', 'historical-code-review-topic',
+                    project_id, run_id, snapshot_revision_id, work_package_id,
+                    work_package_version_id, assignment_id, node_attempt_id,
+                    workspace_import_id, diff_artifact_version_id,
+                    manifest_json, manifest_hash, created_at
+               FROM code_review_manifests WHERE id = ?`,
+          )
+          .run(reviewed.id);
+        raw
+          .prepare(
+            `INSERT INTO interaction_sessions(
+               id, mode, project_id, run_id, node_run_id, status, created_at,
+               closed_at
+             )
+             SELECT 'historical-reviewer-session', mode, project_id, run_id,
+                    node_run_id, status, created_at, closed_at
+               FROM interaction_sessions WHERE id = ?`,
+          )
+          .run(reviewed.workspace.reviewerSessionId);
+        raw
+          .prepare(
+            `INSERT INTO reviewer_workspace_intents(
+               id, code_review_manifest_id, operation_key, state,
+               reviewer_ai_member_id, reviewer_position_id,
+               reviewer_session_id, review_node_run_id, provider_id,
+               workspace_ref, capability_snapshot_json,
+               capability_snapshot_hash, independence_evidence_json,
+               failure_code, failure_message, created_at, updated_at
+             )
+             SELECT 'historical-reviewer-workspace',
+                    'historical-code-review',
+                    'code-review:historical-code-review:workspace', state,
+                    reviewer_ai_member_id, reviewer_position_id,
+                    'historical-reviewer-session', review_node_run_id,
+                    provider_id, workspace_ref, capability_snapshot_json,
+                    capability_snapshot_hash, independence_evidence_json,
+                    failure_code, failure_message, created_at, updated_at
+               FROM reviewer_workspace_intents
+              WHERE code_review_manifest_id = ?`,
+          )
+          .run(reviewed.id);
+        raw
+          .prepare(
+            `INSERT INTO code_review_defects(
+               id, code_review_manifest_id, quality_gate_result_id,
+               work_package_id, result, finding_ids_json, obligation_json,
+               rework_work_package_version_id, status, created_at
+             ) VALUES ('late-obligation', ?, ?, ?, 'FAIL', '[]', '{}', NULL,
+                       'open', '2026-07-28T10:02:00.000Z')`,
+          )
+          .run(
+            "historical-code-review",
+            reviewed.gateResult!.id,
+            reviewed.manifest.workPackageId,
+          );
+      } finally {
+        raw.close();
+      }
+      assert.equal(
+        fixture.database.codeReviews
+          .inspect("review-run")
+          .find((review) => review.id === reviewed.id)?.integrationEligible,
+        false,
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("closes a tracked rework obligation when fresh PASS reviews its exact Version", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw
+          .prepare(
+            `INSERT INTO review_topics(
+               id, project_id, run_id, title, kind, status, revision,
+               manifest_json, manifest_hash, producer_ai_member_id,
+               producer_position_id, producer_session_id, quorum, budget_json,
+               rounds_used, duration_seconds_used, tokens_used, cost_cents_used,
+               stop_condition, escalation_policy, created_at, updated_at
+             )
+             SELECT 'rework-obligation-topic', project_id, run_id, title,
+                    kind, 'FAIL', revision, manifest_json, manifest_hash,
+                    producer_ai_member_id, producer_position_id,
+                    producer_session_id, quorum, budget_json, rounds_used,
+                    duration_seconds_used, tokens_used, cost_cents_used,
+                    stop_condition, escalation_policy, created_at, updated_at
+               FROM review_topics WHERE id = ?`,
+          )
+          .run(reviewed.topicId);
+        raw
+          .prepare(
+            `INSERT INTO quality_gate_results(
+               id, topic_id, kind, manifest_json, manifest_hash, revision_id,
+               result, conditions_json, recheck_ids_json, evidence_refs_json,
+               created_at
+             )
+             SELECT 'rework-obligation-gate', 'rework-obligation-topic', kind,
+                    manifest_json, manifest_hash, revision_id, 'FAIL',
+                    conditions_json, recheck_ids_json, evidence_refs_json,
+                    created_at
+               FROM quality_gate_results WHERE id = ?`,
+          )
+          .run(reviewed.gateResult!.id);
+        raw
+          .prepare(
+            `INSERT INTO code_review_defects(
+               id, code_review_manifest_id, quality_gate_result_id,
+               work_package_id, result, finding_ids_json, obligation_json,
+               rework_work_package_version_id, status, created_at
+             ) VALUES ('rework-obligation', ?, ?, ?, 'FAIL', '[]', '{}', ?,
+                       'rework-created', '2026-07-28T10:02:00.000Z')`,
+          )
+          .run(
+            reviewed.id,
+            "rework-obligation-gate",
+            reviewed.manifest.workPackageId,
+            reviewed.manifest.workPackageVersionId,
+          );
+      } finally {
+        raw.close();
+      }
+
+      const converged = fixture.execute("converge-resolved-rework", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "succeeded");
+      if (converged.status !== "succeeded") return;
+      assert.equal(converged.value.integrationEligible, true);
+      const persisted = new DatabaseSync(fixture.database.path);
+      try {
+        assert.equal(
+          (
+            persisted
+              .prepare(
+                "SELECT status FROM code_review_defects WHERE id = 'rework-obligation'",
+              )
+              .get() as { readonly status: string }
+          ).status,
+          "closed",
+        );
+      } finally {
+        persisted.close();
+      }
+      assert.equal(
+        fixture.database.events
+          .readAfter(0, 1_000)
+          .filter((event) => event.type === "code-review.defect.closed").length,
+        1,
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("rejects PASS after a newer Runtime-owned source import supersedes the reviewed input", () => {
     const fixture = setup(readyReviewerWorkspaceAdapter);
     try {
@@ -731,8 +1438,8 @@ describe("Code Review Runtime", () => {
           )
           .run(
             "a".repeat(64),
-            "2".repeat(40),
-            "2".repeat(40),
+            fixture.sourceCommit,
+            fixture.sourceCommit,
             "3".repeat(40),
             "b".repeat(64),
             now,
@@ -805,7 +1512,7 @@ describe("Code Review Runtime", () => {
       assert.equal(reloaded[0]?.workspace.state, "ready");
       assert.equal(reloaded[0]?.gateResult?.result, "PASS");
       assert.equal(reloaded[0]?.integrationEligible, true);
-      assert.equal(reloaded[0]?.authority?.sourceCommit, "2".repeat(40));
+      assert.equal(reloaded[0]?.authority?.sourceCommit, fixture.sourceCommit);
     } finally {
       reopened.close();
     }

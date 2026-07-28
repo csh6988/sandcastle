@@ -3515,6 +3515,7 @@ export const CodeReviewStartEnvelopeCommandSchema = z
     workPackageId: z.string().trim().min(1),
     diffArtifactVersionId: z.string().trim().min(1),
     reviewerPositionId: z.string().trim().min(1),
+    freshReviewerPositionId: z.string().trim().min(1),
     moderatorPositionId: z.string().trim().min(1),
   })
   .strict();
