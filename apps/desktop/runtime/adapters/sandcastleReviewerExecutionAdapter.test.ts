@@ -357,6 +357,31 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       },
     });
     assert.equal((await execution).status, "succeeded");
+    const reconciliationFacts: Array<{
+      readonly factId: string;
+      readonly kind: string;
+      readonly payload: unknown;
+    }> = [];
+    const terminal = await adapter.reconcile?.(
+      request.operationKey,
+      {
+        record: async (fact) => {
+          reconciliationFacts.push(fact);
+          return {
+            status: "accepted" as const,
+            executionFactId: "reconciled-terminal-fact",
+            effectIds: [],
+            canonicalPayloadHash: "b".repeat(64),
+          };
+        },
+      },
+      "docker-container-1",
+    );
+    assert.equal(terminal?.status, "succeeded");
+    if (terminal?.status !== "succeeded") return;
+    assert.equal(terminal.terminalExecutionFactId, "reconciled-terminal-fact");
+    assert.equal(reconciliationFacts.length, 1);
+    assert.equal(reconciliationFacts[0]?.kind, "completed");
   });
 
   it("does not claim a hard-restarted Docker container is a reattachable Reviewer operation", async () => {
@@ -393,6 +418,150 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       "provider-operation:docker-container-after-restart",
       "provider-status:running",
     ]);
+  });
+
+  it("blocks before Agent execution when the provider-started Fact loses its lease fence", async () => {
+    let agentStarted = false;
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: ({ onOperationStarted }) => ({
+        sandbox: { onOperationStarted },
+        providerId: "sandcastle-docker-reviewer",
+        evidence: ["provider-operation:stale-container"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+        },
+      }),
+      run: async (options) => {
+        const onOperationStarted = (
+          options.sandbox as {
+            readonly onOperationStarted?: (input: {
+              readonly providerId: string;
+              readonly providerOperationId: string;
+              readonly evidence: readonly string[];
+            }) => Promise<void>;
+          }
+        ).onOperationStarted;
+        assert.ok(onOperationStarted);
+        await onOperationStarted({
+          providerId: "sandcastle-docker-reviewer",
+          providerOperationId: "stale-container",
+          evidence: ["provider-operation:stale-container"],
+        });
+        agentStarted = true;
+        return {};
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+
+    const result = await createSandcastleReviewerExecutionAdapter(
+      runtime,
+    ).execute(input(), {
+      record: async (fact) => ({
+        status: fact.kind === "provider-started" ? "stale" : "accepted",
+        executionFactId: fact.factId,
+        effectIds: [],
+        canonicalPayloadHash: "a".repeat(64),
+      }),
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.equal(agentStarted, false);
+  });
+
+  it("redacts and bounds Reviewer message and Tool evidence before persistence", async () => {
+    const recorded: Array<{
+      readonly kind: string;
+      readonly payload: unknown;
+    }> = [];
+    const secret = "test-reviewer-token-value";
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => ({
+        sandbox: {},
+        providerId: "sandcastle-docker-reviewer",
+        evidence: ["provider-operation:docker-container-redaction"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+          providerOperationId: "docker-container-redaction",
+          inspectedReadOnlyReviewMount: true,
+          inspectedEnvironmentHash: "5".repeat(64),
+          inspectedAt: "2026-07-28T10:00:00.000Z",
+          terminalProviderStatus: "completed",
+          terminalProviderReceiptHash: "6".repeat(64),
+        },
+      }),
+      run: async (options) => {
+        const onRuntimeEvent = (
+          options.events as {
+            readonly onRuntimeEvent: (event: unknown) => Promise<void>;
+          }
+        ).onRuntimeEvent;
+        await onRuntimeEvent({
+          type: "message.delta",
+          messageId: "message-secret",
+          text: `Authorization: Bearer ${secret}`,
+        });
+        await onRuntimeEvent({
+          type: "tool.call",
+          toolCallId: "tool-secret",
+          name: "Read",
+          args: JSON.stringify({ token: secret, path: "/review/source" }),
+        });
+        await onRuntimeEvent({
+          type: "tool.result",
+          toolCallId: "tool-secret",
+          content: `token=${secret}\n${"large reviewer output ".repeat(1_000)}`,
+        });
+        return {
+          output: {
+            findings: [
+              {
+                severity: "info",
+                summary: "Reviewed",
+                rationale: "Exact inputs",
+                impact: "No blocker",
+                evidenceRefs: ["diff-1"],
+                suggestedOwner: "software-engineer",
+                blocking: false,
+              },
+            ],
+          },
+        };
+      },
+      runWorkspaceTask: async () => ({}),
+    };
+
+    const result = await createSandcastleReviewerExecutionAdapter(
+      runtime,
+    ).execute(input(), {
+      record: async (fact) => {
+        recorded.push(fact);
+        return {
+          status: "accepted",
+          executionFactId: fact.factId,
+          effectIds: [],
+          canonicalPayloadHash: "a".repeat(64),
+        };
+      },
+    });
+
+    assert.equal(result.status, "succeeded");
+    const serialized = JSON.stringify(recorded);
+    assert.doesNotMatch(serialized, new RegExp(secret));
+    assert.match(serialized, /REDACTED/);
+    const toolResult = recorded.find((fact) => fact.kind === "tool-result")
+      ?.payload as { readonly content: string };
+    assert.ok(toolResult.content.length < 5_000);
+    assert.match(toolResult.content, /TRUNCATED/);
   });
 
   it("fails closed for no-sandbox and bind-mount Reviewer execution", async () => {

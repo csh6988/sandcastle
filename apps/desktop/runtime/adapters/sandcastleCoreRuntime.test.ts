@@ -60,6 +60,7 @@ describe("Sandcastle core Runtime loader", () => {
   });
 
   it("resolves the formal local profile to the Docker sandbox provider", async () => {
+    let closeCalls = 0;
     const dockerSandbox = {
       tag: "bind-mount" as const,
       name: "docker",
@@ -94,7 +95,9 @@ describe("Sandcastle core Runtime loader", () => {
         },
         copyFileIn: async () => undefined,
         copyFileOut: async () => undefined,
-        close: async () => undefined,
+        close: async () => {
+          closeCalls += 1;
+        },
       }),
     };
     let reviewerDockerOptions: Record<string, unknown> | undefined;
@@ -167,6 +170,7 @@ describe("Sandcastle core Runtime loader", () => {
       },
     ]);
     await handle.close();
+    assert.equal(closeCalls, 1);
     assert.equal(
       reviewerSandbox.receipt.providerOperationId,
       "reviewer-container-1",
@@ -202,6 +206,26 @@ describe("Sandcastle core Runtime loader", () => {
         }),
       /operation-local materializer/,
     );
+    const rejectedSandbox = runtime.resolveReviewerSandbox?.({
+      sandboxRef: "docker",
+      workspaceRef: "/review-bundle",
+      operationKey: "code-review:review-2:initial-finding",
+      secretReferenceIds: [],
+      onOperationStarted: async () => {
+        throw new Error("stale provider-started fact");
+      },
+    });
+    assert.ok(rejectedSandbox);
+    await assert.rejects(
+      (rejectedSandbox.sandbox as typeof dockerSandbox).create({
+        worktreePath: "/launcher",
+        hostRepoPath: "/launcher",
+        mounts: [],
+        env: {},
+      }),
+      /stale provider-started fact/,
+    );
+    assert.equal(closeCalls, 2);
     assert.throws(
       () => runtime.resolveSandbox("test-isolated"),
       /Unsupported Sandbox reference/,

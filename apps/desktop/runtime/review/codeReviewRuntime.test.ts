@@ -1272,6 +1272,10 @@ describe("Code Review Runtime", () => {
     });
     let observedAbort = false;
     let cancelCalls = 0;
+    let resolveProviderCancellation!: () => void;
+    const providerCancellation = new Promise<void>((resolve) => {
+      resolveProviderCancellation = resolve;
+    });
     const fixture = setup(readyReviewerWorkspaceAdapter, {
       capabilities: {
         executionBoundIsolation: true,
@@ -1285,6 +1289,7 @@ describe("Code Review Runtime", () => {
             "abort",
             () => {
               observedAbort = true;
+              resolveProviderCancellation();
               resolve();
             },
             { once: true },
@@ -1299,6 +1304,7 @@ describe("Code Review Runtime", () => {
       },
       cancel: async () => {
         cancelCalls += 1;
+        await providerCancellation;
         return "cancelled";
       },
       reconcile: async () => ({
@@ -1316,11 +1322,24 @@ describe("Code Review Runtime", () => {
       });
       await started;
       const running = fixture.database.pipelineRuntime.inspectRun("review-run");
-      const paused = await fixture.database.pipelineRuntime.controlRun({
-        runId: running.run.id,
-        expectedRevision: running.run.revision,
-        action: "pause",
-      });
+      const paused = await Promise.race([
+        fixture.database.pipelineRuntime.controlRun({
+          runId: running.run.id,
+          expectedRevision: running.run.revision,
+          action: "pause",
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "Pause waited for provider cancellation before local abort.",
+                ),
+              ),
+            1_000,
+          );
+        }),
+      ]);
       await assert.rejects(execution);
       assert.equal(paused.run.status, "paused");
       assert.equal(observedAbort, true);
@@ -1841,6 +1860,170 @@ describe("Code Review Runtime", () => {
       );
     } finally {
       fixture.database.close();
+    }
+  });
+
+  it("continues in a fresh aggregate Attempt only after reconciliation accepts the terminal Reviewer Fact", async () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async () => {
+        throw new Error("provider response was lost after durable completion");
+      },
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "not used before restart",
+        evidence: [],
+      }),
+    });
+    let reopened: ReturnType<typeof openCompanyDatabase> | undefined;
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      await assert.rejects(
+        fixture.database.pipelineRuntime.executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        }),
+        /provider response was lost/,
+      );
+      fixture.database.close();
+      reopened = openCompanyDatabase(fixture.companyDir, {
+        codeReviewRuntime: {
+          reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
+          reviewerExecutionAdapter: {
+            capabilities: {
+              executionBoundIsolation: true,
+              reattachRunningOperation: false,
+            },
+            reconcile: async (operationKey, sink) => {
+              assert.ok(sink);
+              const result = {
+                status: "succeeded" as const,
+                providerId: "scripted-docker-reviewer",
+                isolation: {
+                  readOnlyFilesystem: true as const,
+                  independentGitDatabase: true as const,
+                  independentSessionStorage: true as const,
+                  independentCredentialScope: true as const,
+                  independentMutableCache: true as const,
+                  inputAllowlist: true as const,
+                  mountTableHash: "1".repeat(64),
+                  sessionScopeHash: "2".repeat(64),
+                  cacheScopeHash: "3".repeat(64),
+                  credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "reconciled-terminal-operation",
+                  inspectedReadOnlyReviewMount: true as const,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed" as const,
+                  terminalProviderReceiptHash: "6".repeat(64),
+                  mechanism: "scripted-docker-readonly",
+                  mechanismVersion: "1",
+                },
+                isolationEvidence: ["provider:reconciled-terminal"],
+                output: {
+                  findings: [
+                    {
+                      severity: "info" as const,
+                      summary: "Recovered exact review output.",
+                      rationale: "The provider terminal receipt was durable.",
+                      impact: "No Reviewer execution was repeated.",
+                      evidenceRefs: [fixture.diff.id],
+                      suggestedOwner: "software-engineer",
+                      blocking: false,
+                    },
+                  ],
+                },
+              };
+              const receipt = await sink.record({
+                adapterSchemaVersion: 1,
+                factId: `${operationKey}:reconciled-completed`,
+                ordinal: 1,
+                kind: "completed",
+                schemaVersion: 1,
+                payload: { structuredResult: result },
+                evidenceRefs: result.isolationEvidence,
+              });
+              return {
+                ...result,
+                terminalExecutionFactId: receipt.executionFactId,
+              };
+            },
+            execute: async (input) => ({
+              status: "succeeded",
+              providerId: "scripted-docker-reviewer",
+              isolation: {
+                readOnlyFilesystem: true,
+                independentGitDatabase: true,
+                independentSessionStorage: true,
+                independentCredentialScope: true,
+                independentMutableCache: true,
+                inputAllowlist: true,
+                mountTableHash: "1".repeat(64),
+                sessionScopeHash: "2".repeat(64),
+                cacheScopeHash: "3".repeat(64),
+                credentialScopeHash: "4".repeat(64),
+                providerOperationId: "fresh-recheck-after-reconcile",
+                inspectedReadOnlyReviewMount: true,
+                inspectedEnvironmentHash: "5".repeat(64),
+                inspectedAt: "2026-07-28T10:00:00.000Z",
+                terminalProviderStatus: "completed",
+                terminalProviderReceiptHash: "6".repeat(64),
+                mechanism: "scripted-docker-readonly",
+                mechanismVersion: "1",
+              },
+              isolationEvidence: ["provider:fresh-recheck"],
+              output: {
+                result: "PASS",
+                conditions: [],
+                evidenceRefs: [input.manifest.diffArtifactVersionId],
+              },
+            }),
+          },
+        },
+      });
+
+      assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
+      const run = reopened.pipelineRuntime.inspectRun("review-run");
+      const attempts = run.nodes.find(
+        (node) => node.id === "code-review-node",
+      )?.attempts;
+      assert.deepEqual(
+        attempts?.map((attempt) => attempt.status),
+        ["interrupted", "succeeded"],
+      );
+      const raw = new DatabaseSync(reopened.path);
+      try {
+        const reconciledFact = raw
+          .prepare(
+            `SELECT lease_kind AS leaseKind, status
+               FROM execution_facts
+              WHERE fact_id LIKE '%:reconciled-completed'`,
+          )
+          .get() as
+          | { readonly leaseKind: string; readonly status: string }
+          | undefined;
+        assert.equal(reconciledFact?.leaseKind, "reconciliation");
+        assert.equal(reconciledFact?.status, "accepted");
+        assert.equal(
+          (
+            raw
+              .prepare(
+                `SELECT COUNT(*) AS count FROM runtime_audit_records
+                  WHERE action = 'attempt.code-review-reattach'`,
+              )
+              .get() as { readonly count: number }
+          ).count,
+          0,
+        );
+      } finally {
+        raw.close();
+      }
+    } finally {
+      reopened?.close();
     }
   });
 

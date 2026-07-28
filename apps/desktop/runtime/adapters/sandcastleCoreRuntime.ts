@@ -218,22 +218,46 @@ const coreDirectoryCandidates = (): string[] => [
 const receiptHash = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+const DOCKER_OPERATION_TIMEOUT_MS = 5_000;
+
 const dockerOperation = (
   args: readonly string[],
-): Promise<{ readonly exitCode: number; readonly stdout: string }> =>
+): Promise<{
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+}> =>
   new Promise((resolve) => {
-    execFile("docker", [...args], (error, stdout) => {
-      resolve({
-        exitCode:
+    execFile(
+      "docker",
+      [...args],
+      { timeout: DOCKER_OPERATION_TIMEOUT_MS, killSignal: "SIGKILL" },
+      (error, stdout, stderr) => {
+        const errorCode =
           typeof error === "object" && error !== null && "code" in error
-            ? Number(error.code ?? 1)
-            : error
-              ? 1
-              : 0,
-        stdout: stdout.toString(),
-      });
-    });
+            ? error.code
+            : undefined;
+        const timedOut =
+          typeof error === "object" &&
+          error !== null &&
+          (("killed" in error && error.killed === true) ||
+            errorCode === "ETIMEDOUT");
+        resolve({
+          exitCode: typeof errorCode === "number" ? errorCode : error ? 1 : 0,
+          stdout: stdout.toString(),
+          stderr: stderr.toString(),
+          timedOut,
+        });
+      },
+    );
   });
+
+const dockerOperationProvesNotFound = (result: {
+  readonly stdout: string;
+  readonly stderr: string;
+}): boolean =>
+  /No such (?:object|container)\b/i.test(`${result.stdout}\n${result.stderr}`);
 
 const findCoreDirectory = (): string => {
   const directory = coreDirectoryCandidates().find((candidate) =>
@@ -408,11 +432,20 @@ export const createSandcastleExecutionRuntimeFromModules = (
             `environment-inspection:${receipt.inspectedEnvironmentHash}`,
             `credentials:scope:${receipt.credentialScopeHash}`,
           );
-          await onOperationStarted?.({
-            providerId: "sandcastle-docker-reviewer",
-            providerOperationId,
-            evidence: [...evidence],
-          });
+          try {
+            await onOperationStarted?.({
+              providerId: "sandcastle-docker-reviewer",
+              providerOperationId,
+              evidence: [...evidence],
+            });
+          } catch (error) {
+            try {
+              await handle.close();
+            } catch {
+              // Preserve the rejected execution fence as the authoritative error.
+            }
+            throw error;
+          }
           return {
             ...handle,
             close: async () => {
@@ -443,13 +476,16 @@ export const createSandcastleExecutionRuntimeFromModules = (
     cancelReviewerOperation: async (providerOperationId) => {
       const result = await dockerOperation(["rm", "-f", providerOperationId]);
       if (result.exitCode === 0) return "cancelled";
+      if (dockerOperationProvesNotFound(result)) return "not-found";
+      if (result.timedOut) return "unknown";
       const inspected = await dockerOperation([
         "inspect",
         "--format",
         "{{.State.Running}}",
         providerOperationId,
       ]);
-      return inspected.exitCode === 0 ? "unknown" : "not-found";
+      if (inspected.exitCode === 0) return "unknown";
+      return dockerOperationProvesNotFound(inspected) ? "not-found" : "unknown";
     },
     inspectReviewerOperation: async (providerOperationId) => {
       const result = await dockerOperation([
@@ -458,7 +494,9 @@ export const createSandcastleExecutionRuntimeFromModules = (
         "{{.State.Running}}",
         providerOperationId,
       ]);
-      if (result.exitCode !== 0) return "not-found";
+      if (result.exitCode !== 0) {
+        return dockerOperationProvesNotFound(result) ? "not-found" : "unknown";
+      }
       const running = result.stdout.trim();
       if (running === "true") return "running";
       if (running === "false") return "not-running";

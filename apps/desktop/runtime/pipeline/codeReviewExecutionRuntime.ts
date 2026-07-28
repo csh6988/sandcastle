@@ -106,15 +106,7 @@ export const openCodeReviewExecutionRuntime = (options: {
         fact.status === "accepted" &&
         ["completed", "failed", "cancelled"].includes(fact.kind),
     );
-    if (existingTerminal?.kind === "completed") {
-      const payload =
-        typeof existingTerminal.payload === "object" &&
-        existingTerminal.payload !== null
-          ? (existingTerminal.payload as Record<string, unknown>)
-          : {};
-      return payload.structuredResult as ReviewerExecutionResult;
-    }
-    if (existingTerminal) {
+    if (existingTerminal && existingTerminal.kind !== "completed") {
       return {
         status: "unknown",
         code: "RECONCILE_UNKNOWN",
@@ -419,6 +411,285 @@ export const openCodeReviewExecutionRuntime = (options: {
       }
     };
 
+    const acceptedCompletedResult = (details: {
+      readonly executionFactId: string;
+      readonly expectedLease?: ExecutionLeaseContext;
+      readonly reportedResult?: Extract<
+        ReviewerExecutionResult,
+        { readonly status: "succeeded" }
+      >;
+    }): Extract<ReviewerExecutionResult, { readonly status: "succeeded" }> => {
+      const fact = inspectExecution(database, {
+        operationKey: input.operationKey,
+      }).facts.find((candidate) => candidate.id === details.executionFactId);
+      if (
+        !fact ||
+        fact.status !== "accepted" ||
+        fact.kind !== "completed" ||
+        (details.expectedLease &&
+          (fact.leaseId !== details.expectedLease.leaseId ||
+            fact.leaseKind !== "reconciliation" ||
+            fact.executionEpoch !== details.expectedLease.executionEpoch ||
+            fact.fenceToken !== details.expectedLease.fenceToken))
+      ) {
+        throw runtimeError(
+          "EXECUTION_ADAPTER_PROTOCOL",
+          `Reviewer reconciliation did not reference an accepted completed Fact under the active reconciliation lease.`,
+        );
+      }
+      const payload =
+        typeof fact.payload === "object" &&
+        fact.payload !== null &&
+        !Array.isArray(fact.payload)
+          ? (fact.payload as Record<string, unknown>)
+          : {};
+      const structuredResult = payload.structuredResult;
+      if (
+        typeof structuredResult !== "object" ||
+        structuredResult === null ||
+        (structuredResult as { readonly status?: unknown }).status !==
+          "succeeded"
+      ) {
+        throw runtimeError(
+          "EXECUTION_ADAPTER_PROTOCOL",
+          "Reviewer completed Fact requires an exact succeeded structured result.",
+        );
+      }
+      if (details.reportedResult) {
+        const {
+          terminalExecutionFactId: _terminalExecutionFactId,
+          ...reportedResult
+        } = details.reportedResult;
+        if (pipelineHash(structuredResult) !== pipelineHash(reportedResult)) {
+          throw runtimeError(
+            "EXECUTION_ADAPTER_PROTOCOL",
+            "Reviewer reconciliation result does not match its accepted completed Fact.",
+          );
+        }
+      }
+      return {
+        ...(structuredResult as Extract<
+          ReviewerExecutionResult,
+          { readonly status: "succeeded" }
+        >),
+        terminalExecutionFactId: fact.id,
+      };
+    };
+
+    const continueAfterTerminalReconciliation = (details: {
+      readonly terminalExecutionFactId: string;
+    }): void => {
+      const current = database
+        .prepare(
+          `SELECT node_attempts.status AS attemptStatus,
+                  node_attempts.attempt_number AS attemptNumber,
+                  node_attempts.snapshot_revision_id AS snapshotRevisionId,
+                  node_runs.status AS nodeStatus,
+                  node_runs.attempt_count AS attemptCount,
+                  department_runs.status AS runStatus
+             FROM node_attempts
+             JOIN node_runs ON node_runs.id = node_attempts.node_run_id
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_attempts.id = ? AND node_runs.id = ?
+              AND department_runs.id = ?`,
+        )
+        .get(attempt.attemptId, input.nodeRunId, input.runId) as
+        | {
+            readonly attemptStatus: string;
+            readonly attemptNumber: number;
+            readonly snapshotRevisionId: string;
+            readonly nodeStatus: string;
+            readonly attemptCount: number;
+            readonly runStatus: string;
+          }
+        | undefined;
+      if (
+        !current ||
+        !["running", "reconciling"].includes(current.attemptStatus)
+      ) {
+        return;
+      }
+      const validActiveState =
+        (current.attemptStatus === "running" &&
+          current.nodeStatus === "running" &&
+          current.runStatus === "running") ||
+        (current.attemptStatus === "reconciling" &&
+          current.nodeStatus === "blocked" &&
+          current.runStatus === "blocked");
+      if (!validActiveState || current.attemptCount !== current.attemptNumber) {
+        throw runtimeError(
+          "CODE_REVIEW_EXECUTION_STATE_INVALID",
+          `Code Review Node Attempt ${attempt.attemptId} cannot continue after terminal reconciliation from ${current.attemptStatus}/${current.nodeStatus}/${current.runStatus}.`,
+        );
+      }
+      const now = clock().toISOString();
+      const nextAttemptId = randomUUID();
+      const nextAttemptNumber = current.attemptNumber + 1;
+      const commandId = `code-review:terminal-reconciliation:${details.terminalExecutionFactId}`;
+      const request = {
+        operationKey: input.operationKey,
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        interruptedAttemptId: attempt.attemptId,
+        terminalExecutionFactId: details.terminalExecutionFactId,
+      };
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database
+          .prepare(
+            `INSERT INTO runtime_unit_of_work_context(
+               slot, command_id, actor_type, actor_id, authenticated_by,
+               consumer_id, schema_version
+             ) VALUES (1, ?, 'runtime-worker', 'code-review-node-handler',
+                       'runtime', 'code-review-node-handler', 1)`,
+          )
+          .run(commandId);
+        const interrupted = database
+          .prepare(
+            `UPDATE node_attempts
+                SET status = 'interrupted', recoverable = 1,
+                    failure_code = 'EXECUTION_RECONCILED_TERMINAL_RESULT',
+                    failure_message = 'Provider completion was recovered; aggregate processing continues in a fresh Attempt.',
+                    completed_at = ?, terminal_execution_fact_id = ?
+              WHERE id = ? AND status = ?`,
+          )
+          .run(
+            now,
+            details.terminalExecutionFactId,
+            attempt.attemptId,
+            current.attemptStatus,
+          );
+        const resumedNode = database
+          .prepare(
+            `UPDATE node_runs
+                SET status = 'running', attempt_count = ?, result_json = NULL,
+                    failure_code = NULL, failure_message = NULL, updated_at = ?
+              WHERE id = ? AND run_id = ? AND status = ?
+                AND attempt_count = ?`,
+          )
+          .run(
+            nextAttemptNumber,
+            now,
+            input.nodeRunId,
+            input.runId,
+            current.nodeStatus,
+            current.attemptNumber,
+          );
+        const resumedRun = database
+          .prepare(
+            `UPDATE department_runs
+                SET status = 'running', revision = revision + 1,
+                    updated_at = ?
+              WHERE id = ? AND status = ?`,
+          )
+          .run(now, input.runId, current.runStatus);
+        if (
+          interrupted.changes !== 1 ||
+          resumedNode.changes !== 1 ||
+          resumedRun.changes !== 1
+        ) {
+          throw runtimeError(
+            "CODE_REVIEW_EXECUTION_STATE_INVALID",
+            `Code Review Node Attempt ${attempt.attemptId} cannot continue after its reconciled terminal Fact.`,
+          );
+        }
+        database
+          .prepare(
+            `INSERT INTO node_attempts(
+               id, node_run_id, attempt_number, snapshot_revision_id, reason,
+               status, structured_result_json, failure_code, failure_message,
+               created_at, started_at, completed_at
+             ) VALUES (?, ?, ?, ?, 'recovery', 'running', NULL, NULL, NULL,
+                       ?, ?, NULL)`,
+          )
+          .run(
+            nextAttemptId,
+            input.nodeRunId,
+            nextAttemptNumber,
+            current.snapshotRevisionId,
+            now,
+            now,
+          );
+        appendRuntimeMutation({
+          action: "attempt.code-review-terminal-reconciled",
+          entityType: "node-attempt",
+          entityId: attempt.attemptId,
+          eventType: "attempt.interrupted",
+          runId: input.runId,
+          nodeRunId: input.nodeRunId,
+          before: {
+            attemptStatus: current.attemptStatus,
+            nodeStatus: current.nodeStatus,
+            runStatus: current.runStatus,
+          },
+          after: {
+            attemptStatus: "interrupted",
+            terminalExecutionFactId: details.terminalExecutionFactId,
+          },
+          createdAt: now,
+        });
+        appendRuntimeMutation({
+          action: "attempt.code-review-recovery",
+          entityType: "node-attempt",
+          entityId: nextAttemptId,
+          eventType: "attempt.started",
+          runId: input.runId,
+          nodeRunId: input.nodeRunId,
+          before: null,
+          after: {
+            attemptStatus: "running",
+            attemptNumber: nextAttemptNumber,
+            reason: "recovery",
+            nodeStatus: "running",
+            runStatus: "running",
+          },
+          createdAt: now,
+        });
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(commandId) as Array<{ readonly id: string }>
+        ).map((entry) => entry.id);
+        const receipt = {
+          status: "succeeded",
+          value: {
+            interruptedAttemptId: attempt.attemptId,
+            continuationAttemptId: nextAttemptId,
+            terminalExecutionFactId: details.terminalExecutionFactId,
+          },
+          effectIds,
+        };
+        database
+          .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+          .run();
+        database
+          .prepare(
+            `INSERT INTO command_deduplication(
+               command_id, actor_type, actor_id, authenticated_by, consumer_id,
+               schema_version, request_hash, status, result_json, result_hash,
+               effect_ids_json, completed_at
+             ) VALUES (?, 'runtime-worker', 'code-review-node-handler',
+                       'runtime', 'code-review-node-handler', 1, ?, 'completed',
+                       ?, ?, ?, ?)`,
+          )
+          .run(
+            commandId,
+            pipelineHash(request),
+            canonicalPipelineJson(receipt),
+            pipelineHash(receipt),
+            canonicalPipelineJson(effectIds),
+            now,
+          );
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    };
+
     const resumeReconciledAttempt = (reconciliationLeaseId: string): void => {
       const current = database
         .prepare(
@@ -553,6 +824,16 @@ export const openCodeReviewExecutionRuntime = (options: {
       }
     };
 
+    if (existingTerminal?.kind === "completed") {
+      const result = acceptedCompletedResult({
+        executionFactId: existingTerminal.id,
+      });
+      continueAfterTerminalReconciliation({
+        terminalExecutionFactId: existingTerminal.id,
+      });
+      return result;
+    }
+
     if (reconciliation) {
       const reconciliationLease = issueLease("reconciliation");
       const sink = createExecutionFactSink({
@@ -597,9 +878,22 @@ export const openCodeReviewExecutionRuntime = (options: {
           .run(clock().toISOString(), reconciliationLease.leaseId);
       }
       if (result.status !== "running") {
-        if (result.status === "unknown") return result;
-        resumeReconciledAttempt(reconciliationLease.leaseId);
-        return runWithLease(issueLease("execution"), async () => result);
+        if (result.status !== "succeeded") return result;
+        if (!result.terminalExecutionFactId) {
+          throw runtimeError(
+            "EXECUTION_ADAPTER_PROTOCOL",
+            "Reviewer terminal reconciliation must reference its accepted completed Fact.",
+          );
+        }
+        const acceptedResult = acceptedCompletedResult({
+          executionFactId: result.terminalExecutionFactId,
+          expectedLease: reconciliationLease,
+          reportedResult: result,
+        });
+        continueAfterTerminalReconciliation({
+          terminalExecutionFactId: result.terminalExecutionFactId,
+        });
+        return acceptedResult;
       }
       if (
         input.adapter.capabilities.reattachRunningOperation !== true ||

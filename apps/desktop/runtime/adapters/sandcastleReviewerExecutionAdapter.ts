@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +96,40 @@ const hasActualTerminalReceipt = (receipt: Record<string, unknown>): boolean =>
   typeof receipt.terminalProviderReceiptHash === "string" &&
   receipt.terminalProviderReceiptHash.length === 64;
 
+const MAX_REVIEWER_FACT_CONTENT = 4_096;
+
+const sanitizeReviewerFactContent = (value: string): string => {
+  const redacted = value
+    .replace(
+      /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/gi,
+      "[REDACTED_PRIVATE_KEY]",
+    )
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /(["']?(?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*)(["']?)[^"'\s,;}\]]+\2/gi,
+      "$1$2[REDACTED]$2",
+    )
+    .replace(
+      /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g,
+      "[REDACTED]",
+    )
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gi, "[REDACTED]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{12,}\b/gi, "[REDACTED]")
+    .replace(
+      /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+      "[REDACTED]",
+    )
+    .replace(
+      /([?&](?:X-Amz-Signature|signature|sig|token|access_token)=)[^&#\s]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/[A-Za-z0-9+/]{512,}={0,2}/g, "[REDACTED_BASE64]");
+  if (redacted.length <= MAX_REVIEWER_FACT_CONTENT) return redacted;
+  const digest = createHash("sha256").update(redacted).digest("hex");
+  return `${redacted.slice(0, MAX_REVIEWER_FACT_CONTENT)}\n[TRUNCATED redactedSha256=${digest} originalChars=${redacted.length}]`;
+};
+
 type ReviewerCoreRuntimeEvent =
   | {
       readonly type: "message.delta";
@@ -128,7 +163,11 @@ export const createSandcastleReviewerExecutionAdapter = (
 ): ReviewerExecutionAdapter => {
   const providerRefs = new Map<string, string>();
   const activeOperations = new Map<string, Promise<ReviewerExecutionResult>>();
-  const completedOperations = new Map<string, ReviewerExecutionResult>();
+  const completedOperations = new Map<
+    string,
+    Extract<ReviewerExecutionResult, { readonly status: "succeeded" }>
+  >();
+  const reconciliationOrdinals = new Map<string, number>();
 
   const executeOperation: ReviewerExecutionAdapter["execute"] = async (
     input,
@@ -152,15 +191,30 @@ export const createSandcastleReviewerExecutionAdapter = (
       let providerStartedRecorded = false;
       let sawMessageEvent = false;
       let sawUsageEvent = false;
-      let recordQueue = Promise.resolve();
+      let recordQueue: Promise<void> = Promise.resolve();
+      let recordFailure: unknown;
       const evidenceRefs = [input.manifest.diffArtifactVersionId];
       const enqueue = (
         fact: Parameters<NonNullable<typeof sink>["record"]>[0],
-      ): Promise<void> => {
-        recordQueue = recordQueue.then(async () => {
-          if (sink) await sink.record(fact);
+      ) => {
+        const pending = recordQueue.then(async () => {
+          if (recordFailure) throw recordFailure;
+          if (!sink) return undefined;
+          const receipt = await sink.record(fact);
+          if (receipt.status !== "accepted" && receipt.status !== "duplicate") {
+            throw new Error(
+              `Reviewer ${fact.kind} Fact was ${receipt.status} under the active execution fence.`,
+            );
+          }
+          return receipt;
         });
-        return recordQueue;
+        recordQueue = pending.then(
+          () => undefined,
+          (error) => {
+            recordFailure = error;
+          },
+        );
+        return pending;
       };
       const recordProviderStarted = async (started: {
         readonly providerId: string;
@@ -227,7 +281,7 @@ export const createSandcastleReviewerExecutionAdapter = (
             ordinal: ordinal++,
             kind: "message",
             schemaVersion: 1,
-            payload: { content: event.text },
+            payload: { content: sanitizeReviewerFactContent(event.text) },
             evidenceRefs,
           });
           return;
@@ -242,7 +296,7 @@ export const createSandcastleReviewerExecutionAdapter = (
             payload: {
               toolCallId: event.toolCallId,
               name: event.name,
-              args: event.args,
+              args: sanitizeReviewerFactContent(event.args),
             },
             evidenceRefs,
           });
@@ -257,7 +311,7 @@ export const createSandcastleReviewerExecutionAdapter = (
             schemaVersion: 1,
             payload: {
               ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
-              content: event.content,
+              content: sanitizeReviewerFactContent(event.content),
             },
             evidenceRefs,
           });
@@ -334,7 +388,9 @@ export const createSandcastleReviewerExecutionAdapter = (
             ordinal: ordinal++,
             kind: "message",
             schemaVersion: 1,
-            payload: { content: result.stdout.trim() },
+            payload: {
+              content: sanitizeReviewerFactContent(result.stdout.trim()),
+            },
             evidenceRefs,
           });
         }
@@ -353,7 +409,7 @@ export const createSandcastleReviewerExecutionAdapter = (
           await enqueue({
             adapterSchemaVersion: 1,
             factId: `${input.operationKey}:usage`,
-            ordinal,
+            ordinal: ordinal++,
             kind: "usage",
             schemaVersion: 1,
             payload: usage,
@@ -361,8 +417,9 @@ export const createSandcastleReviewerExecutionAdapter = (
           });
         }
         await recordQueue;
+        if (recordFailure) throw recordFailure;
       }
-      return {
+      const succeeded = {
         status: "succeeded",
         providerId: reviewerSandbox.providerId,
         isolation: {
@@ -381,7 +438,9 @@ export const createSandcastleReviewerExecutionAdapter = (
           ReviewerExecutionResult,
           { status: "succeeded" }
         >["output"],
-      };
+      } as const;
+      reconciliationOrdinals.set(input.operationKey, ordinal);
+      return succeeded;
     } catch (error) {
       return blocked(
         error instanceof Error
@@ -402,7 +461,9 @@ export const createSandcastleReviewerExecutionAdapter = (
     activeOperations.set(input.operationKey, operation);
     void operation
       .then((result) => {
-        completedOperations.set(input.operationKey, result);
+        if (result.status === "succeeded") {
+          completedOperations.set(input.operationKey, result);
+        }
       })
       .finally(() => {
         if (activeOperations.get(input.operationKey) === operation) {
@@ -426,10 +487,49 @@ export const createSandcastleReviewerExecutionAdapter = (
       }
       return runtime.cancelReviewerOperation(providerExecutionRef);
     },
-    reconcile: async (_operationKey, _sink, providerExecutionRef) => {
-      const operationKey = _operationKey;
+    reconcile: async (operationKey, sink, providerExecutionRef) => {
       const completed = completedOperations.get(operationKey);
-      if (completed) return completed;
+      if (completed) {
+        if (!sink) {
+          return {
+            status: "unknown",
+            code: "RECONCILE_UNKNOWN",
+            message:
+              "The completed Reviewer result cannot be reconciled without an active reconciliation Fact sink.",
+            evidence: completed.isolationEvidence,
+          };
+        }
+        try {
+          const receipt = await sink.record({
+            adapterSchemaVersion: 1,
+            factId: `${operationKey}:reconciled-completed`,
+            ordinal: reconciliationOrdinals.get(operationKey) ?? 1,
+            kind: "completed",
+            schemaVersion: 1,
+            payload: { structuredResult: completed },
+            evidenceRefs: completed.isolationEvidence,
+          });
+          if (receipt.status !== "accepted" && receipt.status !== "duplicate") {
+            return {
+              status: "unknown",
+              code: "RECONCILE_UNKNOWN",
+              message: `The completed Reviewer result was ${receipt.status} under the active reconciliation fence.`,
+              evidence: completed.isolationEvidence,
+            };
+          }
+          return {
+            ...completed,
+            terminalExecutionFactId: receipt.executionFactId,
+          };
+        } catch (error) {
+          return {
+            status: "unknown",
+            code: "RECONCILE_UNKNOWN",
+            message: `The completed Reviewer result could not be recorded under the active reconciliation fence: ${error instanceof Error ? error.message : String(error)}`,
+            evidence: completed.isolationEvidence,
+          };
+        }
+      }
       const resolvedProviderRef =
         providerExecutionRef ?? providerRefs.get(operationKey);
       if (activeOperations.has(operationKey) && resolvedProviderRef) {

@@ -4751,7 +4751,7 @@ export const openPipelineRuntime = (
 
   const prepareForShutdown = async (): Promise<void> => {
     const active = [...activeExecutions.values()];
-    await Promise.all(
+    const cancellation = Promise.all(
       active.map(async (execution) => {
         try {
           await execution.cancel?.();
@@ -4761,7 +4761,6 @@ export const openPipelineRuntime = (
       }),
     );
     for (const execution of active) execution.controller.abort();
-    await Promise.all(active.map((execution) => execution.done));
     const now = clock().toISOString();
     const running = database
       .prepare(
@@ -4780,70 +4779,76 @@ export const openPipelineRuntime = (
       readonly runId: string;
       readonly operationKey: string | null;
     }>;
-    if (running.length === 0) return;
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      const affectedRuns = new Set<string>();
-      for (const item of running) {
-        const attempt = database
-          .prepare(
-            `UPDATE node_attempts
+    if (running.length > 0) {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const affectedRuns = new Set<string>();
+        for (const item of running) {
+          const attempt = database
+            .prepare(
+              `UPDATE node_attempts
                 SET status = 'reconciling', recoverable = 1,
                     failure_code = 'RUNTIME_SHUTDOWN',
                     failure_message = 'Runtime drained before the external execution reached a proven terminal state.',
                     completed_at = NULL
               WHERE id = ? AND status = 'running'`,
-          )
-          .run(item.attemptId);
-        if (attempt.changes !== 1) continue;
-        database
-          .prepare(
-            `UPDATE node_runs
+            )
+            .run(item.attemptId);
+          if (attempt.changes !== 1) continue;
+          database
+            .prepare(
+              `UPDATE node_runs
                 SET status = 'blocked', failure_code = 'RUNTIME_SHUTDOWN',
                     failure_message = 'Runtime drained with execution reconciliation required.',
                     updated_at = ?
               WHERE id = ? AND status = 'running'`,
-          )
-          .run(now, item.nodeRunId);
-        database
-          .prepare(
-            `UPDATE execution_leases SET released_at = ?
+            )
+            .run(now, item.nodeRunId);
+          database
+            .prepare(
+              `UPDATE execution_leases SET released_at = ?
               WHERE target_kind = 'node-attempt' AND target_id = ?
                 AND released_at IS NULL`,
-          )
-          .run(now, item.attemptId);
-        appendRuntimeMutation({
-          action: "attempt.runtime-shutdown",
-          entityType: "node-attempt",
-          entityId: item.attemptId,
-          eventType: "attempt.reconciling",
-          runId: item.runId,
-          nodeRunId: item.nodeRunId,
-          before: { status: "running" },
-          after: {
-            status: "reconciling",
-            operationKey: item.operationKey ?? `node-attempt:${item.attemptId}`,
-            failureCode: "RUNTIME_SHUTDOWN",
-          },
-          createdAt: now,
-        });
-        affectedRuns.add(item.runId);
+            )
+            .run(now, item.attemptId);
+          appendRuntimeMutation({
+            action: "attempt.runtime-shutdown",
+            entityType: "node-attempt",
+            entityId: item.attemptId,
+            eventType: "attempt.reconciling",
+            runId: item.runId,
+            nodeRunId: item.nodeRunId,
+            before: { status: "running" },
+            after: {
+              status: "reconciling",
+              operationKey:
+                item.operationKey ?? `node-attempt:${item.attemptId}`,
+              failureCode: "RUNTIME_SHUTDOWN",
+            },
+            createdAt: now,
+          });
+          affectedRuns.add(item.runId);
+        }
+        for (const runId of affectedRuns) {
+          database
+            .prepare(
+              `UPDATE department_runs
+                  SET status = 'blocked', revision = revision + 1,
+                      updated_at = ?
+                WHERE id = ? AND status = 'running'`,
+            )
+            .run(now, runId);
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
       }
-      for (const runId of affectedRuns) {
-        database
-          .prepare(
-            `UPDATE department_runs
-                SET status = 'blocked', revision = revision + 1,
-                    updated_at = ?
-              WHERE id = ? AND status = 'running'`,
-          )
-          .run(now, runId);
-      }
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      throw error;
     }
+    await Promise.all([
+      cancellation,
+      Promise.all(active.map((execution) => execution.done)),
+    ]);
   };
 
   const recoverExpiredApprovals = (): number => {
@@ -5791,25 +5796,30 @@ export const openPipelineRuntime = (
         )
         .get(attemptId) as { readonly operationKey: string } | undefined;
       if (!candidate) return;
-      try {
-        await executionAdapter.cancel?.(candidate.operationKey);
-      } catch {
-        // Cancellation is advisory; reconciliation remains authoritative.
-      }
       const active = [...activeExecutions.values()].filter(
         (execution) => execution.attemptId === attemptId,
       );
-      await Promise.all(
-        active.map(async (execution) => {
+      const cancellation = Promise.all([
+        (async () => {
+          try {
+            await executionAdapter.cancel?.(candidate.operationKey);
+          } catch {
+            // Cancellation is advisory; reconciliation remains authoritative.
+          }
+        })(),
+        ...active.map(async (execution) => {
           try {
             await execution.cancel?.();
           } catch {
             // Cancellation is advisory; reconciliation remains authoritative.
           }
         }),
-      );
+      ]);
       for (const execution of active) execution.controller.abort();
-      await Promise.all(active.map((execution) => execution.done));
+      await Promise.all([
+        cancellation,
+        Promise.all(active.map((execution) => execution.done)),
+      ]);
     };
 
   const cancelNodeAttempt: PipelineRuntime["cancelNodeAttempt"] = async (
@@ -6063,28 +6073,29 @@ export const openPipelineRuntime = (
       throw error;
     }
     if (input.action === "pause" || input.action === "cancel") {
-      if (input.action === "cancel") {
-        await Promise.all(
-          cancellationCandidates.map(async (candidate) => {
-            try {
-              await executionAdapter.cancel?.(candidate.operationKey);
-            } catch {
-              // Adapter cancellation is advisory; reconciliation owns truth.
-            }
-          }),
-        );
-      }
-      await Promise.all(
-        active.map(async (execution) => {
+      const cancellation = Promise.all([
+        ...(input.action === "cancel"
+          ? cancellationCandidates.map(async (candidate) => {
+              try {
+                await executionAdapter.cancel?.(candidate.operationKey);
+              } catch {
+                // Adapter cancellation is advisory; reconciliation owns truth.
+              }
+            })
+          : []),
+        ...active.map(async (execution) => {
           try {
             await execution.cancel?.();
           } catch {
             // Cancellation is advisory; reconciliation remains authoritative.
           }
         }),
-      );
+      ]);
       for (const execution of active) execution.controller.abort();
-      await Promise.all(active.map((execution) => execution.done));
+      await Promise.all([
+        cancellation,
+        Promise.all(active.map((execution) => execution.done)),
+      ]);
       if (input.action === "pause" && active.length > 0) {
         const nowAfterAbort = clock().toISOString();
         database.exec("BEGIN IMMEDIATE");

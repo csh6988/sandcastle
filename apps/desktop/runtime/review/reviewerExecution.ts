@@ -108,6 +108,7 @@ export type ReviewerExecutionResult =
       };
       readonly isolationEvidence: readonly string[];
       readonly output: ReviewerFindingOutput | ReviewerRecheckOutput;
+      readonly terminalExecutionFactId?: string;
     }
   | {
       readonly status: "blocked" | "unknown";
