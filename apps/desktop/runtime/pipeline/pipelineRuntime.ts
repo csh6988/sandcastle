@@ -3772,6 +3772,7 @@ export const openPipelineRuntime = (
           WHERE node_attempts.status = 'reconciling'
             AND node_runs.status = 'blocked'
             AND department_runs.status = 'blocked'
+            AND COALESCE(node_runs.handler_kind_id, '') <> 'code-review@1'
             AND NOT EXISTS (
               SELECT 1 FROM execution_leases
                WHERE target_kind = 'node-attempt'

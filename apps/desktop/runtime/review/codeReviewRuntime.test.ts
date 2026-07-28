@@ -1889,8 +1889,19 @@ describe("Code Review Runtime", () => {
         }),
         /provider response was lost/,
       );
+      await fixture.database.pipelineRuntime.prepareForShutdown();
       fixture.database.close();
+      let genericReconcileCalls = 0;
       reopened = openCompanyDatabase(fixture.companyDir, {
+        executionAdapter: {
+          execute: async () => {
+            throw new Error("generic execution must not run Code Review");
+          },
+          reconcile: async () => {
+            genericReconcileCalls += 1;
+            return { status: "unknown", evidenceRefs: [] };
+          },
+        },
         codeReviewRuntime: {
           reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
           reviewerExecutionAdapter: {
@@ -1986,6 +1997,43 @@ describe("Code Review Runtime", () => {
         },
       });
 
+      assert.equal(
+        await reopened.pipelineRuntime.reconcilePendingExecutions(),
+        0,
+      );
+      assert.equal(genericReconcileCalls, 0);
+      const crashConnection = new DatabaseSync(reopened.path);
+      try {
+        crashConnection.exec(`
+          CREATE TRIGGER crash_after_terminal_reconciliation
+          BEFORE UPDATE OF state ON code_review_execution_stages
+          WHEN NEW.state = 'succeeded'
+          BEGIN
+            SELECT RAISE(ABORT, 'crash after terminal reconciliation');
+          END;
+        `);
+      } finally {
+        crashConnection.close();
+      }
+      await assert.rejects(
+        reopened.codeReviewNodeHandler.reconcilePending(),
+        /crash after terminal reconciliation/,
+      );
+      const afterCrash = reopened.pipelineRuntime.inspectRun("review-run");
+      assert.deepEqual(
+        afterCrash.nodes
+          .find((node) => node.id === "code-review-node")
+          ?.attempts.map((attempt) => attempt.status),
+        ["interrupted", "running"],
+      );
+      const resumeConnection = new DatabaseSync(reopened.path);
+      try {
+        resumeConnection.exec(
+          "DROP TRIGGER crash_after_terminal_reconciliation",
+        );
+      } finally {
+        resumeConnection.close();
+      }
       assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
       const run = reopened.pipelineRuntime.inspectRun("review-run");
       const attempts = run.nodes.find(
@@ -2019,6 +2067,127 @@ describe("Code Review Runtime", () => {
           ).count,
           0,
         );
+        assert.equal(
+          (
+            raw
+              .prepare(
+                `SELECT COUNT(*) AS count FROM command_deduplication
+                  WHERE command_id LIKE 'code-review:terminal-reconciliation:%'`,
+              )
+              .get() as { readonly count: number }
+          ).count,
+          1,
+        );
+      } finally {
+        raw.close();
+      }
+    } finally {
+      reopened?.close();
+    }
+  });
+
+  it("replays an accepted blocked Reviewer result after a crash before stage persistence", async () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: false,
+      },
+      execute: async () => {
+        throw new Error("provider response was lost after durable blocking");
+      },
+    });
+    let reopened: ReturnType<typeof openCompanyDatabase> | undefined;
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      await assert.rejects(
+        fixture.database.pipelineRuntime.executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        }),
+        /provider response was lost/,
+      );
+      await fixture.database.pipelineRuntime.prepareForShutdown();
+      fixture.database.close();
+      let reconcileCalls = 0;
+      reopened = openCompanyDatabase(fixture.companyDir, {
+        codeReviewRuntime: {
+          reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
+          reviewerExecutionAdapter: {
+            capabilities: {
+              executionBoundIsolation: true,
+              reattachRunningOperation: false,
+            },
+            execute: async () => {
+              throw new Error("blocked Reviewer execution must not repeat");
+            },
+            reconcile: async (operationKey, sink) => {
+              reconcileCalls += 1;
+              assert.ok(sink);
+              const blocked = {
+                status: "blocked" as const,
+                code: "PROVIDER_ISOLATION_REQUIRED" as const,
+                message:
+                  "The durable Reviewer receipt proves invalid isolation.",
+                evidence: ["provider:isolation-invalid"],
+              };
+              await sink.record({
+                adapterSchemaVersion: 1,
+                factId: `${operationKey}:reconciled-blocked`,
+                ordinal: 1,
+                kind: "completed",
+                schemaVersion: 1,
+                payload: { structuredResult: blocked },
+                evidenceRefs: blocked.evidence,
+              });
+              return blocked;
+            },
+          },
+        },
+      });
+      const crashConnection = new DatabaseSync(reopened.path);
+      try {
+        crashConnection.exec(`
+          CREATE TRIGGER crash_before_blocked_stage_persistence
+          BEFORE UPDATE OF state ON code_review_execution_stages
+          WHEN NEW.state = 'blocked'
+          BEGIN
+            SELECT RAISE(ABORT, 'crash before blocked stage persistence');
+          END;
+        `);
+      } finally {
+        crashConnection.close();
+      }
+      await assert.rejects(
+        reopened.codeReviewNodeHandler.reconcilePending(),
+        /crash before blocked stage persistence/,
+      );
+      const resumeConnection = new DatabaseSync(reopened.path);
+      try {
+        resumeConnection.exec(
+          "DROP TRIGGER crash_before_blocked_stage_persistence",
+        );
+      } finally {
+        resumeConnection.close();
+      }
+      await assert.rejects(
+        reopened.codeReviewNodeHandler.reconcilePending(),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "PROVIDER_ISOLATION_REQUIRED",
+      );
+      assert.equal(reconcileCalls, 1);
+      const raw = new DatabaseSync(reopened.path);
+      try {
+        const stage = raw
+          .prepare(
+            `SELECT state, failure_code AS failureCode
+               FROM code_review_execution_stages
+              WHERE phase = 'initial-finding'`,
+          )
+          .get() as { readonly state: string; readonly failureCode: string };
+        assert.equal(stage.state, "blocked");
+        assert.equal(stage.failureCode, "PROVIDER_ISOLATION_REQUIRED");
       } finally {
         raw.close();
       }

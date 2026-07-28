@@ -411,6 +411,11 @@ export const openCodeReviewExecutionRuntime = (options: {
       }
     };
 
+    type CompletedReviewerExecutionResult = Exclude<
+      ReviewerExecutionResult,
+      { readonly status: "running" }
+    >;
+
     const acceptedCompletedResult = (details: {
       readonly executionFactId: string;
       readonly expectedLease?: ExecutionLeaseContext;
@@ -418,7 +423,7 @@ export const openCodeReviewExecutionRuntime = (options: {
         ReviewerExecutionResult,
         { readonly status: "succeeded" }
       >;
-    }): Extract<ReviewerExecutionResult, { readonly status: "succeeded" }> => {
+    }): CompletedReviewerExecutionResult => {
       const fact = inspectExecution(database, {
         operationKey: input.operationKey,
       }).facts.find((candidate) => candidate.id === details.executionFactId);
@@ -447,12 +452,15 @@ export const openCodeReviewExecutionRuntime = (options: {
       if (
         typeof structuredResult !== "object" ||
         structuredResult === null ||
-        (structuredResult as { readonly status?: unknown }).status !==
-          "succeeded"
+        !["succeeded", "blocked", "unknown"].includes(
+          String(
+            (structuredResult as { readonly status?: unknown }).status ?? "",
+          ),
+        )
       ) {
         throw runtimeError(
           "EXECUTION_ADAPTER_PROTOCOL",
-          "Reviewer completed Fact requires an exact succeeded structured result.",
+          "Reviewer completed Fact requires an exact terminal structured result.",
         );
       }
       if (details.reportedResult) {
@@ -467,18 +475,74 @@ export const openCodeReviewExecutionRuntime = (options: {
           );
         }
       }
-      return {
-        ...(structuredResult as Extract<
-          ReviewerExecutionResult,
-          { readonly status: "succeeded" }
-        >),
-        terminalExecutionFactId: fact.id,
-      };
+      const completedResult =
+        structuredResult as CompletedReviewerExecutionResult;
+      return completedResult.status === "succeeded"
+        ? { ...completedResult, terminalExecutionFactId: fact.id }
+        : completedResult;
     };
 
     const continueAfterTerminalReconciliation = (details: {
       readonly terminalExecutionFactId: string;
     }): void => {
+      const commandId = `code-review:terminal-reconciliation:${details.terminalExecutionFactId}`;
+      const request = {
+        operationKey: input.operationKey,
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        terminalExecutionFactId: details.terminalExecutionFactId,
+      };
+      const requestHash = pipelineHash(request);
+      const existingReceipt = database
+        .prepare(
+          `SELECT status, request_hash AS requestHash,
+                  result_json AS resultJson, result_hash AS resultHash
+             FROM command_deduplication WHERE command_id = ?`,
+        )
+        .get(commandId) as
+        | {
+            readonly status: string;
+            readonly requestHash: string;
+            readonly resultJson: string | null;
+            readonly resultHash: string | null;
+          }
+        | undefined;
+      if (existingReceipt) {
+        let receipt: unknown;
+        try {
+          receipt = existingReceipt.resultJson
+            ? (JSON.parse(existingReceipt.resultJson) as unknown)
+            : null;
+        } catch (error) {
+          throw runtimeError(
+            "COMMAND_RECEIPT_INVALID",
+            `Code Review terminal reconciliation receipt is invalid JSON: ${String(error)}`,
+          );
+        }
+        const value =
+          typeof receipt === "object" && receipt !== null
+            ? (receipt as { readonly value?: unknown }).value
+            : undefined;
+        const receiptValue =
+          typeof value === "object" && value !== null
+            ? (value as Record<string, unknown>)
+            : {};
+        if (
+          existingReceipt.status !== "completed" ||
+          existingReceipt.requestHash !== requestHash ||
+          !existingReceipt.resultHash ||
+          pipelineHash(receipt) !== existingReceipt.resultHash ||
+          receiptValue.continuationAttemptId !== attempt.attemptId ||
+          receiptValue.terminalExecutionFactId !==
+            details.terminalExecutionFactId
+        ) {
+          throw runtimeError(
+            "COMMAND_REPLAY_CONFLICT",
+            "Code Review terminal reconciliation receipt does not match the current continuation Attempt.",
+          );
+        }
+        return;
+      }
       const current = database
         .prepare(
           `SELECT node_attempts.status AS attemptStatus,
@@ -522,17 +586,24 @@ export const openCodeReviewExecutionRuntime = (options: {
           `Code Review Node Attempt ${attempt.attemptId} cannot continue after terminal reconciliation from ${current.attemptStatus}/${current.nodeStatus}/${current.runStatus}.`,
         );
       }
+      const terminalFact = inspectExecution(database, {
+        operationKey: input.operationKey,
+      }).facts.find(
+        (candidate) => candidate.id === details.terminalExecutionFactId,
+      );
+      if (
+        !terminalFact ||
+        terminalFact.target.kind !== "node-attempt" ||
+        terminalFact.target.id !== attempt.attemptId
+      ) {
+        throw runtimeError(
+          "EXECUTION_ADAPTER_PROTOCOL",
+          "The first terminal reconciliation must target the aggregate Attempt being interrupted.",
+        );
+      }
       const now = clock().toISOString();
       const nextAttemptId = randomUUID();
       const nextAttemptNumber = current.attemptNumber + 1;
-      const commandId = `code-review:terminal-reconciliation:${details.terminalExecutionFactId}`;
-      const request = {
-        operationKey: input.operationKey,
-        runId: input.runId,
-        nodeRunId: input.nodeRunId,
-        interruptedAttemptId: attempt.attemptId,
-        terminalExecutionFactId: details.terminalExecutionFactId,
-      };
       database.exec("BEGIN IMMEDIATE");
       try {
         database
@@ -677,7 +748,7 @@ export const openCodeReviewExecutionRuntime = (options: {
           )
           .run(
             commandId,
-            pipelineHash(request),
+            requestHash,
             canonicalPipelineJson(receipt),
             pipelineHash(receipt),
             canonicalPipelineJson(effectIds),
@@ -828,9 +899,11 @@ export const openCodeReviewExecutionRuntime = (options: {
       const result = acceptedCompletedResult({
         executionFactId: existingTerminal.id,
       });
-      continueAfterTerminalReconciliation({
-        terminalExecutionFactId: existingTerminal.id,
-      });
+      if (result.status === "succeeded") {
+        continueAfterTerminalReconciliation({
+          terminalExecutionFactId: existingTerminal.id,
+        });
+      }
       return result;
     }
 
