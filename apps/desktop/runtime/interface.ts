@@ -718,7 +718,16 @@ export const CodeReviewManifestSchema = z
     errorHandlingInputs: z.array(z.string().trim().min(1)),
     crossApplicationImpactInputs: z.array(z.string().trim().min(1)),
     reviewerExecutionProfileId: z.string().trim().min(1).optional(),
+    producerCredentialReferenceIds: z
+      .array(z.string().trim().min(1))
+      .optional(),
     reviewerCredentialReferenceIds: z
+      .array(z.string().trim().min(1))
+      .optional(),
+    producerCredentialProviderScopes: z
+      .array(z.string().trim().min(1))
+      .optional(),
+    reviewerCredentialProviderScopes: z
       .array(z.string().trim().min(1))
       .optional(),
     priorReview: z
@@ -738,6 +747,7 @@ export const CodeReviewManifestSchema = z
               evidenceRefs: z.array(z.string().trim().min(1)),
               resolution: z
                 .object({
+                  id: z.string().trim().min(1),
                   disposition: z.enum([
                     "accepted",
                     "disputed",

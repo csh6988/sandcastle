@@ -97,7 +97,7 @@ export const openCodeReviewNodeHandler = (
     >;
     readonly pipelineRuntime: Pick<
       PipelineRuntime,
-      "inspectRun" | "blockCodeReviewInTransaction"
+      "inspectRun" | "blockCodeReviewInTransaction" | "executeCodeReviewStage"
     >;
     readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
     readonly clock?: () => Date;
@@ -431,6 +431,16 @@ export const openCodeReviewNodeHandler = (
       isolation.cacheScopeHash.length !== 64 ||
       typeof isolation.credentialScopeHash !== "string" ||
       isolation.credentialScopeHash.length !== 64 ||
+      typeof isolation.providerOperationId !== "string" ||
+      isolation.providerOperationId.trim().length === 0 ||
+      isolation.inspectedReadOnlyReviewMount !== true ||
+      typeof isolation.inspectedEnvironmentHash !== "string" ||
+      isolation.inspectedEnvironmentHash.length !== 64 ||
+      typeof isolation.inspectedAt !== "string" ||
+      !Number.isFinite(Date.parse(isolation.inspectedAt)) ||
+      isolation.terminalProviderStatus !== "completed" ||
+      typeof isolation.terminalProviderReceiptHash !== "string" ||
+      isolation.terminalProviderReceiptHash.length !== 64 ||
       result.isolation.mechanism.trim().length === 0 ||
       result.isolation.mechanismVersion.trim().length === 0
     ) {
@@ -525,80 +535,33 @@ export const openCodeReviewNodeHandler = (
         `Reviewer execution ${persisted.operationKey} is ${persisted.state}.`,
       );
     }
-    if (persisted?.state === "running") {
-      const reconciled = executionAdapter.reconcile
-        ? await executionAdapter.reconcile(persisted.operationKey)
-        : ({
-            status: "unknown",
-            code: "RECONCILE_UNKNOWN",
-            message:
-              "The Reviewer provider cannot safely reconcile a running operation.",
-            evidence: [],
-          } satisfies ReviewerExecutionResult);
-      if (reconciled.status !== "succeeded") {
-        persistStage({
-          review,
-          phase: input.phase,
-          participantId: input.reviewer.participantId,
-          sessionId: input.reviewer.sessionId,
-          operationKey: input.operationKey,
-          state: reconciled.status,
-          failure: reconciled,
-        });
-        throw new CodeReviewNodeHandlerError(
-          reconciled.code,
-          reconciled.message,
-        );
-      }
-      try {
-        assertExecutionIsolation(reconciled);
-      } catch (error) {
-        return persistIsolationFailure({
-          review,
-          phase: input.phase,
-          participantId: input.reviewer.participantId,
-          sessionId: input.reviewer.sessionId,
-          operationKey: input.operationKey,
-          error,
-        });
-      }
-      let output: ReturnType<typeof validateExecutionOutput>;
-      try {
-        output = validateExecutionOutput(
-          review,
-          input.phase,
-          reconciled.output,
-        );
-      } catch (error) {
-        return persistInvalidOutput({
-          review,
-          phase: input.phase,
-          participantId: input.reviewer.participantId,
-          sessionId: input.reviewer.sessionId,
-          operationKey: input.operationKey,
-          error,
-        });
-      }
+    if (!persisted) {
       persistStage({
         review,
         phase: input.phase,
         participantId: input.reviewer.participantId,
         sessionId: input.reviewer.sessionId,
         operationKey: input.operationKey,
-        state: "succeeded",
-        result: reconciled,
+        state: "running",
       });
-      return output;
     }
-    persistStage({
-      review,
-      phase: input.phase,
-      participantId: input.reviewer.participantId,
-      sessionId: input.reviewer.sessionId,
+    const result = await options.pipelineRuntime.executeCodeReviewStage({
+      runId: input.manifest.runId,
+      nodeRunId: input.reviewNodeRunId,
+      reviewerSessionId: input.reviewer.sessionId,
+      reviewerAiMemberId: input.reviewer.aiMemberId,
       operationKey: input.operationKey,
-      state: "running",
+      reconcileExisting: persisted?.state === "running",
+      timeoutSeconds: input.executionProfile.timeoutSeconds,
+      request: input,
+      adapter: executionAdapter,
     });
-    const result = await executionAdapter.execute(input);
+    if (result.status === "running") {
+      throw new CodeReviewNodeHandlerError(
+        "RECONCILE_UNKNOWN",
+        `Reviewer execution ${input.operationKey} remained running after reattachment.`,
+      );
+    }
     if (result.status !== "succeeded") {
       persistStage({
         review,
@@ -849,7 +812,6 @@ export const openCodeReviewNodeHandler = (
     }
     for (const finding of topic.findings.filter(
       (candidate) =>
-        candidate.blocking &&
         !topic.resolutions.some(
           (resolution) => resolution.findingId === candidate.id,
         ),

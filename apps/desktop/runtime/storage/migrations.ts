@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 44;
+export const CURRENT_SCHEMA_VERSION = 45;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4212,8 +4212,16 @@ const migrations: readonly CompanyMigration[] = [
             const row = database
               .prepare("SELECT sql FROM sqlite_schema WHERE name = ?")
               .get(name) as { readonly sql: string | null } | undefined;
+            const compatibleSql =
+              name === "code_review_authorities" && row?.sql
+                ? row.sql.replace(
+                    /,\s*initial_execution_stage_id TEXT REFERENCES code_review_execution_stages\(id\),\s*initial_isolation_receipt_hash TEXT,\s*initial_result_hash TEXT,\s*fresh_execution_stage_id TEXT REFERENCES code_review_execution_stages\(id\),\s*fresh_isolation_receipt_hash TEXT,\s*fresh_result_hash TEXT(?=\s*\)\s*STRICT)/i,
+                    "",
+                  )
+                : row?.sql;
             return (
-              !row?.sql || normalizeSql(row.sql) !== normalizeSql(expected)
+              !compatibleSql ||
+              normalizeSql(compatibleSql) !== normalizeSql(expected)
             );
           })
           .map(([name]) => name);
@@ -4304,6 +4312,103 @@ const migrations: readonly CompanyMigration[] = [
         return;
       }
       database.exec(`${Object.values(schemaSql).join(";\n")};`);
+    },
+  },
+  {
+    version: 45,
+    name: "immutable_exact_code_review_execution_evidence",
+    migrate: (database) => {
+      const columns = database
+        .prepare("PRAGMA table_info(code_review_authorities)")
+        .all() as Array<{ readonly name: string }>;
+      if (
+        !columns.some((column) => column.name === "initial_execution_stage_id")
+      ) {
+        database.exec(`
+          DROP TRIGGER code_review_authorities_immutable_update;
+          ALTER TABLE code_review_authorities
+            ADD COLUMN initial_execution_stage_id TEXT REFERENCES code_review_execution_stages(id);
+          ALTER TABLE code_review_authorities
+            ADD COLUMN initial_isolation_receipt_hash TEXT;
+          ALTER TABLE code_review_authorities
+            ADD COLUMN initial_result_hash TEXT;
+          ALTER TABLE code_review_authorities
+            ADD COLUMN fresh_execution_stage_id TEXT REFERENCES code_review_execution_stages(id);
+          ALTER TABLE code_review_authorities
+            ADD COLUMN fresh_isolation_receipt_hash TEXT;
+          ALTER TABLE code_review_authorities
+            ADD COLUMN fresh_result_hash TEXT;
+          UPDATE code_review_authorities
+             SET initial_execution_stage_id = (
+                   SELECT id FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'initial-finding'
+                 ),
+                 initial_isolation_receipt_hash = (
+                   SELECT isolation_receipt_hash FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'initial-finding'
+                 ),
+                 initial_result_hash = (
+                   SELECT result_hash FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'initial-finding'
+                 ),
+                 fresh_execution_stage_id = (
+                   SELECT id FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'fresh-recheck'
+                 ),
+                 fresh_isolation_receipt_hash = (
+                   SELECT isolation_receipt_hash FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'fresh-recheck'
+                 ),
+                 fresh_result_hash = (
+                   SELECT result_hash FROM code_review_execution_stages
+                    WHERE code_review_manifest_id = code_review_authorities.code_review_manifest_id
+                      AND phase = 'fresh-recheck'
+                 );
+          CREATE TRIGGER code_review_authorities_immutable_update
+          BEFORE UPDATE ON code_review_authorities
+          BEGIN
+            SELECT RAISE(ABORT, 'Code Review authority is immutable');
+          END;
+        `);
+      }
+      database.exec(`
+        CREATE TRIGGER IF NOT EXISTS code_review_execution_stages_succeeded_update
+        BEFORE UPDATE ON code_review_execution_stages
+        WHEN OLD.state = 'succeeded' AND (
+          NEW.state IS NOT OLD.state
+          OR NEW.provider_id IS NOT OLD.provider_id
+          OR NEW.isolation_receipt_json IS NOT OLD.isolation_receipt_json
+          OR NEW.isolation_receipt_hash IS NOT OLD.isolation_receipt_hash
+          OR NEW.result_json IS NOT OLD.result_json
+          OR NEW.result_hash IS NOT OLD.result_hash
+          OR NEW.failure_code IS NOT OLD.failure_code
+          OR NEW.failure_message IS NOT OLD.failure_message
+          OR NEW.updated_at IS NOT OLD.updated_at
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Succeeded Code Review execution evidence is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS code_review_authorities_execution_binding_insert
+        BEFORE INSERT ON code_review_authorities
+        WHEN NEW.initial_execution_stage_id IS NULL
+          OR NEW.initial_isolation_receipt_hash IS NULL
+          OR length(NEW.initial_isolation_receipt_hash) <> 64
+          OR NEW.initial_result_hash IS NULL
+          OR length(NEW.initial_result_hash) <> 64
+          OR NEW.fresh_execution_stage_id IS NULL
+          OR NEW.fresh_isolation_receipt_hash IS NULL
+          OR length(NEW.fresh_isolation_receipt_hash) <> 64
+          OR NEW.fresh_result_hash IS NULL
+          OR length(NEW.fresh_result_hash) <> 64
+        BEGIN
+          SELECT RAISE(ABORT, 'Code Review authority requires exact execution evidence bindings');
+        END;
+      `);
     },
   },
 ];

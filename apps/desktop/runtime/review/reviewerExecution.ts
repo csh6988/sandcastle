@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CodeReviewManifest, ReviewTopicView } from "../interface.js";
+import type { ExecutionEventSink } from "../execution/contract.js";
 
 export const ReviewerFindingOutputSchema = z
   .object({
@@ -96,6 +97,12 @@ export type ReviewerExecutionResult =
         readonly sessionScopeHash?: string;
         readonly cacheScopeHash?: string;
         readonly credentialScopeHash?: string;
+        readonly providerOperationId?: string;
+        readonly inspectedReadOnlyReviewMount?: true;
+        readonly inspectedEnvironmentHash?: string;
+        readonly inspectedAt?: string;
+        readonly terminalProviderStatus?: "completed";
+        readonly terminalProviderReceiptHash?: string;
         readonly mechanism: string;
         readonly mechanismVersion: string;
       };
@@ -110,6 +117,10 @@ export type ReviewerExecutionResult =
         | "RECONCILE_UNKNOWN";
       readonly message: string;
       readonly evidence: readonly string[];
+    }
+  | {
+      readonly status: "running";
+      readonly providerExecutionRef: string;
     };
 
 export interface ReviewerExecutionAdapter {
@@ -119,9 +130,21 @@ export interface ReviewerExecutionAdapter {
   };
   readonly execute: (
     input: ReviewerExecutionInput,
+    sink?: ExecutionEventSink,
+    signal?: AbortSignal,
   ) => Promise<ReviewerExecutionResult>;
+  readonly cancel?: (
+    operationKey: string,
+  ) => Promise<"cancelled" | "not-found" | "unknown">;
   readonly reconcile?: (
     operationKey: string,
+    sink?: ExecutionEventSink,
+  ) => Promise<ReviewerExecutionResult>;
+  readonly reattach?: (
+    input: ReviewerExecutionInput,
+    providerExecutionRef: string,
+    sink: ExecutionEventSink,
+    signal: AbortSignal,
   ) => Promise<ReviewerExecutionResult>;
 }
 
@@ -162,6 +185,17 @@ export const createScriptedReviewerExecutionAdapter = (input: {
         cacheScopeHash: result.isolation.cacheScopeHash ?? "3".repeat(64),
         credentialScopeHash:
           result.isolation.credentialScopeHash ?? "4".repeat(64),
+        providerOperationId:
+          result.isolation.providerOperationId ?? "scripted-reviewer-operation",
+        inspectedReadOnlyReviewMount:
+          result.isolation.inspectedReadOnlyReviewMount ?? true,
+        inspectedEnvironmentHash:
+          result.isolation.inspectedEnvironmentHash ?? "5".repeat(64),
+        inspectedAt: result.isolation.inspectedAt ?? "2026-07-28T10:00:00.000Z",
+        terminalProviderStatus:
+          result.isolation.terminalProviderStatus ?? "completed",
+        terminalProviderReceiptHash:
+          result.isolation.terminalProviderReceiptHash ?? "6".repeat(64),
       },
     };
   },

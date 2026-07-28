@@ -59,8 +59,44 @@ describe("Sandcastle core Runtime loader", () => {
     assert.deepEqual(runOptions?.output, { kind: "object", tag: "alignment" });
   });
 
-  it("resolves the formal local profile to the Docker sandbox provider", () => {
-    const dockerSandbox = { tag: "bind-mount", name: "docker" };
+  it("resolves the formal local profile to the Docker sandbox provider", async () => {
+    const dockerSandbox = {
+      tag: "bind-mount" as const,
+      name: "docker",
+      env: {},
+      sandboxHomedir: "/home/agent",
+      create: async (_options: unknown) => ({
+        worktreePath: "/launcher",
+        exec: async (command: string) => {
+          if (command.includes("/etc/hostname")) {
+            return {
+              stdout: "reviewer-container-1\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (command.includes("mountinfo")) {
+            return {
+              stdout: "42 31 0:40 / /review ro - ext4 /dev/root ro\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (command.includes("printf")) {
+            return {
+              stdout:
+                "/home/agent\n/home/agent/.cache\n/home/agent/.config\n/home/agent/.local/share\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        copyFileIn: async () => undefined,
+        copyFileOut: async () => undefined,
+        close: async () => undefined,
+      }),
+    };
     let reviewerDockerOptions: Record<string, unknown> | undefined;
     const runtime = createSandcastleExecutionRuntimeFromModules(
       {
@@ -93,14 +129,31 @@ describe("Sandcastle core Runtime loader", () => {
     );
 
     assert.equal(runtime.resolveSandbox("docker"), dockerSandbox);
-    assert.deepEqual(
-      runtime.resolveReviewerSandbox?.({
-        sandboxRef: "docker",
-        workspaceRef: "/review-bundle",
-        operationKey: "code-review:review-1:initial-finding",
-        secretReferenceIds: [],
-      }).sandbox,
-      dockerSandbox,
+    const reviewerSandbox = runtime.resolveReviewerSandbox?.({
+      sandboxRef: "docker",
+      workspaceRef: "/review-bundle",
+      operationKey: "code-review:review-1:initial-finding",
+      secretReferenceIds: [],
+    });
+    assert.ok(reviewerSandbox);
+    const handle = await (
+      reviewerSandbox.sandbox as typeof dockerSandbox
+    ).create({
+      worktreePath: "/launcher",
+      hostRepoPath: "/launcher",
+      mounts: [],
+      env: {},
+    });
+    await handle.close();
+    assert.equal(
+      reviewerSandbox.receipt.providerOperationId,
+      "reviewer-container-1",
+    );
+    assert.equal(reviewerSandbox.receipt.inspectedReadOnlyReviewMount, true);
+    assert.equal(reviewerSandbox.receipt.terminalProviderStatus, "completed");
+    assert.equal(
+      reviewerSandbox.receipt.terminalProviderReceiptHash?.length,
+      64,
     );
     assert.deepEqual(reviewerDockerOptions, {
       mounts: [

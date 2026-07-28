@@ -461,6 +461,10 @@ describe("Company database migrations", () => {
               version: 44,
               name: "durable_code_review_execution",
             },
+            {
+              version: 45,
+              name: "immutable_exact_code_review_execution_evidence",
+            },
           ],
         );
         assert.deepEqual(
@@ -2031,6 +2035,45 @@ describe("Company database migrations", () => {
           | undefined;
         assert.equal(migration?.version, 44);
         assert.equal(migration?.name, "durable_code_review_execution");
+        const exactEvidenceMigration = inspected
+          .prepare(
+            `SELECT version, name FROM schema_migrations WHERE version = 45`,
+          )
+          .get() as
+          | { readonly version: number; readonly name: string }
+          | undefined;
+        assert.equal(exactEvidenceMigration?.version, 45);
+        assert.equal(
+          exactEvidenceMigration?.name,
+          "immutable_exact_code_review_execution_evidence",
+        );
+        const authorityColumns = inspected
+          .prepare("PRAGMA table_info(code_review_authorities)")
+          .all() as Array<{ readonly name: string }>;
+        assert.equal(
+          authorityColumns.some(
+            (column) => column.name === "initial_execution_stage_id",
+          ),
+          true,
+        );
+        assert.equal(
+          authorityColumns.some(
+            (column) => column.name === "fresh_result_hash",
+          ),
+          true,
+        );
+        assert.equal(
+          (
+            inspected
+              .prepare(
+                `SELECT COUNT(*) AS count FROM sqlite_schema
+                  WHERE type = 'trigger'
+                    AND name = 'code_review_execution_stages_succeeded_update'`,
+              )
+              .get() as { readonly count: number }
+          ).count,
+          1,
+        );
       } finally {
         inspected.close();
       }

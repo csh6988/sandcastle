@@ -74,6 +74,7 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           readonly secretReferenceIds: readonly string[];
         }
       | undefined;
+    const factKinds: string[] = [];
     const runtime: SandcastleExecutionRuntime = {
       resolveAgent: (_provider, _model, options) => {
         captureSessions = options?.captureSessions;
@@ -91,6 +92,12 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
             sessionScopeHash: "2".repeat(64),
             cacheScopeHash: "3".repeat(64),
             credentialScopeHash: "4".repeat(64),
+            providerOperationId: "docker-container-1",
+            inspectedReadOnlyReviewMount: true,
+            inspectedEnvironmentHash: "5".repeat(64),
+            inspectedAt: "2026-07-28T10:00:00.000Z",
+            terminalProviderStatus: "completed",
+            terminalProviderReceiptHash: "6".repeat(64),
           },
         };
       },
@@ -103,8 +110,28 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           /\/review\/inputs\/manifest\.json/,
         );
         assert.match(String(options.prompt), /<reviewer_finding>/);
+        assert.match(String(options.prompt), /"severity"/);
+        assert.match(String(options.prompt), /"rationale"/);
+        assert.match(String(options.prompt), /"impact"/);
+        assert.match(String(options.prompt), /"evidenceRefs"/);
+        assert.match(String(options.prompt), /"suggestedOwner"/);
+        assert.match(String(options.prompt), /"blocking"/);
+        assert.deepEqual(options.output, {
+          tag: "reviewer_finding",
+          schema: "reviewer-finding",
+        });
         assert.doesNotMatch(String(options.prompt), /\/producer\/repository/);
         return {
+          stdout: "Reviewer inspected the exact bundle.",
+          iterations: [
+            {
+              usage: {
+                inputTokens: 10,
+                outputTokens: 5,
+                totalTokens: 15,
+              },
+            },
+          ],
           output: {
             findings: [
               {
@@ -122,8 +149,19 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       },
       runWorkspaceTask: async () => ({}),
     };
-    const result =
-      await createSandcastleReviewerExecutionAdapter(runtime).execute(input());
+    const result = await createSandcastleReviewerExecutionAdapter(
+      runtime,
+    ).execute(input(), {
+      record: async (fact) => {
+        factKinds.push(fact.kind);
+        return {
+          status: "accepted",
+          executionFactId: fact.factId,
+          effectIds: [],
+          canonicalPayloadHash: "a".repeat(64),
+        };
+      },
+    });
     assert.equal(result.status, "succeeded");
     assert.equal(captureSessions, false);
     assert.deepEqual(reviewerRequest, {
@@ -133,6 +171,7 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
       secretReferenceIds: [],
     });
     assert.equal(existsSync(launcherPath), false);
+    assert.deepEqual(factKinds, ["provider-started", "message", "usage"]);
     if (result.status !== "succeeded") return;
     assert.equal(result.isolation.readOnlyFilesystem, true);
     assert.equal(result.isolation.independentSessionStorage, true);
@@ -152,6 +191,12 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
           sessionScopeHash: "2".repeat(64),
           cacheScopeHash: "3".repeat(64),
           credentialScopeHash: "4".repeat(64),
+          providerOperationId: "docker-container-1",
+          inspectedReadOnlyReviewMount: true,
+          inspectedEnvironmentHash: "5".repeat(64),
+          inspectedAt: "2026-07-28T10:00:00.000Z",
+          terminalProviderStatus: "completed",
+          terminalProviderReceiptHash: "6".repeat(64),
         },
       }),
       run: async () => {
@@ -172,6 +217,46 @@ describe("Sandcastle Reviewer Execution Adapter", () => {
     );
     assert.equal(result.status, "blocked");
     assert.equal(runCalls, 0);
+  });
+
+  it("blocks when the provider returns only requested isolation hashes without an actual terminal operation receipt", async () => {
+    const runtime: SandcastleExecutionRuntime = {
+      resolveAgent: () => ({}),
+      resolveSandbox: () => ({}),
+      resolveReviewerSandbox: () => ({
+        sandbox: {},
+        providerId: "requested-only-reviewer",
+        evidence: ["mount:/review:requested-readonly"],
+        receipt: {
+          mountTableHash: "1".repeat(64),
+          sessionScopeHash: "2".repeat(64),
+          cacheScopeHash: "3".repeat(64),
+          credentialScopeHash: "4".repeat(64),
+        } as never,
+      }),
+      run: async () => ({
+        output: {
+          findings: [
+            {
+              severity: "info",
+              summary: "Reviewed",
+              rationale: "Exact inputs",
+              impact: "No blocker",
+              evidenceRefs: ["diff-1"],
+              suggestedOwner: "software-engineer",
+              blocking: false,
+            },
+          ],
+        },
+      }),
+      runWorkspaceTask: async () => ({}),
+    };
+    const result =
+      await createSandcastleReviewerExecutionAdapter(runtime).execute(input());
+    assert.equal(result.status, "blocked");
+    if (result.status === "blocked") {
+      assert.match(result.message, /actual terminal operation receipt/);
+    }
   });
 
   it("blocks when Reviewer Secret References cannot be materialized into an operation-local credential scope", async () => {

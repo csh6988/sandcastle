@@ -9,10 +9,15 @@ import {
   type CodeReviewEnvelopeCommand,
   type CodeReviewManifest,
   type CodeReviewView,
+  type ReviewTopicView,
 } from "../interface.js";
 import type { WorkPackageRuntime } from "../workspaces/workPackages.js";
 import type { PipelineRuntime } from "../pipeline/pipelineRuntime.js";
 import type { ReviewRuntime } from "./reviewRuntime.js";
+import {
+  ReviewerFindingOutputSchema,
+  ReviewerRecheckOutputSchema,
+} from "./reviewerExecution.js";
 import { readCanonicalGitDiff } from "./reviewerWorkspace.js";
 
 export class CodeReviewRuntimeError extends Error {
@@ -197,6 +202,128 @@ export const openCodeReviewRuntime = (
       ).count,
     ) > 0;
 
+  type ExecutionStageEvidence = {
+    readonly id: string;
+    readonly phase: "fresh-recheck" | "initial-finding";
+    readonly operationKey: string;
+    readonly state: string;
+    readonly participantId: string;
+    readonly sessionId: string;
+    readonly providerId: string | null;
+    readonly isolationReceiptJson: string | null;
+    readonly isolationReceiptHash: string | null;
+    readonly resultJson: string | null;
+    readonly resultHash: string | null;
+  };
+
+  const readExecutionStages = (
+    codeReviewId: string,
+  ): readonly ExecutionStageEvidence[] =>
+    database
+      .prepare(
+        `SELECT id, phase, operation_key AS operationKey, state,
+                reviewer_participant_id AS participantId,
+                reviewer_session_id AS sessionId, provider_id AS providerId,
+                isolation_receipt_json AS isolationReceiptJson,
+                isolation_receipt_hash AS isolationReceiptHash,
+                result_json AS resultJson, result_hash AS resultHash
+           FROM code_review_execution_stages
+          WHERE code_review_manifest_id = ?
+          ORDER BY phase`,
+      )
+      .all(codeReviewId) as ExecutionStageEvidence[];
+
+  const executionEvidenceIsExact = (input: {
+    readonly codeReviewId: string;
+    readonly topic: ReviewTopicView;
+    readonly authority?: {
+      readonly initialExecutionStageId: string | null;
+      readonly initialIsolationReceiptHash: string | null;
+      readonly initialResultHash: string | null;
+      readonly freshExecutionStageId: string | null;
+      readonly freshIsolationReceiptHash: string | null;
+      readonly freshResultHash: string | null;
+    };
+  }): boolean => {
+    try {
+      const stages = readExecutionStages(input.codeReviewId);
+      if (stages.length !== 2) return false;
+      const initial = stages.find((stage) => stage.phase === "initial-finding");
+      const fresh = stages.find((stage) => stage.phase === "fresh-recheck");
+      const storageIsValid = (
+        stage: ExecutionStageEvidence | undefined,
+      ): stage is ExecutionStageEvidence =>
+        stage?.state === "succeeded" &&
+        stage.operationKey ===
+          `code-review:${input.codeReviewId}:${stage.phase}` &&
+        Boolean(stage.providerId) &&
+        stage.isolationReceiptJson !== null &&
+        stage.isolationReceiptHash === sha256(stage.isolationReceiptJson) &&
+        stage.resultJson !== null &&
+        stage.resultHash === sha256(stage.resultJson);
+      if (!storageIsValid(initial) || !storageIsValid(fresh)) return false;
+
+      const initialOutput = ReviewerFindingOutputSchema.parse(
+        parseJson<unknown>(initial.resultJson!),
+      );
+      const persistedFindings = input.topic.findings.filter(
+        (finding) =>
+          finding.reviewerParticipantId === initial.participantId &&
+          finding.reviewerSessionId === initial.sessionId,
+      );
+      const expectedInitial = {
+        findings: persistedFindings.map((finding) => ({
+          severity: finding.severity,
+          summary: finding.summary,
+          rationale: finding.rationale,
+          impact: finding.impact,
+          evidenceRefs: finding.evidenceRefs,
+          suggestedOwner: finding.suggestedOwner,
+          blocking: finding.blocking,
+          ...(finding.scopeImpact ? { scopeImpact: finding.scopeImpact } : {}),
+        })),
+      };
+      if (canonicalJson(initialOutput) !== canonicalJson(expectedInitial)) {
+        return false;
+      }
+
+      const freshOutput = ReviewerRecheckOutputSchema.parse(
+        parseJson<unknown>(fresh.resultJson!),
+      );
+      const persistedRecheck = input.topic.rechecks.find(
+        (recheck) =>
+          recheck.reviewerParticipantId === fresh.participantId &&
+          recheck.reviewerSessionId === fresh.sessionId,
+      );
+      if (
+        !persistedRecheck ||
+        canonicalJson(freshOutput) !==
+          canonicalJson({
+            result: persistedRecheck.result,
+            conditions: persistedRecheck.conditions,
+            evidenceRefs: persistedRecheck.evidenceRefs,
+          })
+      ) {
+        return false;
+      }
+      if (input.authority) {
+        return (
+          input.authority.initialExecutionStageId === initial.id &&
+          input.authority.initialIsolationReceiptHash ===
+            initial.isolationReceiptHash &&
+          input.authority.initialResultHash === initial.resultHash &&
+          input.authority.freshExecutionStageId === fresh.id &&
+          input.authority.freshIsolationReceiptHash ===
+            fresh.isolationReceiptHash &&
+          input.authority.freshResultHash === fresh.resultHash
+        );
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const appendMutation = (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
@@ -296,6 +423,12 @@ export const openCodeReviewRuntime = (
                 source_commit AS sourceCommit, diff_hash AS diffHash,
                 reviewer_session_id AS reviewerSessionId,
                 independence_evidence_hash AS independenceEvidenceHash,
+                initial_execution_stage_id AS initialExecutionStageId,
+                initial_isolation_receipt_hash AS initialIsolationReceiptHash,
+                initial_result_hash AS initialResultHash,
+                fresh_execution_stage_id AS freshExecutionStageId,
+                fresh_isolation_receipt_hash AS freshIsolationReceiptHash,
+                fresh_result_hash AS freshResultHash,
                 created_at AS createdAt
            FROM code_review_authorities WHERE code_review_manifest_id = ?`,
       )
@@ -355,6 +488,18 @@ export const openCodeReviewRuntime = (
         authority.diffHash === manifest.diffHash &&
         topic.gateResult?.kind === "code" &&
         topic.gateResult.result === "PASS" &&
+        executionEvidenceIsExact({
+          codeReviewId: String(row.id),
+          topic,
+          authority: authority as {
+            readonly initialExecutionStageId: string | null;
+            readonly initialIsolationReceiptHash: string | null;
+            readonly initialResultHash: string | null;
+            readonly freshExecutionStageId: string | null;
+            readonly freshIsolationReceiptHash: string | null;
+            readonly freshResultHash: string | null;
+          },
+        }) &&
         manifestIsCurrent(manifest) &&
         !packageHasOpenDefect(manifest.workPackageId),
     });
@@ -728,6 +873,54 @@ export const openCodeReviewRuntime = (
     const priorFindingIds = priorDefect
       ? parseJson<string[]>(priorDefect.findingIdsJson)
       : [];
+    const priorObligation = priorDefect
+      ? parseJson<{
+          readonly evidenceRefs?: readonly unknown[];
+        }>(priorDefect.obligationJson)
+      : undefined;
+    const obligationEvidenceRefs = (priorObligation?.evidenceRefs ?? []).filter(
+      (reference): reference is string =>
+        typeof reference === "string" && reference.trim().length > 0,
+    );
+    const resolutionMatrix = priorDefect
+      ? priorFindingIds.map((findingId) => {
+          const finding = priorTopic?.findings.find(
+            (candidate) => candidate.id === findingId,
+          );
+          if (!finding || finding.evidenceRefs.length === 0) {
+            throw new CodeReviewRuntimeError(
+              "CODE_REVIEW_OBLIGATION_INVALID",
+              `Prior Code Review finding ${findingId} is missing required evidence.`,
+            );
+          }
+          const resolution = priorTopic?.resolutions.find(
+            (candidate) => candidate.findingId === findingId,
+          );
+          if (!resolution || resolution.evidenceRefs.length === 0) {
+            throw new CodeReviewRuntimeError(
+              "CODE_REVIEW_OBLIGATION_INVALID",
+              `Prior Code Review finding ${findingId} has no evidence-backed resolution.`,
+            );
+          }
+          return {
+            findingId,
+            summary: finding.summary,
+            evidenceRefs: finding.evidenceRefs,
+            resolution: {
+              id: resolution.id,
+              disposition: resolution.disposition,
+              response: resolution.response,
+              evidenceRefs: resolution.evidenceRefs,
+            },
+          };
+        })
+      : [];
+    if (priorDefect && obligationEvidenceRefs.length === 0) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_OBLIGATION_INVALID",
+        `Prior Code Review Defect ${priorDefect.id} has no obligation evidence.`,
+      );
+    }
     const priorReview = priorDefect
       ? {
           codeReviewId: priorDefect.codeReviewId,
@@ -736,37 +929,18 @@ export const openCodeReviewRuntime = (
           defectId: priorDefect.id,
           result: priorDefect.result,
           findingIds: priorFindingIds,
-          obligation: parseJson<unknown>(priorDefect.obligationJson),
-          resolutionMatrix: priorFindingIds.map((findingId) => {
-            const finding = priorTopic?.findings.find(
-              (candidate) => candidate.id === findingId,
-            );
-            if (!finding) {
-              throw new CodeReviewRuntimeError(
-                "CODE_REVIEW_OBLIGATION_INVALID",
-                `Prior Code Review finding ${findingId} is missing.`,
-              );
-            }
-            const resolution = priorTopic?.resolutions.find(
-              (candidate) => candidate.findingId === findingId,
-            );
-            return {
-              findingId,
-              summary: finding.summary,
-              evidenceRefs: finding.evidenceRefs,
-              resolution: resolution
-                ? {
-                    disposition: resolution.disposition,
-                    response: resolution.response,
-                    evidenceRefs: resolution.evidenceRefs,
-                  }
-                : null,
-            };
-          }),
+          obligation: priorObligation,
+          resolutionMatrix,
           requiredEvidenceRefs: [
             priorDefect.id,
             priorDefect.qualityGateResultId,
             ...priorFindingIds,
+            ...resolutionMatrix.flatMap((entry) => entry.evidenceRefs),
+            ...resolutionMatrix.map((entry) => entry.resolution.id),
+            ...obligationEvidenceRefs,
+            ...resolutionMatrix.flatMap(
+              (entry) => entry.resolution.evidenceRefs,
+            ),
           ],
         }
       : undefined;
@@ -795,6 +969,61 @@ export const openCodeReviewRuntime = (
       throw new CodeReviewRuntimeError(
         "REVIEWER_CREDENTIAL_SCOPE_INVALID",
         "Independent Code Review requires a Reviewer Execution Profile distinct from the producer allocation profile.",
+      );
+    }
+    const producerCredentialReferenceIds = (
+      database
+        .prepare(
+          `SELECT secret_reference_id AS id
+             FROM execution_profile_secret_references
+            WHERE execution_profile_id = ?
+            ORDER BY sort_order, secret_reference_id`,
+        )
+        .all(String(graphRow.producerExecutionProfileId)) as Array<{
+        readonly id: string;
+      }>
+    ).map((reference) => reference.id);
+    const credentialScopes = (
+      referenceIds: readonly string[],
+      owner: "producer" | "Reviewer",
+    ): readonly string[] =>
+      referenceIds.map((referenceId) => {
+        const reference = database
+          .prepare(
+            `SELECT provider_scope AS providerScope
+               FROM secret_references
+              WHERE id = ? AND status = 'active'`,
+          )
+          .get(referenceId) as { readonly providerScope: string } | undefined;
+        if (!reference) {
+          throw new CodeReviewRuntimeError(
+            "REVIEWER_CREDENTIAL_SCOPE_INVALID",
+            `The frozen ${owner} Secret Reference ${referenceId} is missing or archived.`,
+          );
+        }
+        return reference.providerScope;
+      });
+    const producerCredentialProviderScopes = credentialScopes(
+      producerCredentialReferenceIds,
+      "producer",
+    );
+    const reviewerCredentialProviderScopes = credentialScopes(
+      reviewerExecutionProfile.secretReferenceIds,
+      "Reviewer",
+    );
+    const producerReferenceSet = new Set(producerCredentialReferenceIds);
+    const producerScopeSet = new Set(producerCredentialProviderScopes);
+    if (
+      reviewerExecutionProfile.secretReferenceIds.some((referenceId) =>
+        producerReferenceSet.has(referenceId),
+      ) ||
+      reviewerCredentialProviderScopes.some((scope) =>
+        producerScopeSet.has(scope),
+      )
+    ) {
+      throw new CodeReviewRuntimeError(
+        "REVIEWER_CREDENTIAL_SCOPE_INVALID",
+        "Independent Code Review cannot reuse a producer Secret Reference or provider credential scope.",
       );
     }
     const manifest = CodeReviewManifestSchema.parse({
@@ -827,8 +1056,11 @@ export const openCodeReviewRuntime = (
       errorHandlingInputs: [packageManifest.recoveryPolicy],
       crossApplicationImpactInputs: packageManifest.integrationConditions,
       reviewerExecutionProfileId,
+      producerCredentialReferenceIds,
       reviewerCredentialReferenceIds:
         reviewerExecutionProfile.secretReferenceIds,
+      producerCredentialProviderScopes,
+      reviewerCredentialProviderScopes,
       ...(priorReview ? { priorReview } : {}),
       excludedContext: [
         "hidden-prompts",
@@ -1142,27 +1374,7 @@ export const openCodeReviewRuntime = (
           "Only an immutable kind=code PASS can create Integration authority.",
         );
       }
-      const executionStages = database
-        .prepare(
-          `SELECT phase, operation_key AS operationKey, state,
-                  reviewer_participant_id AS participantId,
-                  reviewer_session_id AS sessionId, provider_id AS providerId,
-                  isolation_receipt_hash AS isolationReceiptHash,
-                  result_hash AS resultHash
-             FROM code_review_execution_stages
-            WHERE code_review_manifest_id = ?
-            ORDER BY phase`,
-        )
-        .all(current.id) as Array<{
-        readonly phase: "fresh-recheck" | "initial-finding";
-        readonly operationKey: string;
-        readonly state: string;
-        readonly participantId: string;
-        readonly sessionId: string;
-        readonly providerId: string | null;
-        readonly isolationReceiptHash: string | null;
-        readonly resultHash: string | null;
-      }>;
+      const executionStages = readExecutionStages(current.id);
       const initialExecution = executionStages.find(
         (stage) => stage.phase === "initial-finding",
       );
@@ -1196,7 +1408,8 @@ export const openCodeReviewRuntime = (
           phase: "fresh-recheck",
           participantId: freshReviewerParticipantId,
           sessionId: freshRecheck.reviewerSessionId,
-        })
+        }) ||
+        !executionEvidenceIsExact({ codeReviewId: current.id, topic: review })
       ) {
         throw new CodeReviewRuntimeError(
           "REVIEWER_EXECUTION_REQUIRED",
@@ -1216,10 +1429,28 @@ export const openCodeReviewRuntime = (
         ) as Array<{ readonly id: string }>;
       if (resolvedDefects.length > 0) {
         const priorReview = current.manifest.priorReview;
+        const priorObligationEvidence =
+          priorReview &&
+          typeof priorReview.obligation === "object" &&
+          priorReview.obligation !== null &&
+          "evidenceRefs" in priorReview.obligation &&
+          Array.isArray(priorReview.obligation.evidenceRefs)
+            ? priorReview.obligation.evidenceRefs.filter(
+                (reference): reference is string =>
+                  typeof reference === "string" && reference.trim().length > 0,
+              )
+            : [];
         if (
           resolvedDefects.length !== 1 ||
           !priorReview ||
           priorReview.defectId !== resolvedDefects[0]?.id ||
+          priorObligationEvidence.length === 0 ||
+          priorReview.resolutionMatrix.some(
+            (entry) =>
+              entry.evidenceRefs.length === 0 ||
+              !entry.resolution ||
+              entry.resolution.evidenceRefs.length === 0,
+          ) ||
           priorReview.requiredEvidenceRefs.some(
             (reference) => !freshRecheck.evidenceRefs.includes(reference),
           )
@@ -1311,8 +1542,11 @@ export const openCodeReviewRuntime = (
              repository_reference, base_commit, source_commit,
              workspace_import_id, diff_artifact_version_id, diff_hash,
              self_check_id, self_check_hash, topic_id, manifest_hash,
-             reviewer_session_id, independence_evidence_hash, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             reviewer_session_id, independence_evidence_hash,
+             initial_execution_stage_id, initial_isolation_receipt_hash,
+             initial_result_hash, fresh_execution_stage_id,
+             fresh_isolation_receipt_hash, fresh_result_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           authorityId,
@@ -1337,6 +1571,12 @@ export const openCodeReviewRuntime = (
           current.manifestHash,
           freshRecheck.reviewerSessionId,
           independenceEvidenceHash,
+          initialExecution!.id,
+          initialExecution!.isolationReceiptHash,
+          initialExecution!.resultHash,
+          freshExecution!.id,
+          freshExecution!.isolationReceiptHash,
+          freshExecution!.resultHash,
           now,
         );
       if (!manifestIsCurrent(current.manifest)) {

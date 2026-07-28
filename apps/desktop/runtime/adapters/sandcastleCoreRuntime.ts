@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { dirname, join, posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import {
+  ReviewerFindingOutputSchema,
+  ReviewerRecheckOutputSchema,
+} from "../review/reviewerExecution.js";
 import type { SandcastleExecutionRuntime } from "./sandcastleExecutionPort.js";
 
 interface SandcastleCoreModule {
@@ -10,6 +14,13 @@ interface SandcastleCoreModule {
     readonly output?: unknown;
     readonly commits?: readonly { readonly sha: string }[];
     readonly stdout?: string;
+    readonly iterations?: readonly {
+      readonly usage?: {
+        readonly inputTokens?: number;
+        readonly outputTokens?: number;
+        readonly totalTokens?: number;
+      };
+    }[];
   }>;
   readonly runWorkspaceTask: (options: Record<string, unknown>) => Promise<{
     readonly plan?: unknown;
@@ -80,7 +91,33 @@ interface DockerSandboxModule {
       readonly readonly?: boolean;
     }[];
     readonly env?: Record<string, string>;
-  }) => unknown;
+  }) => {
+    readonly tag: "bind-mount";
+    readonly name: string;
+    readonly env: Record<string, string>;
+    readonly sandboxHomedir?: string;
+    readonly create: (options: {
+      readonly worktreePath: string;
+      readonly hostRepoPath: string;
+      readonly mounts: Array<{
+        hostPath: string;
+        sandboxPath: string;
+        readonly?: boolean;
+      }>;
+      readonly env: Record<string, string>;
+    }) => Promise<{
+      readonly worktreePath: string;
+      readonly exec: (command: string) => Promise<{
+        readonly stdout: string;
+        readonly stderr: string;
+        readonly exitCode: number;
+      }>;
+      readonly interactiveExec?: unknown;
+      readonly copyFileIn: unknown;
+      readonly copyFileOut: unknown;
+      readonly close: () => Promise<void>;
+    }>;
+  };
 }
 
 const translateSandboxPath = (
@@ -247,59 +284,144 @@ export const createSandcastleExecutionRuntimeFromModules = (
           "Reviewer Secret References require an operation-local materializer; the bundled Docker Runtime does not expose one.",
         );
       }
-      const receipt = {
-        mountTableHash: receiptHash([
-          { hostPath: workspaceRef, sandboxPath: "/review", readonly: true },
-        ]),
-        sessionScopeHash: receiptHash({
-          operationKey,
-          captureSessions: false,
-          home: "/home/agent",
-        }),
-        cacheScopeHash: receiptHash({
-          operationKey,
-          cache: "/home/agent/.cache",
-          config: "/home/agent/.config",
-          data: "/home/agent/.local/share",
-        }),
-        credentialScopeHash: receiptHash({
-          operationKey,
-          secretReferenceIds,
-          credentialValuesMounted: false,
-        }),
+      const receipt: {
+        mountTableHash: string;
+        sessionScopeHash: string;
+        cacheScopeHash: string;
+        credentialScopeHash: string;
+        providerOperationId?: string;
+        inspectedReadOnlyReviewMount?: true;
+        inspectedEnvironmentHash?: string;
+        inspectedAt?: string;
+        terminalProviderStatus?: "completed";
+        terminalProviderReceiptHash?: string;
+      } = {
+        mountTableHash: "",
+        sessionScopeHash: "",
+        cacheScopeHash: "",
+        credentialScopeHash: "",
+      };
+      const evidence = [
+        "docker:ephemeral-container",
+        "mount:/review:readonly",
+        "home:/home/agent:container-private",
+        "cache:/home/agent/.cache:container-private",
+        "sessions:capture-disabled",
+        "inputs:/review:allowlisted",
+      ];
+      const baseSandbox = dockerModule.docker({
+        mounts: [
+          {
+            hostPath: workspaceRef,
+            sandboxPath: "/review",
+            readonly: true,
+          },
+        ],
+        env: {
+          HOME: "/home/agent",
+          XDG_CACHE_HOME: "/home/agent/.cache",
+          XDG_CONFIG_HOME: "/home/agent/.config",
+          XDG_DATA_HOME: "/home/agent/.local/share",
+        },
+      });
+      const sandbox = {
+        ...baseSandbox,
+        create: async (options: Parameters<typeof baseSandbox.create>[0]) => {
+          const handle = await baseSandbox.create(options);
+          const [operation, mount, writable, environment] = await Promise.all([
+            handle.exec("cat /etc/hostname"),
+            handle.exec(
+              `awk '$5 == "/review" { print; exit }' /proc/self/mountinfo`,
+            ),
+            handle.exec("test -r /review && test ! -w /review"),
+            handle.exec(
+              `printf '%s\\n%s\\n%s\\n%s\\n' "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"`,
+            ),
+          ]);
+          const providerOperationId = operation.stdout.trim();
+          const mountInspection = mount.stdout.trim();
+          const environmentInspection = environment.stdout.trim().split("\n");
+          if (
+            operation.exitCode !== 0 ||
+            !providerOperationId ||
+            mount.exitCode !== 0 ||
+            !mountInspection ||
+            writable.exitCode !== 0 ||
+            environment.exitCode !== 0 ||
+            environmentInspection.join("|") !==
+              "/home/agent|/home/agent/.cache|/home/agent/.config|/home/agent/.local/share"
+          ) {
+            await handle.close();
+            throw new Error(
+              "The Docker Reviewer operation failed post-launch isolation inspection.",
+            );
+          }
+          const inspectedAt = new Date().toISOString();
+          receipt.providerOperationId = providerOperationId;
+          receipt.inspectedReadOnlyReviewMount = true;
+          receipt.inspectedAt = inspectedAt;
+          receipt.mountTableHash = receiptHash({
+            providerOperationId,
+            mountInspection,
+          });
+          receipt.inspectedEnvironmentHash = receiptHash({
+            providerOperationId,
+            environmentInspection,
+          });
+          receipt.sessionScopeHash = receiptHash({
+            providerOperationId,
+            operationKey,
+            captureSessions: false,
+          });
+          receipt.cacheScopeHash = receiptHash({
+            providerOperationId,
+            environmentInspection: environmentInspection.slice(1),
+          });
+          receipt.credentialScopeHash = receiptHash({
+            providerOperationId,
+            operationKey,
+            secretReferenceIds,
+            credentialValuesMounted: false,
+          });
+          evidence.push(
+            `provider-operation:${providerOperationId}`,
+            `mount-inspection:${receipt.mountTableHash}`,
+            `environment-inspection:${receipt.inspectedEnvironmentHash}`,
+            `credentials:scope:${receipt.credentialScopeHash}`,
+          );
+          return {
+            ...handle,
+            close: async () => {
+              await handle.close();
+              receipt.terminalProviderStatus = "completed";
+              receipt.terminalProviderReceiptHash = receiptHash({
+                providerOperationId,
+                operationKey,
+                status: "completed",
+                mountTableHash: receipt.mountTableHash,
+                inspectedEnvironmentHash: receipt.inspectedEnvironmentHash,
+                closedAt: new Date().toISOString(),
+              });
+              evidence.push(
+                `provider-terminal:${receipt.terminalProviderReceiptHash}`,
+              );
+            },
+          };
+        },
       };
       return {
-        sandbox: dockerModule.docker({
-          mounts: [
-            {
-              hostPath: workspaceRef,
-              sandboxPath: "/review",
-              readonly: true,
-            },
-          ],
-          env: {
-            HOME: "/home/agent",
-            XDG_CACHE_HOME: "/home/agent/.cache",
-            XDG_CONFIG_HOME: "/home/agent/.config",
-            XDG_DATA_HOME: "/home/agent/.local/share",
-          },
-        }),
+        sandbox,
         providerId: "sandcastle-docker-reviewer",
         receipt,
-        evidence: [
-          "docker:ephemeral-container",
-          "mount:/review:readonly",
-          "home:/home/agent:container-private",
-          "cache:/home/agent/.cache:container-private",
-          "sessions:capture-disabled",
-          `credentials:scope:${receipt.credentialScopeHash}`,
-          "inputs:/review:allowlisted",
-        ],
+        evidence,
       };
     },
     run: async (options) => {
       const outputMarker = options.output as
-        | { readonly tag: string; readonly schema: "object" }
+        | {
+            readonly tag: string;
+            readonly schema: "object" | "reviewer-finding" | "reviewer-recheck";
+          }
         | undefined;
       return core.run({
         ...options,
@@ -307,7 +429,12 @@ export const createSandcastleExecutionRuntimeFromModules = (
           ? {
               output: core.Output.object({
                 tag: outputMarker.tag,
-                schema: z.record(z.unknown()),
+                schema:
+                  outputMarker.schema === "reviewer-finding"
+                    ? ReviewerFindingOutputSchema
+                    : outputMarker.schema === "reviewer-recheck"
+                      ? ReviewerRecheckOutputSchema
+                      : z.record(z.unknown()),
               }),
             }
           : {}),

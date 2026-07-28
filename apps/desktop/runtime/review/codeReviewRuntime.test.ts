@@ -117,6 +117,10 @@ const setup = (
       }),
     },
   ),
+  credentialScopes?: {
+    readonly producer: string;
+    readonly reviewer: string;
+  },
 ) => {
   const companyDir = mkdtempSync(join(tmpdir(), "sandcastle-code-review-"));
   companyDirs.push(companyDir);
@@ -153,6 +157,44 @@ const setup = (
     name: "Independent review",
     goal: "Gate one exact imported source commit",
   });
+  let reviewerSecretReferenceIds: readonly string[] = [];
+  if (credentialScopes) {
+    const producerReference = database.catalog
+      .createSecretReference({
+        departmentId: "software-rnd",
+        name: `Producer ${credentialScopes.producer}`,
+        providerScope: credentialScopes.producer,
+      })
+      .secretReferences.find(
+        (reference) =>
+          reference.name === `Producer ${credentialScopes.producer}`,
+      );
+    const reviewerReference = database.catalog
+      .createSecretReference({
+        departmentId: "software-rnd",
+        name: `Reviewer ${credentialScopes.reviewer}`,
+        providerScope: credentialScopes.reviewer,
+      })
+      .secretReferences.find(
+        (reference) =>
+          reference.name === `Reviewer ${credentialScopes.reviewer}`,
+      );
+    assert.ok(producerReference);
+    assert.ok(reviewerReference);
+    const credentials = new DatabaseSync(database.path);
+    try {
+      credentials
+        .prepare(
+          `INSERT INTO execution_profile_secret_references(
+             execution_profile_id, secret_reference_id, sort_order
+           ) VALUES ('software-rnd-local-isolated-git', ?, 0)`,
+        )
+        .run(producerReference.id);
+    } finally {
+      credentials.close();
+    }
+    reviewerSecretReferenceIds = [reviewerReference.id];
+  }
   database.projectConfiguration.update({
     projectId: project.id,
     expectedRevision: 0,
@@ -315,7 +357,7 @@ const setup = (
         },
         retryPolicy: { maxAttempts: 1 },
         permissionPolicy: "deny" as const,
-        secretReferenceIds: [],
+        secretReferenceIds: reviewerSecretReferenceIds,
       },
     ],
     runLimits: { maxActiveNodes: 1 },
@@ -885,13 +927,37 @@ const completeGenericReview = (
           phase: "initial-finding",
           participantId: `${codeReviewId}:reviewer`,
           sessionId: ready.workspace.reviewerSessionId,
-          result: { findings: [`review-finding-${suffix}-${result}`] },
+          result: {
+            findings: [
+              {
+                severity: "info",
+                summary:
+                  "The exact canonical diff was independently inspected.",
+                rationale:
+                  "Record the required independent finding before revision.",
+                impact: "No blocking issue was found in the reviewed input.",
+                evidenceRefs: [ready.manifest.diffArtifactVersionId],
+                suggestedOwner: "software-engineer",
+                blocking: false,
+              },
+            ],
+          },
         },
         {
           phase: "fresh-recheck",
           participantId: freshParticipant.id,
           sessionId: freshSession.id,
-          result: { recheckId: `review-recheck-${suffix}-${result}` },
+          result: {
+            result,
+            conditions:
+              result === "CONDITIONAL_PASS"
+                ? ["Resolve the recorded obligation"]
+                : [],
+            evidenceRefs: [
+              ready.manifest.diffArtifactVersionId,
+              ...(ready.manifest.priorReview?.requiredEvidenceRefs ?? []),
+            ],
+          },
         },
       ] as const) {
         const resultJson = JSON.stringify(stage.result);
@@ -947,8 +1013,8 @@ describe("Code Review Runtime", () => {
     companyDirs.push(companyDir);
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(CURRENT_SCHEMA_VERSION, 44);
-      assert.equal(database.schemaVersion(), 44);
+      assert.equal(CURRENT_SCHEMA_VERSION, 45);
+      assert.equal(database.schemaVersion(), 45);
     } finally {
       database.close();
     }
@@ -1048,6 +1114,305 @@ describe("Code Review Runtime", () => {
         workPackageVersionIds: ["review-package-v1"],
       });
       assert.match(String(aggregateResult?.coverageHash), /^[a-f0-9]{64}$/);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("binds Reviewer message, tool, and usage Execution Facts to the Reviewer Session and Code Review Node Attempt", async () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async (input, sink, signal) => {
+        assert.ok(sink);
+        assert.equal(signal?.aborted, false);
+        for (const fact of [
+          {
+            adapterSchemaVersion: 1,
+            factId: `${input.operationKey}:message`,
+            ordinal: 1,
+            kind: "message" as const,
+            schemaVersion: 1,
+            payload: { content: `Reviewer activity for ${input.phase}` },
+            evidenceRefs: [input.manifest.diffArtifactVersionId],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: `${input.operationKey}:tool`,
+            ordinal: 2,
+            kind: "tool-call" as const,
+            schemaVersion: 1,
+            payload: { name: "read-review-bundle", path: "/review" },
+            evidenceRefs: [input.manifest.diffArtifactVersionId],
+          },
+          {
+            adapterSchemaVersion: 1,
+            factId: `${input.operationKey}:usage`,
+            ordinal: 3,
+            kind: "usage" as const,
+            schemaVersion: 1,
+            payload: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+            evidenceRefs: [input.manifest.diffArtifactVersionId],
+          },
+        ]) {
+          await sink.record(fact);
+        }
+        return {
+          status: "succeeded",
+          providerId: "scripted-docker-reviewer",
+          isolation: {
+            readOnlyFilesystem: true,
+            independentGitDatabase: true,
+            independentSessionStorage: true,
+            independentCredentialScope: true,
+            independentMutableCache: true,
+            inputAllowlist: true,
+            mountTableHash: "1".repeat(64),
+            sessionScopeHash: "2".repeat(64),
+            cacheScopeHash: "3".repeat(64),
+            credentialScopeHash: "4".repeat(64),
+            providerOperationId: `${input.phase}-operation`,
+            inspectedReadOnlyReviewMount: true,
+            inspectedEnvironmentHash: "5".repeat(64),
+            inspectedAt: "2026-07-28T10:00:00.000Z",
+            terminalProviderStatus: "completed",
+            terminalProviderReceiptHash: "6".repeat(64),
+            mechanism: "scripted-docker-readonly",
+            mechanismVersion: "1",
+          },
+          isolationEvidence: [`operation:${input.operationKey}`],
+          output:
+            input.phase === "initial-finding"
+              ? {
+                  findings: [
+                    {
+                      severity: "info",
+                      summary: "The exact Diff was reviewed.",
+                      rationale: "The manifest is complete.",
+                      impact: "No blocker was found.",
+                      evidenceRefs: [input.manifest.diffArtifactVersionId],
+                      suggestedOwner: "software-engineer",
+                      blocking: false,
+                    },
+                  ],
+                }
+              : {
+                  result: "PASS",
+                  conditions: [],
+                  evidenceRefs: [input.manifest.diffArtifactVersionId],
+                },
+        };
+      },
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "No restart in this test.",
+        evidence: [],
+      }),
+    });
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      await fixture.database.pipelineRuntime.executeReady({
+        runId: before.run.id,
+        expectedRevision: before.run.revision,
+      });
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        const facts = raw
+          .prepare(
+            `SELECT execution_facts.kind, execution_facts.target_id AS targetId,
+                    stages.reviewer_session_id AS reviewerSessionId
+               FROM execution_facts
+               JOIN code_review_execution_stages AS stages
+                 ON stages.operation_key = execution_facts.operation_key
+              WHERE execution_facts.status = 'accepted'
+                AND execution_facts.kind IN ('message', 'tool-call', 'usage')
+              ORDER BY stages.phase, execution_facts.ordinal`,
+          )
+          .all() as Array<{
+          readonly kind: string;
+          readonly targetId: string;
+          readonly reviewerSessionId: string;
+        }>;
+        assert.deepEqual(
+          facts.map((fact) => fact.kind),
+          ["message", "tool-call", "usage", "message", "tool-call", "usage"],
+        );
+        assert.equal(new Set(facts.map((fact) => fact.targetId)).size, 1);
+        assert.equal(Boolean(facts[0]?.targetId.length), true);
+        const messages = raw
+          .prepare(
+            `SELECT session_id AS sessionId, content
+               FROM session_messages
+              WHERE content LIKE 'Reviewer activity for %'
+              ORDER BY content`,
+          )
+          .all() as Array<{
+          readonly sessionId: string;
+          readonly content: string;
+        }>;
+        assert.deepEqual(
+          messages.map((message) => message.sessionId).sort(),
+          [...new Set(facts.map((fact) => fact.reviewerSessionId))].sort(),
+        );
+      } finally {
+        raw.close();
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("aborts and cancels an active Reviewer operation when the Department Run is paused", async () => {
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    let observedAbort = false;
+    let cancelCalls = 0;
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async (_input, _sink, signal) => {
+        assert.ok(signal);
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              observedAbort = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        return {
+          status: "unknown",
+          code: "RECONCILE_UNKNOWN",
+          message: "Pause requires provider reconciliation.",
+          evidence: [],
+        };
+      },
+      cancel: async () => {
+        cancelCalls += 1;
+        return "cancelled";
+      },
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "Pause requires provider reconciliation.",
+        evidence: [],
+      }),
+    });
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      const execution = fixture.database.pipelineRuntime.executeReady({
+        runId: before.run.id,
+        expectedRevision: before.run.revision,
+      });
+      await started;
+      const running = fixture.database.pipelineRuntime.inspectRun("review-run");
+      const paused = await fixture.database.pipelineRuntime.controlRun({
+        runId: running.run.id,
+        expectedRevision: running.run.revision,
+        action: "pause",
+      });
+      await assert.rejects(execution);
+      assert.equal(paused.run.status, "paused");
+      assert.equal(observedAbort, true);
+      assert.equal(cancelCalls, 1);
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        assert.equal(
+          (
+            raw
+              .prepare(
+                `SELECT COUNT(*) AS count FROM execution_facts
+                  WHERE operation_key IN (
+                    SELECT operation_key FROM code_review_execution_stages
+                     WHERE phase = 'initial-finding'
+                  ) AND kind = 'cancelled' AND status = 'accepted'`,
+              )
+              .get() as { readonly count: number }
+          ).count,
+          1,
+        );
+      } finally {
+        raw.close();
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("aborts and cancels an active Reviewer operation during Runtime shutdown", async () => {
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    let observedAbort = false;
+    let cancelCalls = 0;
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async (_input, _sink, signal) => {
+        assert.ok(signal);
+        resolveStarted();
+        await new Promise<void>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              observedAbort = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        return {
+          status: "unknown",
+          code: "RECONCILE_UNKNOWN",
+          message: "Shutdown requires provider reconciliation.",
+          evidence: [],
+        };
+      },
+      cancel: async () => {
+        cancelCalls += 1;
+        return "cancelled";
+      },
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "Shutdown requires provider reconciliation.",
+        evidence: [],
+      }),
+    });
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      const execution = fixture.database.pipelineRuntime
+        .executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        })
+        .catch((error: unknown) => error);
+      await started;
+
+      await fixture.database.pipelineRuntime.prepareForShutdown();
+
+      assert.equal(observedAbort, true);
+      assert.equal(cancelCalls, 1);
+      assert.equal((await execution) instanceof Error, true);
+      const drained = fixture.database.pipelineRuntime.inspectRun("review-run");
+      assert.equal(drained.run.status, "blocked");
+      assert.equal(
+        drained.nodes.find((node) => node.id === "code-review-node")?.status,
+        "blocked",
+      );
     } finally {
       fixture.database.close();
     }
@@ -1300,6 +1665,7 @@ describe("Code Review Runtime", () => {
       assert.equal(initialExecuteCalls, 1);
       fixture.database.close();
       let reconcileCalls = 0;
+      let reattachCalls = 0;
       const resumedExecutePhases: string[] = [];
       reopened = openCompanyDatabase(fixture.companyDir, {
         codeReviewRuntime: {
@@ -1311,6 +1677,15 @@ describe("Code Review Runtime", () => {
             },
             reconcile: async () => {
               reconcileCalls += 1;
+              return {
+                status: "running",
+                providerExecutionRef: "review-provider-operation-1",
+              };
+            },
+            reattach: async (input, providerExecutionRef, _sink, signal) => {
+              reattachCalls += 1;
+              assert.equal(providerExecutionRef, "review-provider-operation-1");
+              assert.equal(signal.aborted, false);
               return {
                 status: "succeeded",
                 providerId: "scripted-docker-reviewer",
@@ -1325,6 +1700,12 @@ describe("Code Review Runtime", () => {
                   sessionScopeHash: "2".repeat(64),
                   cacheScopeHash: "3".repeat(64),
                   credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "reconciled-operation",
+                  inspectedReadOnlyReviewMount: true,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed",
+                  terminalProviderReceiptHash: "6".repeat(64),
                   mechanism: "scripted-docker-readonly",
                   mechanismVersion: "1",
                 },
@@ -1336,7 +1717,7 @@ describe("Code Review Runtime", () => {
                       summary: "Recovered exact review output.",
                       rationale: "The provider operation receipt was durable.",
                       impact: "No Agent retry was required.",
-                      evidenceRefs: [fixture.diff.id],
+                      evidenceRefs: [input.manifest.diffArtifactVersionId],
                       suggestedOwner: "software-engineer",
                       blocking: false,
                     },
@@ -1360,6 +1741,12 @@ describe("Code Review Runtime", () => {
                   sessionScopeHash: "2".repeat(64),
                   cacheScopeHash: "3".repeat(64),
                   credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "fresh-recheck-operation",
+                  inspectedReadOnlyReviewMount: true,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed",
+                  terminalProviderReceiptHash: "6".repeat(64),
                   mechanism: "scripted-docker-readonly",
                   mechanismVersion: "1",
                 },
@@ -1376,6 +1763,7 @@ describe("Code Review Runtime", () => {
       });
       assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
       assert.equal(reconcileCalls, 1);
+      assert.equal(reattachCalls, 1);
       assert.deepEqual(resumedExecutePhases, ["fresh-recheck"]);
       assert.equal(
         reopened.codeReviews.inspect("review-run")[0]?.integrationEligible,
@@ -1449,6 +1837,67 @@ describe("Code Review Runtime", () => {
         blocked.nodes.find((node) => node.id === "code-review-node")?.status,
         "blocked",
       );
+    } finally {
+      reopened?.close();
+    }
+  });
+
+  it("releases the Reviewer reconciliation lease when provider reconciliation throws", async () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: true,
+      },
+      execute: async () => {
+        throw new Error("provider response was lost after durable start");
+      },
+      reconcile: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "not used before restart",
+        evidence: [],
+      }),
+    });
+    let reopened: ReturnType<typeof openCompanyDatabase> | undefined;
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      await assert.rejects(
+        fixture.database.pipelineRuntime.executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        }),
+      );
+      fixture.database.close();
+      reopened = openCompanyDatabase(fixture.companyDir, {
+        codeReviewRuntime: {
+          reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
+          reviewerExecutionAdapter: {
+            capabilities: {
+              executionBoundIsolation: true,
+              reattachRunningOperation: true,
+            },
+            execute: async () => {
+              throw new Error("must not resend an unknown Reviewer operation");
+            },
+            reconcile: async () => {
+              throw new Error("provider reconciliation failed");
+            },
+          },
+        },
+      });
+
+      await assert.rejects(
+        reopened.codeReviewNodeHandler.reconcilePending(),
+        /provider reconciliation failed/,
+      );
+
+      const review = reopened.codeReviews.inspect("review-run")[0];
+      assert.ok(review);
+      const leases = reopened.pipelineRuntime.inspectExecution({
+        operationKey: `code-review:${review.id}:initial-finding`,
+      }).leases;
+      assert.equal(leases.at(-1)?.leaseKind, "reconciliation");
+      assert.notEqual(leases.at(-1)?.releasedAt, null);
     } finally {
       reopened?.close();
     }
@@ -1553,6 +2002,26 @@ describe("Code Review Runtime", () => {
       }
       const result = fixture.execute(
         "reject-shared-reviewer-profile",
+        4,
+        startCommand(fixture),
+      );
+      assert.equal(result.status, "rejected");
+      if (result.status === "rejected") {
+        assert.equal(result.error.code, "REVIEWER_CREDENTIAL_SCOPE_INVALID");
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("rejects distinct producer and Reviewer Secret References with an overlapping provider credential scope", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, undefined, {
+      producer: "shared-provider-account",
+      reviewer: "shared-provider-account",
+    });
+    try {
+      const result = fixture.execute(
+        "reject-overlapping-secret-scope",
         4,
         startCommand(fixture),
       );
@@ -2056,6 +2525,111 @@ describe("Code Review Runtime", () => {
     }
   });
 
+  it("rejects Integration authority when a Reviewer execution result does not match the persisted review evidence", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw.exec("DROP TRIGGER code_review_execution_stages_succeeded_update");
+        const resultJson = JSON.stringify({
+          findings: [
+            {
+              severity: "info",
+              summary: "A different finding was returned by the execution.",
+              rationale: "The execution receipt must bind exact review data.",
+              impact: "Persisted review evidence no longer matches.",
+              evidenceRefs: [reviewed.manifest.diffArtifactVersionId],
+              suggestedOwner: "software-engineer",
+              blocking: false,
+            },
+          ],
+        });
+        raw
+          .prepare(
+            `UPDATE code_review_execution_stages
+                SET result_json = ?, result_hash = ?
+              WHERE code_review_manifest_id = ?
+                AND phase = 'initial-finding'`,
+          )
+          .run(resultJson, hash(resultJson), reviewed.id);
+      } finally {
+        raw.close();
+      }
+      const converged = fixture.execute("reject-mismatched-execution", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "rejected");
+      if (converged.status === "rejected") {
+        assert.equal(converged.error.code, "REVIEWER_EXECUTION_REQUIRED");
+      }
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("freezes every successful Reviewer execution evidence column", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      assert.throws(() => {
+        const raw = new DatabaseSync(fixture.database.path);
+        try {
+          raw
+            .prepare(
+              `UPDATE code_review_execution_stages
+                  SET provider_id = 'rewritten-provider'
+                WHERE code_review_manifest_id = ?
+                  AND phase = 'initial-finding'`,
+            )
+            .run(reviewed.id);
+        } finally {
+          raw.close();
+        }
+      }, /immutable/);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("rejects an existing authority at query time when its bound execution evidence is corrupted", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const reviewed = completeGenericReview(fixture, "PASS");
+      const converged = fixture.execute("converge-before-corruption", 4, {
+        type: "code-review.converge",
+        codeReviewId: reviewed.id,
+      });
+      assert.equal(converged.status, "succeeded");
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw.exec("DROP TRIGGER code_review_execution_stages_succeeded_update");
+        const resultJson = JSON.stringify({
+          result: "FAIL",
+          conditions: [],
+          evidenceRefs: [reviewed.manifest.diffArtifactVersionId],
+        });
+        raw
+          .prepare(
+            `UPDATE code_review_execution_stages
+                SET result_json = ?, result_hash = ?
+              WHERE code_review_manifest_id = ?
+                AND phase = 'fresh-recheck'`,
+          )
+          .run(resultJson, hash(resultJson), reviewed.id);
+      } finally {
+        raw.close();
+      }
+      const inspected = fixture.database.codeReviews
+        .inspect("review-run")
+        .find((review) => review.id === reviewed.id);
+      assert.equal(inspected?.integrationEligible, false);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("rejects convergence without an initial independent Finding", () => {
     const fixture = setup(readyReviewerWorkspaceAdapter);
     try {
@@ -2417,10 +2991,26 @@ describe("Code Review Runtime", () => {
             JSON.stringify(["review-finding-history-PASS"]),
             JSON.stringify({
               conditions: ["Resolve the historical finding"],
-              evidenceRefs: [historical.manifest.diffArtifactVersionId],
+              evidenceRefs: ["obligation-evidence"],
               freshIndependentReReviewRequired: true,
             }),
             historical.manifest.workPackageVersionId,
+          );
+        raw
+          .prepare(
+            `INSERT INTO review_resolutions(
+               id, topic_id, finding_id, participant_id, disposition,
+               response, evidence_refs_json, revised_subject_id,
+               revised_subject_hash, created_at
+             ) VALUES ('historical-resolution', ?, ?, ?, 'resolved',
+                       'The rework resolves the historical finding.', ?,
+                       NULL, NULL, '2026-07-28T10:01:30.000Z')`,
+          )
+          .run(
+            historical.topicId,
+            "review-finding-history-PASS",
+            `${historical.id}:owner`,
+            JSON.stringify(["resolution-evidence"]),
           );
       } finally {
         raw.close();
@@ -2437,6 +3027,10 @@ describe("Code Review Runtime", () => {
         "rework-obligation",
         "rework-obligation-gate",
         "review-finding-history-PASS",
+        historical.manifest.diffArtifactVersionId,
+        "historical-resolution",
+        "obligation-evidence",
+        "resolution-evidence",
       ]);
 
       const converged = fixture.execute("converge-resolved-rework", 4, {
@@ -2467,6 +3061,52 @@ describe("Code Review Runtime", () => {
           .filter((event) => event.type === "code-review.defect.closed").length,
         1,
       );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("blocks a fresh review when the prior Defect has no evidence-backed finding resolution", () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter);
+    try {
+      const historical = completeGenericReview(fixture, "PASS", {
+        suffix: "missing-resolution-history",
+      });
+      const raw = new DatabaseSync(fixture.database.path);
+      try {
+        raw
+          .prepare(
+            `INSERT INTO code_review_defects(
+               id, code_review_manifest_id, quality_gate_result_id,
+               work_package_id, result, finding_ids_json, obligation_json,
+               rework_work_package_version_id, status, created_at
+             ) VALUES ('missing-resolution-defect', ?, ?, ?, 'FAIL', ?, ?, ?,
+                       'rework-created', '2026-07-28T10:03:00.000Z')`,
+          )
+          .run(
+            historical.id,
+            historical.gateResult!.id,
+            historical.manifest.workPackageId,
+            JSON.stringify(["review-finding-missing-resolution-history-PASS"]),
+            JSON.stringify({
+              conditions: ["Resolve the historical finding"],
+              evidenceRefs: ["obligation-evidence"],
+              freshIndependentReReviewRequired: true,
+            }),
+            historical.manifest.workPackageVersionId,
+          );
+      } finally {
+        raw.close();
+      }
+      const started = fixture.execute("reject-missing-resolution", 4, {
+        ...startCommand(fixture),
+        codeReviewId: "code-review-missing-resolution",
+        topicId: "code-review-topic-missing-resolution",
+      });
+      assert.equal(started.status, "rejected");
+      if (started.status === "rejected") {
+        assert.equal(started.error.code, "CODE_REVIEW_OBLIGATION_INVALID");
+      }
     } finally {
       fixture.database.close();
     }

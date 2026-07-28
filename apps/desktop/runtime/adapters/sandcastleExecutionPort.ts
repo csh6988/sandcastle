@@ -26,12 +26,25 @@ export interface SandcastleExecutionRuntime {
       readonly sessionScopeHash: string;
       readonly cacheScopeHash: string;
       readonly credentialScopeHash: string;
+      readonly providerOperationId?: string;
+      readonly inspectedReadOnlyReviewMount?: true;
+      readonly inspectedEnvironmentHash?: string;
+      readonly inspectedAt?: string;
+      readonly terminalProviderStatus?: "completed";
+      readonly terminalProviderReceiptHash?: string;
     };
   };
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;
     readonly commits?: readonly { readonly sha: string }[];
     readonly stdout?: string;
+    readonly iterations?: readonly {
+      readonly usage?: {
+        readonly inputTokens?: number;
+        readonly outputTokens?: number;
+        readonly totalTokens?: number;
+      };
+    }[];
   }>;
   readonly runWorkspaceTask: (
     options: Readonly<Record<string, unknown>>,
