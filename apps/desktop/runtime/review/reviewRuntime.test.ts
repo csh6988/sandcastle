@@ -851,6 +851,57 @@ describe("Review Runtime", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
+    database.exec(`
+      INSERT INTO positions(
+        id, department_id, name, responsibility, ai_member_id, sort_order, created_at
+      ) VALUES
+        ('developer-position', 'department', 'Developer', 'Produce', 'developer-ai', 1, '2026-07-28T00:00:00.000Z'),
+        ('developer-position-b', 'department', 'Developer B', 'Produce', 'developer-ai-b', 2, '2026-07-28T00:00:00.000Z'),
+        ('reviewer-position', 'department', 'Reviewer', 'Review', 'reviewer-ai', 3, '2026-07-28T00:00:00.000Z');
+      INSERT INTO integration_generations(
+        id, project_id, run_id, snapshot_revision_id, node_run_id, generation,
+        coverage_id, coverage_node_run_id, coverage_node_attempt_id,
+        coverage_hash, manifest_json, manifest_hash, state,
+        pass_authority_hash, failure_code, failure_message, created_at, updated_at
+      ) VALUES (
+        'generation-1', 'project-1', 'run-1', 'snapshot-1', 'integration-node', 1,
+        'coverage-1', 'coverage-node', 'coverage-attempt', '${"c".repeat(64)}',
+        '{}', '${"a".repeat(64)}', 'aggregate-review', NULL, NULL, NULL,
+        '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z'
+      );
+      INSERT INTO work_package_assignments(
+        id, work_package_version_id, node_attempt_id, position_id, ai_member_id,
+        agent_adapter_id, rationale_json, allocation_id, interaction_session_id,
+        sandbox_identity, evidence_scope, state, created_at, updated_at
+      ) VALUES
+        ('assignment-1', 'version-1', 'attempt-1', 'developer-position',
+         'developer-ai', 'scripted', '{}', 'allocation-1', 'developer-session',
+         'sandbox-1', 'evidence-1', 'self-check-passed',
+         '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z'),
+        ('assignment-2', 'version-2', 'attempt-2', 'developer-position-b',
+         'developer-ai-b', 'scripted', '{}', 'allocation-2', 'developer-session-b',
+         'sandbox-2', 'evidence-2', 'self-check-passed',
+         '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z');
+      INSERT INTO integration_operations(
+        id, generation_id, repository_result_id, work_package_id,
+        work_package_version_id, authority_id, quality_gate_result_id, ordinal,
+        source_branch, source_commit, diff_hash, expected_tip, request_json,
+        request_hash, idempotency_key, state, receipt_json, receipt_hash,
+        resulting_commit, failure_code, failure_message, created_at, updated_at
+      ) VALUES
+        ('operation-1', 'generation-1', 'repository-result-1', 'package-1',
+         'version-1', 'authority-1', 'gate-1', 0, 'work/package-1',
+         '${"1".repeat(40)}', '${"2".repeat(64)}', '${"3".repeat(40)}', '{}',
+         '${"4".repeat(64)}', 'integration:generation-1:operation-1', 'succeeded',
+         '{}', '${"5".repeat(64)}', '${"6".repeat(40)}', NULL, NULL,
+         '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z'),
+        ('operation-2', 'generation-1', 'repository-result-2', 'package-2',
+         'version-2', 'authority-2', 'gate-2', 1, 'work/package-2',
+         '${"7".repeat(40)}', '${"8".repeat(64)}', '${"9".repeat(40)}', '{}',
+         '${"b".repeat(64)}', 'integration:generation-1:operation-2', 'succeeded',
+         '{}', '${"c".repeat(64)}', '${"d".repeat(40)}', NULL, NULL,
+         '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z');
+    `);
     database
       .prepare(
         `INSERT INTO interaction_sessions(
@@ -922,6 +973,16 @@ describe("Review Runtime", () => {
     database.exec("BEGIN IMMEDIATE");
     const first = runtime.recordAggregateExecutionInTransaction(input);
     database.exec("COMMIT");
+    const eligibility = JSON.parse(
+      String(
+        database
+          .prepare(
+            "SELECT eligibility_snapshot_json AS value FROM review_participants WHERE id = ?",
+          )
+          .get(input.reviewer.participantId)!.value,
+      ),
+    ) as { readonly producerLineage: readonly unknown[] };
+    assert.equal(eligibility.producerLineage.length, 2);
     database.exec("BEGIN IMMEDIATE");
     const replay = runtime.recordAggregateExecutionInTransaction(input);
     database.exec("COMMIT");
@@ -940,6 +1001,146 @@ describe("Review Runtime", () => {
     );
     database.exec("ROLLBACK");
     assert.equal(runtime.inspect(input.topicId).gateResult?.result, "PASS");
+    database.close();
+  });
+
+  it("rejects an aggregate Reviewer who matches any frozen producer identity", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const now = "2026-07-28T00:00:00.000Z";
+    database.exec(`
+      INSERT INTO positions(
+        id, department_id, name, responsibility, ai_member_id, sort_order, created_at
+      ) VALUES
+        ('developer-position-a', 'department', 'Developer A', 'Produce', 'developer-ai-a', 1, '${now}'),
+        ('developer-position-b', 'department', 'Developer B', 'Produce', 'developer-ai-b', 2, '${now}');
+      INSERT INTO interaction_sessions(
+        id, mode, project_id, run_id, node_run_id, status, created_at, closed_at
+      ) VALUES
+        ('developer-session-a', 'run-collaboration', 'project-1', 'run-1', 'development-node-a', 'active', '${now}', NULL),
+        ('developer-session-b', 'run-collaboration', 'project-1', 'run-1', 'integration-node', 'active', '${now}', NULL);
+      INSERT INTO session_participants(
+        id, session_id, participant_type, participant_ref, role, created_at
+      ) VALUES
+        ('aggregate-participant', 'developer-session-b', 'ai-member',
+         'developer-ai-b', 'aggregate-reviewer:generation-1', '${now}');
+      INSERT INTO integration_generations(
+        id, project_id, run_id, snapshot_revision_id, node_run_id, generation,
+        coverage_id, coverage_node_run_id, coverage_node_attempt_id,
+        coverage_hash, manifest_json, manifest_hash, state,
+        pass_authority_hash, failure_code, failure_message, created_at, updated_at
+      ) VALUES (
+        'generation-1', 'project-1', 'run-1', 'snapshot-1', 'integration-node', 1,
+        'coverage-1', 'coverage-node', 'coverage-attempt', '${"c".repeat(64)}',
+        '{}', '${"d".repeat(64)}', 'aggregate-review', NULL, NULL, NULL,
+        '${now}', '${now}'
+      );
+      INSERT INTO work_package_assignments(
+        id, work_package_version_id, node_attempt_id, position_id, ai_member_id,
+        agent_adapter_id, rationale_json, allocation_id, interaction_session_id,
+        sandbox_identity, evidence_scope, state, created_at, updated_at
+      ) VALUES
+        ('assignment-a', 'version-a', 'attempt-a', 'developer-position-a',
+         'developer-ai-a', 'scripted', '{}', 'allocation-a', 'developer-session-a',
+         'sandbox-a', 'evidence-a', 'self-check-passed', '${now}', '${now}'),
+        ('assignment-b', 'version-b', 'attempt-b', 'developer-position-b',
+         'developer-ai-b', 'scripted', '{}', 'allocation-b', 'developer-session-b',
+         'sandbox-b', 'evidence-b', 'self-check-passed', '${now}', '${now}');
+      INSERT INTO integration_operations(
+        id, generation_id, repository_result_id, work_package_id,
+        work_package_version_id, authority_id, quality_gate_result_id, ordinal,
+        source_branch, source_commit, diff_hash, expected_tip, request_json,
+        request_hash, idempotency_key, state, receipt_json, receipt_hash,
+        resulting_commit, failure_code, failure_message, created_at, updated_at
+      ) VALUES
+        ('operation-a', 'generation-1', 'repository-a', 'package-a', 'version-a',
+         'authority-a', 'gate-a', 0, 'work/a', '${"1".repeat(40)}',
+         '${"2".repeat(64)}', '${"3".repeat(40)}', '{}', '${"4".repeat(64)}',
+         'integration:generation-1:operation-a', 'succeeded', '{}', '${"5".repeat(64)}',
+         '${"6".repeat(40)}', NULL, NULL, '${now}', '${now}'),
+        ('operation-b', 'generation-1', 'repository-b', 'package-b', 'version-b',
+         'authority-b', 'gate-b', 1, 'work/b', '${"7".repeat(40)}',
+         '${"8".repeat(64)}', '${"9".repeat(40)}', '{}', '${"a".repeat(64)}',
+         'integration:generation-1:operation-b', 'succeeded', '{}', '${"b".repeat(64)}',
+         '${"c".repeat(40)}', NULL, NULL, '${now}', '${now}');
+    `);
+    const runtime = openReviewRuntime(database, {
+      events: { append: () => ({}) as never },
+      clock: () => new Date(now),
+    });
+    const manifest = {
+      scope: "aggregate" as const,
+      topicId: "integration-review:generation-1",
+      supportingArtifactVersionIds: [],
+      supportingSpecRevisionIds: [],
+      harnessSnapshotIds: [],
+      acceptanceCriteria: ["npm test"],
+      excludedContext: [
+        "hidden-prompts" as const,
+        "prior-reviewer-opinions" as const,
+        "private-transcripts" as const,
+      ],
+      integrationGenerationId: "generation-1",
+      integrationManifestHash: "d".repeat(64),
+      repositoryCommits: [
+        { repositoryId: "repository-1", commit: "e".repeat(40) },
+      ],
+    };
+
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      assert.throws(
+        () =>
+          runtime.recordAggregateExecutionInTransaction({
+            commandId: "generation-1:aggregate-review:record",
+            actor: {
+              type: "runtime-worker",
+              id: "integration-node-handler",
+              authenticatedBy: "runtime",
+            },
+            topicId: manifest.topicId,
+            projectId: "project-1",
+            runId: "run-1",
+            manifest,
+            producer: {
+              aiMemberId: "developer-ai-a",
+              positionId: "developer-position-a",
+              sessionId: "developer-session-a",
+            },
+            reviewer: {
+              participantId: "aggregate-participant",
+              aiMemberId: "developer-ai-b",
+              positionId: "developer-position-b",
+              sessionId: "developer-session-b",
+            },
+            terminalExecutionFactId: "aggregate-terminal-fact",
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: ["execution-fact:aggregate-terminal-fact"],
+          }),
+        (error: unknown) =>
+          error instanceof ReviewRuntimeError &&
+          error.code === "REVIEWER_INELIGIBLE",
+      );
+    } finally {
+      database.exec("ROLLBACK");
+    }
+    assert.equal(
+      Number(
+        database.prepare("SELECT COUNT(*) AS count FROM review_topics").get()!
+          .count,
+      ),
+      0,
+    );
+    assert.equal(
+      Number(
+        database
+          .prepare("SELECT COUNT(*) AS count FROM quality_gate_results")
+          .get()!.count,
+      ),
+      0,
+    );
     database.close();
   });
 

@@ -50,7 +50,7 @@ const promptFor = (input: ReviewerExecutionInput): string => {
   if (isAggregateManifest(manifest)) {
     return `# Independent Aggregate Integration Review
 
-You are a non-producer Reviewer in a fresh Session. Read only the allowlisted multi-Repository bundle mounted at /review and the frozen aggregate manifest. Verify the exact integrated commits against every acceptance criterion. Do not inspect hidden transcripts, mutable producer state, credentials, or external repositories.
+You are a non-producer Reviewer in a fresh Session. Read only the allowlisted multi-Repository bundle mounted at /review. Read /review/inputs/manifest.json first; it is the frozen aggregate manifest that binds the Generation manifest hash, every acceptance criterion, and each Repository to its exact integrated commit. Inspect only the mounted repository-* directories, verify every frozen criterion, and cite manifest identities in every evidenceRefs entry. Do not inspect hidden transcripts, mutable producer state, credentials, or external repositories.
 
 Return exactly one JSON object inside <reviewer_recheck>...</reviewer_recheck> tags:
 {

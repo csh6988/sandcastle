@@ -49,6 +49,9 @@ export interface IntegrationValidationExecutor {
   readonly reconcile: (
     input: IntegrationValidationInput,
   ) => Promise<IntegrationValidationResult>;
+  readonly cancel?: (
+    input: IntegrationValidationInput,
+  ) => Promise<IntegrationValidationResult>;
 }
 
 export type AggregateIntegrationReviewInput = {
@@ -95,6 +98,10 @@ export interface IntegrationNodeHandler {
     readonly nodeRunId: string;
   }) => Promise<void>;
   readonly reconcilePending: () => Promise<number>;
+  readonly cancelPending: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+  }) => Promise<void>;
 }
 
 const actor: ActorRef = {
@@ -178,7 +185,7 @@ export const openIntegrationNodeHandler = (options: {
   const executeGeneration = async (generationId: string): Promise<void> => {
     let generation: IntegrationGenerationView;
     try {
-      generation = options.integrations.executePending(generationId);
+      generation = await options.integrations.executePending(generationId);
     } catch (error) {
       if (!(error instanceof IntegrationRuntimeError)) throw error;
       options.integrations.blockPending(generationId, {
@@ -188,7 +195,7 @@ export const openIntegrationNodeHandler = (options: {
       });
       return;
     }
-    if (generation.state === "validating") {
+    if (generation.state === "validating" || generation.state === "blocked") {
       for (const required of generation.manifest.requiredValidations) {
         generation = options.integrations
           .inspect(generation.manifest.runId)
@@ -214,8 +221,22 @@ export const openIntegrationNodeHandler = (options: {
             required.responsibleWorkPackageVersionIds,
           validation: required,
         };
-        let result = await validationExecutor.reconcile(input);
-        if (result.status === "not-applied") {
+        const stage = options.integrations.claimExecutionStage?.({
+          generationId: generation.id,
+          operationKey: input.operationKey,
+          phase: "validation",
+          targetKey: required.id,
+          request: input,
+          createIfMissing: generation.state !== "blocked",
+        });
+        if (stage?.mode === "missing") return;
+        let result =
+          stage?.mode === "terminal"
+            ? (stage.result as IntegrationValidationResult)
+            : stage?.mode === "execute"
+              ? await validationExecutor.execute(input)
+              : await validationExecutor.reconcile(input);
+        if (stage?.mode !== "terminal" && result.status === "not-applied") {
           result = await validationExecutor.execute(input);
         }
         if (result.status === "not-applied") {
@@ -227,12 +248,30 @@ export const openIntegrationNodeHandler = (options: {
           return;
         }
         if (result.status === "unknown") {
+          options.integrations.recordExecutionStageResult?.({
+            operationKey: input.operationKey,
+            request: input,
+            state: "unknown",
+            result,
+          });
+          const current = options.integrations
+            .inspect(generation.manifest.runId)
+            .find((candidate) => candidate.id === generation.id);
+          if (current?.state === "blocked") return;
           options.integrations.blockPending(generation.id, {
             code: result.code,
             message: result.message,
             evidence: result.evidence,
           });
           return;
+        }
+        if (stage?.mode !== "terminal") {
+          options.integrations.recordExecutionStageResult?.({
+            operationKey: input.operationKey,
+            request: input,
+            state: result.status === "passed" ? "succeeded" : "failed",
+            result,
+          });
         }
         const commandId = `${input.operationKey}:${result.status}`;
         if (
@@ -264,7 +303,11 @@ export const openIntegrationNodeHandler = (options: {
     generation = options.integrations
       .inspect(generation.manifest.runId)
       .find((candidate) => candidate.id === generationId)!;
-    if (generation.state !== "aggregate-review") return;
+    if (
+      generation.state !== "aggregate-review" &&
+      generation.state !== "blocked"
+    )
+      return;
     const topicId = `integration-review:${generation.id}`;
     const input: AggregateIntegrationReviewInput = {
       operationKey: `${generation.id}:aggregate-review`,
@@ -280,8 +323,22 @@ export const openIntegrationNodeHandler = (options: {
       })),
       acceptanceCriteria: generation.manifest.integrationConditions,
     };
-    let result = await aggregateReviewExecutor.reconcile(input);
-    if (result.status === "not-applied") {
+    const stage = options.integrations.claimExecutionStage?.({
+      generationId: generation.id,
+      operationKey: input.operationKey,
+      phase: "aggregate-review",
+      targetKey: "aggregate-review",
+      request: input,
+      createIfMissing: generation.state !== "blocked",
+    });
+    if (stage?.mode === "missing") return;
+    let result =
+      stage?.mode === "terminal"
+        ? (stage.result as AggregateIntegrationReviewResult)
+        : stage?.mode === "execute"
+          ? await aggregateReviewExecutor.execute(input)
+          : await aggregateReviewExecutor.reconcile(input);
+    if (stage?.mode !== "terminal" && result.status === "not-applied") {
       result = await aggregateReviewExecutor.execute(input);
     }
     if (result.status === "not-applied") {
@@ -293,12 +350,30 @@ export const openIntegrationNodeHandler = (options: {
       return;
     }
     if (result.status === "unknown") {
+      options.integrations.recordExecutionStageResult?.({
+        operationKey: input.operationKey,
+        request: input,
+        state: "unknown",
+        result,
+      });
+      const current = options.integrations
+        .inspect(generation.manifest.runId)
+        .find((candidate) => candidate.id === generation.id);
+      if (current?.state === "blocked") return;
       options.integrations.blockPending(generation.id, {
         code: result.code,
         message: result.message,
         evidence: result.evidence,
       });
       return;
+    }
+    if (stage?.mode !== "terminal") {
+      options.integrations.recordExecutionStageResult?.({
+        operationKey: input.operationKey,
+        request: input,
+        state: "succeeded",
+        result,
+      });
     }
     const commandId = `${input.operationKey}:completed`;
     executeCommand({
@@ -324,7 +399,9 @@ export const openIntegrationNodeHandler = (options: {
             !["failed", "passed"].includes(candidate.state),
         );
       if (!generation) {
-        const generationNumber = options.integrations.inspect(runId).length + 1;
+        const generationNumber =
+          options.integrations.nextGenerationNumber?.(runId, nodeRunId) ??
+          options.integrations.inspect(runId).length + 1;
         const generationId = `integration:${runId}:g${generationNumber}`;
         const commandId = `integration:${runId}:${nodeRunId}:g${generationNumber}:start`;
         try {
@@ -385,12 +462,43 @@ export const openIntegrationNodeHandler = (options: {
       }
     },
     reconcilePending: async () => {
-      const operationCount = options.integrations.reconcilePending();
+      const operationCount = await options.integrations.reconcilePending();
       const generations = options.integrations.inspectPending();
       for (const generation of generations) {
         await executeGeneration(generation.id);
       }
       return operationCount + generations.length;
+    },
+    cancelPending: async ({ runId, nodeRunId }) => {
+      await options.integrations.cancelPendingGit?.({ runId, nodeRunId });
+      const generation = options.integrations
+        .inspect(runId)
+        .find(
+          (candidate) =>
+            candidate.manifest.nodeRunId === nodeRunId &&
+            !["failed", "passed"].includes(candidate.state),
+        );
+      if (!generation || !validationExecutor.cancel) return;
+      const stages = options.integrations.inspectExecutionStageRequests?.(
+        generation.id,
+      );
+      for (const stage of stages ?? []) {
+        if (stage.phase !== "validation") continue;
+        const request = stage.request as IntegrationValidationInput;
+        const result = await validationExecutor.cancel(request);
+        if (result.status === "not-applied") continue;
+        options.integrations.recordExecutionStageResult?.({
+          operationKey: stage.operationKey,
+          request,
+          state:
+            result.status === "unknown"
+              ? "unknown"
+              : result.status === "passed"
+                ? "succeeded"
+                : "failed",
+          result,
+        });
+      }
     },
   };
 };

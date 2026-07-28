@@ -471,6 +471,27 @@ export const openIsolatedIntegrationValidationExecutor = (options: {
 
   return {
     reconcile,
+    cancel: async (input) => {
+      const record = readRecord(input);
+      if (record.status !== "valid" || record.value.state !== "started") {
+        return reconcile(input);
+      }
+      const cancellation = await provider.cancel(
+        record.value.providerOperationId,
+      );
+      const reconciled = await reconcile(input);
+      if (reconciled.status !== "unknown") return reconciled;
+      return {
+        ...reconciled,
+        evidence: {
+          ...(typeof reconciled.evidence === "object" &&
+          reconciled.evidence !== null
+            ? reconciled.evidence
+            : { reconciliationEvidence: reconciled.evidence }),
+          cancellation,
+        },
+      };
+    },
     execute: async (input) => {
       const reconciled = await reconcile(input);
       if (reconciled.status !== "not-applied") return reconciled;

@@ -42,25 +42,49 @@ export const connectIntegrationGenerations = async (input: {
   let generation = 0;
   let handle: RuntimeSubscriptionHandle | null = null;
   let latestView: readonly IntegrationGenerationView[] = [];
+  let acknowledgedSequence = 0;
+  let eventQueue = Promise.resolve();
 
   const diagnosticMessage = (error: unknown): string =>
     error instanceof Error
       ? `Runtime unavailable; Integration resync required: ${error.message}`
       : "Runtime unavailable; Integration resync required.";
 
-  const queryView = async (frameGeneration: number): Promise<void> => {
+  const queryView = async (
+    frameGeneration: number,
+    frameSequence?: number,
+  ): Promise<void> => {
     const result = await input.bridge.query({
       type: "integration-generations.inspect",
       runId: input.runId,
     });
-    if (closed) return;
+    if (
+      closed ||
+      frameGeneration !== generation ||
+      (frameSequence !== undefined &&
+        frameSequence !== acknowledgedSequence + 1)
+    ) {
+      return;
+    }
     latestView = result.view;
     input.onFrame({ generation: frameGeneration, view: result.view });
   };
 
-  const handleEventFrame = async (frame: RuntimeEventFrame): Promise<void> => {
-    if (closed || frame.subscriptionGeneration < generation) return;
-    generation = frame.subscriptionGeneration;
+  const terminateStream = async (
+    frameGeneration: number,
+    error: unknown,
+  ): Promise<void> => {
+    if (closed || frameGeneration !== generation) return;
+    const active = handle;
+    handle = null;
+    input.onDiagnostic(diagnosticMessage(error));
+    if (active) await input.bridge.closeEventStream(active);
+  };
+
+  const applyEventFrame = async (frame: RuntimeEventFrame): Promise<void> => {
+    if (closed || !handle || frame.subscriptionGeneration !== generation) {
+      return;
+    }
     if (frame.value.kind === "control") {
       if (frame.value.control.type === "runtime.disconnected") {
         input.onDiagnostic(
@@ -69,13 +93,58 @@ export const connectIntegrationGenerations = async (input: {
       }
       return;
     }
-    if (frame.value.event.runId !== input.runId) return;
+    const sequence = frame.value.event.sequence;
+    if (sequence <= acknowledgedSequence) return;
+    if (sequence !== acknowledgedSequence + 1) {
+      await terminateStream(
+        frame.subscriptionGeneration,
+        new Error(
+          `Runtime event sequence ${sequence} is not contiguous after ${acknowledgedSequence}.`,
+        ),
+      );
+      return;
+    }
     try {
-      await queryView(generation);
+      if (frame.value.event.runId === input.runId) {
+        await queryView(frame.subscriptionGeneration, sequence);
+      }
+      if (
+        closed ||
+        !handle ||
+        frame.subscriptionGeneration !== generation ||
+        sequence !== acknowledgedSequence + 1
+      ) {
+        return;
+      }
+      const acknowledgement = await input.bridge.execute({
+        commandId: globalThis.crypto.randomUUID(),
+        command: {
+          type: "ack-runtime-events",
+          sequence,
+          subscriptionGeneration: frame.subscriptionGeneration,
+        },
+      });
+      if (acknowledgement.status === "rejected") {
+        throw new Error(acknowledgement.error.message);
+      }
+      if (
+        acknowledgement.value.subscriptionGeneration !==
+        frame.subscriptionGeneration
+      ) {
+        throw new Error(
+          "Runtime event acknowledgement changed the active subscription generation.",
+        );
+      }
+      acknowledgedSequence = sequence;
       input.onDiagnostic(null);
     } catch (error) {
-      input.onDiagnostic(diagnosticMessage(error));
+      await terminateStream(frame.subscriptionGeneration, error);
     }
+  };
+
+  const handleEventFrame = (frame: RuntimeEventFrame): Promise<void> => {
+    eventQueue = eventQueue.then(() => applyEventFrame(frame));
+    return eventQueue;
   };
 
   const synchronize = async (): Promise<void> => {
@@ -118,6 +187,7 @@ export const connectIntegrationGenerations = async (input: {
     }
     handle = opened;
     generation = opened.subscriptionGeneration;
+    acknowledgedSequence = opened.barrierSequence;
     input.onFrame({ generation, view: latestView });
     input.onDiagnostic(null);
   };

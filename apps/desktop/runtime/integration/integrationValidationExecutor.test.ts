@@ -297,6 +297,45 @@ describe("Isolated Integration validation executor", () => {
     assert.equal(executes, 1);
   });
 
+  it("dispatches cancellation to the exact provider operation and keeps the result reconcilable", async () => {
+    const { repository, integratedCommit } = repositoryFixture();
+    const cancelled: string[] = [];
+    const provider: IntegrationValidationProvider = {
+      execute: async (input) => {
+        input.onOperationStarted({
+          providerId: "sandcastle-docker-validation",
+          providerOperationId: "container-cancel",
+          evidenceRefs: ["provider-started"],
+        });
+        throw new Error("provider remains externally uncertain");
+      },
+      inspect: async () => "not-running",
+      cancel: async (providerOperationId) => {
+        cancelled.push(providerOperationId);
+        return "cancelled";
+      },
+    };
+    const executor = openIsolatedIntegrationValidationExecutor({
+      evidenceRoot: mkdtempSync(
+        join(tmpdir(), "integration-validation-cancel-"),
+      ),
+      provider,
+    });
+    const input = inputFor(repository, integratedCommit);
+    await executor.execute(input);
+
+    const result = await executor.cancel!(input);
+
+    assert.deepEqual(cancelled, ["container-cancel"]);
+    assert.equal(result.status, "unknown");
+    if (result.status === "unknown") {
+      assert.equal(
+        (result.evidence as { readonly cancellation: string }).cancellation,
+        "cancelled",
+      );
+    }
+  });
+
   it("executes frozen Contract commands and binds fixture plus Runtime evidence on failure", async () => {
     const { repository, integratedCommit } = repositoryFixture();
     const provider: IntegrationValidationProvider = {

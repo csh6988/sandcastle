@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,6 +19,17 @@ import { openAggregateIntegrationReviewExecutor } from "./aggregateIntegrationRe
 
 const git = (root: string, args: readonly string[]): string =>
   execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, entry) =>
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? Object.fromEntries(
+          Object.entries(entry as Record<string, unknown>).sort(
+            ([left], [right]) => left.localeCompare(right),
+          ),
+        )
+      : entry,
+  );
 
 const openReceiptHarness = (input?: {
   readonly waitForConcurrentExecutions?: boolean;
@@ -27,8 +45,7 @@ const openReceiptHarness = (input?: {
   const storage = new DatabaseSync(":memory:");
   migrateCompanyDatabase(storage);
   let persistedSession:
-    | { readonly sessionId: string; readonly participantId: string }
-    | undefined;
+    { readonly sessionId: string; readonly participantId: string } | undefined;
   const database = {
     exec: (sql: string) => storage.exec(sql),
     prepare: (sql: string) => {
@@ -52,6 +69,10 @@ const openReceiptHarness = (input?: {
   let adapterExecutions = 0;
   let recordMutations = 0;
   let recordedInput: unknown;
+  let signalExecutionStarted: (() => void) | undefined;
+  const executionStarted = new Promise<void>((resolve) => {
+    signalExecutionStarted = resolve;
+  });
   let releaseExecutions: (() => void) | undefined;
   const concurrentExecutions = new Promise<void>((resolve) => {
     releaseExecutions = resolve;
@@ -60,7 +81,7 @@ const openReceiptHarness = (input?: {
     execute: async () => {
       adapterExecutions += 1;
       if (input?.waitForConcurrentExecutions) {
-        if (adapterExecutions === 2) releaseExecutions?.();
+        signalExecutionStarted?.();
         await concurrentExecutions;
       }
       return {
@@ -114,9 +135,12 @@ const openReceiptHarness = (input?: {
       } as never;
     },
   };
+  const workspaceRoot = mkdtempSync(
+    join(tmpdir(), "aggregate-receipt-workspace-"),
+  );
   const executor = openAggregateIntegrationReviewExecutor({
     database,
-    workspaceRoot: mkdtempSync(join(tmpdir(), "aggregate-receipt-workspace-")),
+    workspaceRoot,
     reviewerExecutionAdapter,
     interaction: {
       createSession: () => ({ id: "aggregate-session" }) as never,
@@ -173,10 +197,13 @@ const openReceiptHarness = (input?: {
   return {
     executor,
     storage,
+    workspaceRoot,
     repository,
     integratedCommit,
     adapterExecutions: () => adapterExecutions,
     recordMutations: () => recordMutations,
+    executionStarted,
+    releaseExecutions: () => releaseExecutions?.(),
   };
 };
 
@@ -192,12 +219,19 @@ describe("Aggregate Integration Review executor", () => {
     const integratedCommit = git(repository, ["rev-parse", "HEAD"]);
     let recordedManifest: unknown;
     let adapterManifest: unknown;
+    let bundledManifest: unknown;
     let selectedReviewer: string | undefined;
     let adapterExecutions = 0;
     const reviewerExecutionAdapter = createScriptedReviewerExecutionAdapter({
       onExecute: (request) => {
         adapterExecutions += 1;
         adapterManifest = request.manifest;
+        bundledManifest = JSON.parse(
+          readFileSync(
+            join(request.workspaceRef, "inputs", "manifest.json"),
+            "utf8",
+          ),
+        );
       },
       execute: () => ({
         status: "succeeded",
@@ -335,6 +369,24 @@ describe("Aggregate Integration Review executor", () => {
       qualityGateResultId: `quality-gate-${input.topicId}`,
     });
     assert.deepEqual(adapterManifest, recordedManifest);
+    assert.deepEqual(bundledManifest, {
+      scope: "aggregate",
+      topicId: input.topicId,
+      supportingArtifactVersionIds: [],
+      supportingSpecRevisionIds: [],
+      harnessSnapshotIds: [],
+      acceptanceCriteria: ["npm test"],
+      excludedContext: [
+        "hidden-prompts",
+        "prior-reviewer-opinions",
+        "private-transcripts",
+      ],
+      integrationGenerationId: input.generationId,
+      integrationManifestHash: input.manifestHash,
+      repositoryCommits: [
+        { repositoryId: repository, commit: integratedCommit },
+      ],
+    });
     assert.equal(
       (adapterManifest as { readonly scope: string }).scope,
       "aggregate",
@@ -503,6 +555,59 @@ describe("Aggregate Integration Review executor", () => {
     assert.equal(participantCreates, 1);
   });
 
+  it("rejects a symlinked aggregate manifest input before Reviewer execution", async () => {
+    const harness = openReceiptHarness();
+    const input = {
+      operationKey: "generation-symlink:aggregate-review",
+      generationId: "generation-symlink",
+      manifestHash: "a".repeat(64),
+      projectId: "project-1",
+      runId: "run-1",
+      nodeRunId: "integration-node",
+      topicId: "integration-review:generation-symlink",
+      repositoryCommits: [
+        {
+          repositoryId: harness.repository,
+          commit: harness.integratedCommit,
+        },
+      ],
+      acceptanceCriteria: ["npm test"],
+    };
+    const bundleRoot = join(
+      harness.workspaceRoot,
+      createHash("sha256").update(input.operationKey).digest("hex"),
+    );
+    const externalInputs = mkdtempSync(
+      join(tmpdir(), "aggregate-symlink-inputs-"),
+    );
+    mkdirSync(bundleRoot, { recursive: true });
+    writeFileSync(
+      join(externalInputs, "manifest.json"),
+      canonicalJson({
+        scope: "aggregate",
+        topicId: input.topicId,
+        supportingArtifactVersionIds: [],
+        supportingSpecRevisionIds: [],
+        harnessSnapshotIds: [],
+        acceptanceCriteria: input.acceptanceCriteria,
+        excludedContext: [
+          "hidden-prompts",
+          "prior-reviewer-opinions",
+          "private-transcripts",
+        ],
+        integrationGenerationId: input.generationId,
+        integrationManifestHash: input.manifestHash,
+        repositoryCommits: input.repositoryCommits,
+      }),
+    );
+    symlinkSync(externalInputs, join(bundleRoot, "inputs"));
+
+    const result = await harness.executor.execute(input);
+
+    assert.equal(result.status, "unknown");
+    assert.equal(harness.adapterExecutions(), 0);
+  });
+
   it("replays the exact aggregate record authority and rejects changed input", async () => {
     const harness = openReceiptHarness();
     const input = {
@@ -568,14 +673,18 @@ describe("Aggregate Integration Review executor", () => {
       acceptanceCriteria: ["npm test"],
     };
 
-    const [left, right] = await Promise.all([
-      harness.executor.execute(input),
-      harness.executor.execute(input),
-    ]);
+    const leftPromise = harness.executor.execute(input);
+    await harness.executionStarted;
+    const rightPromise = harness.executor.execute(input);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const concurrentExecutionCount = harness.adapterExecutions();
+    harness.releaseExecutions();
+    const [left, right] = await Promise.all([leftPromise, rightPromise]);
 
     assert.deepEqual(left, right);
     assert.equal(left.status, "completed");
-    assert.equal(harness.adapterExecutions(), 2);
+    assert.equal(concurrentExecutionCount, 1);
+    assert.equal(harness.adapterExecutions(), 1);
     assert.equal(harness.recordMutations(), 1);
     assert.equal(
       Number(

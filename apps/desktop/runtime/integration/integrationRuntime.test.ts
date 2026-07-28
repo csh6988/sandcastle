@@ -141,6 +141,15 @@ const setup = (
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
   database.exec("PRAGMA foreign_keys = OFF");
+  database
+    .prepare(
+      `INSERT INTO department_runs(
+         id, project_id, department_id, status, created_at,
+         pipeline_version_id, snapshot_revision_id, revision, updated_at
+       ) VALUES ('run-1', 'project-1', 'software-rnd', 'running', ?,
+                 'software-rnd-pipeline-v1', 'snapshot-1', 0, ?)`,
+    )
+    .run("2026-07-28T00:00:00.000Z", "2026-07-28T00:00:00.000Z");
   const gitCalls: unknown[] = [];
   const gitAdapter: GitIntegrationAdapter = options.gitAdapter ?? {
     execute: (input) => {
@@ -300,7 +309,9 @@ const validateAll = (
 };
 
 const aggregateManifest = (
-  view: ReturnType<ReturnType<typeof openIntegrationRuntime>["executePending"]>,
+  view: Awaited<
+    ReturnType<ReturnType<typeof openIntegrationRuntime>["executePending"]>
+  >,
   topicId: string,
 ) => ({
   scope: "aggregate",
@@ -323,7 +334,7 @@ const aggregateManifest = (
 });
 
 describe("Integration Runtime generation manifest", () => {
-  it("freezes exact completed Code Review coverage in producer-first repository operations", () => {
+  it("freezes exact completed Code Review coverage in producer-first repository operations", async () => {
     const { database, runtime } = setup();
 
     database.exec("BEGIN IMMEDIATE");
@@ -389,7 +400,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(view.state, "pending");
   });
 
-  it("fails closed before Git when frozen Contract validation commands are empty", () => {
+  it("fails closed before Git when frozen Contract validation commands are empty", async () => {
     const invalid = coverage({
       packages: coverage().packages.map((entry) => ({
         ...entry,
@@ -422,7 +433,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.deepEqual(gitCalls, []);
   });
 
-  it("fails closed before Git writes when one Repository coverage has different base commits", () => {
+  it("fails closed before Git writes when one Repository coverage has different base commits", async () => {
     const inconsistent = coverage({
       packages: [
         coverage().packages[0]!,
@@ -457,7 +468,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.deepEqual(gitCalls, []);
   });
 
-  it("persists operation receipts in dependency order and waits for every Repository validation", () => {
+  it("persists operation receipts in dependency order and waits for every Repository validation", async () => {
     const { database, runtime, gitCalls, eventCalls } = setup();
     database.exec("BEGIN IMMEDIATE");
     runtime.dispatchInTransaction({
@@ -472,7 +483,7 @@ describe("Integration Runtime generation manifest", () => {
     });
     database.exec("COMMIT");
 
-    const integrated = runtime.executePending("generation-execution");
+    const integrated = await runtime.executePending("generation-execution");
     assert.equal(integrated.state, "validating");
     assert.deepEqual(
       (gitCalls as Array<{ readonly sourceCommit: string }>).map(
@@ -571,11 +582,11 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("records Integration operation intent and finalization as replayable Runtime UoWs", () => {
+  it("records Integration operation intent and finalization as replayable Runtime UoWs", async () => {
     const { database, runtime, eventCalls } = setup();
     start(database, runtime, "generation-operation-uow");
 
-    const integrated = runtime.executePending("generation-operation-uow");
+    const integrated = await runtime.executePending("generation-operation-uow");
 
     assert.equal(integrated.state, "validating");
     const receipts = database
@@ -641,7 +652,7 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("rolls back an operation intent UoW before executing Git and retries cleanly", () => {
+  it("rolls back an operation intent UoW before executing Git and retries cleanly", async () => {
     let failIntent = true;
     const { database, runtime, gitCalls } = setup(coverage(), {
       failureInjection: (point) => {
@@ -653,7 +664,7 @@ describe("Integration Runtime generation manifest", () => {
     });
     start(database, runtime, "generation-intent-uow-rollback");
 
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-intent-uow-rollback"),
       /intent transaction interrupted/,
     );
@@ -678,13 +689,13 @@ describe("Integration Runtime generation manifest", () => {
     );
 
     assert.equal(
-      runtime.executePending("generation-intent-uow-rollback").state,
+      (await runtime.executePending("generation-intent-uow-rollback")).state,
       "validating",
     );
     assert.equal(gitCalls.length, 2);
   });
 
-  it("does not execute Git twice when another worker wins the operation intent race", () => {
+  it("does not execute Git twice when another worker wins the operation intent race", async () => {
     let raced = false;
     let executeCount = 0;
     let runtime!: ReturnType<typeof openIntegrationRuntime>;
@@ -716,7 +727,7 @@ describe("Integration Runtime generation manifest", () => {
     start(initialized.database, runtime, "generation-intent-race");
 
     assert.equal(
-      runtime.executePending("generation-intent-race").state,
+      (await runtime.executePending("generation-intent-race")).state,
       "validating",
     );
     assert.equal(executeCount, 1);
@@ -732,10 +743,11 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("reconciles a raced intent receipt in the same invocation", () => {
+  it("reconciles a raced intent receipt in the same invocation", async () => {
     let raced = false;
     let crashInner = true;
     let executeCount = 0;
+    let innerExecution: Promise<unknown> | undefined;
     let runtime!: ReturnType<typeof openIntegrationRuntime>;
     const initialized = setup(
       coverage({ packages: [coverage().packages[0]!] }),
@@ -756,10 +768,10 @@ describe("Integration Runtime generation manifest", () => {
         failureInjection: (point) => {
           if (point === "before-operation-intent" && !raced) {
             raced = true;
-            assert.throws(
-              () => runtime.executePending("generation-intent-race-crash"),
-              /inner worker stopped after intent/,
+            innerExecution = runtime.executePending(
+              "generation-intent-race-crash",
             );
+            void innerExecution.catch(() => undefined);
           }
           if (point === "after-intent" && crashInner) {
             crashInner = false;
@@ -772,16 +784,18 @@ describe("Integration Runtime generation manifest", () => {
     start(initialized.database, runtime, "generation-intent-race-crash");
 
     assert.equal(
-      runtime.executePending("generation-intent-race-crash").state,
+      (await runtime.executePending("generation-intent-race-crash")).state,
       "validating",
     );
+    await assert.rejects(innerExecution!, /inner worker stopped after intent/);
     assert.equal(executeCount, 1);
   });
 
-  it("fails closed when a raced intent receipt has inconsistent effect IDs", () => {
+  it("fails closed when a raced intent receipt has inconsistent effect IDs", async () => {
     let raced = false;
     let crashInner = true;
     let executeCount = 0;
+    let innerExecution: Promise<unknown> | undefined;
     let runtime!: ReturnType<typeof openIntegrationRuntime>;
     const initialized = setup(
       coverage({ packages: [coverage().packages[0]!] }),
@@ -796,10 +810,10 @@ describe("Integration Runtime generation manifest", () => {
         failureInjection: (point) => {
           if (point === "before-operation-intent" && !raced) {
             raced = true;
-            assert.throws(
-              () => runtime.executePending("generation-intent-receipt-drift"),
-              /inner worker stopped after intent/,
+            innerExecution = runtime.executePending(
+              "generation-intent-receipt-drift",
             );
+            void innerExecution.catch(() => undefined);
             initialized.database
               .prepare(
                 `UPDATE command_deduplication SET effect_ids_json = '["forged"]'
@@ -818,16 +832,17 @@ describe("Integration Runtime generation manifest", () => {
     runtime = initialized.runtime;
     start(initialized.database, runtime, "generation-intent-receipt-drift");
 
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-intent-receipt-drift"),
       (error: unknown) =>
         error instanceof IntegrationRuntimeError &&
         error.code === "INTEGRATION_CONFLICT",
     );
+    await assert.rejects(innerExecution!, /inner worker stopped after intent/);
     assert.equal(executeCount, 0);
   });
 
-  it("rolls back operation finalization and recovers the Git effect without re-execution", () => {
+  it("rolls back operation finalization and recovers the Git effect without re-execution", async () => {
     let failFinalize = true;
     const executedSources: string[] = [];
     const adapter: GitIntegrationAdapter = {
@@ -860,7 +875,7 @@ describe("Integration Runtime generation manifest", () => {
     });
     start(database, runtime, "generation-finalize-uow-rollback");
 
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-finalize-uow-rollback"),
       /finalization transaction interrupted/,
     );
@@ -885,13 +900,13 @@ describe("Integration Runtime generation manifest", () => {
     );
 
     assert.equal(
-      runtime.executePending("generation-finalize-uow-rollback").state,
+      (await runtime.executePending("generation-finalize-uow-rollback")).state,
       "validating",
     );
     assert.deepEqual(executedSources, [commit("2"), commit("4")]);
   });
 
-  it("fails the whole generation on partial multi-Repository failure and never continues it", () => {
+  it("fails the whole generation on partial multi-Repository failure and never continues it", async () => {
     const calls: string[] = [];
     const adapter: GitIntegrationAdapter = {
       execute: (input) => {
@@ -928,12 +943,12 @@ describe("Integration Runtime generation manifest", () => {
     });
     database.exec("COMMIT");
 
-    const failed = runtime.executePending("generation-partial");
+    const failed = await runtime.executePending("generation-partial");
     assert.equal(failed.state, "failed");
     assert.equal(failed.operations[0]?.state, "succeeded");
     assert.equal(failed.operations[1]?.state, "failed");
     assert.equal(failed.defects[0]?.kind, "git-conflict");
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-partial"),
       (error: unknown) =>
         error instanceof IntegrationRuntimeError &&
@@ -942,7 +957,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.deepEqual(calls, [commit("2"), commit("4")]);
   });
 
-  it("returns an attributable Integration failure to Work Package rework and admits only fresh reviewed coverage", () => {
+  it("returns an attributable Integration failure to Work Package rework and admits only fresh reviewed coverage", async () => {
     const uiPackage: CompletedCodeReviewCoverage["packages"][number] = {
       workPackageId: "package-ui",
       workPackageVersionId: "package-ui-v1",
@@ -969,8 +984,7 @@ describe("Integration Runtime generation manifest", () => {
     let currentCoverage = coverage({
       packages: [...coverage().packages, uiPackage],
     });
-    const versionCalls: unknown[] = [];
-    const assignCalls: unknown[] = [];
+    const reworkCalls: unknown[] = [];
     const manifest = {
       objective: "Recover Integration",
       acceptanceCriteria: ["Fresh review passes"],
@@ -992,7 +1006,6 @@ describe("Integration Runtime generation manifest", () => {
         runtimeImportOnly: true as const,
       },
     };
-    const { execution: _execution, ...versionManifest } = manifest;
     const workPackageGraph: {
       projectId: string;
       runId: string;
@@ -1119,11 +1132,11 @@ describe("Integration Runtime generation manifest", () => {
       readCoverage: () => currentCoverage,
       workPackages: {
         inspect: () => workPackageGraph as unknown as WorkPackageGraphView,
-        versionInTransaction: (input) => {
-          versionCalls.push(input);
+        reworkInTransaction: (input) => {
+          reworkCalls.push(input);
           appendReworkAudit(
             input.commandId,
-            "work-package.version",
+            "work-package.reworked",
             input.workPackageId,
           );
           const workPackage = workPackageGraph.packages.find(
@@ -1139,31 +1152,19 @@ describe("Integration Runtime generation manifest", () => {
             status: "ready",
             manifest: {
               ...manifest,
-              ...input.manifest,
-              execution: manifest.execution,
+              recoveryPolicy: input.recoveryReason,
             } as typeof manifest,
-            dependencies: input.dependencies.map((dependency) => ({
+            dependencies: active.dependencies.map((dependency) => ({
               predecessorWorkPackageVersionId:
-                dependency.predecessorWorkPackageVersionId,
-              kind: dependency.kind as "contract" | "commit",
+                input.dependencyVersionReplacements?.[
+                  dependency.predecessorWorkPackageVersionId
+                ] ?? dependency.predecessorWorkPackageVersionId,
+              kind: dependency.kind,
               contractId: dependency.contractId ?? null,
               contractVersion: dependency.contractVersion ?? null,
               evidenceRef: dependency.evidenceRef ?? null,
             })),
           });
-          workPackage.revision += 1;
-          return workPackageGraph as unknown as WorkPackageGraphView;
-        },
-        assignInTransaction: (input) => {
-          assignCalls.push(input);
-          appendReworkAudit(
-            input.commandId,
-            "work-package.assign",
-            input.workPackageId,
-          );
-          const workPackage = workPackageGraph.packages.find(
-            (entry) => entry.id === input.workPackageId,
-          )!;
           workPackage.revision += 1;
           workPackage.state = "assigned";
           return workPackageGraph as unknown as WorkPackageGraphView;
@@ -1174,76 +1175,51 @@ describe("Integration Runtime generation manifest", () => {
     const { runtime, pipelineCalls } = initialized;
     start(database, runtime, "generation-rework");
 
-    const failed = runtime.executePending("generation-rework");
+    const failed = await runtime.executePending("generation-rework");
 
     assert.equal(failed.state, "failed");
-    assert.equal(versionCalls.length, 3);
-    assert.deepEqual(versionCalls[0], {
+    assert.equal(reworkCalls.length, 3);
+    assert.deepEqual(reworkCalls[0], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 4,
       workPackageId: "package-api",
       versionId: "integration-rework:generation-rework:package-api:v2",
-      dependencies: [],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
-      },
+      baseCommit: commit("1"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {},
     });
-    assert.deepEqual(versionCalls[1], {
+    assert.deepEqual(reworkCalls[1], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 6,
       workPackageId: "package-web",
       versionId: "integration-rework:generation-rework:package-web:v2",
-      dependencies: [
-        {
-          predecessorWorkPackageVersionId:
-            "integration-rework:generation-rework:package-api:v2",
-          kind: "contract",
-          contractId: "contract-api",
-          contractVersion: "1",
-        },
-      ],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      baseCommit: commit("3"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {
+        "package-api-v1": "integration-rework:generation-rework:package-api:v2",
       },
     });
-    assert.deepEqual(versionCalls[2], {
+    assert.deepEqual(reworkCalls[2], {
       commandId:
         "integration-operation:generation-rework:package-api-v1:finalize",
       actor: runtimeActor,
       expectedRevision: 8,
       workPackageId: "package-ui",
       versionId: "integration-rework:generation-rework:package-ui:v2",
-      dependencies: [
-        {
-          predecessorWorkPackageVersionId:
-            "integration-rework:generation-rework:package-web:v2",
-          kind: "commit",
-        },
-      ],
-      manifest: {
-        ...versionManifest,
-        recoveryPolicy:
-          "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      baseCommit: commit("5"),
+      recoveryReason:
+        "Integration Generation generation-rework failed: INTEGRATION_GIT_CONFLICT",
+      dependencyVersionReplacements: {
+        "package-api-v1": "integration-rework:generation-rework:package-api:v2",
+        "package-web-v1": "integration-rework:generation-rework:package-web:v2",
       },
     });
-    assert.deepEqual(assignCalls, [
-      {
-        commandId:
-          "integration-operation:generation-rework:package-api-v1:finalize",
-        actor: runtimeActor,
-        expectedRevision: 5,
-        workPackageId: "package-api",
-        baseCommit: commit("1"),
-      },
-    ]);
     assert.equal(
       database
         .prepare(
@@ -1347,7 +1323,7 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("reconciles an effect committed before receipt finalization without reissuing it", () => {
+  it("reconciles an effect committed before receipt finalization without reissuing it", async () => {
     const applied = new Map<string, GitIntegrationRequest>();
     let failAfterEffect = true;
     let executeCount = 0;
@@ -1396,17 +1372,17 @@ describe("Integration Runtime generation manifest", () => {
     });
     database.exec("COMMIT");
 
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-reconcile"),
       /simulated crash/,
     );
     assert.equal(runtime.inspect("run-1")[0]?.operations[0]?.state, "running");
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     assert.equal(runtime.inspect("run-1")[0]?.state, "validating");
     assert.equal(executeCount, 2);
   });
 
-  it("reconciles a frozen started request after mutable Code Review coverage is superseded", () => {
+  it("reconciles a frozen started request after mutable Code Review coverage is superseded", async () => {
     let currentCoverage = coverage({ packages: [coverage().packages[0]!] });
     let applied: GitIntegrationRequest | undefined;
     let crash = true;
@@ -1443,7 +1419,7 @@ describe("Integration Runtime generation manifest", () => {
       },
     });
     start(database, runtime, "generation-superseded-reconcile");
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-superseded-reconcile"),
       /crash after effect/,
     );
@@ -1453,11 +1429,11 @@ describe("Integration Runtime generation manifest", () => {
       packages: [coverage().packages[0]!],
     });
 
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     assert.equal(runtime.inspect("run-1")[0]?.state, "validating");
   });
 
-  it("rolls back the complete failure finalization UoW and recovers it on restart", () => {
+  it("rolls back the complete failure finalization UoW and recovers it on restart", async () => {
     let crash = true;
     const adapter: GitIntegrationAdapter = {
       execute: () => ({
@@ -1488,7 +1464,7 @@ describe("Integration Runtime generation manifest", () => {
       },
     );
     start(database, runtime, "generation-failure-uow");
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-failure-uow"),
       /crash during failure finalization/,
     );
@@ -1497,14 +1473,14 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(preRestart.operations[0]?.state, "running");
     assert.deepEqual(preRestart.defects, []);
 
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     const recovered = runtime.inspect("run-1")[0]!;
     assert.equal(recovered.state, "failed");
     assert.equal(recovered.operations[0]?.state, "failed");
     assert.equal(recovered.defects.length, 1);
   });
 
-  it("replays an identical generation manifest and rejects changed coverage for the same identity", () => {
+  it("replays an identical generation manifest and rejects changed coverage for the same identity", async () => {
     let currentCoverage = coverage();
     const { database, runtime } = setup(currentCoverage, {
       readCoverage: () => currentCoverage,
@@ -1547,7 +1523,7 @@ describe("Integration Runtime generation manifest", () => {
     database.exec("ROLLBACK");
   });
 
-  it("reconciles a crash after intent before effect and executes each operation only once", () => {
+  it("reconciles a crash after intent before effect and executes each operation only once", async () => {
     let crash = true;
     let executeCount = 0;
     const adapter: GitIntegrationAdapter = {
@@ -1573,17 +1549,17 @@ describe("Integration Runtime generation manifest", () => {
       },
     });
     start(database, runtime, "generation-intent-crash");
-    assert.throws(
+    await assert.rejects(
       () => runtime.executePending("generation-intent-crash"),
       /simulated crash after intent/,
     );
     assert.equal(executeCount, 0);
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     assert.equal(executeCount, 2);
     assert.equal(runtime.inspect("run-1")[0]?.state, "validating");
   });
 
-  it("includes a committed pending Generation in startup reconciliation", () => {
+  it("includes a committed pending Generation in startup reconciliation", async () => {
     const { database, runtime } = setup(
       coverage({ packages: [coverage().packages[0]!] }),
     );
@@ -1595,7 +1571,7 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("finalizes a known pre-write Git rejection without leaving an intent hanging", () => {
+  it("finalizes a known pre-write Git rejection without leaving an intent hanging", async () => {
     const adapter: GitIntegrationAdapter = {
       execute: () => ({
         status: "failed",
@@ -1612,7 +1588,7 @@ describe("Integration Runtime generation manifest", () => {
     );
     start(database, runtime, "generation-source-drift");
 
-    const failed = runtime.executePending("generation-source-drift");
+    const failed = await runtime.executePending("generation-source-drift");
 
     assert.equal(failed.state, "failed");
     assert.equal(failed.operations[0]?.state, "failed");
@@ -1623,7 +1599,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(failed.defects.length, 1);
   });
 
-  it("reconciles a previously unknown Git outcome when the exact result later becomes provable", () => {
+  it("reconciles a previously unknown Git outcome when the exact result later becomes provable", async () => {
     let executeCount = 0;
     let reconcileCount = 0;
     let provable = false;
@@ -1660,7 +1636,7 @@ describe("Integration Runtime generation manifest", () => {
       { gitAdapter: adapter },
     );
     start(database, runtime, "generation-unknown");
-    const blocked = runtime.executePending("generation-unknown");
+    const blocked = await runtime.executePending("generation-unknown");
     assert.equal(blocked.state, "blocked");
     assert.equal(blocked.operations[0]?.state, "unknown");
     assert.deepEqual(
@@ -1677,10 +1653,10 @@ describe("Integration Runtime generation manifest", () => {
         "integration-operation:generation-unknown:package-api-v1:unknown",
       ],
     );
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     assert.equal(runtime.inspect("run-1")[0]?.state, "blocked");
     provable = true;
-    assert.equal(runtime.reconcilePending(), 1);
+    assert.equal(await runtime.reconcilePending(), 1);
     const recovered = runtime.inspect("run-1")[0]!;
     assert.equal(recovered.state, "validating");
     assert.equal(recovered.operations[0]?.state, "succeeded");
@@ -1706,13 +1682,13 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(executeCount, 1);
     assert.equal(reconcileCount, 2);
     assert.equal(
-      runtime.executePending("generation-unknown").state,
+      (await runtime.executePending("generation-unknown")).state,
       "validating",
     );
     assert.equal(reconcileCount, 2);
   });
 
-  it("rejects changed unknown reconciliation evidence under the stable receipt identity", () => {
+  it("rejects changed unknown reconciliation evidence under the stable receipt identity", async () => {
     let reconciliation = 0;
     const adapter: GitIntegrationAdapter = {
       execute: () => ({
@@ -1734,11 +1710,11 @@ describe("Integration Runtime generation manifest", () => {
     );
     start(database, runtime, "generation-unknown-conflict");
     assert.equal(
-      runtime.executePending("generation-unknown-conflict").state,
+      (await runtime.executePending("generation-unknown-conflict")).state,
       "blocked",
     );
 
-    assert.throws(
+    await assert.rejects(
       () => runtime.reconcilePending(),
       (error: unknown) =>
         error instanceof IntegrationRuntimeError &&
@@ -1747,7 +1723,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(runtime.inspect("run-1")[0]?.operations[0]?.state, "unknown");
   });
 
-  it("persists replayable blockPending state with Integration and Pipeline audit effects", () => {
+  it("persists replayable blockPending state with Integration and Pipeline audit effects", async () => {
     const { database, runtime, eventCalls } = setup(
       coverage({ packages: [coverage().packages[0]!] }),
       { recordPipelineAudit: true },
@@ -1824,7 +1800,122 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("rejects blockPending for terminal Generations without writing evidence", () => {
+  it("recovers a blocked validation stage by reconciliation without reissuing its external effect", async () => {
+    const { database, runtime } = setup();
+    start(database, runtime, "generation-validation-recovery");
+    const validating = await runtime.executePending(
+      "generation-validation-recovery",
+    );
+    const required = validating.manifest.requiredValidations[0]!;
+    const repository = validating.repositoryResults.find(
+      (entry) => entry.repositoryReference === required.repositoryReference,
+    )!;
+    const request = {
+      operationKey: `${validating.id}:validation:${required.id}`,
+      generationId: validating.id,
+      manifestHash: validating.manifestHash,
+      repositoryReference: repository.repositoryReference,
+      integratedCommit: repository.integratedCommit!,
+      responsibleWorkPackageVersionIds:
+        required.responsibleWorkPackageVersionIds,
+      validation: required,
+    };
+
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: validating.id,
+        operationKey: request.operationKey,
+        phase: "validation",
+        targetKey: required.id,
+        request,
+        createIfMissing: true,
+      }),
+      { mode: "execute" },
+    );
+    const unknown = {
+      status: "unknown" as const,
+      code: "RECONCILE_UNKNOWN",
+      message: "provider outcome is not yet provable",
+      evidence: { providerOperationId: "validation-provider-1" },
+    };
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "unknown",
+      result: unknown,
+    });
+    runtime.blockPending(validating.id, unknown);
+
+    assert.equal(
+      runtime.inspect(validating.manifest.runId)[0]?.state,
+      "blocked",
+    );
+    assert.equal(
+      runtime.inspectPending().some((entry) => entry.id === validating.id),
+      true,
+    );
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: validating.id,
+        operationKey: request.operationKey,
+        phase: "validation",
+        targetKey: required.id,
+        request,
+        createIfMissing: false,
+      }),
+      { mode: "reconcile" },
+    );
+    const passed = {
+      status: "passed" as const,
+      evidenceRefs: ["validation-provider-terminal-1"],
+      responsibleWorkPackageVersionIds: [],
+    };
+    runtime.recordExecutionStageResult({
+      operationKey: request.operationKey,
+      request,
+      state: "succeeded",
+      result: passed,
+    });
+    database.exec("BEGIN IMMEDIATE");
+    runtime.dispatchInTransaction({
+      commandId: `${request.operationKey}:passed`,
+      actor: runtimeActor,
+      command: {
+        type: "integration.validation.record",
+        generationId: validating.id,
+        validationId: required.id,
+        repositoryReference: repository.repositoryReference,
+        status: "passed",
+        kind: required.kind,
+        evidenceRefs: [...passed.evidenceRefs],
+        responsibleWorkPackageVersionIds: [],
+      },
+    });
+    database.exec("COMMIT");
+
+    assert.deepEqual(
+      runtime.claimExecutionStage({
+        generationId: validating.id,
+        operationKey: request.operationKey,
+        phase: "validation",
+        targetKey: required.id,
+        request,
+        createIfMissing: false,
+      }),
+      { mode: "terminal", result: passed },
+    );
+    assert.equal(
+      runtime
+        .inspect(validating.manifest.runId)[0]!
+        .defects.some(
+          (defect) =>
+            defect.kind === "reconciliation" && defect.status === "open",
+        ),
+      false,
+    );
+  });
+
+  it("rejects blockPending for terminal Generations without writing evidence", async () => {
     for (const state of ["passed", "failed"] as const) {
       const { database, runtime, eventCalls } = setup(
         coverage({ packages: [coverage().packages[0]!] }),
@@ -1890,7 +1981,7 @@ describe("Integration Runtime generation manifest", () => {
     }
   });
 
-  it("rolls back blockPending when the Generation transition affects no row", () => {
+  it("rolls back blockPending when the Generation transition affects no row", async () => {
     const { database, runtime, eventCalls } = setup(
       coverage({ packages: [coverage().packages[0]!] }),
       { recordPipelineAudit: true },
@@ -1958,7 +2049,7 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(runtime.inspect("run-1")[0]?.state, "pending");
   });
 
-  it("persists blockStart context, audits, event, and receipt atomically", () => {
+  it("persists blockStart context, audits, event, and receipt atomically", async () => {
     const { database, runtime, eventCalls } = setup(coverage(), {
       recordPipelineAudit: true,
     });
@@ -1970,7 +2061,7 @@ describe("Integration Runtime generation manifest", () => {
       )
       .run("2026-07-28T00:00:00.000Z");
     const input = {
-      generationId: "generation-block-start",
+      generationId: "integration:run-block-start:g1",
       runId: "run-block-start",
       nodeRunId: "integration-node-block-start",
       failure: {
@@ -1984,7 +2075,7 @@ describe("Integration Runtime generation manifest", () => {
     runtime.blockStart(input);
 
     const commandId =
-      "integration-generation:generation-block-start:block-start";
+      "integration-generation:integration:run-block-start:g1:block-start";
     const receipt = database
       .prepare(
         `SELECT effect_ids_json AS effectIdsJson FROM command_deduplication
@@ -2017,12 +2108,19 @@ describe("Integration Runtime generation manifest", () => {
       ).length,
       1,
     );
+    assert.equal(
+      runtime.nextGenerationNumber(
+        "run-block-start",
+        "integration-node-block-start",
+      ),
+      2,
+    );
   });
 
-  it("records producer and consumer responsibility for cross-application Contract failure", () => {
+  it("records producer and consumer responsibility for cross-application Contract failure", async () => {
     const { database, runtime } = setup();
     start(database, runtime, "generation-contract-failure");
-    runtime.executePending("generation-contract-failure");
+    await runtime.executePending("generation-contract-failure");
 
     database.exec("BEGIN IMMEDIATE");
     const failed = runtime.dispatchInTransaction({
@@ -2065,10 +2163,10 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("rejects contract failure evidence on passed or build-test validation records", () => {
+  it("rejects contract failure evidence on passed or build-test validation records", async () => {
     const { database, runtime } = setup();
     start(database, runtime, "generation-invalid-contract-evidence");
-    const integrated = runtime.executePending(
+    const integrated = await runtime.executePending(
       "generation-invalid-contract-evidence",
     );
     const buildValidation = integrated.manifest.requiredValidations.find(
@@ -2106,7 +2204,7 @@ describe("Integration Runtime generation manifest", () => {
     database.exec("ROLLBACK");
   });
 
-  it("binds aggregate independent PASS to exact integrated commits and creates downstream authority", () => {
+  it("binds aggregate independent PASS to exact integrated commits and creates downstream authority", async () => {
     let gateResult: {
       readonly gateResult: {
         readonly id: string;
@@ -2122,7 +2220,7 @@ describe("Integration Runtime generation manifest", () => {
       reviewRuntime: { inspect: () => gateResult },
     });
     start(database, runtime, "generation-pass");
-    const integrated = runtime.executePending("generation-pass");
+    const integrated = await runtime.executePending("generation-pass");
     validateAll(database, runtime, "generation-pass");
     const manifest = aggregateManifest(integrated, "aggregate-topic");
     gateResult = {
@@ -2168,7 +2266,7 @@ describe("Integration Runtime generation manifest", () => {
     );
   });
 
-  it("fails the generation when aggregate review is not an unconditional PASS", () => {
+  it("fails the generation when aggregate review is not an unconditional PASS", async () => {
     let gateResult: {
       readonly gateResult: {
         readonly id: string;
@@ -2184,7 +2282,7 @@ describe("Integration Runtime generation manifest", () => {
       reviewRuntime: { inspect: () => gateResult },
     });
     start(database, runtime, "generation-conditional");
-    const integrated = runtime.executePending("generation-conditional");
+    const integrated = await runtime.executePending("generation-conditional");
     validateAll(database, runtime, "generation-conditional");
     const manifest = aggregateManifest(
       integrated,

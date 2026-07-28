@@ -1475,6 +1475,7 @@ describe("Company database migrations", () => {
       );
     previous.exec(`
       PRAGMA foreign_keys = OFF;
+      DROP INDEX execution_leases_active_operation_idx;
       DROP TABLE run_memory_selections;
       DROP TABLE reviewed_memory_entries;
       DROP TABLE reviewed_memory_decisions;
@@ -2035,8 +2036,7 @@ describe("Company database migrations", () => {
             `SELECT version, name FROM schema_migrations WHERE version = 44`,
           )
           .get() as
-          | { readonly version: number; readonly name: string }
-          | undefined;
+          { readonly version: number; readonly name: string } | undefined;
         assert.equal(migration?.version, 44);
         assert.equal(migration?.name, "durable_code_review_execution");
         const exactEvidenceMigration = inspected
@@ -2044,8 +2044,7 @@ describe("Company database migrations", () => {
             `SELECT version, name FROM schema_migrations WHERE version = 45`,
           )
           .get() as
-          | { readonly version: number; readonly name: string }
-          | undefined;
+          { readonly version: number; readonly name: string } | undefined;
         assert.equal(exactEvidenceMigration?.version, 45);
         assert.equal(
           exactEvidenceMigration?.name,
@@ -2094,6 +2093,10 @@ describe("Company database migrations", () => {
     const old = new DatabaseSync(path);
     old.exec(`
       PRAGMA foreign_keys = OFF;
+      DROP INDEX execution_leases_active_operation_idx;
+      DROP TRIGGER integration_execution_stages_immutable_delete;
+      DROP TRIGGER integration_execution_stages_terminal_update;
+      DROP TRIGGER integration_execution_stages_identity_update;
       DROP TRIGGER integration_aggregate_reviews_immutable_delete;
       DROP TRIGGER integration_aggregate_reviews_immutable_update;
       DROP TRIGGER integration_defects_immutable_delete;
@@ -2112,6 +2115,8 @@ describe("Company database migrations", () => {
       DROP INDEX integration_operations_state_idx;
       DROP INDEX integration_validation_records_generation_idx;
       DROP INDEX integration_generations_run_idx;
+      DROP INDEX integration_execution_stages_state_idx;
+      DROP TABLE integration_execution_stages;
       DROP TABLE integration_aggregate_reviews;
       DROP TABLE integration_defects;
       DROP TABLE integration_validation_records;
@@ -2141,11 +2146,24 @@ describe("Company database migrations", () => {
           [
             { name: "integration_aggregate_reviews" },
             { name: "integration_defects" },
+            { name: "integration_execution_stages" },
             { name: "integration_generations" },
             { name: "integration_operations" },
             { name: "integration_repository_results" },
             { name: "integration_validation_records" },
           ],
+        );
+        assert.equal(
+          Number(
+            inspected
+              .prepare(
+                `SELECT COUNT(*) AS count FROM sqlite_schema
+                  WHERE type = 'index'
+                    AND name = 'execution_leases_active_operation_idx'`,
+              )
+              .get()!.count,
+          ),
+          1,
         );
         assert.deepEqual(
           {

@@ -1165,8 +1165,7 @@ const migrations: readonly CompanyMigration[] = [
             WHERE id = 'software-rnd' AND built_in = 1`,
         )
         .get() as
-        | { readonly activePipelineVersionId?: string | null }
-        | undefined;
+        { readonly activePipelineVersionId?: string | null } | undefined;
       if (active?.activePipelineVersionId !== "software-rnd-pipeline-v1") {
         return;
       }
@@ -4415,6 +4414,11 @@ const migrations: readonly CompanyMigration[] = [
     version: 46,
     name: "multi_repository_integration_generations",
     migrate: (database) => {
+      database.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS execution_leases_active_operation_idx
+          ON execution_leases(operation_key)
+          WHERE released_at IS NULL;
+      `);
       const requiredObjects = [
         "integration_generations",
         "integration_repository_results",
@@ -4422,10 +4426,12 @@ const migrations: readonly CompanyMigration[] = [
         "integration_validation_records",
         "integration_defects",
         "integration_aggregate_reviews",
+        "integration_execution_stages",
         "integration_generations_run_idx",
         "integration_operations_state_idx",
         "integration_validation_records_generation_idx",
         "integration_defects_generation_idx",
+        "integration_execution_stages_state_idx",
         "integration_generations_identity_update",
         "integration_generations_immutable_delete",
         "integration_operations_identity_update",
@@ -4440,6 +4446,9 @@ const migrations: readonly CompanyMigration[] = [
         "integration_defects_immutable_delete",
         "integration_aggregate_reviews_immutable_update",
         "integration_aggregate_reviews_immutable_delete",
+        "integration_execution_stages_identity_update",
+        "integration_execution_stages_terminal_update",
+        "integration_execution_stages_immutable_delete",
       ] as const;
       const existingObjects = database
         .prepare(
@@ -4594,6 +4603,24 @@ const migrations: readonly CompanyMigration[] = [
           created_at TEXT NOT NULL
         ) STRICT;
 
+        CREATE TABLE integration_execution_stages (
+          id TEXT PRIMARY KEY,
+          operation_key TEXT NOT NULL UNIQUE,
+          generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+          phase TEXT NOT NULL CHECK (phase IN ('validation', 'aggregate-review')),
+          target_key TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+          state TEXT NOT NULL CHECK (
+            state IN ('running', 'reconciling', 'unknown', 'succeeded', 'failed')
+          ),
+          result_json TEXT,
+          result_hash TEXT CHECK (result_hash IS NULL OR length(result_hash) = 64),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (generation_id, phase, target_key)
+        ) STRICT;
+
         CREATE INDEX integration_generations_run_idx
           ON integration_generations(run_id, generation, created_at);
         CREATE INDEX integration_operations_state_idx
@@ -4602,6 +4629,8 @@ const migrations: readonly CompanyMigration[] = [
           ON integration_validation_records(generation_id, repository_result_id, validation_id);
         CREATE INDEX integration_defects_generation_idx
           ON integration_defects(generation_id, status, created_at, id);
+        CREATE INDEX integration_execution_stages_state_idx
+          ON integration_execution_stages(state, updated_at, operation_key);
 
         CREATE TRIGGER integration_generations_identity_update
         BEFORE UPDATE ON integration_generations
@@ -4734,6 +4763,35 @@ const migrations: readonly CompanyMigration[] = [
         BEGIN
           SELECT RAISE(ABORT, 'Aggregate Integration review is immutable');
         END;
+        CREATE TRIGGER integration_execution_stages_identity_update
+        BEFORE UPDATE ON integration_execution_stages
+        WHEN NEW.id <> OLD.id
+          OR NEW.operation_key <> OLD.operation_key
+          OR NEW.generation_id <> OLD.generation_id
+          OR NEW.phase <> OLD.phase
+          OR NEW.target_key <> OLD.target_key
+          OR NEW.request_json <> OLD.request_json
+          OR NEW.request_hash <> OLD.request_hash
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration execution stage identity is immutable');
+        END;
+        CREATE TRIGGER integration_execution_stages_terminal_update
+        BEFORE UPDATE ON integration_execution_stages
+        WHEN OLD.state IN ('succeeded', 'failed') AND (
+          NEW.state IS NOT OLD.state
+          OR NEW.result_json IS NOT OLD.result_json
+          OR NEW.result_hash IS NOT OLD.result_hash
+          OR NEW.updated_at IS NOT OLD.updated_at
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Terminal Integration execution stage is immutable');
+        END;
+        CREATE TRIGGER integration_execution_stages_immutable_delete
+        BEFORE DELETE ON integration_execution_stages
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration execution stage evidence is immutable');
+        END;
       `);
     },
   },
@@ -4791,8 +4849,7 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   const foreignKeysEnabled = Number(
     (
       database.prepare("PRAGMA foreign_keys").get() as
-        | { readonly foreign_keys?: unknown }
-        | undefined
+        { readonly foreign_keys?: unknown } | undefined
     )?.foreign_keys,
   );
   if (

@@ -17,7 +17,7 @@ export const loadConfiguredExecutionAdapter = async (
   loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
 ): Promise<ExecutionAdapter | undefined> => {
   const mode =
-    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "scripted";
+    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "production";
   if (mode === "scripted") return undefined;
   if (mode !== "production") {
     throw new Error(`Unsupported Company Runtime execution adapter: ${mode}`);
@@ -32,7 +32,7 @@ export const loadConfiguredReviewerExecutionAdapter = async (
   loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
 ) => {
   const mode =
-    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "scripted";
+    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "production";
   if (mode === "scripted") return undefined;
   if (mode !== "production") {
     throw new Error(`Unsupported Company Runtime execution adapter: ${mode}`);
@@ -45,7 +45,7 @@ export const loadConfiguredIntegrationValidationProvider = async (
   loadRuntime: () => Promise<SandcastleExecutionRuntime> = loadSandcastleExecutionRuntime,
 ) => {
   const mode =
-    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "scripted";
+    environment.SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER ?? "production";
   if (mode === "scripted") return undefined;
   if (mode !== "production") {
     throw new Error(`Unsupported Company Runtime execution adapter: ${mode}`);

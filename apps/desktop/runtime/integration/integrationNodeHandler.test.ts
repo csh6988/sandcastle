@@ -319,6 +319,167 @@ describe("Integration Node Handler", () => {
     ]);
   });
 
+  it("reconciles a durable blocked validation stage without repeating execution", async () => {
+    let view = generation("blocked");
+    let reconcileCount = 0;
+    let executeCount = 0;
+    const stageResults: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: () => {
+          view = generation("passed", true);
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => view,
+        reconcilePending: () => 0,
+        claimExecutionStage: () => ({ mode: "reconcile" }),
+        recordExecutionStageResult: (input: unknown) =>
+          stageResults.push(input),
+        blockPending: () => {
+          throw new Error("terminal reconciliation must not block");
+        },
+      } as unknown as IntegrationRuntime,
+      validationExecutor: {
+        reconcile: async () => {
+          reconcileCount += 1;
+          return {
+            status: "passed",
+            evidenceRefs: ["provider-terminal"],
+            responsibleWorkPackageVersionIds: [],
+          };
+        },
+        execute: async () => {
+          executeCount += 1;
+          throw new Error("must not reissue validation");
+        },
+      },
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.reconcilePending();
+
+    assert.equal(reconcileCount, 1);
+    assert.equal(executeCount, 0);
+    assert.equal(stageResults.length, 1);
+    assert.equal(
+      (stageResults[0] as { readonly state: string }).state,
+      "succeeded",
+    );
+  });
+
+  it("reconciles a durable blocked aggregate stage without repeating Reviewer execution", async () => {
+    let view = generation("blocked", true);
+    let reconcileCount = 0;
+    let executeCount = 0;
+    const stageResults: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: () => {
+          view = generation("passed", true);
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [view],
+        inspectPending: () => [view],
+        executePending: () => view,
+        reconcilePending: () => 0,
+        claimExecutionStage: () => ({ mode: "reconcile" }),
+        recordExecutionStageResult: (input: unknown) =>
+          stageResults.push(input),
+        blockPending: () => {
+          throw new Error("terminal reconciliation must not block");
+        },
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: {
+        reconcile: async () => {
+          reconcileCount += 1;
+          return {
+            status: "completed",
+            topicId: "integration-review:integration:run-1:g1",
+            qualityGateResultId: "aggregate-gate-1",
+          };
+        },
+        execute: async () => {
+          executeCount += 1;
+          throw new Error("must not repeat aggregate Reviewer execution");
+        },
+      },
+    });
+
+    await handler.reconcilePending();
+
+    assert.equal(reconcileCount, 1);
+    assert.equal(executeCount, 0);
+    assert.equal(stageResults.length, 1);
+    assert.equal(
+      (stageResults[0] as { readonly state: string }).state,
+      "succeeded",
+    );
+  });
+
+  it("dispatches cancellation to the durable validation provider operation", async () => {
+    const view = generation("validating");
+    const request = {
+      operationKey: `${view.id}:validation:${validation.id}`,
+      generationId: view.id,
+      manifestHash: view.manifestHash,
+      repositoryReference: "/repositories/api",
+      integratedCommit: "1".repeat(40),
+      responsibleWorkPackageVersionIds: ["package-v1"],
+      validation,
+    };
+    const cancellations: unknown[] = [];
+    const stageResults: unknown[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {} as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => [view],
+        inspectExecutionStageRequests: () => [
+          {
+            operationKey: request.operationKey,
+            phase: "validation",
+            request,
+            state: "running",
+          },
+        ],
+        recordExecutionStageResult: (input: unknown) =>
+          stageResults.push(input),
+      } as unknown as IntegrationRuntime,
+      validationExecutor: {
+        reconcile: async () => ({ status: "not-applied" }),
+        execute: async () => ({ status: "not-applied" }),
+        cancel: async (input) => {
+          cancellations.push(input);
+          return {
+            status: "unknown",
+            code: "RECONCILE_UNKNOWN",
+            message: "cancellation requires reconciliation",
+            evidence: { cancellation: "cancelled" },
+          };
+        },
+      },
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.cancelPending({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.deepEqual(cancellations, [request]);
+    assert.equal(stageResults.length, 1);
+    assert.equal(
+      (stageResults[0] as { readonly state: string }).state,
+      "unknown",
+    );
+  });
+
   for (const phase of ["validation", "aggregate-review"] as const) {
     it(`blocks with evidence when the ${phase} Command is deterministically rejected`, async () => {
       const view = generation(
@@ -437,6 +598,70 @@ describe("Integration Node Handler", () => {
       (envelopes[0] as { readonly consumerId?: string }).consumerId,
       "integration-node-handler",
     );
+  });
+
+  it("uses a fresh Generation identity after a durable start block", async () => {
+    let nextGeneration = 1;
+    let view: IntegrationGenerationView | undefined;
+    const commands: string[] = [];
+    const blocked: string[] = [];
+    const handler = openIntegrationNodeHandler({
+      commandRegistry: {
+        execute: (envelope: {
+          readonly commandId: string;
+          readonly command: { readonly generationId?: string };
+        }) => {
+          commands.push(envelope.commandId);
+          if (envelope.command.generationId?.endsWith(":g1")) {
+            nextGeneration = 2;
+            return {
+              status: "rejected",
+              error: {
+                code: "INTEGRATION_COVERAGE_STALE",
+                message: "old Snapshot coverage is stale",
+              },
+              effectIds: [],
+            };
+          }
+          view = generation("passed") as IntegrationGenerationView;
+          Object.assign(view, {
+            id: "integration:run-1:g2",
+            manifest: {
+              ...view.manifest,
+              runId: "run-1",
+              nodeRunId: "integration-node-1",
+            },
+          });
+          return { status: "succeeded", value: view, effectIds: [] };
+        },
+      } as unknown as CompanyCommandRegistry,
+      integrations: {
+        inspect: () => (view ? [view] : []),
+        nextGenerationNumber: () => nextGeneration,
+        inspectPending: () => [],
+        executePending: () => view!,
+        reconcilePending: () => 0,
+        blockStart: (input: { readonly generationId: string }) =>
+          blocked.push(input.generationId),
+      } as unknown as IntegrationRuntime,
+      validationExecutor: unusedValidationExecutor,
+      aggregateReviewExecutor: unusedAggregateReviewExecutor,
+    });
+
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+    await handler.executeReady({
+      runId: "run-1",
+      nodeRunId: "integration-node-1",
+    });
+
+    assert.deepEqual(blocked, ["integration:run-1:g1"]);
+    assert.deepEqual(commands, [
+      "integration:run-1:integration-node-1:g1:start",
+      "integration:run-1:integration-node-1:g2:start",
+    ]);
   });
 
   it("leaves a STORE_BUSY generation start retryable without blocking", async () => {

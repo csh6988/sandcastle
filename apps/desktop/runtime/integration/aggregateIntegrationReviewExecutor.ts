@@ -4,7 +4,9 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -122,6 +124,14 @@ export const openAggregateIntegrationReviewExecutor = (options: {
 }): AggregateIntegrationReviewExecutor => {
   const clock = options.clock ?? (() => new Date());
   mkdirSync(options.workspaceRoot, { recursive: true, mode: 0o700 });
+  const inFlight = new Map<
+    string,
+    {
+      readonly inputHash: string;
+      readonly reconcileExisting: boolean;
+      readonly promise: Promise<AggregateIntegrationReviewResult>;
+    }
+  >();
 
   const makeReadOnly = (path: string): void => {
     const entry = lstatSync(path);
@@ -291,9 +301,58 @@ export const openAggregateIntegrationReviewExecutor = (options: {
   const prepareWorkspace = (input: AggregateIntegrationReviewInput): string => {
     const root = join(options.workspaceRoot, sha256(input.operationKey));
     mkdirSync(root, { recursive: true, mode: 0o700 });
+    const assertDirectory = (path: string, label: string): void => {
+      const entry = lstatSync(path);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        throw new Error(`${label} must be a non-symbolic directory`);
+      }
+    };
+    const assertRegularFile = (path: string, label: string): void => {
+      const entry = lstatSync(path);
+      if (entry.isSymbolicLink() || !entry.isFile()) {
+        throw new Error(`${label} must be a non-symbolic regular file`);
+      }
+    };
+    const assertExactEntries = (
+      path: string,
+      expected: readonly string[],
+      label: string,
+    ): void => {
+      const actual = readdirSync(path).sort();
+      const exact = [...expected].sort();
+      if (canonicalJson(actual) !== canonicalJson(exact)) {
+        throw new Error(`${label} contains non-allowlisted entries`);
+      }
+    };
+    assertDirectory(root, "aggregate workspace root");
+    const inputs = join(root, "inputs");
+    const manifestPath = join(inputs, "manifest.json");
+    const manifestJson = canonicalJson(manifestFor(input));
+    if (existsSync(manifestPath)) {
+      assertDirectory(inputs, "aggregate workspace inputs");
+      assertRegularFile(manifestPath, "aggregate workspace manifest");
+      assertExactEntries(
+        inputs,
+        ["manifest.json"],
+        "aggregate workspace inputs",
+      );
+      if (readFileSync(manifestPath, "utf8") !== manifestJson) {
+        throw new Error("existing aggregate workspace manifest drifted");
+      }
+    } else {
+      if (existsSync(inputs)) {
+        throw new Error("existing aggregate workspace inputs are incomplete");
+      }
+      mkdirSync(inputs, { mode: 0o700 });
+      writeFileSync(manifestPath, manifestJson, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    }
     for (const [index, repository] of input.repositoryCommits.entries()) {
       const target = join(root, `repository-${index + 1}`);
       if (existsSync(target)) {
+        assertDirectory(target, `aggregate workspace repository-${index + 1}`);
         const current = execFileSync(
           "git",
           ["-C", target, "rev-parse", "HEAD"],
@@ -330,6 +389,17 @@ export const openAggregateIntegrationReviewExecutor = (options: {
       }
       makeReadOnly(target);
     }
+    assertExactEntries(
+      root,
+      [
+        "inputs",
+        ...input.repositoryCommits.map(
+          (_repository, index) => `repository-${index + 1}`,
+        ),
+      ],
+      "aggregate workspace root",
+    );
+    makeReadOnly(inputs);
     chmodSync(root, 0o500);
     return root;
   };
@@ -385,7 +455,7 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     return { sessionId: session.id, participantId: participant.id };
   };
 
-  const execute = async (
+  const executeOnce = async (
     input: AggregateIntegrationReviewInput,
     reconcileExisting: boolean,
   ): Promise<AggregateIntegrationReviewResult> => {
@@ -687,6 +757,44 @@ export const openAggregateIntegrationReviewExecutor = (options: {
             : "Aggregate Reviewer result was invalid.",
         evidence: { operationKey: input.operationKey },
       };
+    }
+  };
+
+  const execute = async (
+    input: AggregateIntegrationReviewInput,
+    reconcileExisting: boolean,
+  ): Promise<AggregateIntegrationReviewResult> => {
+    const inputHash = sha256(canonicalJson(input));
+    const existing = inFlight.get(input.operationKey);
+    if (existing) {
+      if (existing.inputHash !== inputHash) {
+        return {
+          status: "unknown",
+          code: "INTEGRATION_AGGREGATE_REVIEW_CONFLICT",
+          message:
+            "Aggregate Review operation is already executing with different frozen input.",
+          evidence: { operationKey: input.operationKey },
+        };
+      }
+      const result = await existing.promise;
+      if (
+        !reconcileExisting &&
+        existing.reconcileExisting &&
+        result.status === "not-applied"
+      ) {
+        return execute(input, false);
+      }
+      return result;
+    }
+    const promise = executeOnce(input, reconcileExisting);
+    const claim = { inputHash, reconcileExisting, promise };
+    inFlight.set(input.operationKey, claim);
+    try {
+      return await promise;
+    } finally {
+      if (inFlight.get(input.operationKey) === claim) {
+        inFlight.delete(input.operationKey);
+      }
     }
   };
 

@@ -187,11 +187,20 @@ describe("Company Runtime command registry", () => {
     database.close();
   });
 
-  it("persists validation audit, event, receipt, and effectIds atomically and replays without duplicates", () => {
+  it("persists validation audit, event, receipt, and effectIds atomically and replays without duplicates", async () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
     const clock = () => new Date("2026-07-28T00:00:00.000Z");
+    database
+      .prepare(
+        `INSERT INTO department_runs(
+           id, project_id, department_id, status, created_at,
+           snapshot_revision_id, revision, updated_at
+         ) VALUES ('run-1', 'project-1', 'department-1', 'running', ?,
+                   'snapshot-1', 0, ?)`,
+      )
+      .run(clock().toISOString(), clock().toISOString());
     const events = openRuntimeEvents(database, { clock });
     const integrationRuntime = openIntegrationRuntime(database, {
       events,
@@ -281,8 +290,8 @@ describe("Company Runtime command registry", () => {
         nodeRunId: "integration-node-1",
       },
     });
-    assert.equal(started.status, "succeeded");
-    integrationRuntime.executePending("generation-real");
+    assert.equal(started.status, "succeeded", JSON.stringify(started));
+    await integrationRuntime.executePending("generation-real");
     const validationId =
       integrationRuntime.inspect("run-1")[0]!.manifest.requiredValidations[0]!
         .id;
