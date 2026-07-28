@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 13;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 14;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -1004,6 +1004,10 @@ const definitions = [
     "code-review.workspace.ready",
     "code-review.workspace.blocked",
     "code-review.workspace.unknown",
+    "code-review.execution.started",
+    "code-review.execution.completed",
+    "code-review.execution.blocked",
+    "code-review.execution.unknown",
     "code-review.authority.created",
     "code-review.defect.created",
     "code-review.defect.closed",

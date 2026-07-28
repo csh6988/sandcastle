@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createRuntimeEventRegistry,
+  RUNTIME_EVENT_REGISTRY_VERSION,
   RuntimeEventRegistryError,
 } from "./registry.js";
 
@@ -85,6 +86,10 @@ const agUiRegistryFixture = [
   "code-review.workspace.ready@1:custom",
   "code-review.workspace.blocked@1:custom",
   "code-review.workspace.unknown@1:custom",
+  "code-review.execution.started@1:custom",
+  "code-review.execution.completed@1:custom",
+  "code-review.execution.blocked@1:custom",
+  "code-review.execution.unknown@1:custom",
   "code-review.authority.created@1:custom",
   "code-review.defect.created@1:custom",
   "code-review.defect.closed@1:custom",
@@ -132,6 +137,8 @@ const retainedCatalogRegistryFixture = [
 describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
+    assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 14);
 
     assert.deepEqual(
       registry
@@ -524,6 +531,27 @@ describe("Runtime Event registry", () => {
           workPackageId: "work-package-1",
           workPackageVersionId: "work-package-version-1",
           qualityGateResultId: "code-gate-1",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "code-review.execution.started",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          topicId: "code-review-topic-1",
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+        },
+        payload: {
+          codeReviewId: "code-review-1",
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+          phase: "initial-finding",
+          operationKey: "code-review:code-review-1:initial-finding",
+          state: "running",
         },
       }),
     );

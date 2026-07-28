@@ -544,7 +544,7 @@ A bounded **Discussion topic** attached to a product proposal, technical design,
 _Avoid_: "free-form debate" (the topic has a finite quality objective), "approval chat" (discussion is evidence for a gate, not the authority), merging participant answers into one anonymous opinion
 
 **Independent Code Review**:
-A formal review of one exact Work Package Version and its Runtime-imported source commit. One eligible non-producer records the initial independent finding in an isolated read-only **Reviewer Workspace**, and a second distinct eligible non-producer supplies the fresh recheck from a new Session bound to the Code Review Node. It produces evidence for a code-kind **Quality Gate Result** and cannot silently downgrade to self-review or shared writable execution.
+A formal review of one exact Work Package Version and its Runtime-imported source commit. One eligible non-producer records the initial independent finding, and a second distinct eligible non-producer supplies the fresh recheck from another new Session bound to the Code Review Node. Both operations execute through durable Reviewer execution stages. It produces evidence for a code-kind **Quality Gate Result** and cannot silently downgrade to self-review, bind-mount, no-sandbox, shared writable execution, or an unknown provider operation.
 _Avoid_: developer self-check, peer chat, serial review in the producer Workspace
 
 **Code Review manifest**:
@@ -552,11 +552,14 @@ The immutable input identity for an **Independent Code Review**, binding the exa
 _Avoid_: current branch state, mutable review checklist, unbounded producer context
 
 **Reviewer Workspace**:
-The isolated read-only Workspace used by an independent Reviewer with a fresh Session, allowlisted inputs, and separate Git, credentials, Session storage, and mutable cache from the producer.
+The allowlisted input bundle used by an independent Reviewer. It contains only the exact detached source Git object set, frozen Code Review manifest, and canonical Diff. Filesystem layout and content checks prevent hidden producer context from entering the bundle, but the bundle alone is not an isolation proof. Formal review additionally requires an execution-bound Sandbox receipt proving a read-only mount and separate Git, credentials, Session storage, and mutable cache from the producer.
 _Avoid_: Developer Workspace, bind mount, no-sandbox review, shared writable checkout
 
 **Code Review authority**:
-The immutable Integration authority created only from a fresh independent code-kind `PASS` bound to the current exact Work Package Version, source commit, canonical Diff bytes/hash, and Reviewer independence evidence, with no package-level open obligation. Eligibility is revalidated when queried rather than cached from the moment of approval.
+The immutable per-package Integration authority created only from a fresh independent code-kind `PASS` bound to the current exact Work Package Version, source commit, canonical Diff bytes/hash, fresh recheck Session, and execution-bound Reviewer isolation evidence, with no package-level open obligation. Eligibility is revalidated when queried rather than cached from the moment of approval.
+
+**Code Review coverage**:
+The aggregate internal authority of the shared `code-review@1` Node. It freezes the sorted current active Work Package Version IDs, their eligible Code Review authority IDs, their code-kind Quality Gate Result IDs, and a canonical `coverageHash`. The Node remains running until this set covers every active Version; T16 Integration consumes this complete set rather than the last package's PASS.
 _Avoid_: review status, `CONDITIONAL_PASS`, developer self-check, historical PASS
 
 **Quality Gate Result**:

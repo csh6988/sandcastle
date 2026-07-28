@@ -29,6 +29,7 @@ import { openCompanyDatabase, type CompanyDatabase } from "./storage/sqlite.js";
 import type { LocalAgentHost } from "./agent/agentCatalog.js";
 import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
+import type { ReviewerExecutionAdapter } from "./review/reviewerExecution.js";
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
@@ -40,6 +41,7 @@ export interface CompanyRuntimeServerOptions {
   readonly token: string;
   readonly executionAdapter?: ExecutionAdapter;
   readonly interactionExecutionAdapter?: ModelOnlyInteractionExecutionAdapter;
+  readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
@@ -108,6 +110,13 @@ export const startCompanyRuntimeServer = async (
       ...(options.interactionExecutionAdapter
         ? { interactionExecutionAdapter: options.interactionExecutionAdapter }
         : {}),
+      ...(options.reviewerExecutionAdapter
+        ? {
+            codeReviewRuntime: {
+              reviewerExecutionAdapter: options.reviewerExecutionAdapter,
+            },
+          }
+        : {}),
     });
   } catch (error) {
     releaseLock();
@@ -115,6 +124,7 @@ export const startCompanyRuntimeServer = async (
   }
   await database.pipelineRuntime.reconcilePendingExecutions();
   await database.interaction.reconcilePendingTurns();
+  await database.codeReviewNodeHandler.reconcilePending();
   const startedAt = new Date().toISOString();
   const trustedConnections = [
     {

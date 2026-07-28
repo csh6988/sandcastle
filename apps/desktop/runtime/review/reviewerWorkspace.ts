@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ReviewerWorkspaceAdapter } from "./codeReviewRuntime.js";
 
 const sha256 = (value: string | Buffer): string =>
@@ -32,6 +32,13 @@ const git = (repositoryReference: string, ...args: string[]): string =>
     env: gitEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+
+const sortedLines = (value: string): string[] =>
+  value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
 
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -76,6 +83,121 @@ const removeTemporaryWorkspace = (temporaryRoot: string): void => {
   rmSync(temporaryRoot, { recursive: true, force: true });
 };
 
+const assertContainedPath = (parent: string, child: string): void => {
+  const relation = relative(parent, child);
+  if (
+    relation === "" ||
+    (!relation.startsWith(`..${sep}`) && relation !== "..")
+  )
+    return;
+  throw new Error("Reviewer Workspace path escapes its controlled root.");
+};
+
+const assertDirectoryChainHasNoSymlink = (
+  root: string,
+  target: string,
+): void => {
+  const resolvedRoot = resolve(root);
+  const resolvedTarget = resolve(target);
+  assertContainedPath(resolvedRoot, resolvedTarget);
+  let current = resolvedRoot;
+  if (lstatSync(current).isSymbolicLink()) {
+    throw new Error("Reviewer Workspace root cannot be a symbolic link.");
+  }
+  const relation = relative(resolvedRoot, resolvedTarget);
+  for (const segment of relation.split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+      throw new Error("Reviewer Workspace ancestors cannot be symbolic links.");
+    }
+  }
+};
+
+const assertExactEntries = (
+  path: string,
+  expected: readonly string[],
+): void => {
+  const actual = readdirSync(path).sort();
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    throw new Error(`Reviewer Workspace has unexpected entries at ${path}.`);
+  }
+};
+
+const assertRegularFile = (path: string): void => {
+  const entry = lstatSync(path);
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error(`Reviewer Workspace input ${path} must be a regular file.`);
+  }
+};
+
+const expectedReviewObjectIds = (input: {
+  readonly repositoryReference: string;
+  readonly baseCommit: string;
+  readonly sourceCommit: string;
+}): string[] => {
+  const ids = new Set<string>();
+  for (const commit of [input.baseCommit, input.sourceCommit]) {
+    ids.add(commit);
+    ids.add(
+      git(input.repositoryReference, "show", "-s", "--format=%T", commit),
+    );
+    for (const line of sortedLines(
+      git(
+        input.repositoryReference,
+        "ls-tree",
+        "-r",
+        "-t",
+        "--full-tree",
+        commit,
+      ),
+    )) {
+      const objectId = line.split(/\s+/)[2];
+      if (objectId) ids.add(objectId);
+    }
+  }
+  return [...ids].sort();
+};
+
+const actualReviewObjectIds = (sourcePath: string): string[] =>
+  sortedLines(
+    git(
+      sourcePath,
+      "cat-file",
+      "--batch-all-objects",
+      "--batch-check=%(objectname)",
+    ),
+  );
+
+const assertExactWorkspaceLayout = (reviewerRoot: string): void => {
+  assertExactEntries(reviewerRoot, [
+    "credential-scope",
+    "exposed",
+    "mutable-cache",
+    "session-storage",
+  ]);
+  const exposedRoot = join(reviewerRoot, "exposed");
+  assertExactEntries(exposedRoot, ["inputs", "source"]);
+  assertExactEntries(join(exposedRoot, "inputs"), [
+    "canonical.diff",
+    "manifest.json",
+  ]);
+  assertRegularFile(join(exposedRoot, "inputs", "manifest.json"));
+  assertRegularFile(join(exposedRoot, "inputs", "canonical.diff"));
+  for (const privateDirectory of [
+    "session-storage",
+    "credential-scope",
+    "mutable-cache",
+  ]) {
+    const path = join(reviewerRoot, privateDirectory);
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error("Reviewer Workspace private scopes must be directories.");
+    }
+    assertExactEntries(path, []);
+  }
+};
+
 const resolveGitCommonDirectory = (repositoryReference: string): string => {
   const commonDirectory = git(
     repositoryReference,
@@ -94,27 +216,37 @@ const assertRepositorySnapshot = (input: {
   readonly sourcePath: string;
   readonly baseCommit: string;
   readonly sourceCommit: string;
-}): { readonly gitCommonDirectory: string } => {
+  readonly expectedObjectIds: readonly string[];
+}): { readonly gitCommonDirectory: string; readonly objectSetHash: string } => {
   const head = git(input.sourcePath, "rev-parse", "HEAD");
   if (head !== input.sourceCommit) {
     throw new Error(
       "Reviewer Workspace is not detached at the exact source commit.",
     );
   }
-  execFileSync(
-    "git",
-    [
-      "-C",
-      input.sourcePath,
-      "merge-base",
-      "--is-ancestor",
-      input.baseCommit,
-      input.sourceCommit,
-    ],
-    { env: gitEnvironment, stdio: "ignore" },
-  );
   if (git(input.sourcePath, "remote") !== "") {
     throw new Error("Reviewer Workspace must not retain a writable remote.");
+  }
+  if (git(input.sourcePath, "status", "--porcelain", "--untracked-files=all")) {
+    throw new Error("Reviewer Workspace source tree must remain clean.");
+  }
+  const refs = sortedLines(
+    git(input.sourcePath, "for-each-ref", "--format=%(refname)"),
+  );
+  if (
+    JSON.stringify(refs) !==
+    JSON.stringify(["refs/review/base", "refs/review/source"])
+  ) {
+    throw new Error("Reviewer Workspace contains unexpected Git refs.");
+  }
+  const actualObjectIds = actualReviewObjectIds(input.sourcePath);
+  if (
+    JSON.stringify(actualObjectIds) !==
+    JSON.stringify([...input.expectedObjectIds].sort())
+  ) {
+    throw new Error(
+      "Reviewer Workspace contains Git objects outside the allowlist.",
+    );
   }
   const gitCommonDirectory = resolveGitCommonDirectory(input.sourcePath);
   const hostGitCommonDirectory = resolveGitCommonDirectory(
@@ -130,7 +262,10 @@ const assertRepositorySnapshot = (input: {
   ) {
     throw new Error("Reviewer Workspace inputs cannot include Git submodules.");
   }
-  return { gitCommonDirectory };
+  return {
+    gitCommonDirectory,
+    objectSetHash: sha256(actualObjectIds.join("\n")),
+  };
 };
 
 export const readCanonicalGitDiff = (input: {
@@ -184,9 +319,27 @@ export const openLocalReviewerWorkspaceAdapter = (
     const manifestPath = join(exposedRoot, "inputs", "manifest.json");
     const diffPath = join(exposedRoot, "inputs", "canonical.diff");
     try {
+      assertDirectoryChainHasNoSymlink(companyDir, dirname(reviewerRoot));
       const repositoryReference = realpathSync(
         input.manifest.repositoryReference,
       );
+      execFileSync(
+        "git",
+        [
+          "-C",
+          repositoryReference,
+          "merge-base",
+          "--is-ancestor",
+          input.manifest.baseCommit,
+          input.manifest.sourceCommit,
+        ],
+        { env: gitEnvironment, stdio: "ignore" },
+      );
+      const expectedObjectIds = expectedReviewObjectIds({
+        repositoryReference,
+        baseCommit: input.manifest.baseCommit,
+        sourceCommit: input.manifest.sourceCommit,
+      });
       const diff = readCanonicalGitDiff({
         repositoryReference,
         baseCommit: input.manifest.baseCommit,
@@ -201,18 +354,33 @@ export const openLocalReviewerWorkspaceAdapter = (
           const temporarySource = join(temporaryExposed, "source");
           const temporaryInputs = join(temporaryExposed, "inputs");
           mkdirSync(temporaryInputs, { recursive: true, mode: 0o700 });
-          execFileSync(
-            "git",
-            [
-              "clone",
-              "--no-local",
-              "--no-checkout",
-              repositoryReference,
-              temporarySource,
-            ],
-            { env: gitEnvironment, stdio: ["ignore", "ignore", "pipe"] },
+          execFileSync("git", ["init", "-q", temporarySource], {
+            env: gitEnvironment,
+            stdio: ["ignore", "ignore", "pipe"],
+          });
+          git(
+            temporarySource,
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            repositoryReference,
+            input.manifest.sourceCommit,
           );
-          git(temporarySource, "remote", "remove", "origin");
+          git(
+            temporarySource,
+            "update-ref",
+            "refs/review/source",
+            "FETCH_HEAD",
+          );
+          git(
+            temporarySource,
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            repositoryReference,
+            input.manifest.baseCommit,
+          );
+          git(temporarySource, "update-ref", "refs/review/base", "FETCH_HEAD");
           git(
             temporarySource,
             "checkout",
@@ -244,7 +412,9 @@ export const openLocalReviewerWorkspaceAdapter = (
             sourcePath: temporarySource,
             baseCommit: input.manifest.baseCommit,
             sourceCommit: input.manifest.sourceCommit,
+            expectedObjectIds,
           });
+          assertExactWorkspaceLayout(temporaryRoot);
           makeReadOnly(temporaryExposed);
           renameSync(temporaryRoot, reviewerRoot);
         } catch (error) {
@@ -252,11 +422,14 @@ export const openLocalReviewerWorkspaceAdapter = (
           throw error;
         }
       }
+      assertDirectoryChainHasNoSymlink(companyDir, reviewerRoot);
+      assertExactWorkspaceLayout(reviewerRoot);
       const snapshot = assertRepositorySnapshot({
         repositoryReference,
         sourcePath,
         baseCommit: input.manifest.baseCommit,
         sourceCommit: input.manifest.sourceCommit,
+        expectedObjectIds,
       });
       const manifestBytes = readFileSync(manifestPath);
       const diffBytes = readFileSync(diffPath);
@@ -288,6 +461,7 @@ export const openLocalReviewerWorkspaceAdapter = (
           `diff-sha256:${sha256(diff)}`,
           `manifest-sha256:${sha256(manifestBytes)}`,
           `git-common-directory-sha256:${sha256(snapshot.gitCommonDirectory)}`,
+          `git-object-set-sha256:${snapshot.objectSetHash}`,
           "remote:none",
           "filesystem:read-only",
           "inputs:manifest+canonical-diff",

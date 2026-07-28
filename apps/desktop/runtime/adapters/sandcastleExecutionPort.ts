@@ -12,6 +12,14 @@ export interface SandcastleExecutionRuntime {
     options?: { readonly captureSessions?: boolean },
   ) => unknown;
   readonly resolveSandbox: (sandboxRef: string) => unknown;
+  readonly resolveReviewerSandbox?: (input: {
+    readonly sandboxRef: string;
+    readonly workspaceRef: string;
+  }) => {
+    readonly sandbox: unknown;
+    readonly providerId: string;
+    readonly evidence: readonly string[];
+  };
   readonly run: (options: Readonly<Record<string, unknown>>) => Promise<{
     readonly output?: unknown;
     readonly commits?: readonly { readonly sha: string }[];

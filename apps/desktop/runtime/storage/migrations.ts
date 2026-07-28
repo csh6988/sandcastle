@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 43;
+export const CURRENT_SCHEMA_VERSION = 44;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4220,6 +4220,85 @@ const migrations: readonly CompanyMigration[] = [
         if (incompatible.length > 0) {
           throw new Error(
             `Existing Code Review schema is incompatible: ${incompatible.join(", ")}`,
+          );
+        }
+        return;
+      }
+      database.exec(`${Object.values(schemaSql).join(";\n")};`);
+    },
+  },
+  {
+    version: 44,
+    name: "durable_code_review_execution",
+    migrate: (database) => {
+      const schemaSql = {
+        code_review_execution_stages: `CREATE TABLE code_review_execution_stages (
+          id TEXT PRIMARY KEY,
+          code_review_manifest_id TEXT NOT NULL REFERENCES code_review_manifests(id),
+          phase TEXT NOT NULL CHECK (phase IN ('initial-finding', 'fresh-recheck')),
+          operation_key TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (state IN ('running', 'succeeded', 'blocked', 'unknown')),
+          reviewer_participant_id TEXT NOT NULL REFERENCES review_participants(id),
+          reviewer_session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+          provider_id TEXT,
+          isolation_receipt_json TEXT,
+          isolation_receipt_hash TEXT,
+          result_json TEXT,
+          result_hash TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(code_review_manifest_id, phase)
+        ) STRICT`,
+        code_review_execution_stages_state_idx:
+          "CREATE INDEX code_review_execution_stages_state_idx ON code_review_execution_stages(state, updated_at, id)",
+        code_review_execution_stages_identity_update: `
+          CREATE TRIGGER code_review_execution_stages_identity_update
+          BEFORE UPDATE ON code_review_execution_stages
+          WHEN NEW.id <> OLD.id
+            OR NEW.code_review_manifest_id <> OLD.code_review_manifest_id
+            OR NEW.phase <> OLD.phase
+            OR NEW.operation_key <> OLD.operation_key
+            OR NEW.reviewer_participant_id <> OLD.reviewer_participant_id
+            OR NEW.reviewer_session_id <> OLD.reviewer_session_id
+            OR NEW.created_at <> OLD.created_at
+          BEGIN
+            SELECT RAISE(ABORT, 'Code Review execution identity is immutable');
+          END`,
+        code_review_execution_stages_immutable_delete: `
+          CREATE TRIGGER code_review_execution_stages_immutable_delete
+          BEFORE DELETE ON code_review_execution_stages
+          BEGIN
+            SELECT RAISE(ABORT, 'Code Review execution evidence is immutable');
+          END`,
+      } as const;
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const existingObjects = database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE name LIKE 'code_review_execution_stages%'`,
+        )
+        .all() as Array<{ readonly name: string }>;
+      if (existingObjects.length > 0) {
+        const incompatible = Object.entries(schemaSql)
+          .filter(([name, expected]) => {
+            const row = database
+              .prepare("SELECT sql FROM sqlite_schema WHERE name = ?")
+              .get(name) as { readonly sql: string | null } | undefined;
+            return (
+              !row?.sql || normalizeSql(row.sql) !== normalizeSql(expected)
+            );
+          })
+          .map(([name]) => name);
+        if (incompatible.length > 0) {
+          throw new Error(
+            `Existing Code Review execution schema is incompatible: ${incompatible.join(", ")}`,
           );
         }
         return;

@@ -105,10 +105,16 @@ import {
   type WorkPackageRuntime,
 } from "../workspaces/workPackages.js";
 import {
+  blockingReviewerWorkspaceAdapter,
   openCodeReviewRuntime,
   type CodeReviewRuntime,
   type ReviewerWorkspaceAdapter,
 } from "../review/codeReviewRuntime.js";
+import {
+  openCodeReviewNodeHandler,
+  type CodeReviewNodeHandler,
+} from "../review/codeReviewNodeHandler.js";
+import type { ReviewerExecutionAdapter } from "../review/reviewerExecution.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -133,6 +139,7 @@ export interface CompanyDatabase {
   readonly supervision: RuntimeSupervision;
   readonly workPackages: WorkPackageRuntime;
   readonly codeReviews: CodeReviewRuntime;
+  readonly codeReviewNodeHandler: CodeReviewNodeHandler;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -242,6 +249,7 @@ export const openCompanyDatabase = (
     };
     readonly codeReviewRuntime?: {
       readonly reviewerWorkspaceAdapter?: ReviewerWorkspaceAdapter;
+      readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -397,7 +405,10 @@ export const openCompanyDatabase = (
     artifacts: artifactRegistry,
     reviewerWorkspaceAdapter:
       options.codeReviewRuntime?.reviewerWorkspaceAdapter ??
-      openLocalReviewerWorkspaceAdapter(companyDir),
+      (options.codeReviewRuntime?.reviewerExecutionAdapter?.capabilities
+        .executionBoundIsolation
+        ? openLocalReviewerWorkspaceAdapter(companyDir)
+        : blockingReviewerWorkspaceAdapter),
     ...(options.clock ? { clock: options.clock } : {}),
   });
   memory = openRuntimeMemory(database, {
@@ -428,6 +439,26 @@ export const openCompanyDatabase = (
     workPackages,
     codeReviews,
   );
+  const codeReviewNodeHandler = openCodeReviewNodeHandler(database, {
+    events,
+    commandRegistry,
+    codeReviews,
+    reviewRuntime: review,
+    workPackages,
+    artifacts: artifactRegistry,
+    interaction,
+    pipelineRuntime,
+    ...(options.codeReviewRuntime?.reviewerExecutionAdapter
+      ? {
+          reviewerExecutionAdapter:
+            options.codeReviewRuntime.reviewerExecutionAdapter,
+        }
+      : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
+  pipelineRuntime.registerCodeReviewExecutor(
+    codeReviewNodeHandler.executeReady,
+  );
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
@@ -455,6 +486,7 @@ export const openCompanyDatabase = (
     supervision,
     workPackages,
     codeReviews,
+    codeReviewNodeHandler,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")

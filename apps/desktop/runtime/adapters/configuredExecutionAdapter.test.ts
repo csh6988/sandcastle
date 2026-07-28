@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { loadConfiguredExecutionAdapter } from "./configuredExecutionAdapter.js";
+import {
+  loadConfiguredExecutionAdapter,
+  loadConfiguredReviewerExecutionAdapter,
+} from "./configuredExecutionAdapter.js";
 import type { SandcastleExecutionRuntime } from "./sandcastleExecutionPort.js";
 
 describe("Configured Execution Adapter", () => {
@@ -13,6 +16,14 @@ describe("Configured Execution Adapter", () => {
 
     assert.equal(
       await loadConfiguredExecutionAdapter(
+        { SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "scripted" },
+        loadRuntime,
+      ),
+      undefined,
+    );
+    assert.equal(loads, 0);
+    assert.equal(
+      await loadConfiguredReviewerExecutionAdapter(
         { SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "scripted" },
         loadRuntime,
       ),
@@ -39,7 +50,12 @@ describe("Configured Execution Adapter", () => {
     );
 
     assert.equal(typeof adapter?.execute, "function");
-    assert.equal(loads, 1);
+    const reviewerAdapter = await loadConfiguredReviewerExecutionAdapter(
+      { SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "production" },
+      loadRuntime,
+    );
+    assert.equal(typeof reviewerAdapter?.execute, "function");
+    assert.equal(loads, 2);
   });
 
   it("rejects an unknown execution mode instead of silently downgrading", async () => {

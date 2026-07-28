@@ -3328,7 +3328,7 @@ export const ProductReadinessRecordEnvelopeCommandSchema = z
     checkKey: z.string().trim().min(1),
     status: z.enum(["ready", "blocked"]),
     summary: z.string().trim().min(1),
-    evidenceRefs: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
   })
   .strict();
 
@@ -3547,7 +3547,7 @@ export const ReviewFindingSubmitEnvelopeCommandSchema = z
     summary: z.string().trim().min(1),
     rationale: z.string().trim().min(1),
     impact: z.string().trim().min(1),
-    evidenceRefs: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
     suggestedOwner: z.string().trim().min(1),
     blocking: z.boolean(),
     scopeImpact: z.enum(["scope-preserving", "scope-changing"]).optional(),
@@ -3563,7 +3563,7 @@ export const ReviewFindingDispositionEnvelopeCommandSchema = z
     participantId: z.string().trim().min(1),
     disposition: z.enum(["accepted", "disputed", "resolved", "rejected"]),
     response: z.string().trim().min(1),
-    evidenceRefs: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
     revisedSubjectId: z.string().trim().min(1).optional(),
     revisedSubjectHash: Sha256Schema.optional(),
   })
@@ -3605,7 +3605,7 @@ export const ReviewRevisionSubmitEnvelopeCommandSchema = z
     producerAiMemberId: z.string().trim().min(1),
     producerPositionId: z.string().trim().min(1),
     producerSessionId: z.string().trim().min(1),
-    evidenceRefs: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
   })
   .strict();
 
@@ -3619,7 +3619,7 @@ export const ReviewRecheckSubmitEnvelopeCommandSchema = z
     reviewerSessionId: z.string().trim().min(1),
     result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
     conditions: z.array(z.string().trim().min(1)),
-    evidenceRefs: z.array(z.string().trim().min(1)),
+    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
   })
   .strict();
 

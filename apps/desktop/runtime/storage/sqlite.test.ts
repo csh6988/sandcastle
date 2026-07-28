@@ -457,6 +457,10 @@ describe("Company database migrations", () => {
               version: 43,
               name: "independent_code_review_authority",
             },
+            {
+              version: 44,
+              name: "durable_code_review_execution",
+            },
           ],
         );
         assert.deepEqual(
@@ -1983,6 +1987,55 @@ describe("Company database migrations", () => {
       );
     } finally {
       inspected.close();
+    }
+  });
+
+  it("upgrades schema version 43 with durable Reviewer execution stages", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const path = current.path;
+    current.close();
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(`
+        DROP TRIGGER code_review_execution_stages_identity_update;
+        DROP TRIGGER code_review_execution_stages_immutable_delete;
+        DROP INDEX code_review_execution_stages_state_idx;
+        DROP TABLE code_review_execution_stages;
+        DELETE FROM schema_migrations WHERE version = 44;
+        UPDATE schema_metadata SET value = '43' WHERE key = 'schema_version';
+        PRAGMA user_version = 43;
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(upgraded.path);
+      try {
+        const table = inspected
+          .prepare(
+            `SELECT name FROM sqlite_schema
+              WHERE type = 'table' AND name = 'code_review_execution_stages'`,
+          )
+          .get() as { readonly name: string } | undefined;
+        assert.equal(table?.name, "code_review_execution_stages");
+        const migration = inspected
+          .prepare(
+            `SELECT version, name FROM schema_migrations WHERE version = 44`,
+          )
+          .get() as
+          | { readonly version: number; readonly name: string }
+          | undefined;
+        assert.equal(migration?.version, 44);
+        assert.equal(migration?.name, "durable_code_review_execution");
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
     }
   });
 });

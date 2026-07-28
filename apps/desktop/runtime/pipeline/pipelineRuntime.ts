@@ -193,6 +193,12 @@ export interface PipelineRuntime {
     readonly runId: string;
     readonly expectedRevision: number;
   }) => Promise<DepartmentRunView>;
+  readonly registerCodeReviewExecutor: (
+    executor: (input: {
+      readonly runId: string;
+      readonly nodeRunId: string;
+    }) => Promise<void>,
+  ) => void;
   readonly controlRun: (input: {
     readonly runId: string;
     readonly expectedRevision: number;
@@ -274,8 +280,10 @@ export interface PipelineRuntime {
   readonly completeCodeReviewInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
-    readonly authorityId: string;
-    readonly qualityGateResultId: string;
+    readonly workPackageVersionIds: readonly string[];
+    readonly authorityIds: readonly string[];
+    readonly qualityGateResultIds: readonly string[];
+    readonly coverageHash: string;
   }) => void;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
@@ -572,6 +580,16 @@ export const openPipelineRuntime = (
       readonly done: Promise<void>;
     }
   >();
+  let codeReviewExecutor:
+    | ((input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+      }) => Promise<void>)
+    | undefined;
+  const registerCodeReviewExecutor: PipelineRuntime["registerCodeReviewExecutor"] =
+    (executor) => {
+      codeReviewExecutor = executor;
+    };
   const appendRuntimeMutation = (input: {
     readonly action: string;
     readonly entityType: string;
@@ -6769,8 +6787,10 @@ export const openPipelineRuntime = (
     (input) => {
       const now = clock().toISOString();
       const result = {
-        authorityId: input.authorityId,
-        qualityGateResultId: input.qualityGateResultId,
+        workPackageVersionIds: [...input.workPackageVersionIds],
+        authorityIds: [...input.authorityIds],
+        qualityGateResultIds: [...input.qualityGateResultIds],
+        coverageHash: input.coverageHash,
       };
       const completedNode = database
         .prepare(
@@ -6855,7 +6875,7 @@ export const openPipelineRuntime = (
                   WHEN EXISTS (
                     SELECT 1 FROM node_runs
                      WHERE id = ? AND handler_kind_id = 'code-review@1'
-                  ) THEN 0
+                  ) THEN 1
                   WHEN NOT EXISTS (
                     SELECT 1 FROM work_package_versions
                      WHERE work_package_versions.node_run_id = ?
@@ -8534,6 +8554,24 @@ export const openPipelineRuntime = (
       }
       ensureHandlerAvailable(view, ready, node);
 
+      if (ready.handler?.handlerKindId === "code-review@1") {
+        if (!codeReviewExecutor) {
+          throw new PipelineRuntimeError(
+            "CODE_REVIEW_EXECUTOR_UNAVAILABLE",
+            "The frozen code-review@1 Node has no registered Runtime executor.",
+          );
+        }
+        await codeReviewExecutor({ runId: input.runId, nodeRunId: ready.id });
+        const afterCodeReview = inspectRun(input.runId);
+        if (
+          afterCodeReview.nodes.find((candidate) => candidate.id === ready.id)
+            ?.status === "ready"
+        ) {
+          return afterCodeReview;
+        }
+        continue;
+      }
+
       if ((executionAdapter.maxConcurrentNodes ?? 1) > 1) {
         const concurrent = readyNodes
           .map((candidate) => ({
@@ -9419,6 +9457,7 @@ export const openPipelineRuntime = (
     startRun,
     forkRun,
     executeReady,
+    registerCodeReviewExecutor,
     reconcileWorkPackageImports,
     controlRun,
     cancelNodeAttempt,

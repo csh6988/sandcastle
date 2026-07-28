@@ -61,6 +61,7 @@ describe("Sandcastle core Runtime loader", () => {
 
   it("resolves the formal local profile to the Docker sandbox provider", () => {
     const dockerSandbox = { tag: "bind-mount", name: "docker" };
+    let reviewerDockerOptions: Record<string, unknown> | undefined;
     const runtime = createSandcastleExecutionRuntimeFromModules(
       {
         run: async () => ({}),
@@ -83,10 +84,37 @@ describe("Sandcastle core Runtime loader", () => {
           }),
         }),
       },
-      { docker: () => dockerSandbox },
+      {
+        docker: (options) => {
+          reviewerDockerOptions = options;
+          return dockerSandbox;
+        },
+      },
     );
 
     assert.equal(runtime.resolveSandbox("docker"), dockerSandbox);
+    assert.deepEqual(
+      runtime.resolveReviewerSandbox?.({
+        sandboxRef: "docker",
+        workspaceRef: "/review-bundle",
+      }).sandbox,
+      dockerSandbox,
+    );
+    assert.deepEqual(reviewerDockerOptions, {
+      mounts: [
+        {
+          hostPath: "/review-bundle",
+          sandboxPath: "/review",
+          readonly: true,
+        },
+      ],
+      env: {
+        HOME: "/home/agent",
+        XDG_CACHE_HOME: "/home/agent/.cache",
+        XDG_CONFIG_HOME: "/home/agent/.config",
+        XDG_DATA_HOME: "/home/agent/.local/share",
+      },
+    });
     assert.throws(
       () => runtime.resolveSandbox("test-isolated"),
       /Unsupported Sandbox reference/,

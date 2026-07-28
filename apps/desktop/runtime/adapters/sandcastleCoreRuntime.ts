@@ -72,7 +72,14 @@ interface NoSandboxModule {
 }
 
 interface DockerSandboxModule {
-  readonly docker: () => unknown;
+  readonly docker: (options?: {
+    readonly mounts?: readonly {
+      readonly hostPath: string;
+      readonly sandboxPath: string;
+      readonly readonly?: boolean;
+    }[];
+    readonly env?: Record<string, string>;
+  }) => unknown;
 }
 
 const translateSandboxPath = (
@@ -219,6 +226,39 @@ export const createSandcastleExecutionRuntimeFromModules = (
       if (sandboxRef === "no-sandbox") return hostBindMountSandbox;
       if (sandboxRef === "docker" && dockerModule) return dockerModule.docker();
       throw new Error(`Unsupported Sandbox reference: ${sandboxRef}`);
+    },
+    resolveReviewerSandbox: ({ sandboxRef, workspaceRef }) => {
+      if (sandboxRef !== "docker" || !dockerModule) {
+        throw new Error(
+          "Independent Code Review requires the Docker Sandbox provider.",
+        );
+      }
+      return {
+        sandbox: dockerModule.docker({
+          mounts: [
+            {
+              hostPath: workspaceRef,
+              sandboxPath: "/review",
+              readonly: true,
+            },
+          ],
+          env: {
+            HOME: "/home/agent",
+            XDG_CACHE_HOME: "/home/agent/.cache",
+            XDG_CONFIG_HOME: "/home/agent/.config",
+            XDG_DATA_HOME: "/home/agent/.local/share",
+          },
+        }),
+        providerId: "sandcastle-docker-reviewer",
+        evidence: [
+          "docker:ephemeral-container",
+          "mount:/review:readonly",
+          "home:/home/agent:container-private",
+          "cache:/home/agent/.cache:container-private",
+          "sessions:capture-disabled",
+          "inputs:/review:allowlisted",
+        ],
+      };
     },
     run: async (options) => {
       const outputMarker = options.output as

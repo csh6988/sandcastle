@@ -2,6 +2,7 @@ import { startCompanyRuntimeServer } from "./server.js";
 import {
   loadConfiguredExecutionAdapter,
   loadConfiguredInteractionExecutionAdapter,
+  loadConfiguredReviewerExecutionAdapter,
 } from "./adapters/configuredExecutionAdapter.js";
 
 const requiredEnvironment = (name: string): string => {
@@ -14,6 +15,8 @@ const main = async (): Promise<void> => {
   const executionAdapter = await loadConfiguredExecutionAdapter();
   const interactionExecutionAdapter =
     await loadConfiguredInteractionExecutionAdapter();
+  const reviewerExecutionAdapter =
+    await loadConfiguredReviewerExecutionAdapter();
   const acpToken = process.env.SANDCASTLE_COMPANY_RUNTIME_ACP_TOKEN;
   const acpClientId = process.env.SANDCASTLE_ACP_CLIENT_ID;
   if ((acpToken && !acpClientId) || (!acpToken && acpClientId)) {
@@ -48,6 +51,7 @@ const main = async (): Promise<void> => {
       : {}),
     executionAdapter,
     interactionExecutionAdapter,
+    reviewerExecutionAdapter,
   });
   const close = (): void => {
     void runtime.close();

@@ -369,6 +369,72 @@ export const openCodeReviewRuntime = (
     return ids.map((row) => readOne(row.id));
   };
 
+  const reconcileAggregateCoverage = (current: CodeReviewView): void => {
+    const node = database
+      .prepare(
+        `SELECT status FROM node_runs
+          WHERE id = ? AND run_id = ? AND handler_kind_id = 'code-review@1'`,
+      )
+      .get(current.workspace.reviewNodeRunId, current.manifest.runId) as
+      | { readonly status: string }
+      | undefined;
+    if (node?.status !== "running") return;
+    const workPackageVersionIds = options.workPackages
+      .inspect(current.manifest.runId)
+      .packages.map((workPackage) =>
+        workPackage.versions.find((version) => version.status === "ready"),
+      )
+      .filter((version) => version !== undefined)
+      .map((version) => version.id)
+      .sort();
+    const eligible = inspect(current.manifest.runId)
+      .filter(
+        (review) =>
+          review.integrationEligible &&
+          workPackageVersionIds.includes(review.manifest.workPackageVersionId),
+      )
+      .sort((left, right) =>
+        left.manifest.workPackageVersionId.localeCompare(
+          right.manifest.workPackageVersionId,
+        ),
+      );
+    if (
+      workPackageVersionIds.length === 0 ||
+      eligible.length !== workPackageVersionIds.length ||
+      eligible.some(
+        (review, index) =>
+          review.manifest.workPackageVersionId !==
+            workPackageVersionIds[index] ||
+          !review.authority ||
+          !review.gateResult,
+      )
+    ) {
+      return;
+    }
+    const authorityIds = eligible.map((review) => review.authority!.id);
+    const qualityGateResultIds = eligible.map(
+      (review) => review.gateResult!.id,
+    );
+    const coverageHash = sha256(
+      canonicalJson({
+        schemaVersion: 1,
+        runId: current.manifest.runId,
+        nodeRunId: current.workspace.reviewNodeRunId,
+        workPackageVersionIds,
+        authorityIds,
+        qualityGateResultIds,
+      }),
+    );
+    options.pipelineRuntime.completeCodeReviewInTransaction({
+      runId: current.manifest.runId,
+      nodeRunId: current.workspace.reviewNodeRunId,
+      workPackageVersionIds,
+      authorityIds,
+      qualityGateResultIds,
+      coverageHash,
+    });
+  };
+
   const createSession = (input: {
     readonly projectId: string;
     readonly runId: string;
@@ -566,19 +632,30 @@ export const openCodeReviewRuntime = (
     );
     const reviewNodes = database
       .prepare(
-        `SELECT id FROM node_runs
+        `SELECT id, status FROM node_runs
           WHERE run_id = ? AND handler_kind_id = 'code-review@1'
-            AND status IN ('queued', 'ready', 'blocked')
           ORDER BY created_at, id`,
       )
-      .all(String(graphRow.runId)) as Array<{ readonly id: string }>;
+      .all(String(graphRow.runId)) as Array<{
+      readonly id: string;
+      readonly status: string;
+    }>;
     if (reviewNodes.length !== 1) {
       throw new CodeReviewRuntimeError(
         "CODE_REVIEW_NODE_NOT_READY",
         "Independent Code Review requires exactly one active code-review@1 Node Run.",
       );
     }
-    const reviewNodeRunId = reviewNodes[0]!.id;
+    const reviewNode = reviewNodes[0]!;
+    if (
+      !["queued", "ready", "blocked", "running"].includes(reviewNode.status)
+    ) {
+      throw new CodeReviewRuntimeError(
+        "CODE_REVIEW_NODE_NOT_READY",
+        `Independent Code Review cannot add package coverage while the shared Code Review Node is ${reviewNode.status}.`,
+      );
+    }
+    const reviewNodeRunId = reviewNode.id;
     const now = clock().toISOString();
     const reviewerSessionId = createSession({
       projectId: String(graphRow.projectId),
@@ -780,10 +857,12 @@ export const openCodeReviewRuntime = (
         now,
         now,
       );
-    options.pipelineRuntime.startCodeReviewInTransaction({
-      runId: manifest.runId,
-      nodeRunId: reviewNodeRunId,
-    });
+    if (reviewNode.status !== "running") {
+      options.pipelineRuntime.startCodeReviewInTransaction({
+        runId: manifest.runId,
+        nodeRunId: reviewNodeRunId,
+      });
+    }
     appendMutation({
       commandId: input.commandId,
       actor: input.actor,
@@ -838,6 +917,7 @@ export const openCodeReviewRuntime = (
         (defect) => defect.qualityGateResultId === current.gateResult?.id,
       )
     ) {
+      if (current.authority) reconcileAggregateCoverage(current);
       return current;
     }
     const review = options.reviewRuntime.inspect(current.topicId);
@@ -847,6 +927,9 @@ export const openCodeReviewRuntime = (
       (finding) =>
         finding.reviewerParticipantId === initialReviewerParticipantId &&
         finding.reviewerSessionId === current.workspace.reviewerSessionId,
+    );
+    const initialParticipant = review.participants.find(
+      (participant) => participant.id === initialReviewerParticipantId,
     );
     const revision = review.revisions.find(
       (candidate) => candidate.id === current.gateResult?.revisionId,
@@ -859,6 +942,32 @@ export const openCodeReviewRuntime = (
     const freshParticipant = review.participants.find(
       (participant) => participant.id === freshReviewerParticipantId,
     );
+    if (
+      !initialParticipant ||
+      !freshParticipant ||
+      positionMember(initialParticipant.positionId) !==
+        initialParticipant.aiMemberId ||
+      positionMember(freshParticipant.positionId) !==
+        freshParticipant.aiMemberId
+    ) {
+      throw new CodeReviewRuntimeError(
+        "REVIEWER_INELIGIBLE",
+        "Code Review participants must still resolve to active Reviewer Positions and AI members at convergence.",
+      );
+    }
+    const initialSession = database
+      .prepare(
+        `SELECT mode, run_id AS runId, node_run_id AS nodeRunId, status
+           FROM interaction_sessions WHERE id = ?`,
+      )
+      .get(current.workspace.reviewerSessionId) as
+      | {
+          readonly mode: string;
+          readonly runId: string | null;
+          readonly nodeRunId: string | null;
+          readonly status: string;
+        }
+      | undefined;
     const freshSession = freshRecheck
       ? (database
           .prepare(
@@ -876,13 +985,20 @@ export const openCodeReviewRuntime = (
       : undefined;
     if (
       !initialFinding ||
-      !freshParticipant?.eligibility.eligible ||
+      initialFinding.evidenceRefs.length === 0 ||
+      !freshParticipant.eligibility.eligible ||
       !freshRecheck ||
+      freshRecheck.evidenceRefs.length === 0 ||
+      current.gateResult.evidenceRefs.length === 0 ||
       !revision ||
       revision.subjectKind !== "canonical-diff" ||
       revision.subjectId !== current.manifest.diffArtifactVersionId ||
       revision.subjectHash !== current.manifest.diffHash ||
       revision.producerAiMemberId === freshParticipant.aiMemberId ||
+      initialSession?.mode !== "run-collaboration" ||
+      initialSession.runId !== current.manifest.runId ||
+      initialSession.nodeRunId !== current.workspace.reviewNodeRunId ||
+      initialSession.status !== "active" ||
       freshSession?.mode !== "run-collaboration" ||
       freshSession.runId !== current.manifest.runId ||
       freshSession.nodeRunId !== current.workspace.reviewNodeRunId ||
@@ -897,31 +1013,10 @@ export const openCodeReviewRuntime = (
     const workPackage = graph.packages.find(
       (entry) => entry.id === current.manifest.workPackageId,
     );
-    const activeVersion = workPackage?.versions.find(
-      (version) => version.status === "ready",
-    );
-    const activeAssignment = activeVersion?.assignments.at(-1);
-    const activeImport = activeAssignment?.allocation.imports
-      .filter((entry) => entry.state === "succeeded")
-      .at(-1);
-    const diff = options.artifacts.inspect(
-      current.manifest.diffArtifactVersionId,
-    ).version;
     if (
       !workPackage ||
       workPackage.revision !== input.expectedRevision ||
-      activeVersion?.id !== current.manifest.workPackageVersionId ||
-      activeAssignment?.id !== current.manifest.assignmentId ||
-      activeAssignment.selfCheck?.id !== current.manifest.selfCheck.id ||
-      activeImport?.id !== current.manifest.workspaceImportId ||
-      activeImport.resultCommit !== current.manifest.sourceCommit ||
-      diff.id !== current.manifest.diffArtifactVersionId ||
-      diff.contentHash !== current.manifest.diffHash ||
-      diff.status === "superseded" ||
-      diff.integrityStatus !== "verified" ||
-      diff.producer.runId !== current.manifest.runId ||
-      diff.producer.nodeAttemptId !== current.manifest.nodeAttemptId ||
-      diff.producer.workPackageId !== current.manifest.workPackageId
+      !manifestIsCurrent(current.manifest)
     ) {
       throw new CodeReviewRuntimeError(
         "CODE_REVIEW_AUTHORITY_STALE",
@@ -1000,6 +1095,12 @@ export const openCodeReviewRuntime = (
         );
       }
       const authorityId = `code-review-authority:${input.command.codeReviewId}`;
+      if (!manifestIsCurrent(current.manifest)) {
+        throw new CodeReviewRuntimeError(
+          "CODE_REVIEW_AUTHORITY_STALE",
+          "The exact Code Review manifest changed before Integration authority could be recorded.",
+        );
+      }
       database
         .prepare(
           `INSERT INTO code_review_authorities(
@@ -1033,16 +1134,17 @@ export const openCodeReviewRuntime = (
           current.manifest.selfCheck.hash,
           current.topicId,
           current.manifestHash,
-          current.workspace.reviewerSessionId,
+          freshRecheck.reviewerSessionId,
           independenceEvidenceHash,
           now,
         );
-      options.pipelineRuntime.completeCodeReviewInTransaction({
-        runId: current.manifest.runId,
-        nodeRunId: current.workspace.reviewNodeRunId,
-        authorityId,
-        qualityGateResultId: gate.id,
-      });
+      if (!manifestIsCurrent(current.manifest)) {
+        throw new CodeReviewRuntimeError(
+          "CODE_REVIEW_AUTHORITY_STALE",
+          "The exact Code Review manifest changed before the Pipeline Code Review barrier could advance.",
+        );
+      }
+      reconcileAggregateCoverage(readOne(current.id));
       appendMutation({
         commandId: input.commandId,
         actor: input.actor,

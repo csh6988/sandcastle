@@ -678,7 +678,7 @@ describe("Product Review Runtime", () => {
           participantId: "scope-owner",
           disposition: "rejected",
           response: "The owner does not accept the proposed scope change.",
-          evidenceRefs: [],
+          evidenceRefs: ["product-baseline:scope"],
         },
       });
       assert.equal(disposition.status, "succeeded");
