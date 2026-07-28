@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
   GitIntegrationAdapterError,
@@ -287,6 +287,78 @@ describe("Local Git Integration Adapter", () => {
       (error: unknown) =>
         error instanceof GitIntegrationAdapterError &&
         error.code === "INTEGRATION_REPOSITORY_INVALID",
+    );
+  });
+
+  it("treats timeout and cancellation as unknown without writing the generation ref", () => {
+    const fixture = repository();
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const cancelledResult = openLocalGitIntegrationAdapter({
+      signal: cancelled.signal,
+    }).execute(
+      request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "cancelled-operation",
+      }),
+    );
+    assert.equal(cancelledResult.status, "unknown");
+    assert.throws(() => git(fixture.root, "rev-parse", "integration/run-1/g1"));
+
+    const timeoutResult = openLocalGitIntegrationAdapter({
+      timeoutMs: 1,
+    }).execute(
+      request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "timeout-operation",
+      }),
+    );
+    assert.equal(timeoutResult.status, "unknown");
+    assert.throws(() => git(fixture.root, "rev-parse", "integration/run-1/g1"));
+  });
+
+  it("accepts a canonical Repository reached through a parent realpath alias and rejects Windows ref separators", () => {
+    const fixture = repository();
+    const parentAlias = `${fixture.root}-parent-alias`;
+    roots.push(parentAlias);
+    symlinkSync(dirname(fixture.root), parentAlias);
+    const aliasedRoot = join(parentAlias, basename(fixture.root));
+    const result = openLocalGitIntegrationAdapter().execute(
+      request({
+        root: aliasedRoot,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "realpath-alias",
+      }),
+    );
+    assert.equal(result.status, "succeeded");
+
+    assert.throws(
+      () =>
+        openLocalGitIntegrationAdapter().execute({
+          ...request({
+            root: fixture.root,
+            base: fixture.base,
+            sourceBranch: "work/api",
+            sourceCommit: fixture.api,
+            expectedTip: fixture.base,
+            operationId: "windows-ref",
+          }),
+          integrationBranch: "integration\\run-1\\g1",
+        }),
+      (error: unknown) =>
+        error instanceof GitIntegrationAdapterError &&
+        error.code === "INTEGRATION_REF_INVALID",
     );
   });
 });

@@ -1051,6 +1051,7 @@ const definitions = [
   ...[
     "integration.generation.started",
     "integration.generation.validating",
+    "integration.validation.recorded",
     "integration.generation.aggregate-review",
     "integration.generation.blocked",
     "integration.generation.failed",

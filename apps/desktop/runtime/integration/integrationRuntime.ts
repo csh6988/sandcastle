@@ -22,6 +22,9 @@ export class IntegrationRuntimeError extends Error {
 type CompletedCodeReviewCoveragePackage =
   CompletedCodeReviewCoverage["packages"][number];
 
+type RequiredIntegrationValidation =
+  IntegrationGenerationManifest["requiredValidations"][number];
+
 export type GitIntegrationRequest = {
   readonly operationId: string;
   readonly generationId: string;
@@ -99,6 +102,20 @@ export type IntegrationGenerationManifest = {
     readonly hash: string;
   }[];
   readonly integrationConditions: readonly string[];
+  readonly requiredValidations: readonly {
+    readonly id: string;
+    readonly repositoryReference: string;
+    readonly kind: "build-test" | "contract";
+    readonly identityHash: string;
+    readonly condition?: string;
+    readonly contract?: {
+      readonly id: string;
+      readonly version: string;
+      readonly hash: string;
+      readonly producerApplicationId: string;
+      readonly consumerApplicationId: string;
+    };
+  }[];
 };
 
 export type IntegrationOperationView = {
@@ -153,6 +170,15 @@ export type IntegrationGenerationView = {
       | "blocked";
     readonly expectedTip: string;
     readonly integratedCommit: string | null;
+    readonly validationRecords: readonly {
+      readonly validationId: string;
+      readonly kind: "build-test" | "contract";
+      readonly status: "passed" | "failed";
+      readonly recordHash: string;
+      readonly evidenceRefs: readonly string[];
+      readonly responsibleWorkPackageVersionIds: readonly string[];
+      readonly contractFailure: unknown | null;
+    }[];
   }[];
   readonly operations: readonly IntegrationOperationView[];
   readonly defects: readonly {
@@ -166,6 +192,7 @@ export type IntegrationGenerationView = {
     readonly id: string;
     readonly topicId: string;
     readonly qualityGateResultId: string;
+    readonly input: unknown;
     readonly inputHash: string;
     readonly result: "PASS" | "CONDITIONAL_PASS" | "FAIL";
     readonly evidence: readonly string[];
@@ -183,6 +210,7 @@ export type IntegrationEnvelopeCommand =
   | {
       readonly type: "integration.validation.record";
       readonly generationId: string;
+      readonly validationId: string;
       readonly repositoryReference: string;
       readonly status: "passed" | "failed";
       readonly kind: "build-test" | "contract";
@@ -206,6 +234,7 @@ export type IntegrationEnvelopeCommand =
 
 export interface IntegrationRuntime {
   readonly inspect: (runId: string) => readonly IntegrationGenerationView[];
+  readonly inspectPending: () => readonly IntegrationGenerationView[];
   readonly dispatchInTransaction: (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
@@ -213,6 +242,14 @@ export interface IntegrationRuntime {
   }) => IntegrationGenerationView;
   readonly executePending: (generationId: string) => IntegrationGenerationView;
   readonly reconcilePending: () => number;
+  readonly blockPending: (
+    generationId: string,
+    failure: {
+      readonly code: string;
+      readonly message: string;
+      readonly evidence: unknown;
+    },
+  ) => IntegrationGenerationView;
 }
 
 const canonicalize = (value: unknown): unknown => {
@@ -319,6 +356,72 @@ const topologicalOrder = (
   return ordered;
 };
 
+const requiredValidationsFor = (
+  ordered: readonly CompletedCodeReviewCoveragePackage[],
+  contractVersions: ReadonlyMap<
+    string,
+    { readonly id: string; readonly version: string; readonly hash: string }
+  >,
+): readonly RequiredIntegrationValidation[] => {
+  const items: RequiredIntegrationValidation[] = [];
+  const repositories = new Map<string, Set<string>>();
+  for (const entry of ordered) {
+    const conditions = repositories.get(entry.repositoryReference) ?? new Set();
+    for (const condition of entry.integrationConditions)
+      conditions.add(condition);
+    repositories.set(entry.repositoryReference, conditions);
+  }
+  for (const [repositoryReference, configured] of repositories) {
+    const conditions =
+      configured.size > 0 ? [...configured] : ["repository build and test"];
+    for (const condition of conditions) {
+      const identity = {
+        kind: "build-test" as const,
+        repositoryReference,
+        condition,
+      };
+      const identityHash = sha256(canonicalJson(identity));
+      items.push({
+        id: `validation:${identityHash}`,
+        ...identity,
+        identityHash,
+      });
+    }
+  }
+  for (const consumer of ordered) {
+    for (const dependency of consumer.dependencies.filter(
+      (entry) => entry.kind === "contract",
+    )) {
+      const producer = ordered.find(
+        (entry) =>
+          entry.workPackageVersionId ===
+          dependency.predecessorWorkPackageVersionId,
+      )!;
+      const contract = contractVersions.get(dependency.contractId!)!;
+      const identity = {
+        kind: "contract" as const,
+        repositoryReference: consumer.repositoryReference,
+        contract: {
+          id: contract.id,
+          version: contract.version,
+          hash: contract.hash,
+          producerApplicationId: producer.applicationId,
+          consumerApplicationId: consumer.applicationId,
+        },
+      };
+      const identityHash = sha256(canonicalJson(identity));
+      items.push({
+        id: `validation:${identityHash}`,
+        ...identity,
+        identityHash,
+      });
+    }
+  }
+  return [...new Map(items.map((item) => [item.id, item])).values()].sort(
+    (left, right) => left.id.localeCompare(right.id),
+  );
+};
+
 export const openIntegrationRuntime = (
   database: DatabaseSync,
   options: {
@@ -335,6 +438,12 @@ export const openIntegrationRuntime = (
         readonly generationId: string;
       }) => void;
       readonly blockIntegrationInTransaction: (input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+        readonly generationId: string;
+        readonly failure: { readonly code: string; readonly message: string };
+      }) => void;
+      readonly failIntegrationInTransaction: (input: {
         readonly runId: string;
         readonly nodeRunId: string;
         readonly generationId: string;
@@ -366,7 +475,7 @@ export const openIntegrationRuntime = (
       };
     };
     readonly failureInjection?: (
-      point: "after-intent" | "after-effect",
+      point: "after-intent" | "after-effect" | "during-failure-finalization",
       operationId: string,
     ) => void;
     readonly clock?: () => Date;
@@ -399,6 +508,17 @@ export const openIntegrationRuntime = (
                 integrated_commit AS integratedCommit
            FROM integration_repository_results
           WHERE generation_id = ? ORDER BY repository_reference`,
+      )
+      .all(generationId) as Array<Record<string, unknown>>;
+    const validationRecords = database
+      .prepare(
+        `SELECT repository_result_id AS repositoryResultId,
+                validation_id AS validationId, kind, status,
+                record_hash AS recordHash, evidence_json AS evidenceJson,
+                responsibility_json AS responsibilityJson,
+                contract_failure_json AS contractFailureJson
+           FROM integration_validation_records
+          WHERE generation_id = ? ORDER BY validation_id`,
       )
       .all(generationId) as Array<Record<string, unknown>>;
     const persistedOperations = database
@@ -474,7 +594,8 @@ export const openIntegrationRuntime = (
       .prepare(
         `SELECT id, topic_id AS topicId,
                 quality_gate_result_id AS qualityGateResultId,
-                input_hash AS inputHash, result, evidence_json AS evidenceJson
+                input_json AS inputJson, input_hash AS inputHash, result,
+                evidence_json AS evidenceJson
            FROM integration_aggregate_reviews WHERE generation_id = ?`,
       )
       .get(generationId) as Record<string, unknown> | undefined;
@@ -495,6 +616,26 @@ export const openIntegrationRuntime = (
         integratedCommit: repository.integratedCommit
           ? String(repository.integratedCommit)
           : null,
+        validationRecords: validationRecords
+          .filter(
+            (record) =>
+              String(record.repositoryResultId) === String(repository.id),
+          )
+          .map((record) => ({
+            validationId: String(record.validationId),
+            kind: String(record.kind) as "build-test" | "contract",
+            status: String(record.status) as "passed" | "failed",
+            recordHash: String(record.recordHash),
+            evidenceRefs: parseJson<readonly string[]>(
+              String(record.evidenceJson),
+            ),
+            responsibleWorkPackageVersionIds: parseJson<readonly string[]>(
+              String(record.responsibilityJson),
+            ),
+            contractFailure: record.contractFailureJson
+              ? parseJson(String(record.contractFailureJson))
+              : null,
+          })),
       })),
       operations,
       defects: defects.map((defect) => ({
@@ -509,6 +650,7 @@ export const openIntegrationRuntime = (
             id: String(aggregate.id),
             topicId: String(aggregate.topicId),
             qualityGateResultId: String(aggregate.qualityGateResultId),
+            input: parseJson(String(aggregate.inputJson)),
             inputHash: String(aggregate.inputHash),
             result: String(aggregate.result) as
               | "PASS"
@@ -651,6 +793,7 @@ export const openIntegrationRuntime = (
       integrationConditions: [
         ...new Set(ordered.flatMap((entry) => entry.integrationConditions)),
       ].sort(),
+      requiredValidations: requiredValidationsFor(ordered, contractVersions),
     };
     const manifestJson = canonicalJson(manifest);
     const manifestHash = sha256(manifestJson);
@@ -807,12 +950,17 @@ export const openIntegrationRuntime = (
         now,
         input.view.id,
       );
-    options.pipelineRuntime.blockIntegrationInTransaction({
+    const pipelineFailure = {
       runId: input.view.manifest.runId,
       nodeRunId: input.view.manifest.nodeRunId,
       generationId: input.view.id,
       failure: { code: input.code, message: input.message },
-    });
+    };
+    if (input.blocked) {
+      options.pipelineRuntime.blockIntegrationInTransaction(pipelineFailure);
+    } else {
+      options.pipelineRuntime.failIntegrationInTransaction(pipelineFailure);
+    }
     options.events.append({
       type: input.blocked
         ? "integration.generation.blocked"
@@ -1096,51 +1244,62 @@ export const openIntegrationRuntime = (
     }
     const now = clock().toISOString();
     const isUnknown = result.status === "unknown";
-    database
-      .prepare(
-        `UPDATE integration_operations
-            SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
-          WHERE id = ? AND state IN ('intent', 'running')`,
-      )
-      .run(
-        isUnknown ? "unknown" : "failed",
-        result.code,
-        result.message,
-        now,
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database
+        .prepare(
+          `UPDATE integration_operations
+              SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
+            WHERE id = ? AND state IN ('intent', 'running')`,
+        )
+        .run(
+          isUnknown ? "unknown" : "failed",
+          result.code,
+          result.message,
+          now,
+          input.request.operationId,
+        );
+      database
+        .prepare(
+          `UPDATE integration_repository_results
+              SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
+            WHERE generation_id = ? AND repository_reference = ?`,
+        )
+        .run(
+          isUnknown ? "blocked" : "failed",
+          result.code,
+          result.message,
+          now,
+          input.view.id,
+          input.entry.repositoryReference,
+        );
+      options.failureInjection?.(
+        "during-failure-finalization",
         input.request.operationId,
       );
-    database
-      .prepare(
-        `UPDATE integration_repository_results
-            SET state = ?, failure_code = ?, failure_message = ?, updated_at = ?
-          WHERE generation_id = ? AND repository_reference = ?`,
-      )
-      .run(
-        isUnknown ? "blocked" : "failed",
-        result.code,
-        result.message,
-        now,
-        input.view.id,
-        input.entry.repositoryReference,
-      );
-    failGeneration({
-      view: input.view,
-      operationId: input.request.operationId,
-      kind:
-        result.status === "conflict"
-          ? "git-conflict"
-          : isUnknown
-            ? "reconciliation"
-            : "git-conflict",
-      code: result.code,
-      message: result.message,
-      responsibility: {
-        workPackageIds: [input.entry.workPackageId],
-        workPackageVersionIds: [input.entry.workPackageVersionId],
-      },
-      evidence: result.evidence,
-      blocked: isUnknown,
-    });
+      failGeneration({
+        view: input.view,
+        operationId: input.request.operationId,
+        kind:
+          result.status === "conflict"
+            ? "git-conflict"
+            : isUnknown
+              ? "reconciliation"
+              : "git-conflict",
+        code: result.code,
+        message: result.message,
+        responsibility: {
+          workPackageIds: [input.entry.workPackageId],
+          workPackageVersionIds: [input.entry.workPackageVersionId],
+        },
+        evidence: result.evidence,
+        blocked: isUnknown,
+      });
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
     return false;
   };
 
@@ -1153,12 +1312,6 @@ export const openIntegrationRuntime = (
       );
     }
     if (view.state === "blocked") return view;
-    if (!currentCoverageIsExact(view.manifest)) {
-      throw new IntegrationRuntimeError(
-        "INTEGRATION_COVERAGE_STALE",
-        "The exact completed Code Review coverage is no longer eligible; no Git write was attempted.",
-      );
-    }
     for (const [ordinal, entry] of view.manifest.packages.entries()) {
       view = readOne(generationId);
       const repository = view.repositoryResults.find(
@@ -1170,6 +1323,19 @@ export const openIntegrationRuntime = (
         entry,
         expectedTip: repository.expectedTip,
       });
+      const planned = view.operations.find(
+        (operation) =>
+          operation.workPackageVersionId === entry.workPackageVersionId,
+      );
+      if (
+        planned?.state === "pending" &&
+        !currentCoverageIsExact(view.manifest)
+      ) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_COVERAGE_STALE",
+          "The exact completed Code Review coverage is no longer eligible; no new Git effect was attempted.",
+        );
+      }
       if (!resolveOperation({ view, entry, request, ordinal })) {
         return readOne(generationId);
       }
@@ -1247,6 +1413,18 @@ export const openIntegrationRuntime = (
     );
     const allowedMembers =
       input.command.kind === "contract" ? generationMembers : repositoryMembers;
+    const requiredValidation = view.manifest.requiredValidations.find(
+      (validation) =>
+        validation.id === input.command.validationId &&
+        validation.repositoryReference === input.command.repositoryReference &&
+        validation.kind === input.command.kind,
+    );
+    if (!requiredValidation) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_VALIDATION_NOT_REQUIRED",
+        "The validation record does not match an exact item frozen in the Integration manifest.",
+      );
+    }
     if (
       input.command.responsibleWorkPackageVersionIds.some(
         (id) => !allowedMembers.has(id),
@@ -1258,13 +1436,22 @@ export const openIntegrationRuntime = (
       );
     }
     if (
-      input.command.status === "failed" &&
       input.command.kind === "contract" &&
+      input.command.status === "failed" &&
       !input.command.contractFailure
     ) {
       throw new IntegrationRuntimeError(
         "INTEGRATION_CONTRACT_EVIDENCE_INVALID",
         "A failed cross-application Contract validation requires producer, consumer, fixture, and Runtime evidence.",
+      );
+    }
+    if (
+      input.command.contractFailure &&
+      (input.command.kind !== "contract" || input.command.status !== "failed")
+    ) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_CONTRACT_EVIDENCE_INVALID",
+        "Contract failure evidence is allowed only on a failed Contract validation.",
       );
     }
     if (input.command.contractFailure) {
@@ -1280,7 +1467,18 @@ export const openIntegrationRuntime = (
           entry.id === failure.contractId &&
           entry.version === failure.contractVersion,
       );
-      if (!producer || !consumer || !contract || producer === consumer) {
+      if (
+        !producer ||
+        !consumer ||
+        !contract ||
+        producer === consumer ||
+        requiredValidation.contract?.id !== failure.contractId ||
+        requiredValidation.contract.version !== failure.contractVersion ||
+        requiredValidation.contract.producerApplicationId !==
+          failure.producerApplicationId ||
+        requiredValidation.contract.consumerApplicationId !==
+          failure.consumerApplicationId
+      ) {
         throw new IntegrationRuntimeError(
           "INTEGRATION_CONTRACT_EVIDENCE_INVALID",
           "Contract failure evidence does not bind reviewed producer and consumer Applications to the frozen Contract version.",
@@ -1289,6 +1487,7 @@ export const openIntegrationRuntime = (
     }
     const now = clock().toISOString();
     const validation = {
+      validationId: input.command.validationId,
       status: input.command.status,
       kind: input.command.kind,
       evidenceRefs: [...input.command.evidenceRefs].sort(),
@@ -1297,28 +1496,86 @@ export const openIntegrationRuntime = (
       ].sort(),
       contractFailure: input.command.contractFailure ?? null,
     };
+    const validationJson = canonicalJson(validation);
+    const recordHash = sha256(validationJson);
+    const existingRecord = database
+      .prepare(
+        `SELECT record_hash AS recordHash
+           FROM integration_validation_records
+          WHERE generation_id = ? AND validation_id = ?`,
+      )
+      .get(view.id, input.command.validationId) as
+      | { readonly recordHash: string }
+      | undefined;
+    if (existingRecord) {
+      if (existingRecord.recordHash !== recordHash) {
+        throw new IntegrationRuntimeError(
+          "INTEGRATION_CONFLICT",
+          "A frozen validation identity was reused with changed evidence.",
+        );
+      }
+      return readOne(view.id);
+    }
     database
       .prepare(
-        `UPDATE integration_repository_results
-            SET state = ?, validation_json = ?, failure_code = ?,
-                failure_message = ?, updated_at = ?
-          WHERE id = ? AND state = 'validating'`,
+        `INSERT INTO integration_validation_records(
+           id, generation_id, repository_result_id, validation_id, kind,
+           status, evidence_json, responsibility_json, contract_failure_json,
+           record_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        input.command.status === "passed" ? "succeeded" : "failed",
-        canonicalJson(validation),
-        input.command.status === "failed"
-          ? input.command.kind === "contract"
-            ? "INTEGRATION_CONTRACT_FAILED"
-            : "INTEGRATION_VALIDATION_FAILED"
-          : null,
-        input.command.status === "failed"
-          ? "Integration validation failed with recorded evidence."
-          : null,
-        now,
+        randomUUID(),
+        view.id,
         repository.id,
+        input.command.validationId,
+        input.command.kind,
+        input.command.status,
+        canonicalJson(validation.evidenceRefs),
+        canonicalJson(validation.responsibleWorkPackageVersionIds),
+        validation.contractFailure
+          ? canonicalJson(validation.contractFailure)
+          : null,
+        recordHash,
+        now,
       );
+    options.events.append({
+      type: "integration.validation.recorded",
+      scope: {
+        companyId: "company",
+        projectId: view.manifest.projectId,
+        runId: view.manifest.runId,
+        nodeRunId: view.manifest.nodeRunId,
+        integrationGenerationId: view.id,
+        commandId: input.commandId,
+      },
+      payload: {
+        generationId: view.id,
+        repositoryReference: input.command.repositoryReference,
+        validationId: input.command.validationId,
+        kind: input.command.kind,
+        status: input.command.status,
+        recordHash,
+      },
+      timestamp: now,
+    });
     if (input.command.status === "failed") {
+      database
+        .prepare(
+          `UPDATE integration_repository_results
+              SET state = 'failed', validation_json = ?, failure_code = ?,
+                  failure_message = ?, updated_at = ?
+            WHERE id = ? AND state = 'validating'`,
+        )
+        .run(
+          validationJson,
+          input.command.kind === "contract"
+            ? "INTEGRATION_CONTRACT_FAILED"
+            : "INTEGRATION_VALIDATION_FAILED",
+          "Integration validation failed with recorded evidence.",
+          now,
+          repository.id,
+        );
       failGeneration({
         view,
         kind: input.command.kind,
@@ -1351,6 +1608,42 @@ export const openIntegrationRuntime = (
         evidence: validation,
       });
       return readOne(view.id);
+    }
+    const requiredForRepository = view.manifest.requiredValidations.filter(
+      (validation) =>
+        validation.repositoryReference === input.command.repositoryReference,
+    ).length;
+    const passedForRepository = Number(
+      (
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count FROM integration_validation_records
+              WHERE generation_id = ? AND repository_result_id = ?
+                AND status = 'passed'`,
+          )
+          .get(view.id, repository.id) as { readonly count: number }
+      ).count,
+    );
+    if (passedForRepository === requiredForRepository) {
+      database
+        .prepare(
+          `UPDATE integration_repository_results
+              SET state = 'succeeded', validation_json = ?, updated_at = ?
+            WHERE id = ? AND state = 'validating'`,
+        )
+        .run(
+          canonicalJson({
+            requiredValidationIds: view.manifest.requiredValidations
+              .filter(
+                (validation) =>
+                  validation.repositoryReference ===
+                  input.command.repositoryReference,
+              )
+              .map((validation) => validation.id),
+          }),
+          now,
+          repository.id,
+        );
     }
     const remaining = Number(
       (
@@ -1581,6 +1874,16 @@ export const openIntegrationRuntime = (
 
   return {
     inspect,
+    inspectPending: () => {
+      const ids = database
+        .prepare(
+          `SELECT id FROM integration_generations
+            WHERE state IN ('running', 'validating', 'aggregate-review')
+            ORDER BY updated_at, id`,
+        )
+        .all() as Array<{ readonly id: string }>;
+      return ids.map((entry) => readOne(entry.id));
+    },
     dispatchInTransaction,
     executePending,
     reconcilePending: () => {
@@ -1592,6 +1895,28 @@ export const openIntegrationRuntime = (
         .all() as Array<{ readonly id: string }>;
       for (const entry of ids) executePending(entry.id);
       return ids.length;
+    },
+    blockPending: (generationId, failure) => {
+      const view = readOne(generationId);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        failGeneration({
+          view,
+          kind: "reconciliation",
+          code: failure.code,
+          message: failure.message,
+          responsibility: {
+            workPackageVersionIds: view.manifest.dependencyOrder,
+          },
+          evidence: failure.evidence,
+          blocked: true,
+        });
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return readOne(generationId);
     },
   };
 };

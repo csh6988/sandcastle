@@ -123,7 +123,9 @@ import {
 import { openLocalGitIntegrationAdapter } from "../integration/gitIntegrationAdapter.js";
 import {
   openIntegrationNodeHandler,
+  type AggregateIntegrationReviewExecutor,
   type IntegrationNodeHandler,
+  type IntegrationValidationExecutor,
 } from "../integration/integrationNodeHandler.js";
 
 export interface CompanyDatabase {
@@ -265,8 +267,10 @@ export const openCompanyDatabase = (
     };
     readonly integrationRuntime?: {
       readonly gitAdapter?: GitIntegrationAdapter;
+      readonly validationExecutor?: IntegrationValidationExecutor;
+      readonly aggregateReviewExecutor?: AggregateIntegrationReviewExecutor;
       readonly failureInjection?: (
-        point: "after-intent" | "after-effect",
+        point: "after-intent" | "after-effect" | "during-failure-finalization",
         operationId: string,
       ) => void;
     };
@@ -495,6 +499,15 @@ export const openCompanyDatabase = (
   const integrationNodeHandler = openIntegrationNodeHandler({
     commandRegistry,
     integrations,
+    ...(options.integrationRuntime?.validationExecutor
+      ? { validationExecutor: options.integrationRuntime.validationExecutor }
+      : {}),
+    ...(options.integrationRuntime?.aggregateReviewExecutor
+      ? {
+          aggregateReviewExecutor:
+            options.integrationRuntime.aggregateReviewExecutor,
+        }
+      : {}),
   });
   pipelineRuntime.registerIntegrationExecutor(
     integrationNodeHandler.executeReady,
@@ -502,7 +515,7 @@ export const openCompanyDatabase = (
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
-  integrationNodeHandler.reconcilePending();
+  void integrationNodeHandler.reconcilePending();
 
   return {
     path,

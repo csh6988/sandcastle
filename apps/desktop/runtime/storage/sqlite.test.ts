@@ -2096,6 +2096,13 @@ describe("Company database migrations", () => {
       PRAGMA foreign_keys = OFF;
       DROP TRIGGER integration_aggregate_reviews_immutable_delete;
       DROP TRIGGER integration_aggregate_reviews_immutable_update;
+      DROP TRIGGER integration_defects_immutable_delete;
+      DROP TRIGGER integration_defects_evidence_update;
+      DROP TRIGGER integration_validation_records_immutable_delete;
+      DROP TRIGGER integration_validation_records_immutable_update;
+      DROP TRIGGER integration_repository_results_immutable_delete;
+      DROP TRIGGER integration_repository_results_terminal_update;
+      DROP TRIGGER integration_repository_results_identity_update;
       DROP TRIGGER integration_operations_immutable_delete;
       DROP TRIGGER integration_operations_succeeded_update;
       DROP TRIGGER integration_operations_identity_update;
@@ -2103,9 +2110,11 @@ describe("Company database migrations", () => {
       DROP TRIGGER integration_generations_identity_update;
       DROP INDEX integration_defects_generation_idx;
       DROP INDEX integration_operations_state_idx;
+      DROP INDEX integration_validation_records_generation_idx;
       DROP INDEX integration_generations_run_idx;
       DROP TABLE integration_aggregate_reviews;
       DROP TABLE integration_defects;
+      DROP TABLE integration_validation_records;
       DROP TABLE integration_operations;
       DROP TABLE integration_repository_results;
       DROP TABLE integration_generations;
@@ -2135,6 +2144,7 @@ describe("Company database migrations", () => {
             { name: "integration_generations" },
             { name: "integration_operations" },
             { name: "integration_repository_results" },
+            { name: "integration_validation_records" },
           ],
         );
         assert.deepEqual(
@@ -2149,6 +2159,96 @@ describe("Company database migrations", () => {
             version: 46,
             name: "multi_repository_integration_generations",
           },
+        );
+        inspected.exec("PRAGMA foreign_keys = OFF");
+        inspected
+          .prepare(
+            `INSERT INTO integration_generations(
+               id, project_id, run_id, snapshot_revision_id, node_run_id,
+               generation, coverage_id, coverage_node_run_id,
+               coverage_node_attempt_id, coverage_hash, manifest_json,
+               manifest_hash, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, '{}', ?, 'passed', ?, ?)`,
+          )
+          .run(
+            "generation-immutable",
+            "project",
+            "run",
+            "snapshot",
+            "node",
+            "coverage",
+            "coverage-node",
+            "coverage-attempt",
+            "a".repeat(64),
+            "b".repeat(64),
+            "2026-07-28T00:00:00.000Z",
+            "2026-07-28T00:00:00.000Z",
+          );
+        inspected
+          .prepare(
+            `INSERT INTO integration_repository_results(
+               id, generation_id, repository_reference, base_commit,
+               integration_branch, state, expected_tip, integrated_commit,
+               validation_json, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, '{}', ?, ?)`,
+          )
+          .run(
+            "repository-immutable",
+            "generation-immutable",
+            "/repositories/api",
+            "1".repeat(40),
+            "integration/run/g1",
+            "2".repeat(40),
+            "2".repeat(40),
+            "2026-07-28T00:00:00.000Z",
+            "2026-07-28T00:00:00.000Z",
+          );
+        inspected
+          .prepare(
+            `INSERT INTO integration_validation_records(
+               id, generation_id, repository_result_id, validation_id, kind,
+               status, evidence_json, responsibility_json, record_hash, created_at
+             ) VALUES (?, ?, ?, ?, 'build-test', 'passed', '[]', '[]', ?, ?)`,
+          )
+          .run(
+            "validation-immutable",
+            "generation-immutable",
+            "repository-immutable",
+            "validation-1",
+            "c".repeat(64),
+            "2026-07-28T00:00:00.000Z",
+          );
+        inspected
+          .prepare(
+            `INSERT INTO integration_defects(
+               id, generation_id, kind, responsibility_json, evidence_json,
+               status, created_at
+             ) VALUES (?, ?, 'build-test', '{}', '{}', 'open', ?)`,
+          )
+          .run(
+            "defect-immutable",
+            "generation-immutable",
+            "2026-07-28T00:00:00.000Z",
+          );
+        assert.throws(() =>
+          inspected.exec(
+            "UPDATE integration_repository_results SET base_commit = '9999999999999999999999999999999999999999' WHERE id = 'repository-immutable'",
+          ),
+        );
+        assert.throws(() =>
+          inspected.exec(
+            "UPDATE integration_repository_results SET integrated_commit = '8888888888888888888888888888888888888888' WHERE id = 'repository-immutable'",
+          ),
+        );
+        assert.throws(() =>
+          inspected.exec(
+            "UPDATE integration_validation_records SET evidence_json = '[\"changed\"]' WHERE id = 'validation-immutable'",
+          ),
+        );
+        assert.throws(() =>
+          inspected.exec(
+            "UPDATE integration_defects SET evidence_json = '{\"changed\":true}' WHERE id = 'defect-immutable'",
+          ),
         );
       } finally {
         inspected.close();
