@@ -362,6 +362,7 @@ export const openCodeReviewExecutionRuntime = (options: {
             evidence: [],
           };
         }
+        if (result.status === "unknown") return result;
         const ordinal =
           Math.max(
             0,
@@ -391,7 +392,10 @@ export const openCodeReviewExecutionRuntime = (options: {
             "Reviewer terminal Execution Fact was not accepted.",
           );
         }
-        return result;
+        return {
+          ...result,
+          terminalExecutionFactId: receipt.executionFactId,
+        };
       } finally {
         if (timeout) clearTimeout(timeout);
         clearInterval(renewal);
@@ -413,16 +417,13 @@ export const openCodeReviewExecutionRuntime = (options: {
 
     type CompletedReviewerExecutionResult = Exclude<
       ReviewerExecutionResult,
-      { readonly status: "running" }
+      { readonly status: "running" | "unknown" }
     >;
 
     const acceptedCompletedResult = (details: {
       readonly executionFactId: string;
       readonly expectedLease?: ExecutionLeaseContext;
-      readonly reportedResult?: Extract<
-        ReviewerExecutionResult,
-        { readonly status: "succeeded" }
-      >;
+      readonly reportedResult?: CompletedReviewerExecutionResult;
     }): CompletedReviewerExecutionResult => {
       const fact = inspectExecution(database, {
         operationKey: input.operationKey,
@@ -452,7 +453,7 @@ export const openCodeReviewExecutionRuntime = (options: {
       if (
         typeof structuredResult !== "object" ||
         structuredResult === null ||
-        !["succeeded", "blocked", "unknown"].includes(
+        !["succeeded", "blocked"].includes(
           String(
             (structuredResult as { readonly status?: unknown }).status ?? "",
           ),
@@ -477,9 +478,7 @@ export const openCodeReviewExecutionRuntime = (options: {
       }
       const completedResult =
         structuredResult as CompletedReviewerExecutionResult;
-      return completedResult.status === "succeeded"
-        ? { ...completedResult, terminalExecutionFactId: fact.id }
-        : completedResult;
+      return { ...completedResult, terminalExecutionFactId: fact.id };
     };
 
     const continueAfterTerminalReconciliation = (details: {
@@ -951,7 +950,7 @@ export const openCodeReviewExecutionRuntime = (options: {
           .run(clock().toISOString(), reconciliationLease.leaseId);
       }
       if (result.status !== "running") {
-        if (result.status !== "succeeded") return result;
+        if (result.status === "unknown") return result;
         if (!result.terminalExecutionFactId) {
           throw runtimeError(
             "EXECUTION_ADAPTER_PROTOCOL",
@@ -963,9 +962,11 @@ export const openCodeReviewExecutionRuntime = (options: {
           expectedLease: reconciliationLease,
           reportedResult: result,
         });
-        continueAfterTerminalReconciliation({
-          terminalExecutionFactId: result.terminalExecutionFactId,
-        });
+        if (acceptedResult.status === "succeeded") {
+          continueAfterTerminalReconciliation({
+            terminalExecutionFactId: result.terminalExecutionFactId,
+          });
+        }
         return acceptedResult;
       }
       if (

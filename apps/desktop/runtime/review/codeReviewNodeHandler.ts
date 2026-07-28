@@ -222,6 +222,7 @@ export const openCodeReviewNodeHandler = (
         options.pipelineRuntime.blockCodeReviewInTransaction({
           runId: input.review.manifest.runId,
           nodeRunId: input.review.workspace.reviewNodeRunId,
+          terminalExecutionFactId: input.failure.terminalExecutionFactId,
           failure: {
             code: input.failure.code,
             message: input.failure.message,
@@ -1133,7 +1134,22 @@ export const openCodeReviewNodeHandler = (
           ORDER BY manifests.run_id, workspaces.review_node_run_id`,
       )
       .all() as Array<{ readonly runId: string; readonly nodeRunId: string }>;
-    for (const row of rows) await executeReady(row);
+    for (const row of rows) {
+      try {
+        await executeReady(row);
+      } catch (error) {
+        const node = options.pipelineRuntime
+          .inspectRun(row.runId)
+          .nodes.find((candidate) => candidate.id === row.nodeRunId);
+        if (
+          !(error instanceof CodeReviewNodeHandlerError) ||
+          node?.status !== "blocked" ||
+          node.attempts.at(-1)?.status !== "failed"
+        ) {
+          throw error;
+        }
+      }
+    }
     return rows.length;
   };
 

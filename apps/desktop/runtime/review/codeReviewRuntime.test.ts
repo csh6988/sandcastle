@@ -2130,7 +2130,7 @@ describe("Code Review Runtime", () => {
                   "The durable Reviewer receipt proves invalid isolation.",
                 evidence: ["provider:isolation-invalid"],
               };
-              await sink.record({
+              const receipt = await sink.record({
                 adapterSchemaVersion: 1,
                 factId: `${operationKey}:reconciled-blocked`,
                 ordinal: 1,
@@ -2139,7 +2139,10 @@ describe("Code Review Runtime", () => {
                 payload: { structuredResult: blocked },
                 evidenceRefs: blocked.evidence,
               });
-              return blocked;
+              return {
+                ...blocked,
+                terminalExecutionFactId: receipt.executionFactId,
+              };
             },
           },
         },
@@ -2169,13 +2172,8 @@ describe("Code Review Runtime", () => {
       } finally {
         resumeConnection.close();
       }
-      await assert.rejects(
-        reopened.codeReviewNodeHandler.reconcilePending(),
-        (error: unknown) =>
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "PROVIDER_ISOLATION_REQUIRED",
-      );
+      assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
+      assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 0);
       assert.equal(reconcileCalls, 1);
       const raw = new DatabaseSync(reopened.path);
       try {
@@ -2188,9 +2186,175 @@ describe("Code Review Runtime", () => {
           .get() as { readonly state: string; readonly failureCode: string };
         assert.equal(stage.state, "blocked");
         assert.equal(stage.failureCode, "PROVIDER_ISOLATION_REQUIRED");
+        const attempt = raw
+          .prepare(
+            `SELECT attempts.status,
+                    facts.fact_id AS terminalExecutionFactId
+               FROM node_attempts AS attempts
+               LEFT JOIN execution_facts AS facts
+                 ON facts.id = attempts.terminal_execution_fact_id
+              WHERE attempts.node_run_id = 'code-review-node'
+              ORDER BY attempts.attempt_number DESC LIMIT 1`,
+          )
+          .get() as {
+          readonly status: string;
+          readonly terminalExecutionFactId: string | null;
+        };
+        assert.equal(attempt.status, "failed");
+        assert.match(
+          attempt.terminalExecutionFactId ?? "",
+          /reconciled-blocked/,
+        );
       } finally {
         raw.close();
       }
+    } finally {
+      reopened?.close();
+    }
+  });
+
+  it("retries an unknown Reviewer outcome because it is not a terminal Execution Fact", async () => {
+    const fixture = setup(readyReviewerWorkspaceAdapter, {
+      capabilities: {
+        executionBoundIsolation: true,
+        reattachRunningOperation: false,
+      },
+      execute: async () => ({
+        status: "unknown",
+        code: "RECONCILE_UNKNOWN",
+        message: "The provider has not exposed terminal evidence yet.",
+        evidence: ["provider:pending"],
+      }),
+    });
+    let reopened: ReturnType<typeof openCompanyDatabase> | undefined;
+    try {
+      const before = fixture.database.pipelineRuntime.inspectRun("review-run");
+      await assert.rejects(
+        fixture.database.pipelineRuntime.executeReady({
+          runId: before.run.id,
+          expectedRevision: before.run.revision,
+        }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "RECONCILE_UNKNOWN",
+      );
+      const review = fixture.database.codeReviews.inspect("review-run")[0];
+      assert.ok(review);
+      assert.equal(
+        fixture.database.pipelineRuntime
+          .inspectExecution({
+            operationKey: `code-review:${review.id}:initial-finding`,
+          })
+          .facts.filter((fact) => fact.kind === "completed").length,
+        0,
+      );
+      fixture.database.close();
+      let reconcileCalls = 0;
+      reopened = openCompanyDatabase(fixture.companyDir, {
+        codeReviewRuntime: {
+          reviewerWorkspaceAdapter: readyReviewerWorkspaceAdapter,
+          reviewerExecutionAdapter: {
+            capabilities: {
+              executionBoundIsolation: true,
+              reattachRunningOperation: false,
+            },
+            reconcile: async (operationKey, sink) => {
+              reconcileCalls += 1;
+              assert.ok(sink);
+              const result = {
+                status: "succeeded" as const,
+                providerId: "scripted-docker-reviewer",
+                isolation: {
+                  readOnlyFilesystem: true as const,
+                  independentGitDatabase: true as const,
+                  independentSessionStorage: true as const,
+                  independentCredentialScope: true as const,
+                  independentMutableCache: true as const,
+                  inputAllowlist: true as const,
+                  mountTableHash: "1".repeat(64),
+                  sessionScopeHash: "2".repeat(64),
+                  cacheScopeHash: "3".repeat(64),
+                  credentialScopeHash: "4".repeat(64),
+                  providerOperationId: "reconciled-after-unknown",
+                  inspectedReadOnlyReviewMount: true as const,
+                  inspectedEnvironmentHash: "5".repeat(64),
+                  inspectedAt: "2026-07-28T10:00:00.000Z",
+                  terminalProviderStatus: "completed" as const,
+                  terminalProviderReceiptHash: "6".repeat(64),
+                  mechanism: "scripted-docker-readonly",
+                  mechanismVersion: "1",
+                },
+                isolationEvidence: ["provider:reconciled-after-unknown"],
+                output: {
+                  findings: [
+                    {
+                      severity: "info" as const,
+                      summary: "Recovered exact review output.",
+                      rationale:
+                        "The provider later exposed terminal evidence.",
+                      impact: "The review can continue without resending work.",
+                      evidenceRefs: [fixture.diff.id],
+                      suggestedOwner: "software-engineer",
+                      blocking: false,
+                    },
+                  ],
+                },
+              };
+              const receipt = await sink.record({
+                adapterSchemaVersion: 1,
+                factId: `${operationKey}:reconciled-completed`,
+                ordinal: 1,
+                kind: "completed",
+                schemaVersion: 1,
+                payload: { structuredResult: result },
+                evidenceRefs: result.isolationEvidence,
+              });
+              return {
+                ...result,
+                terminalExecutionFactId: receipt.executionFactId,
+              };
+            },
+            execute: async (input) => ({
+              status: "succeeded",
+              providerId: "scripted-docker-reviewer",
+              isolation: {
+                readOnlyFilesystem: true,
+                independentGitDatabase: true,
+                independentSessionStorage: true,
+                independentCredentialScope: true,
+                independentMutableCache: true,
+                inputAllowlist: true,
+                mountTableHash: "1".repeat(64),
+                sessionScopeHash: "2".repeat(64),
+                cacheScopeHash: "3".repeat(64),
+                credentialScopeHash: "4".repeat(64),
+                providerOperationId: "fresh-recheck-after-unknown",
+                inspectedReadOnlyReviewMount: true,
+                inspectedEnvironmentHash: "5".repeat(64),
+                inspectedAt: "2026-07-28T10:00:00.000Z",
+                terminalProviderStatus: "completed",
+                terminalProviderReceiptHash: "6".repeat(64),
+                mechanism: "scripted-docker-readonly",
+                mechanismVersion: "1",
+              },
+              isolationEvidence: ["provider:fresh-recheck"],
+              output: {
+                result: "PASS",
+                conditions: [],
+                evidenceRefs: [input.manifest.diffArtifactVersionId],
+              },
+            }),
+          },
+        },
+      });
+
+      assert.equal(await reopened.codeReviewNodeHandler.reconcilePending(), 1);
+      assert.equal(reconcileCalls, 1);
+      assert.equal(
+        reopened.codeReviews.inspect("review-run")[0]?.integrationEligible,
+        true,
+      );
     } finally {
       reopened?.close();
     }

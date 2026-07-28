@@ -288,6 +288,7 @@ export interface PipelineRuntime {
   readonly blockCodeReviewInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
+    readonly terminalExecutionFactId?: string;
     readonly reason?:
       | "code-review-isolation"
       | "code-review-rework"
@@ -6716,17 +6717,24 @@ export const openPipelineRuntime = (
           `Code Review isolation failure cannot block Node Run ${input.nodeRunId} from ${current.nodeStatus} or Department Run ${input.runId} from ${current.runStatus}.`,
         );
       }
-      if (current.nodeStatus === "running") {
+      if (
+        current.nodeStatus === "running" ||
+        (current.nodeStatus === "blocked" && input.terminalExecutionFactId)
+      ) {
         const requiresReconciliation =
-          input.reason === "code-review-reconciliation";
+          input.reason === "code-review-reconciliation" &&
+          !input.terminalExecutionFactId;
+        const attemptStatus =
+          current.nodeStatus === "running" ? "running" : "reconciling";
         const failedAttempt = database
           .prepare(
             `UPDATE node_attempts
                 SET status = ?, recoverable = ?, failure_code = ?,
-                    failure_message = ?, completed_at = ?
+                    failure_message = ?, completed_at = ?,
+                    terminal_execution_fact_id = COALESCE(?, terminal_execution_fact_id)
               WHERE id = (
                 SELECT id FROM node_attempts
-                 WHERE node_run_id = ? AND status = 'running'
+                 WHERE node_run_id = ? AND status = ?
               ORDER BY attempt_number DESC LIMIT 1
               )`,
           )
@@ -6736,12 +6744,14 @@ export const openPipelineRuntime = (
             input.failure.code,
             input.failure.message,
             requiresReconciliation ? null : now,
+            input.terminalExecutionFactId ?? null,
             input.nodeRunId,
+            attemptStatus,
           );
         if (failedAttempt.changes !== 1) {
           throw new PipelineRuntimeError(
             "CODE_REVIEW_BLOCK_STATE_INVALID",
-            `Code Review Node Run ${input.nodeRunId} has no running Attempt to block.`,
+            `Code Review Node Run ${input.nodeRunId} has no ${attemptStatus} Attempt to block.`,
           );
         }
       }

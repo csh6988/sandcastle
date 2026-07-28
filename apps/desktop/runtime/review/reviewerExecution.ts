@@ -111,7 +111,17 @@ export type ReviewerExecutionResult =
       readonly terminalExecutionFactId?: string;
     }
   | {
-      readonly status: "blocked" | "unknown";
+      readonly status: "blocked";
+      readonly code:
+        | "PROVIDER_ISOLATION_REQUIRED"
+        | "REVIEWER_OUTPUT_INVALID"
+        | "RECONCILE_UNKNOWN";
+      readonly message: string;
+      readonly evidence: readonly string[];
+      readonly terminalExecutionFactId?: string;
+    }
+  | {
+      readonly status: "unknown";
       readonly code:
         | "PROVIDER_ISOLATION_REQUIRED"
         | "REVIEWER_OUTPUT_INVALID"
