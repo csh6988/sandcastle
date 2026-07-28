@@ -2277,6 +2277,70 @@ describe("Company database migrations", () => {
       upgraded.close();
     }
   });
+
+  it("rejects same-name but incompatible v46 tables, triggers, and indexes transactionally", () => {
+    const corruptions = [
+      {
+        label: "extra table column",
+        sql: "ALTER TABLE integration_generations ADD COLUMN forged TEXT",
+      },
+      {
+        label: "no-op trigger",
+        sql: `DROP TRIGGER integration_execution_stages_terminal_update;
+              CREATE TRIGGER integration_execution_stages_terminal_update
+              BEFORE UPDATE ON integration_execution_stages BEGIN SELECT 1; END`,
+      },
+      {
+        label: "active lease index mismatch",
+        sql: `DROP INDEX execution_leases_active_operation_idx;
+              CREATE INDEX execution_leases_active_operation_idx
+                ON execution_leases(operation_key)`,
+      },
+    ] as const;
+    for (const corruption of corruptions) {
+      const companyDir = tempCompanyDir();
+      const current = openCompanyDatabase(companyDir);
+      const path = current.path;
+      current.close();
+      const forged = new DatabaseSync(path);
+      forged.exec(`
+        ${corruption.sql};
+        DELETE FROM schema_migrations WHERE version = 46;
+        UPDATE schema_metadata SET value = '45' WHERE key = 'schema_version';
+        PRAGMA user_version = 45;
+      `);
+      forged.close();
+
+      assert.throws(
+        () => openCompanyDatabase(companyDir),
+        new RegExp("Existing Integration schema is incompatible"),
+        corruption.label,
+      );
+      const inspected = new DatabaseSync(path);
+      try {
+        assert.equal(
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get()!.value,
+          "45",
+        );
+        assert.equal(
+          Number(
+            inspected
+              .prepare(
+                "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 46",
+              )
+              .get()!.count,
+          ),
+          0,
+        );
+      } finally {
+        inspected.close();
+      }
+    }
+  });
 });
 describe("Company database backups", () => {
   it("creates an online backup that can restore a closed company database", async () => {

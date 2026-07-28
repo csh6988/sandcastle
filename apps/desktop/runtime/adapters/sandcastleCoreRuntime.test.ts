@@ -157,6 +157,7 @@ describe("Sandcastle core Runtime loader", () => {
         providerOperationId: "reviewer-container-1",
         evidence: [
           "docker:ephemeral-container",
+          "docker:network:none",
           "mount:/review:readonly",
           "home:/home/agent:container-private",
           "cache:/home/agent/.cache:container-private",
@@ -169,6 +170,7 @@ describe("Sandcastle core Runtime loader", () => {
         ],
       },
     ]);
+    assert.equal(reviewerDockerOptions?.network, "none");
     await handle.close();
     assert.equal(closeCalls, 1);
     assert.equal(

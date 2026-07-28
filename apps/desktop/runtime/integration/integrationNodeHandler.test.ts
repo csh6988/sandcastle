@@ -46,6 +46,8 @@ const generation = (
     state,
     manifestHash: "b".repeat(64),
     manifest: {
+      schemaVersion: 1,
+      generationId: "integration:run-1:g1",
       projectId: "project-1",
       runId: "run-1",
       nodeRunId: "integration-node-1",
@@ -53,6 +55,15 @@ const generation = (
         {
           workPackageVersionId: "package-v1",
           repositoryReference: "/repositories/api",
+          reviewContext: {
+            codeReviewManifestId: "code-review-1",
+            codeReviewManifestHash: "c".repeat(64),
+            diffArtifactVersionId: "diff-1",
+            specRevisionIds: ["spec-1"],
+            harnessSnapshotIds: ["harness-1"],
+            acceptanceCriteria: ["The accepted API behavior remains valid."],
+            selfCheckEvidenceRefs: ["self-check-1"],
+          },
         },
       ],
       integrationConditions: ["npm test"],
@@ -154,7 +165,8 @@ describe("Integration Node Handler", () => {
         repositoryCommits: [
           { repositoryId: "/repositories/api", commit: "1".repeat(40) },
         ],
-        acceptanceCriteria: ["npm test"],
+        acceptanceCriteria: ["The accepted API behavior remains valid."],
+        generationManifest: generation("aggregate-review", true).manifest,
       },
     ]);
     assert.deepEqual(

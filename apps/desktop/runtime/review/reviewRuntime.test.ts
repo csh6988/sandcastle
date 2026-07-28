@@ -12,6 +12,11 @@ import { startCompanyRuntimeServer } from "../server.js";
 import { ReviewInputManifestSchema } from "../interface.js";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import { openReviewRuntime, ReviewRuntimeError } from "./reviewRuntime.js";
+import {
+  aggregateReviewManifestFor,
+  integrationManifestHash,
+} from "../integration/integrationAggregateManifest.js";
+import type { IntegrationGenerationManifest } from "../integration/integrationRuntime.js";
 
 const companyDirs: string[] = [];
 
@@ -851,6 +856,61 @@ describe("Review Runtime", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
+    const generationManifest: IntegrationGenerationManifest = {
+      schemaVersion: 1,
+      generationId: "generation-1",
+      generation: 1,
+      projectId: "project-1",
+      runId: "run-1",
+      snapshotRevisionId: "snapshot-1",
+      nodeRunId: "integration-node",
+      coverageId: "coverage-1",
+      coverageNodeRunId: "coverage-node",
+      coverageNodeAttemptId: "coverage-attempt",
+      coverageHash: "c".repeat(64),
+      repositories: [
+        {
+          repositoryReference: "repository-1",
+          baseCommit: "3".repeat(40),
+          integrationBranch: "integration/run-1/g1",
+        },
+      ],
+      packages: [
+        {
+          workPackageId: "package-1",
+          workPackageVersionId: "version-1",
+          applicationId: "application-1",
+          repositoryReference: "repository-1",
+          baseCommit: "3".repeat(40),
+          sourceBranch: "work/package-1",
+          sourceCommit: "1".repeat(40),
+          diffHash: "2".repeat(64),
+          authorityId: "authority-1",
+          qualityGateResultId: "gate-1",
+          reviewContext: {
+            codeReviewManifestId: "code-review-1",
+            codeReviewManifestHash: "e".repeat(64),
+            diffArtifactVersionId: "diff-1",
+            specRevisionIds: ["spec-1"],
+            harnessSnapshotIds: ["harness-1"],
+            acceptanceCriteria: ["npm test"],
+            selfCheckEvidenceRefs: ["self-check-1"],
+          },
+          dependencies: [],
+          contractVersions: [],
+          integrationConditions: ["npm test"],
+        },
+      ],
+      dependencyOrder: ["version-1"],
+      contractVersions: [],
+      integrationConditions: ["npm test"],
+      requiredValidations: [],
+    };
+    const generationHash = integrationManifestHash(generationManifest);
+    const generationJson = JSON.stringify(generationManifest).replaceAll(
+      "'",
+      "''",
+    );
     database.exec(`
       INSERT INTO positions(
         id, department_id, name, responsibility, ai_member_id, sort_order, created_at
@@ -866,7 +926,7 @@ describe("Review Runtime", () => {
       ) VALUES (
         'generation-1', 'project-1', 'run-1', 'snapshot-1', 'integration-node', 1,
         'coverage-1', 'coverage-node', 'coverage-attempt', '${"c".repeat(64)}',
-        '{}', '${"a".repeat(64)}', 'aggregate-review', NULL, NULL, NULL,
+        '${generationJson}', '${generationHash}', 'aggregate-review', NULL, NULL, NULL,
         '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z'
       );
       INSERT INTO work_package_assignments(
@@ -922,6 +982,15 @@ describe("Review Runtime", () => {
       events: { append: () => ({}) as never },
       clock: () => new Date("2026-07-28T00:00:00.000Z"),
     });
+    const aggregateManifest = aggregateReviewManifestFor({
+      generationId: "generation-1",
+      manifestHash: generationHash,
+      generationManifest,
+      topicId: "integration-review:generation-1",
+      repositoryCommits: [
+        { repositoryId: "repository-1", commit: "b".repeat(40) },
+      ],
+    });
     const input = {
       commandId: "generation-1:aggregate-review:record",
       actor: {
@@ -932,24 +1001,7 @@ describe("Review Runtime", () => {
       topicId: "integration-review:generation-1",
       projectId: "project-1",
       runId: "run-1",
-      manifest: {
-        scope: "aggregate" as const,
-        topicId: "integration-review:generation-1",
-        supportingArtifactVersionIds: [],
-        supportingSpecRevisionIds: [],
-        harnessSnapshotIds: [],
-        acceptanceCriteria: ["npm test"],
-        excludedContext: [
-          "hidden-prompts" as const,
-          "prior-reviewer-opinions" as const,
-          "private-transcripts" as const,
-        ],
-        integrationGenerationId: "generation-1",
-        integrationManifestHash: "a".repeat(64),
-        repositoryCommits: [
-          { repositoryId: "repository-1", commit: "b".repeat(40) },
-        ],
-      },
+      manifest: aggregateManifest,
       producer: {
         aiMemberId: "developer-ai",
         positionId: "developer-position",
@@ -966,9 +1018,24 @@ describe("Review Runtime", () => {
       conditions: [],
       evidenceRefs: [
         "execution-fact:aggregate-terminal-fact",
-        "isolation-receipt",
+        "integration-generation:generation-1",
+        `integration-manifest:${generationHash}`,
+        `repository-commit:repository-1:${"b".repeat(40)}`,
       ],
     };
+
+    database.exec("BEGIN IMMEDIATE");
+    assert.throws(
+      () =>
+        runtime.recordAggregateExecutionInTransaction({
+          ...input,
+          evidenceRefs: [...input.evidenceRefs, "fabricated"],
+        }),
+      (error: unknown) =>
+        error instanceof ReviewRuntimeError &&
+        error.code === "REVIEW_AGGREGATE_EXECUTION_CONFLICT",
+    );
+    database.exec("ROLLBACK");
 
     database.exec("BEGIN IMMEDIATE");
     const first = runtime.recordAggregateExecutionInTransaction(input);

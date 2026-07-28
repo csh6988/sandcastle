@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
+  readFileSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -74,6 +76,129 @@ const inputFor = (
 });
 
 describe("Isolated Integration validation executor", () => {
+  it("prepares Git workspaces with a minimal environment and ignores hostile global filters and hooks", async () => {
+    const { repository, integratedCommit } = repositoryFixture();
+    const root = mkdtempSync(join(tmpdir(), "integration-safe-git-env-"));
+    const hookMarker = join(root, "hook-ran");
+    const filterMarker = join(root, "filter-ran");
+    const hookDirectory = join(root, "hooks");
+    execFileSync("mkdir", ["-p", hookDirectory]);
+    writeFileSync(
+      join(hookDirectory, "post-checkout"),
+      `#!/bin/sh\nprintf hook > '${hookMarker}'\n`,
+      { mode: 0o755 },
+    );
+    const globalConfig = join(root, "hostile.gitconfig");
+    const globalAttributes = join(root, "hostile.attributes");
+    writeFileSync(globalAttributes, "* filter=leak\n");
+    writeFileSync(
+      globalConfig,
+      `[core]\n\thooksPath = ${hookDirectory}\n\tattributesFile = ${globalAttributes}\n[filter "leak"]\n\tsmudge = sh -c 'printf filter > ${filterMarker}; cat'\n\trequired = true\n`,
+    );
+    const gitPath = execFileSync("which", ["git"], {
+      encoding: "utf8",
+    }).trim();
+    const environmentLog = join(root, "environment.log");
+    const wrapper = join(root, "git-wrapper.sh");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nenv >> '${environmentLog}'\nprintf '%s\\n' __CALL__ >> '${environmentLog}'\nexec '${gitPath}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    const priorGlobal = process.env.GIT_CONFIG_GLOBAL;
+    const priorSecret = process.env.SANDCASTLE_TEST_SECRET;
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    process.env.SANDCASTLE_TEST_SECRET = "must-not-reach-git";
+    try {
+      const executor = openIsolatedIntegrationValidationExecutor({
+        evidenceRoot: join(root, "evidence"),
+        gitExecutable: wrapper,
+        provider: {
+          execute: async (input) => {
+            input.onOperationStarted({
+              providerId: "fixture",
+              providerOperationId: "safe-git-env",
+              evidenceRefs: [],
+            });
+            return {
+              status: "completed",
+              exitCode: 0,
+              providerId: "fixture",
+              providerOperationId: "safe-git-env",
+              terminalReceiptHash: "a".repeat(64),
+              evidenceRefs: [],
+              output: "passed",
+            };
+          },
+          inspect: async () => "not-found",
+          cancel: async () => "not-found",
+        },
+      });
+
+      assert.equal(
+        (await executor.execute(inputFor(repository, integratedCommit))).status,
+        "passed",
+      );
+    } finally {
+      if (priorGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = priorGlobal;
+      if (priorSecret === undefined) delete process.env.SANDCASTLE_TEST_SECRET;
+      else process.env.SANDCASTLE_TEST_SECRET = priorSecret;
+    }
+    const logged = readFileSync(environmentLog, "utf8");
+    assert.doesNotMatch(logged, /must-not-reach-git/);
+    assert.doesNotMatch(logged, new RegExp(globalConfig));
+    assert.equal(existsSync(hookMarker), false);
+    assert.equal(existsSync(filterMarker), false);
+  });
+
+  it("cancels a hung Git checkout into durable unknown without starting or retrying the provider", async () => {
+    const { repository, integratedCommit } = repositoryFixture();
+    const root = mkdtempSync(join(tmpdir(), "integration-safe-git-cancel-"));
+    const gitPath = execFileSync("which", ["git"], {
+      encoding: "utf8",
+    }).trim();
+    const checkoutLog = join(root, "checkout.log");
+    const wrapper = join(root, "git-wrapper.sh");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\ncase " $* " in\n  *" checkout "*)\n    printf checkout >> '${checkoutLog}'\n    trap 'exit 143' TERM INT\n    while :; do sleep 1; done\n    ;;\nesac\nexec '${gitPath}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    let providerExecutions = 0;
+    const executor = openIsolatedIntegrationValidationExecutor({
+      evidenceRoot: join(root, "evidence"),
+      gitExecutable: wrapper,
+      workspaceGitTimeoutMs: 10_000,
+      provider: {
+        execute: async () => {
+          providerExecutions += 1;
+          throw new Error("provider must not start");
+        },
+        inspect: async () => "unknown",
+        cancel: async () => "unknown",
+      },
+    });
+    const input = inputFor(repository, integratedCommit);
+    const executing = executor.execute(input);
+    for (
+      let attempt = 0;
+      attempt < 100 && !existsSync(checkoutLog);
+      attempt++
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(checkoutLog), true);
+    const cancelled = await executor.cancel!(input);
+    const terminal = await executing;
+
+    assert.equal(cancelled.status, "unknown");
+    assert.equal(terminal.status, "unknown");
+    assert.equal((await executor.execute(input)).status, "unknown");
+    assert.equal(readFileSync(checkoutLog, "utf8"), "checkout");
+    assert.equal(providerExecutions, 0);
+  });
+
   it("atomically fences concurrent execution before the provider starts", async () => {
     const { repository, integratedCommit } = repositoryFixture();
     let executes = 0;

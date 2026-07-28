@@ -114,6 +114,15 @@ export type CompletedCodeReviewCoverage = {
     readonly diffHash: string;
     readonly authorityId: string;
     readonly qualityGateResultId: string;
+    readonly reviewContext: {
+      readonly codeReviewManifestId: string;
+      readonly codeReviewManifestHash: string;
+      readonly diffArtifactVersionId: string;
+      readonly specRevisionIds: readonly string[];
+      readonly harnessSnapshotIds: readonly string[];
+      readonly acceptanceCriteria: readonly string[];
+      readonly selfCheckEvidenceRefs: readonly string[];
+    };
     readonly dependencies: readonly {
       readonly predecessorWorkPackageVersionId: string;
       readonly kind:
@@ -2214,6 +2223,18 @@ export const openCodeReviewRuntime = (
           diffHash: review.manifest.diffHash,
           authorityId: review.authority.id,
           qualityGateResultId: review.gateResult.id,
+          reviewContext: {
+            codeReviewManifestId: review.id,
+            codeReviewManifestHash: review.manifestHash,
+            diffArtifactVersionId: review.manifest.diffArtifactVersionId,
+            specRevisionIds: [...review.manifest.specRevisionIds].sort(),
+            harnessSnapshotIds: [...review.manifest.harnessSnapshotIds].sort(),
+            acceptanceCriteria: [...review.manifest.acceptanceCriteria].sort(),
+            selfCheckEvidenceRefs: [
+              ...review.manifest.selfCheck.evidenceRefs,
+              ...review.manifest.selfCheck.logRefs,
+            ].sort(),
+          },
           dependencies,
           contractVersions,
           integrationConditions: packageManifest.integrationConditions,

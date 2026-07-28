@@ -356,6 +356,7 @@ export const createSandcastleExecutionRuntimeFromModules = (
       };
       const evidence = [
         "docker:ephemeral-container",
+        "docker:network:none",
         "mount:/review:readonly",
         "home:/home/agent:container-private",
         "cache:/home/agent/.cache:container-private",
@@ -376,6 +377,7 @@ export const createSandcastleExecutionRuntimeFromModules = (
           XDG_CONFIG_HOME: "/home/agent/.config",
           XDG_DATA_HOME: "/home/agent/.local/share",
         },
+        network: "none",
       });
       const sandbox = {
         ...baseSandbox,

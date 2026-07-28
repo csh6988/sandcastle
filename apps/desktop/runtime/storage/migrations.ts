@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import {
   canonicalPipelineJson,
   pipelineHash,
@@ -4415,69 +4415,8 @@ const migrations: readonly CompanyMigration[] = [
     version: 46,
     name: "multi_repository_integration_generations",
     migrate: (database) => {
-      database.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS execution_leases_active_operation_idx
-          ON execution_leases(operation_key)
-          WHERE released_at IS NULL;
-      `);
-      const requiredObjects = [
-        "integration_generations",
-        "integration_repository_results",
-        "integration_operations",
-        "integration_validation_records",
-        "integration_defects",
-        "integration_aggregate_reviews",
-        "integration_execution_stages",
-        "integration_generations_run_idx",
-        "integration_operations_state_idx",
-        "integration_validation_records_generation_idx",
-        "integration_defects_generation_idx",
-        "integration_execution_stages_state_idx",
-        "integration_generations_identity_update",
-        "integration_generations_immutable_delete",
-        "integration_operations_identity_update",
-        "integration_operations_succeeded_update",
-        "integration_operations_immutable_delete",
-        "integration_repository_results_identity_update",
-        "integration_repository_results_terminal_update",
-        "integration_repository_results_immutable_delete",
-        "integration_validation_records_immutable_update",
-        "integration_validation_records_immutable_delete",
-        "integration_defects_evidence_update",
-        "integration_defects_immutable_delete",
-        "integration_aggregate_reviews_immutable_update",
-        "integration_aggregate_reviews_immutable_delete",
-        "integration_execution_stages_identity_update",
-        "integration_execution_stages_terminal_update",
-        "integration_execution_stages_immutable_delete",
-      ] as const;
-      const existingObjects = database
-        .prepare(
-          `SELECT name FROM sqlite_schema
-            WHERE name LIKE 'integration_%' ORDER BY name`,
-        )
-        .all() as Array<{ readonly name: string }>;
-      if (existingObjects.length > 0) {
-        const existingNames = new Set(
-          existingObjects.map((entry) => entry.name),
-        );
-        const missing = requiredObjects.filter(
-          (name) => !existingNames.has(name),
-        );
-        const unexpected = existingObjects
-          .map((entry) => entry.name)
-          .filter((name) => !requiredObjects.includes(name as never));
-        if (missing.length > 0 || unexpected.length > 0) {
-          throw new Error(
-            `Existing Integration schema is incompatible: ${[
-              ...missing,
-              ...unexpected,
-            ].join(", ")}`,
-          );
-        }
-        return;
-      }
-      database.exec(`
+      const createIntegrationSchema = (target: DatabaseSync): void =>
+        target.exec(`
         CREATE TABLE integration_generations (
           id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL REFERENCES projects(id),
@@ -4794,6 +4733,85 @@ const migrations: readonly CompanyMigration[] = [
           SELECT RAISE(ABORT, 'Integration execution stage evidence is immutable');
         END;
       `);
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createIntegrationSchema(reference);
+        const expectedObjects = reference
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'integration_%' ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+        const actualObjects = database
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'integration_%' ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+        if (actualObjects.length > 0) {
+          const actualByName = new Map(
+            actualObjects.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(
+            expectedObjects.map((entry) => entry.name),
+          );
+          const incompatible = expectedObjects
+            .filter((expected) => {
+              const actual = actualByName.get(expected.name);
+              return (
+                !actual ||
+                actual.type !== expected.type ||
+                normalizeSql(actual.sql) !== normalizeSql(expected.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actualObjects
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Integration schema is incompatible: ${incompatible.join(", ")}`,
+            );
+          }
+        } else {
+          createIntegrationSchema(database);
+        }
+      } finally {
+        reference.close();
+      }
+      const activeLeaseIndexSql = `CREATE UNIQUE INDEX execution_leases_active_operation_idx
+        ON execution_leases(operation_key)
+        WHERE released_at IS NULL`;
+      const activeLeaseIndex = database
+        .prepare(
+          "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'execution_leases_active_operation_idx'",
+        )
+        .get() as { readonly sql: string | null } | undefined;
+      if (
+        activeLeaseIndex?.sql &&
+        normalizeSql(activeLeaseIndex.sql) !== normalizeSql(activeLeaseIndexSql)
+      ) {
+        throw new Error(
+          "Existing Integration schema is incompatible: execution_leases_active_operation_idx",
+        );
+      }
+      if (!activeLeaseIndex) database.exec(activeLeaseIndexSql);
     },
   },
 ];

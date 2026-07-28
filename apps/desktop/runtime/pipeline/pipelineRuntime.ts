@@ -7194,8 +7194,9 @@ export const openPipelineRuntime = (
       const run = database
         .prepare(
           `UPDATE department_runs
-              SET status = 'blocked', revision = revision + 1, updated_at = ?
-            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+              SET status = CASE WHEN status = 'paused' THEN status ELSE 'blocked' END,
+                  revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked', 'paused')`,
         )
         .run(now, input.runId);
       if (run.changes !== 1) {
@@ -7248,8 +7249,9 @@ export const openPipelineRuntime = (
       const run = database
         .prepare(
           `UPDATE department_runs
-              SET status = 'running', revision = revision + 1, updated_at = ?
-            WHERE id = ? AND status = 'blocked'`,
+              SET status = CASE WHEN status = 'paused' THEN status ELSE 'running' END,
+                  revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('blocked', 'paused')`,
         )
         .run(now, input.runId);
       if (node.changes !== 1 || attempt.changes !== 1 || run.changes !== 1) {
