@@ -12,6 +12,7 @@ import {
   ProductReviewStateViewSchema,
   ReviewTopicViewSchema,
   CodeReviewViewSchema,
+  IntegrationGenerationViewSchema,
   type CommandEnvelope,
   type CommandResult,
   type ApplicationView,
@@ -29,6 +30,8 @@ import {
   type ReviewEnvelopeCommand,
   type CodeReviewEnvelopeCommand,
   type CodeReviewView,
+  type IntegrationEnvelopeCommand,
+  type IntegrationGenerationView,
   type MemoryEnvelopeCommand,
   MemoryCandidateViewSchema,
   MemoryDecisionViewSchema,
@@ -89,6 +92,10 @@ import {
   CodeReviewRuntimeError,
   type CodeReviewRuntime,
 } from "./review/codeReviewRuntime.js";
+import {
+  IntegrationRuntimeError,
+  type IntegrationRuntime,
+} from "./integration/integrationRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -213,6 +220,18 @@ export const companyCommandDefinitions = {
     primaryAggregate: "work-package",
     expectedRevisionRequired: true,
   },
+  "integration.generation.start": {
+    primaryAggregate: "integration-generation",
+    expectedRevisionRequired: false,
+  },
+  "integration.validation.record": {
+    primaryAggregate: "integration-generation",
+    expectedRevisionRequired: false,
+  },
+  "integration.aggregate-review.record": {
+    primaryAggregate: "integration-generation",
+    expectedRevisionRequired: false,
+  },
   "workspace-allocation.provision": {
     primaryAggregate: "workspace-allocation",
     expectedRevisionRequired: true,
@@ -336,6 +355,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof CodeReviewRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof IntegrationRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof RuntimeMemoryError) {
@@ -643,6 +665,145 @@ const executeCodeReviewCommand = (
         "Company database is busy; retry the same Command ID.",
       );
     }
+    throw error;
+  }
+};
+
+const executeIntegrationCommand = (
+  database: DatabaseSync,
+  integrations: IntegrationRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<IntegrationGenerationView> => {
+  if (!envelope.command.type.startsWith("integration.")) {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not an Integration command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<IntegrationGenerationView>;
+      }
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<IntegrationGenerationView>;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<IntegrationGenerationView>;
+    database.exec("SAVEPOINT integration_command");
+    try {
+      const value = integrations.dispatchInTransaction({
+        commandId: envelope.commandId,
+        actor: envelope.actor,
+        command: envelope.command as IntegrationEnvelopeCommand,
+      });
+      database.exec("RELEASE integration_command");
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      result = {
+        status: "succeeded",
+        value: IntegrationGenerationViewSchema.parse(value),
+        effectIds,
+      };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO integration_command");
+      database.exec("RELEASE integration_command");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
     throw error;
   }
 };
@@ -2674,6 +2835,7 @@ export const openCompanyCommandRegistry = (
   memoryFailure?: (point: MemoryCommandFailurePoint) => void,
   workPackageRuntime?: WorkPackageRuntime,
   codeReviewRuntime?: CodeReviewRuntime,
+  integrationRuntime?: IntegrationRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
@@ -2703,6 +2865,20 @@ export const openCompanyCommandRegistry = (
       return executeCodeReviewCommand(
         database,
         codeReviewRuntime,
+        envelope,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type.startsWith("integration.")) {
+      if (!integrationRuntime) {
+        throw new CompanyCommandError(
+          "INTEGRATION_RUNTIME_UNAVAILABLE",
+          "Integration Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeIntegrationCommand(
+        database,
+        integrationRuntime,
         envelope,
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;

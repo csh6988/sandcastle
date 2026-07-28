@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 45;
+export const CURRENT_SCHEMA_VERSION = 46;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4407,6 +4407,248 @@ const migrations: readonly CompanyMigration[] = [
           OR length(NEW.fresh_result_hash) <> 64
         BEGIN
           SELECT RAISE(ABORT, 'Code Review authority requires exact execution evidence bindings');
+        END;
+      `);
+    },
+  },
+  {
+    version: 46,
+    name: "multi_repository_integration_generations",
+    migrate: (database) => {
+      const requiredObjects = [
+        "integration_generations",
+        "integration_repository_results",
+        "integration_operations",
+        "integration_defects",
+        "integration_aggregate_reviews",
+        "integration_generations_run_idx",
+        "integration_operations_state_idx",
+        "integration_defects_generation_idx",
+        "integration_generations_identity_update",
+        "integration_generations_immutable_delete",
+        "integration_operations_identity_update",
+        "integration_operations_succeeded_update",
+        "integration_operations_immutable_delete",
+        "integration_aggregate_reviews_immutable_update",
+        "integration_aggregate_reviews_immutable_delete",
+      ] as const;
+      const existingObjects = database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE name LIKE 'integration_%' ORDER BY name`,
+        )
+        .all() as Array<{ readonly name: string }>;
+      if (existingObjects.length > 0) {
+        const existingNames = new Set(
+          existingObjects.map((entry) => entry.name),
+        );
+        const missing = requiredObjects.filter(
+          (name) => !existingNames.has(name),
+        );
+        const unexpected = existingObjects
+          .map((entry) => entry.name)
+          .filter((name) => !requiredObjects.includes(name as never));
+        if (missing.length > 0 || unexpected.length > 0) {
+          throw new Error(
+            `Existing Integration schema is incompatible: ${[
+              ...missing,
+              ...unexpected,
+            ].join(", ")}`,
+          );
+        }
+        return;
+      }
+      database.exec(`
+        CREATE TABLE integration_generations (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          run_id TEXT NOT NULL REFERENCES department_runs(id),
+          snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+          node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+          generation INTEGER NOT NULL CHECK (generation > 0),
+          coverage_id TEXT NOT NULL,
+          coverage_node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+          coverage_node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+          coverage_hash TEXT NOT NULL CHECK (length(coverage_hash) = 64),
+          manifest_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+          state TEXT NOT NULL CHECK (
+            state IN (
+              'pending', 'running', 'validating', 'aggregate-review', 'blocked', 'failed', 'passed'
+            )
+          ),
+          pass_authority_hash TEXT CHECK (
+            pass_authority_hash IS NULL OR length(pass_authority_hash) = 64
+          ),
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (run_id, generation),
+          UNIQUE (run_id, coverage_id)
+        ) STRICT;
+
+        CREATE TABLE integration_repository_results (
+          id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+          repository_reference TEXT NOT NULL,
+          base_commit TEXT NOT NULL CHECK (length(base_commit) = 40),
+          integration_branch TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (
+            state IN ('pending', 'running', 'validating', 'succeeded', 'failed', 'blocked')
+          ),
+          expected_tip TEXT NOT NULL CHECK (length(expected_tip) = 40),
+          integrated_commit TEXT CHECK (
+            integrated_commit IS NULL OR length(integrated_commit) = 40
+          ),
+          validation_json TEXT,
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (generation_id, repository_reference)
+        ) STRICT;
+
+        CREATE TABLE integration_operations (
+          id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+          repository_result_id TEXT NOT NULL REFERENCES integration_repository_results(id),
+          work_package_id TEXT NOT NULL REFERENCES work_packages(id),
+          work_package_version_id TEXT NOT NULL REFERENCES work_package_versions(id),
+          authority_id TEXT NOT NULL REFERENCES code_review_authorities(id),
+          quality_gate_result_id TEXT NOT NULL REFERENCES quality_gate_results(id),
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          source_branch TEXT NOT NULL,
+          source_commit TEXT NOT NULL CHECK (length(source_commit) = 40),
+          diff_hash TEXT NOT NULL CHECK (length(diff_hash) = 64),
+          expected_tip TEXT NOT NULL CHECK (length(expected_tip) = 40),
+          request_json TEXT NOT NULL,
+          request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+          idempotency_key TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (
+            state IN ('intent', 'running', 'succeeded', 'failed', 'unknown', 'blocked')
+          ),
+          receipt_json TEXT,
+          receipt_hash TEXT CHECK (receipt_hash IS NULL OR length(receipt_hash) = 64),
+          resulting_commit TEXT CHECK (
+            resulting_commit IS NULL OR length(resulting_commit) = 40
+          ),
+          failure_code TEXT,
+          failure_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (generation_id, work_package_version_id),
+          UNIQUE (generation_id, repository_result_id, ordinal)
+        ) STRICT;
+
+        CREATE TABLE integration_defects (
+          id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+          integration_operation_id TEXT REFERENCES integration_operations(id),
+          kind TEXT NOT NULL CHECK (
+            kind IN ('git-conflict', 'build-test', 'contract', 'aggregate', 'reconciliation')
+          ),
+          responsibility_json TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+          created_at TEXT NOT NULL,
+          closed_at TEXT
+        ) STRICT;
+
+        CREATE TABLE integration_aggregate_reviews (
+          id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL UNIQUE REFERENCES integration_generations(id),
+          topic_id TEXT NOT NULL REFERENCES review_topics(id),
+          quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+          input_json TEXT NOT NULL,
+          input_hash TEXT NOT NULL CHECK (length(input_hash) = 64),
+          result TEXT NOT NULL CHECK (result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')),
+          evidence_json TEXT NOT NULL,
+          pass_authority_hash TEXT CHECK (
+            pass_authority_hash IS NULL OR length(pass_authority_hash) = 64
+          ),
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX integration_generations_run_idx
+          ON integration_generations(run_id, generation, created_at);
+        CREATE INDEX integration_operations_state_idx
+          ON integration_operations(state, updated_at, id);
+        CREATE INDEX integration_defects_generation_idx
+          ON integration_defects(generation_id, status, created_at, id);
+
+        CREATE TRIGGER integration_generations_identity_update
+        BEFORE UPDATE ON integration_generations
+        WHEN NEW.id <> OLD.id
+          OR NEW.project_id <> OLD.project_id
+          OR NEW.run_id <> OLD.run_id
+          OR NEW.snapshot_revision_id <> OLD.snapshot_revision_id
+          OR NEW.node_run_id <> OLD.node_run_id
+          OR NEW.generation <> OLD.generation
+          OR NEW.coverage_id <> OLD.coverage_id
+          OR NEW.coverage_node_run_id <> OLD.coverage_node_run_id
+          OR NEW.coverage_node_attempt_id <> OLD.coverage_node_attempt_id
+          OR NEW.coverage_hash <> OLD.coverage_hash
+          OR NEW.manifest_json <> OLD.manifest_json
+          OR NEW.manifest_hash <> OLD.manifest_hash
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration Generation manifest is immutable');
+        END;
+        CREATE TRIGGER integration_generations_immutable_delete
+        BEFORE DELETE ON integration_generations
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration Generation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_operations_identity_update
+        BEFORE UPDATE ON integration_operations
+        WHEN NEW.id <> OLD.id
+          OR NEW.generation_id <> OLD.generation_id
+          OR NEW.repository_result_id <> OLD.repository_result_id
+          OR NEW.work_package_id <> OLD.work_package_id
+          OR NEW.work_package_version_id <> OLD.work_package_version_id
+          OR NEW.authority_id <> OLD.authority_id
+          OR NEW.quality_gate_result_id <> OLD.quality_gate_result_id
+          OR NEW.ordinal <> OLD.ordinal
+          OR NEW.source_branch <> OLD.source_branch
+          OR NEW.source_commit <> OLD.source_commit
+          OR NEW.diff_hash <> OLD.diff_hash
+          OR NEW.expected_tip <> OLD.expected_tip
+          OR NEW.request_json <> OLD.request_json
+          OR NEW.request_hash <> OLD.request_hash
+          OR NEW.idempotency_key <> OLD.idempotency_key
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration operation request is immutable');
+        END;
+        CREATE TRIGGER integration_operations_succeeded_update
+        BEFORE UPDATE ON integration_operations
+        WHEN OLD.state = 'succeeded' AND (
+          NEW.state IS NOT OLD.state
+          OR NEW.receipt_json IS NOT OLD.receipt_json
+          OR NEW.receipt_hash IS NOT OLD.receipt_hash
+          OR NEW.resulting_commit IS NOT OLD.resulting_commit
+          OR NEW.failure_code IS NOT OLD.failure_code
+          OR NEW.failure_message IS NOT OLD.failure_message
+          OR NEW.updated_at IS NOT OLD.updated_at
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Succeeded Integration operation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_operations_immutable_delete
+        BEFORE DELETE ON integration_operations
+        BEGIN
+          SELECT RAISE(ABORT, 'Integration operation evidence is immutable');
+        END;
+        CREATE TRIGGER integration_aggregate_reviews_immutable_update
+        BEFORE UPDATE ON integration_aggregate_reviews
+        BEGIN
+          SELECT RAISE(ABORT, 'Aggregate Integration review is immutable');
+        END;
+        CREATE TRIGGER integration_aggregate_reviews_immutable_delete
+        BEFORE DELETE ON integration_aggregate_reviews
+        BEGIN
+          SELECT RAISE(ABORT, 'Aggregate Integration review is immutable');
         END;
       `);
     },

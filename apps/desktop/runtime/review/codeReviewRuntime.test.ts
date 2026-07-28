@@ -1013,8 +1013,8 @@ describe("Code Review Runtime", () => {
     companyDirs.push(companyDir);
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(CURRENT_SCHEMA_VERSION, 45);
-      assert.equal(database.schemaVersion(), 45);
+      assert.equal(CURRENT_SCHEMA_VERSION, 46);
+      assert.equal(database.schemaVersion(), 46);
     } finally {
       database.close();
     }
@@ -3929,6 +3929,27 @@ describe("Code Review Runtime", () => {
         authorities.map((review) => review.gateResult!.id),
       );
       assert.match(aggregate.coverageHash, /^[a-f0-9]{64}$/);
+      const completedCoverage =
+        fixture.database.codeReviews.readCompletedCoverage("review-run");
+      assert.equal(
+        completedCoverage.coverageId,
+        completedCoverage.nodeAttemptId,
+      );
+      assert.equal(completedCoverage.coverageHash, aggregate.coverageHash);
+      assert.deepEqual(
+        completedCoverage.packages.map((entry) => ({
+          versionId: entry.workPackageVersionId,
+          authorityId: entry.authorityId,
+          gateResultId: entry.qualityGateResultId,
+          sourceCommit: entry.sourceCommit,
+        })),
+        authorities.map((review) => ({
+          versionId: review.manifest.workPackageVersionId,
+          authorityId: review.authority!.id,
+          gateResultId: review.gateResult!.id,
+          sourceCommit: review.manifest.sourceCommit,
+        })),
+      );
       raw.close();
     } finally {
       fixture.database.close();

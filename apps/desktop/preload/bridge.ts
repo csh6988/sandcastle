@@ -25,6 +25,7 @@ import {
   TechnicalReviewStateViewSchema,
   ReviewTopicViewSchema,
   CodeReviewViewSchema,
+  IntegrationGenerationViewSchema,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
@@ -813,30 +814,34 @@ export const createSandcastleBridge = (
                         ? ReviewTopicViewSchema.array().parse(result.view)
                         : nextQuery.type === "code-reviews.inspect"
                           ? CodeReviewViewSchema.array().parse(result.view)
-                          : nextQuery.type === "run.supervision.inspect"
-                            ? RunSupervisionViewSchema.parse(result.view)
-                            : nextQuery.type === "interaction.inspect"
-                              ? InteractionViewSchema.parse(result.view)
-                              : nextQuery.type === "memory.candidates.list"
-                                ? MemoryCandidateViewSchema.array().parse(
-                                    result.view,
-                                  )
-                                : nextQuery.type === "memory.records.list" ||
-                                    nextQuery.type ===
-                                      "memory.legacy-records.list"
-                                  ? LegacyMemoryRecordViewSchema.array().parse(
+                          : nextQuery.type === "integration-generations.inspect"
+                            ? IntegrationGenerationViewSchema.array().parse(
+                                result.view,
+                              )
+                            : nextQuery.type === "run.supervision.inspect"
+                              ? RunSupervisionViewSchema.parse(result.view)
+                              : nextQuery.type === "interaction.inspect"
+                                ? InteractionViewSchema.parse(result.view)
+                                : nextQuery.type === "memory.candidates.list"
+                                  ? MemoryCandidateViewSchema.array().parse(
                                       result.view,
                                     )
-                                  : nextQuery.type === "memory.entries.list"
-                                    ? MemoryEntryViewSchema.array().parse(
+                                  : nextQuery.type === "memory.records.list" ||
+                                      nextQuery.type ===
+                                        "memory.legacy-records.list"
+                                    ? LegacyMemoryRecordViewSchema.array().parse(
                                         result.view,
                                       )
-                                    : nextQuery.type ===
-                                        "memory.selections.list"
-                                      ? RunMemorySelectionViewSchema.array().parse(
+                                    : nextQuery.type === "memory.entries.list"
+                                      ? MemoryEntryViewSchema.array().parse(
                                           result.view,
                                         )
-                                      : result.view;
+                                      : nextQuery.type ===
+                                          "memory.selections.list"
+                                        ? RunMemorySelectionViewSchema.array().parse(
+                                            result.view,
+                                          )
+                                        : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
@@ -888,56 +893,61 @@ export const createSandcastleBridge = (
                 : input.command.type === "code-review.start" ||
                     input.command.type === "code-review.converge"
                   ? CodeReviewViewSchema.parse(result.value)
-                  : input.command.type.startsWith("review.")
-                    ? ReviewTopicViewSchema.parse(result.value)
-                    : input.command.type === "workspace-allocation.provision" ||
-                        input.command.type === "source-import.execute" ||
-                        input.command.type === "workspace-allocation.cleanup"
-                      ? WorkspaceAllocationViewSchema.parse(result.value)
-                      : input.command.type === "memory.candidate.propose" ||
-                          input.command.type === "memory.review.start"
-                        ? MemoryCandidateViewSchema.parse(result.value)
-                        : input.command.type === "memory.candidate.decide"
-                          ? MemoryDecisionViewSchema.parse(result.value)
-                          : input.command.type === "memory.entry.select-for-run"
-                            ? RunMemorySelectionViewSchema.parse(result.value)
-                            : input.command.type === "interaction.prompt"
-                              ? InteractionTurnViewSchema.parse(result.value)
-                              : input.command.type === "node-attempt.cancel" ||
-                                  input.command.type ===
-                                    "interaction-turn.cancel" ||
-                                  input.command.type ===
-                                    "run.governed-intervention"
-                                ? RunSupervisionViewSchema.parse(result.value)
+                  : input.command.type.startsWith("integration.")
+                    ? IntegrationGenerationViewSchema.parse(result.value)
+                    : input.command.type.startsWith("review.")
+                      ? ReviewTopicViewSchema.parse(result.value)
+                      : input.command.type ===
+                            "workspace-allocation.provision" ||
+                          input.command.type === "source-import.execute" ||
+                          input.command.type === "workspace-allocation.cleanup"
+                        ? WorkspaceAllocationViewSchema.parse(result.value)
+                        : input.command.type === "memory.candidate.propose" ||
+                            input.command.type === "memory.review.start"
+                          ? MemoryCandidateViewSchema.parse(result.value)
+                          : input.command.type === "memory.candidate.decide"
+                            ? MemoryDecisionViewSchema.parse(result.value)
+                            : input.command.type ===
+                                "memory.entry.select-for-run"
+                              ? RunMemorySelectionViewSchema.parse(result.value)
+                              : input.command.type === "interaction.prompt"
+                                ? InteractionTurnViewSchema.parse(result.value)
                                 : input.command.type ===
-                                    "interaction.turn.cancel"
-                                  ? InteractionTurnViewSchema.parse(
-                                      result.value,
-                                    )
-                                  : input.command.type === "permission.decide"
-                                    ? PermissionRequestViewSchema.parse(
+                                      "node-attempt.cancel" ||
+                                    input.command.type ===
+                                      "interaction-turn.cancel" ||
+                                    input.command.type ===
+                                      "run.governed-intervention"
+                                  ? RunSupervisionViewSchema.parse(result.value)
+                                  : input.command.type ===
+                                      "interaction.turn.cancel"
+                                    ? InteractionTurnViewSchema.parse(
                                         result.value,
                                       )
-                                    : input.command.type.startsWith(
-                                          "work-package.",
-                                        )
-                                      ? WorkPackageGraphViewSchema.parse(
+                                    : input.command.type === "permission.decide"
+                                      ? PermissionRequestViewSchema.parse(
                                           result.value,
                                         )
-                                      : z
-                                          .object({
-                                            acknowledged: z.literal(true),
-                                            subscriptionGeneration: z
-                                              .number()
-                                              .int()
-                                              .positive(),
-                                            barrierSequence: z
-                                              .number()
-                                              .int()
-                                              .nonnegative(),
-                                            auditId: z.string().trim().min(1),
-                                          })
-                                          .parse(result.value);
+                                      : input.command.type.startsWith(
+                                            "work-package.",
+                                          )
+                                        ? WorkPackageGraphViewSchema.parse(
+                                            result.value,
+                                          )
+                                        : z
+                                            .object({
+                                              acknowledged: z.literal(true),
+                                              subscriptionGeneration: z
+                                                .number()
+                                                .int()
+                                                .positive(),
+                                              barrierSequence: z
+                                                .number()
+                                                .int()
+                                                .nonnegative(),
+                                              auditId: z.string().trim().min(1),
+                                            })
+                                            .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,

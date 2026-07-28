@@ -93,6 +93,12 @@ const agUiRegistryFixture = [
   "code-review.authority.created@1:custom",
   "code-review.defect.created@1:custom",
   "code-review.defect.closed@1:custom",
+  "integration.generation.started@1:custom",
+  "integration.generation.validating@1:custom",
+  "integration.generation.aggregate-review@1:custom",
+  "integration.generation.blocked@1:custom",
+  "integration.generation.failed@1:custom",
+  "integration.generation.completed@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -138,7 +144,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 14);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 15);
 
     assert.deepEqual(
       registry
@@ -255,6 +261,51 @@ describe("Runtime Event registry", () => {
           status: "pending",
         },
       }),
+    );
+  });
+
+  it("adds v15 Integration events without changing retained v14 contracts", () => {
+    const registry = createRuntimeEventRegistry();
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "run.created",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          departmentId: "department-1",
+          runId: "run-1",
+        },
+        payload: { runId: "run-1", status: "ready" },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "integration.generation.completed",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          nodeRunId: "integration-node-1",
+          integrationGenerationId: "generation-1",
+        },
+        payload: { generationId: "generation-1", state: "passed" },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "integration.generation.completed",
+          scope: {
+            companyId: "company",
+            projectId: "project-1",
+            runId: "run-1",
+            nodeRunId: "integration-node-1",
+          },
+          payload: { generationId: "generation-1", state: "passed" },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
     );
   });
 

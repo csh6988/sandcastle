@@ -417,6 +417,8 @@ export const startCompanyRuntimeServer = async (
                     return database.review.list(query);
                   case "code-reviews.inspect":
                     return database.codeReviews.inspect(query.runId);
+                  case "integration-generations.inspect":
+                    return database.integrations.inspect(query.runId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -495,6 +497,8 @@ export const startCompanyRuntimeServer = async (
                   return database.review.list(request.query);
                 case "code-reviews.inspect":
                   return database.codeReviews.inspect(request.query.runId);
+                case "integration-generations.inspect":
+                  return database.integrations.inspect(request.query.runId);
                 case "departments.list":
                   return database.catalog.departments();
                 case "department.inspect":

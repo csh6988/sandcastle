@@ -12,6 +12,8 @@ import {
 } from "./commandRegistry.js";
 import { openProjectConfiguration } from "./project/projectConfiguration.js";
 import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
+import { migrateCompanyDatabase } from "./storage/migrations.js";
+import type { IntegrationRuntime } from "./integration/integrationRuntime.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -23,6 +25,109 @@ const actor = {
 };
 
 describe("Company Runtime command registry", () => {
+  it("replays Integration Commands and rejects changed input under the same Command ID", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    const projectConfiguration = openProjectConfiguration(database);
+    let dispatchCount = 0;
+    const integrationRuntime = {
+      dispatchInTransaction: (input: {
+        readonly command: { readonly generationId: string };
+      }) => {
+        dispatchCount += 1;
+        return {
+          id: input.command.generationId,
+          manifest: {
+            schemaVersion: 1,
+            generationId: input.command.generationId,
+            generation: 1,
+            projectId: "project-1",
+            runId: "run-1",
+            snapshotRevisionId: "snapshot-1",
+            nodeRunId: "integration-node-1",
+            coverageId: "coverage-1",
+            coverageNodeRunId: "code-review-node-1",
+            coverageNodeAttemptId: "code-review-attempt-1",
+            coverageHash: "a".repeat(64),
+            repositories: [],
+            packages: [],
+            dependencyOrder: [],
+            contractVersions: [],
+            integrationConditions: [],
+          },
+          manifestHash: "b".repeat(64),
+          state: "pending",
+          repositoryResults: [],
+          operations: [],
+          defects: [],
+          aggregateReview: null,
+          passAuthorityHash: null,
+        };
+      },
+    } as unknown as IntegrationRuntime;
+    const registry = openCompanyCommandRegistry(
+      database,
+      projectConfiguration,
+      undefined,
+      () => new Date("2026-07-28T00:00:00.000Z"),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      integrationRuntime,
+    );
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "integration-command-1",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "integration-node-handler",
+        authenticatedBy: "runtime" as const,
+      },
+      consumerId: "integration-node-handler",
+      command: {
+        type: "integration.generation.start" as const,
+        generationId: "generation-1",
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
+      },
+    };
+
+    const first = registry.execute(envelope);
+    const replay = registry.execute(envelope);
+    const changed = registry.execute({
+      ...envelope,
+      command: { ...envelope.command, generationId: "generation-2" },
+    });
+
+    assert.deepEqual(replay, first);
+    assert.equal(dispatchCount, 1);
+    assert.equal(changed.status, "rejected");
+    if (changed.status === "rejected") {
+      assert.equal(changed.error.code, "COMMAND_ID_REUSE");
+    }
+    assert.equal(
+      (
+        database
+          .prepare("SELECT COUNT(*) AS count FROM runtime_unit_of_work_context")
+          .get() as { readonly count: number }
+      ).count,
+      0,
+    );
+    database.close();
+  });
+
   it("persists an idempotent ACP Permission decision, receipt, and registry-valid events in one unit of work", () => {
     const database = openCompanyDatabase(tempCompanyDir());
     try {

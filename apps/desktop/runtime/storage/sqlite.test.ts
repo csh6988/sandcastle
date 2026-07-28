@@ -465,6 +465,10 @@ describe("Company database migrations", () => {
               version: 45,
               name: "immutable_exact_code_review_execution_evidence",
             },
+            {
+              version: 46,
+              name: "multi_repository_integration_generations",
+            },
           ],
         );
         assert.deepEqual(
@@ -2073,6 +2077,78 @@ describe("Company database migrations", () => {
               .get() as { readonly count: number }
           ).count,
           1,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("upgrades schema version 45 with immutable Integration Generation storage", () => {
+    const companyDir = tempCompanyDir();
+    const initial = openCompanyDatabase(companyDir);
+    const path = initial.path;
+    initial.close();
+    const old = new DatabaseSync(path);
+    old.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TRIGGER integration_aggregate_reviews_immutable_delete;
+      DROP TRIGGER integration_aggregate_reviews_immutable_update;
+      DROP TRIGGER integration_operations_immutable_delete;
+      DROP TRIGGER integration_operations_succeeded_update;
+      DROP TRIGGER integration_operations_identity_update;
+      DROP TRIGGER integration_generations_immutable_delete;
+      DROP TRIGGER integration_generations_identity_update;
+      DROP INDEX integration_defects_generation_idx;
+      DROP INDEX integration_operations_state_idx;
+      DROP INDEX integration_generations_run_idx;
+      DROP TABLE integration_aggregate_reviews;
+      DROP TABLE integration_defects;
+      DROP TABLE integration_operations;
+      DROP TABLE integration_repository_results;
+      DROP TABLE integration_generations;
+      DELETE FROM schema_migrations WHERE version = 46;
+      UPDATE schema_metadata SET value = '45' WHERE key = 'schema_version';
+      PRAGMA user_version = 45;
+    `);
+    old.close();
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), 46);
+      const inspected = new DatabaseSync(upgraded.path);
+      try {
+        assert.deepEqual(
+          inspected
+            .prepare(
+              `SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name LIKE 'integration_%'
+                ORDER BY name`,
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            { name: "integration_aggregate_reviews" },
+            { name: "integration_defects" },
+            { name: "integration_generations" },
+            { name: "integration_operations" },
+            { name: "integration_repository_results" },
+          ],
+        );
+        assert.deepEqual(
+          {
+            ...(inspected
+              .prepare(
+                "SELECT version, name FROM schema_migrations WHERE version = 46",
+              )
+              .get() as Record<string, unknown>),
+          },
+          {
+            version: 46,
+            name: "multi_repository_integration_generations",
+          },
         );
       } finally {
         inspected.close();

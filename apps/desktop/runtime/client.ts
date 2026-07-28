@@ -34,6 +34,7 @@ import {
   TechnicalReviewStateViewSchema,
   ReviewTopicViewSchema,
   CodeReviewViewSchema,
+  IntegrationGenerationViewSchema,
   WorkspaceAllocationViewSchema,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
@@ -211,6 +212,7 @@ export const createCompanyRuntimeClientFromTransport = (
         query.type === "review.topic.inspect" ||
         query.type === "review.topics.list" ||
         query.type === "code-reviews.inspect" ||
+        query.type === "integration-generations.inspect" ||
         query.type === "run.supervision.inspect" ||
         query.type === "artifact.inspect" ||
         query.type === "artifact.lineage.inspect" ||
@@ -299,6 +301,10 @@ export const createCompanyRuntimeClientFromTransport = (
         ) as unknown as CompanyQueryResult<Query>;
       case "code-reviews.inspect":
         return CodeReviewViewSchema.array().parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "integration-generations.inspect":
+        return IntegrationGenerationViewSchema.array().parse(
           queryValue,
         ) as unknown as CompanyQueryResult<Query>;
       case "departments.list":
@@ -801,36 +807,47 @@ export const createCompanyRuntimeClientFromTransport = (
                       ? ReviewTopicViewSchema.parse(parsed.view)
                       : envelope.query.type === "review.topics.list"
                         ? ReviewTopicViewSchema.array().parse(parsed.view)
-                        : envelope.query.type === "run.supervision.inspect"
-                          ? RunSupervisionViewSchema.parse(parsed.view)
-                          : envelope.query.type === "memory.candidates.list"
-                            ? MemoryCandidateViewSchema.array().parse(
+                        : envelope.query.type === "code-reviews.inspect"
+                          ? CodeReviewViewSchema.array().parse(parsed.view)
+                          : envelope.query.type ===
+                              "integration-generations.inspect"
+                            ? IntegrationGenerationViewSchema.array().parse(
                                 parsed.view,
                               )
-                            : envelope.query.type === "memory.records.list" ||
-                                envelope.query.type ===
-                                  "memory.legacy-records.list"
-                              ? LegacyMemoryRecordViewSchema.array().parse(
-                                  parsed.view,
-                                )
-                              : envelope.query.type === "memory.entries.list"
-                                ? MemoryEntryViewSchema.array().parse(
+                            : envelope.query.type === "run.supervision.inspect"
+                              ? RunSupervisionViewSchema.parse(parsed.view)
+                              : envelope.query.type === "memory.candidates.list"
+                                ? MemoryCandidateViewSchema.array().parse(
                                     parsed.view,
                                   )
                                 : envelope.query.type ===
-                                    "memory.selections.list"
-                                  ? RunMemorySelectionViewSchema.array().parse(
+                                      "memory.records.list" ||
+                                    envelope.query.type ===
+                                      "memory.legacy-records.list"
+                                  ? LegacyMemoryRecordViewSchema.array().parse(
                                       parsed.view,
                                     )
                                   : envelope.query.type ===
-                                      "interaction.inspect"
-                                    ? InteractionViewSchema.parse(parsed.view)
-                                    : (() => {
-                                        throw new RuntimeClientError(
-                                          "PROTOCOL_ERROR",
-                                          `Verified QueryEnvelope does not support ${envelope.query.type}.`,
-                                        );
-                                      })();
+                                      "memory.entries.list"
+                                    ? MemoryEntryViewSchema.array().parse(
+                                        parsed.view,
+                                      )
+                                    : envelope.query.type ===
+                                        "memory.selections.list"
+                                      ? RunMemorySelectionViewSchema.array().parse(
+                                          parsed.view,
+                                        )
+                                      : envelope.query.type ===
+                                          "interaction.inspect"
+                                        ? InteractionViewSchema.parse(
+                                            parsed.view,
+                                          )
+                                        : (() => {
+                                            throw new RuntimeClientError(
+                                              "PROTOCOL_ERROR",
+                                              `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                                            );
+                                          })();
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,
@@ -848,6 +865,15 @@ export const createCompanyRuntimeClientFromTransport = (
     });
     const parsed = CommandResultSchema.safeParse(raw);
     if (parsed.success) {
+      if (
+        parsed.data.status === "succeeded" &&
+        envelope.command.type.startsWith("integration.")
+      ) {
+        return {
+          ...parsed.data,
+          value: IntegrationGenerationViewSchema.parse(parsed.data.value),
+        } as unknown as CommandResult<EnvelopeCommandResult<Command>>;
+      }
       return parsed.data as CommandResult<EnvelopeCommandResult<Command>>;
     }
     if (envelope.command.type === "ack-runtime-events") {

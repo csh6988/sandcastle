@@ -149,6 +149,41 @@ const codeReviewView = {
   integrationEligible: false,
 };
 
+const integrationGenerationView = {
+  id: "generation-1",
+  manifest: {
+    schemaVersion: 1 as const,
+    generationId: "generation-1",
+    generation: 1,
+    projectId: "project-1",
+    runId: "run-1",
+    snapshotRevisionId: "snapshot-1",
+    nodeRunId: "integration-node-1",
+    coverageId: "coverage-1",
+    coverageNodeRunId: "code-review-node-1",
+    coverageNodeAttemptId: "code-review-attempt-1",
+    coverageHash: "a".repeat(64),
+    repositories: [
+      {
+        repositoryReference: "/repositories/api",
+        baseCommit: "b".repeat(40),
+        integrationBranch: "integration/run-1/g1",
+      },
+    ],
+    packages: [],
+    dependencyOrder: [],
+    contractVersions: [],
+    integrationConditions: ["npm test"],
+  },
+  manifestHash: "c".repeat(64),
+  state: "validating" as const,
+  repositoryResults: [],
+  operations: [],
+  defects: [],
+  aggregateReview: null,
+  passAuthorityHash: null,
+};
+
 describe("Sandcastle preload bridge", () => {
   it("parses Workspace command results through the typed tunnel", async () => {
     const bridge = createSandcastleBridge(async (channel) => {
@@ -293,6 +328,39 @@ describe("Sandcastle preload bridge", () => {
       ),
       ["query", "execute"],
     );
+  });
+
+  it("parses Integration Generation Query Views and Commands through the typed tunnel", async () => {
+    const bridge = createSandcastleBridge(async (_channel, payload) => {
+      const request = payload as { readonly operation?: string };
+      return request.operation === "query"
+        ? { view: [integrationGenerationView], asOfSequence: 22 }
+        : {
+            status: "succeeded",
+            value: integrationGenerationView,
+            effectIds: ["audit-integration-1"],
+          };
+    });
+
+    const inspected = await bridge.query({
+      type: "integration-generations.inspect",
+      runId: "run-1",
+    });
+    const started = await bridge.execute({
+      commandId: "integration-start-1",
+      command: {
+        type: "integration.generation.start",
+        generationId: "generation-1",
+        runId: "run-1",
+        nodeRunId: "integration-node-1",
+      },
+    });
+
+    assert.equal(inspected.view[0]?.manifestHash, "c".repeat(64));
+    assert.equal(started.status, "succeeded");
+    if (started.status === "succeeded") {
+      assert.equal(started.value.id, "generation-1");
+    }
   });
 
   it("exposes Interaction Prompt without leaking Electron IPC", async () => {

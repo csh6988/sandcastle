@@ -209,6 +209,12 @@ export interface PipelineRuntime {
       readonly nodeRunId: string;
     }) => Promise<void>,
   ) => void;
+  readonly registerIntegrationExecutor: (
+    executor: (input: {
+      readonly runId: string;
+      readonly nodeRunId: string;
+    }) => Promise<void>,
+  ) => void;
   readonly executeCodeReviewStage: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -309,6 +315,30 @@ export interface PipelineRuntime {
     readonly authorityIds: readonly string[];
     readonly qualityGateResultIds: readonly string[];
     readonly coverageHash: string;
+  }) => void;
+  readonly startIntegrationInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly generationId: string;
+  }) => void;
+  readonly blockIntegrationInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly generationId: string;
+    readonly failure: {
+      readonly code: string;
+      readonly message: string;
+    };
+  }) => void;
+  readonly completeIntegrationInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly generationId: string;
+    readonly passAuthorityHash: string;
+    readonly repositoryCommits: readonly {
+      readonly repositoryReference: string;
+      readonly commit: string;
+    }[];
   }) => void;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
@@ -606,6 +636,16 @@ export const openPipelineRuntime = (
   const registerCodeReviewExecutor: PipelineRuntime["registerCodeReviewExecutor"] =
     (executor) => {
       codeReviewExecutor = executor;
+    };
+  let integrationExecutor:
+    | ((input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+      }) => Promise<void>)
+    | undefined;
+  const registerIntegrationExecutor: PipelineRuntime["registerIntegrationExecutor"] =
+    (executor) => {
+      integrationExecutor = executor;
     };
   let executeCodeReviewStage: PipelineRuntime["executeCodeReviewStage"];
   const appendRuntimeMutation = (input: {
@@ -6926,6 +6966,211 @@ export const openPipelineRuntime = (
       });
     };
 
+  const startIntegrationInTransaction: PipelineRuntime["startIntegrationInTransaction"] =
+    (input) => {
+      const current = database
+        .prepare(
+          `SELECT node_runs.status AS nodeStatus,
+                  node_runs.attempt_count AS attemptCount,
+                  node_runs.handler_kind_id AS handlerKindId,
+                  department_runs.status AS runStatus,
+                  department_runs.snapshot_revision_id AS snapshotRevisionId
+             FROM node_runs
+             JOIN department_runs ON department_runs.id = node_runs.run_id
+            WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+        )
+        .get(input.nodeRunId, input.runId) as
+        | {
+            readonly nodeStatus: string;
+            readonly attemptCount: number;
+            readonly handlerKindId: string;
+            readonly runStatus: string;
+            readonly snapshotRevisionId: string;
+          }
+        | undefined;
+      if (
+        !current ||
+        current.handlerKindId !== "integration@1" ||
+        !["ready", "blocked"].includes(current.nodeStatus) ||
+        !["ready", "running", "blocked"].includes(current.runStatus)
+      ) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_START_STATE_INVALID",
+          `Integration Node Run ${input.nodeRunId} cannot start from its current Pipeline state.`,
+        );
+      }
+      const now = clock().toISOString();
+      database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'running', attempt_count = attempt_count + 1,
+                  result_json = ?, failure_code = NULL, failure_message = NULL,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'
+              AND status IN ('ready', 'blocked')`,
+        )
+        .run(
+          canonicalPipelineJson({ generationId: input.generationId }),
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      const attemptId = randomUUID();
+      database
+        .prepare(
+          `INSERT INTO node_attempts(
+             id, node_run_id, attempt_number, snapshot_revision_id, reason,
+             status, structured_result_json, failure_code, failure_message,
+             created_at, started_at, completed_at
+           ) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(
+          attemptId,
+          input.nodeRunId,
+          current.attemptCount + 1,
+          current.snapshotRevisionId,
+          current.attemptCount === 0 ? "initial" : "recovery",
+          canonicalPipelineJson({ generationId: input.generationId }),
+          now,
+          now,
+        );
+      appendRuntimeMutation({
+        action: "node.integration-start",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.started",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        nodeAttemptId: attemptId,
+        before: { status: current.nodeStatus },
+        after: {
+          status: "running",
+          runStatus: "running",
+          generationId: input.generationId,
+        },
+        createdAt: now,
+      });
+    };
+
+  const blockIntegrationInTransaction: PipelineRuntime["blockIntegrationInTransaction"] =
+    (input) => {
+      const now = clock().toISOString();
+      database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'blocked', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'
+              AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'failed', recoverable = 0, failure_code = ?,
+                  failure_message = ?, completed_at = ?
+            WHERE id = (
+              SELECT id FROM node_attempts WHERE node_run_id = ?
+                AND status IN ('running', 'reconciling')
+              ORDER BY attempt_number DESC LIMIT 1
+            )`,
+        )
+        .run(input.failure.code, input.failure.message, now, input.nodeRunId);
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'blocked', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+        )
+        .run(now, input.runId);
+      appendRuntimeMutation({
+        action: "run.integration-blocked",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.blocked",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: {
+          status: "blocked",
+          generationId: input.generationId,
+          failure: input.failure,
+        },
+        createdAt: now,
+      });
+    };
+
+  const completeIntegrationInTransaction: PipelineRuntime["completeIntegrationInTransaction"] =
+    (input) => {
+      const now = clock().toISOString();
+      const result = {
+        generationId: input.generationId,
+        passAuthorityHash: input.passAuthorityHash,
+        repositoryCommits: input.repositoryCommits,
+      };
+      const node = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'succeeded', result_json = ?, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'integration@1'
+              AND status = 'running'`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId, input.runId);
+      const attempt = database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'succeeded', structured_result_json = ?,
+                  failure_code = NULL, failure_message = NULL, completed_at = ?
+            WHERE id = (
+              SELECT id FROM node_attempts WHERE node_run_id = ?
+                AND status = 'running'
+              ORDER BY attempt_number DESC LIMIT 1
+            )`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId);
+      if (node.changes !== 1 || attempt.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "INTEGRATION_COMPLETE_STATE_INVALID",
+          `Integration Node Run ${input.nodeRunId} has no running Attempt to complete.`,
+        );
+      }
+      refreshQueuedNodes(input.runId, now);
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, input.runId);
+      appendRuntimeMutation({
+        action: "node.integration-complete",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.succeeded",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: { status: "succeeded", ...result },
+        createdAt: now,
+      });
+    };
+
   const releaseWorkPackageSuccessorsInTransaction: PipelineRuntime["releaseWorkPackageSuccessorsInTransaction"] =
     (input) => {
       const assignment = database
@@ -8648,14 +8893,21 @@ export const openPipelineRuntime = (
           );
         }
         await codeReviewExecutor({ runId: input.runId, nodeRunId: ready.id });
-        const afterCodeReview = inspectRun(input.runId);
-        if (
-          afterCodeReview.nodes.find((candidate) => candidate.id === ready.id)
-            ?.status === "ready"
-        ) {
-          return afterCodeReview;
+        return inspectRun(input.runId);
+      }
+
+      if (ready.handler?.handlerKindId === "integration@1") {
+        if (!integrationExecutor) {
+          throw new PipelineRuntimeError(
+            "INTEGRATION_EXECUTOR_UNAVAILABLE",
+            "The frozen integration@1 Node has no registered Runtime executor.",
+          );
         }
-        continue;
+        await integrationExecutor({
+          runId: input.runId,
+          nodeRunId: ready.id,
+        });
+        return inspectRun(input.runId);
       }
 
       if ((executionAdapter.maxConcurrentNodes ?? 1) > 1) {
@@ -9544,6 +9796,7 @@ export const openPipelineRuntime = (
     forkRun,
     executeReady,
     registerCodeReviewExecutor,
+    registerIntegrationExecutor,
     executeCodeReviewStage,
     reconcileWorkPackageImports,
     controlRun,
@@ -9558,6 +9811,9 @@ export const openPipelineRuntime = (
     blockCodeReviewInTransaction,
     startCodeReviewInTransaction,
     completeCodeReviewInTransaction,
+    startIntegrationInTransaction,
+    blockIntegrationInTransaction,
+    completeIntegrationInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,

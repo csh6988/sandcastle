@@ -115,6 +115,16 @@ import {
   type CodeReviewNodeHandler,
 } from "../review/codeReviewNodeHandler.js";
 import type { ReviewerExecutionAdapter } from "../review/reviewerExecution.js";
+import {
+  openIntegrationRuntime,
+  type GitIntegrationAdapter,
+  type IntegrationRuntime,
+} from "../integration/integrationRuntime.js";
+import { openLocalGitIntegrationAdapter } from "../integration/gitIntegrationAdapter.js";
+import {
+  openIntegrationNodeHandler,
+  type IntegrationNodeHandler,
+} from "../integration/integrationNodeHandler.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -140,6 +150,8 @@ export interface CompanyDatabase {
   readonly workPackages: WorkPackageRuntime;
   readonly codeReviews: CodeReviewRuntime;
   readonly codeReviewNodeHandler: CodeReviewNodeHandler;
+  readonly integrations: IntegrationRuntime;
+  readonly integrationNodeHandler: IntegrationNodeHandler;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
   readonly backup: () => Promise<CompanyDatabaseBackup>;
@@ -250,6 +262,13 @@ export const openCompanyDatabase = (
     readonly codeReviewRuntime?: {
       readonly reviewerWorkspaceAdapter?: ReviewerWorkspaceAdapter;
       readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
+    };
+    readonly integrationRuntime?: {
+      readonly gitAdapter?: GitIntegrationAdapter;
+      readonly failureInjection?: (
+        point: "after-intent" | "after-effect",
+        operationId: string,
+      ) => void;
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -411,6 +430,19 @@ export const openCompanyDatabase = (
         : blockingReviewerWorkspaceAdapter),
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const integrations = openIntegrationRuntime(database, {
+    events,
+    codeReviews,
+    pipelineRuntime,
+    reviewRuntime: review,
+    gitAdapter:
+      options.integrationRuntime?.gitAdapter ??
+      openLocalGitIntegrationAdapter(),
+    ...(options.integrationRuntime?.failureInjection
+      ? { failureInjection: options.integrationRuntime.failureInjection }
+      : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -438,6 +470,7 @@ export const openCompanyDatabase = (
     options.memoryRuntime?.commandFailure,
     workPackages,
     codeReviews,
+    integrations,
   );
   const codeReviewNodeHandler = openCodeReviewNodeHandler(database, {
     events,
@@ -459,9 +492,17 @@ export const openCompanyDatabase = (
   pipelineRuntime.registerCodeReviewExecutor(
     codeReviewNodeHandler.executeReady,
   );
+  const integrationNodeHandler = openIntegrationNodeHandler({
+    commandRegistry,
+    integrations,
+  });
+  pipelineRuntime.registerIntegrationExecutor(
+    integrationNodeHandler.executeReady,
+  );
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
+  integrationNodeHandler.reconcilePending();
 
   return {
     path,
@@ -487,6 +528,8 @@ export const openCompanyDatabase = (
     workPackages,
     codeReviews,
     codeReviewNodeHandler,
+    integrations,
+    integrationNodeHandler,
     schemaVersion: () => {
       const row = database
         .prepare("SELECT value FROM schema_metadata WHERE key = ?")
