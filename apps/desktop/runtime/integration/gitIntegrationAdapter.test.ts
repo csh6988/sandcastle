@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -80,15 +81,23 @@ const request = (input: {
   idempotencyKey: `integration:generation-1:${input.operationId}`,
 });
 
+const waitFor = async (predicate: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 5_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for Git.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
 describe("Local Git Integration Adapter", () => {
-  it("does not execute Repository-local reference transaction hooks", () => {
+  it("does not execute Repository-local reference transaction hooks", async () => {
     const fixture = repository();
     const marker = join(fixture.root, "hook-executed");
     const hook = join(fixture.root, ".git", "hooks", "reference-transaction");
     writeFileSync(hook, `#!/bin/sh\nprintf hook > '${marker}'\n`);
     chmodSync(hook, 0o755);
 
-    const result = openLocalGitIntegrationAdapter().execute(
+    const result = await openLocalGitIntegrationAdapter().execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -103,7 +112,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(existsSync(marker), false);
   });
 
-  it("applies exact full base-to-source tree deltas with generation-ref CAS and exact replay", () => {
+  it("applies exact full base-to-source tree deltas with generation-ref CAS and exact replay", async () => {
     const fixture = repository();
     const adapter = openLocalGitIntegrationAdapter();
     const firstRequest = request({
@@ -115,7 +124,7 @@ describe("Local Git Integration Adapter", () => {
       operationId: "operation-api",
     });
 
-    const first = adapter.execute(firstRequest);
+    const first = await adapter.execute(firstRequest);
     assert.equal(first.status, "succeeded");
     if (first.status !== "succeeded") return;
     assert.equal(
@@ -129,7 +138,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
     assert.equal(git(fixture.root, "rev-parse", "work/api"), fixture.api);
 
-    const second = adapter.execute(
+    const second = await adapter.execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -150,7 +159,7 @@ describe("Local Git Integration Adapter", () => {
       "web",
     );
 
-    const replay = adapter.execute(
+    const replay = await adapter.execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -162,7 +171,7 @@ describe("Local Git Integration Adapter", () => {
     );
     assert.deepEqual(replay, second);
     assert.deepEqual(
-      adapter.reconcile(
+      await adapter.reconcile(
         request({
           root: fixture.root,
           base: fixture.base,
@@ -176,7 +185,7 @@ describe("Local Git Integration Adapter", () => {
     );
   });
 
-  it("leaves the generation ref unchanged on conflict and protects every non-generation ref", () => {
+  it("leaves the generation ref unchanged on conflict and protects every non-generation ref", async () => {
     const fixture = repository();
     git(fixture.root, "switch", "work/api");
     writeFileSync(join(fixture.root, "shared.txt"), "api change\n");
@@ -190,7 +199,7 @@ describe("Local Git Integration Adapter", () => {
     const webConflict = git(fixture.root, "rev-parse", "HEAD");
     git(fixture.root, "switch", "main");
     const adapter = openLocalGitIntegrationAdapter();
-    const first = adapter.execute(
+    const first = await adapter.execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -203,7 +212,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(first.status, "succeeded");
     if (first.status !== "succeeded") return;
 
-    const conflicted = adapter.execute(
+    const conflicted = await adapter.execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -221,7 +230,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
     assert.equal(git(fixture.root, "rev-parse", "work/web"), webConflict);
 
-    const protectedRef = adapter.execute({
+    const protectedRef = await adapter.execute({
       ...request({
         root: fixture.root,
         base: fixture.base,
@@ -238,7 +247,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(protectedRef.code, "INTEGRATION_REF_INVALID");
   });
 
-  it("rejects symbolic refs, linked Worktrees, nested roots, and leaf symlink Repository paths", () => {
+  it("rejects symbolic refs, linked Worktrees, nested roots, and leaf symlink Repository paths", async () => {
     const fixture = repository();
     const adapter = openLocalGitIntegrationAdapter();
     const baseRequest = request({
@@ -256,7 +265,7 @@ describe("Local Git Integration Adapter", () => {
       "refs/heads/integration/run-1/g1",
       "refs/heads/main",
     );
-    const symbolicRef = adapter.execute(baseRequest);
+    const symbolicRef = await adapter.execute(baseRequest);
     assert.equal(symbolicRef.status, "failed");
     if (symbolicRef.status !== "failed") return;
     assert.equal(symbolicRef.writeStatus, "not-started");
@@ -269,14 +278,14 @@ describe("Local Git Integration Adapter", () => {
       "refs/heads/integration/run-1/g1",
     );
 
-    const applied = adapter.execute(baseRequest);
+    const applied = await adapter.execute(baseRequest);
     assert.equal(applied.status, "succeeded");
     if (applied.status !== "succeeded") return;
     const linked = mkdtempSync(join(tmpdir(), "sandcastle-t16-linked-"));
     roots.push(linked);
     rmSync(linked, { recursive: true, force: true });
     git(fixture.root, "worktree", "add", linked, "integration/run-1/g1");
-    const checkedOut = adapter.execute(
+    const checkedOut = await adapter.execute(
       request({
         root: fixture.root,
         base: fixture.base,
@@ -293,7 +302,7 @@ describe("Local Git Integration Adapter", () => {
 
     const nested = join(fixture.root, "nested");
     mkdirSync(nested);
-    const nestedRoot = adapter.execute({
+    const nestedRoot = await adapter.execute({
       ...baseRequest,
       repositoryReference: nested,
     });
@@ -304,7 +313,7 @@ describe("Local Git Integration Adapter", () => {
     const symlink = `${fixture.root}-symlink`;
     roots.push(symlink);
     symlinkSync(fixture.root, symlink);
-    const symlinkRoot = adapter.execute({
+    const symlinkRoot = await adapter.execute({
       ...baseRequest,
       repositoryReference: symlink,
     });
@@ -314,14 +323,14 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(symlinkRoot.code, "INTEGRATION_REPOSITORY_INVALID");
   });
 
-  it("rejects a Repository whose .git directory is a symlink without changing the target refs", () => {
+  it("rejects a Repository whose .git directory is a symlink without changing the target refs", async () => {
     const target = repository();
     const attacker = repository();
     rmSync(join(attacker.root, ".git"), { recursive: true, force: true });
     symlinkSync(join(target.root, ".git"), join(attacker.root, ".git"));
     assert.throws(() => git(target.root, "rev-parse", "integration/run-1/g1"));
 
-    const result = openLocalGitIntegrationAdapter().execute(
+    const result = await openLocalGitIntegrationAdapter().execute(
       request({
         root: attacker.root,
         base: target.base,
@@ -341,11 +350,11 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(git(target.root, "rev-parse", "work/api"), target.api);
   });
 
-  it("treats timeout and cancellation as unknown without writing the generation ref", () => {
+  it("treats timeout and cancellation as unknown without writing the generation ref", async () => {
     const fixture = repository();
     const cancelled = new AbortController();
     cancelled.abort();
-    const cancelledResult = openLocalGitIntegrationAdapter({
+    const cancelledResult = await openLocalGitIntegrationAdapter({
       signal: cancelled.signal,
     }).execute(
       request({
@@ -360,7 +369,7 @@ describe("Local Git Integration Adapter", () => {
     assert.equal(cancelledResult.status, "unknown");
     assert.throws(() => git(fixture.root, "rev-parse", "integration/run-1/g1"));
 
-    const timeoutResult = openLocalGitIntegrationAdapter({
+    const timeoutResult = await openLocalGitIntegrationAdapter({
       timeoutMs: 1,
     }).execute(
       request({
@@ -376,13 +385,77 @@ describe("Local Git Integration Adapter", () => {
     assert.throws(() => git(fixture.root, "rev-parse", "integration/run-1/g1"));
   });
 
-  it("accepts a canonical Repository reached through a parent realpath alias and rejects Windows ref separators", () => {
+  it(
+    "interrupts the exact in-flight Git child and requires reconciliation without a duplicate ref write",
+    { skip: process.platform === "win32" },
+    async () => {
+      const fixture = repository();
+      const wrapperRoot = mkdtempSync(
+        join(tmpdir(), "sandcastle-t16-git-wrapper-"),
+      );
+      roots.push(wrapperRoot);
+      const marker = join(wrapperRoot, "update-ref.marker");
+      const wrapper = join(wrapperRoot, "git-wrapper.mjs");
+      writeFileSync(
+        wrapper,
+        `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args.includes("update-ref")) {
+  appendFileSync(${JSON.stringify(marker)}, "started\\n");
+  process.on("SIGTERM", () => {
+    appendFileSync(${JSON.stringify(marker)}, "aborted\\n");
+    process.exit(143);
+  });
+  setInterval(() => {}, 1_000);
+} else {
+  const result = spawnSync("git", args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
+`,
+      );
+      chmodSync(wrapper, 0o755);
+      const operation = request({
+        root: fixture.root,
+        base: fixture.base,
+        sourceBranch: "work/api",
+        sourceCommit: fixture.api,
+        expectedTip: fixture.base,
+        operationId: "operation-cancel-in-flight",
+      });
+      const adapter = openLocalGitIntegrationAdapter({
+        gitExecutable: wrapper,
+        timeoutMs: 10_000,
+      });
+
+      const executing = adapter.execute(operation);
+      await waitFor(() => existsSync(marker));
+      await adapter.cancel?.(operation.operationId);
+      const result = await executing;
+
+      assert.equal(result.status, "unknown");
+      await waitFor(() => readFileSync(marker, "utf8").includes("aborted"));
+      assert.match(readFileSync(marker, "utf8"), /started\naborted/);
+      assert.deepEqual(
+        await openLocalGitIntegrationAdapter().reconcile(operation),
+        { status: "not-applied" },
+      );
+      assert.throws(() =>
+        git(fixture.root, "rev-parse", "integration/run-1/g1"),
+      );
+      assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
+      assert.equal(git(fixture.root, "rev-parse", "work/api"), fixture.api);
+    },
+  );
+
+  it("accepts a canonical Repository reached through a parent realpath alias and rejects Windows ref separators", async () => {
     const fixture = repository();
     const parentAlias = `${fixture.root}-parent-alias`;
     roots.push(parentAlias);
     symlinkSync(dirname(fixture.root), parentAlias);
     const aliasedRoot = join(parentAlias, basename(fixture.root));
-    const result = openLocalGitIntegrationAdapter().execute(
+    const result = await openLocalGitIntegrationAdapter().execute(
       request({
         root: aliasedRoot,
         base: fixture.base,
@@ -394,7 +467,7 @@ describe("Local Git Integration Adapter", () => {
     );
     assert.equal(result.status, "succeeded");
 
-    const windowsRef = openLocalGitIntegrationAdapter().execute({
+    const windowsRef = await openLocalGitIntegrationAdapter().execute({
       ...request({
         root: fixture.root,
         base: fixture.base,

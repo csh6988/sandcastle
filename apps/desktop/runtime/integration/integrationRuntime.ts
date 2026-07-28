@@ -74,10 +74,13 @@ export type GitIntegrationReconciliation =
     };
 
 export interface GitIntegrationAdapter {
-  readonly execute: (input: GitIntegrationRequest) => GitIntegrationResult;
+  readonly execute: (
+    input: GitIntegrationRequest,
+  ) => GitIntegrationResult | Promise<GitIntegrationResult>;
   readonly reconcile: (
     input: GitIntegrationRequest,
-  ) => GitIntegrationReconciliation;
+  ) => GitIntegrationReconciliation | Promise<GitIntegrationReconciliation>;
+  readonly cancel?: (operationId: string) => Promise<void>;
 }
 
 export type IntegrationGenerationManifest = {
@@ -172,12 +175,7 @@ export type IntegrationGenerationView = {
     readonly baseCommit: string;
     readonly integrationBranch: string;
     readonly state:
-      | "pending"
-      | "running"
-      | "validating"
-      | "succeeded"
-      | "failed"
-      | "blocked";
+      "pending" | "running" | "validating" | "succeeded" | "failed" | "blocked";
     readonly expectedTip: string;
     readonly integratedCommit: string | null;
     readonly validationRecords: readonly {
@@ -244,14 +242,44 @@ export type IntegrationEnvelopeCommand =
 
 export interface IntegrationRuntime {
   readonly inspect: (runId: string) => readonly IntegrationGenerationView[];
+  readonly nextGenerationNumber: (runId: string, nodeRunId: string) => number;
   readonly inspectPending: () => readonly IntegrationGenerationView[];
   readonly dispatchInTransaction: (input: {
     readonly commandId: string;
     readonly actor: ActorRef;
     readonly command: IntegrationEnvelopeCommand;
   }) => IntegrationGenerationView;
-  readonly executePending: (generationId: string) => IntegrationGenerationView;
-  readonly reconcilePending: () => number;
+  readonly executePending: (
+    generationId: string,
+  ) => Promise<IntegrationGenerationView>;
+  readonly reconcilePending: () => Promise<number>;
+  readonly cancelPendingGit?: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+  }) => Promise<void>;
+  readonly claimExecutionStage: (input: {
+    readonly generationId: string;
+    readonly operationKey: string;
+    readonly phase: "validation" | "aggregate-review";
+    readonly targetKey: string;
+    readonly request: unknown;
+    readonly createIfMissing: boolean;
+  }) =>
+    | { readonly mode: "execute" | "reconcile" }
+    | { readonly mode: "terminal"; readonly result: unknown }
+    | { readonly mode: "missing" };
+  readonly recordExecutionStageResult: (input: {
+    readonly operationKey: string;
+    readonly request: unknown;
+    readonly state: "unknown" | "succeeded" | "failed";
+    readonly result: unknown;
+  }) => void;
+  readonly inspectExecutionStageRequests: (generationId: string) => readonly {
+    readonly operationKey: string;
+    readonly phase: "validation" | "aggregate-review";
+    readonly request: unknown;
+    readonly state: "running" | "reconciling" | "unknown";
+  }[];
   readonly blockPending: (
     generationId: string,
     failure: {
@@ -527,6 +555,11 @@ export const openIntegrationRuntime = (
         readonly generationId: string;
         readonly failure: { readonly code: string; readonly message: string };
       }) => void;
+      readonly resumeIntegrationInTransaction?: (input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+        readonly generationId: string;
+      }) => void;
       readonly failIntegrationInTransaction: (input: {
         readonly runId: string;
         readonly nodeRunId: string;
@@ -581,6 +614,7 @@ export const openIntegrationRuntime = (
   },
 ): IntegrationRuntime => {
   const clock = options.clock ?? (() => new Date());
+  const activeGitExecutions = new Map<string, Promise<GitIntegrationResult>>();
 
   const appendIntegrationAudit = (input: {
     readonly commandId: string;
@@ -790,9 +824,7 @@ export const openIntegrationRuntime = (
             input: parseJson(String(aggregate.inputJson)),
             inputHash: String(aggregate.inputHash),
             result: String(aggregate.result) as
-              | "PASS"
-              | "CONDITIONAL_PASS"
-              | "FAIL",
+              "PASS" | "CONDITIONAL_PASS" | "FAIL",
             evidence: parseJson<readonly string[]>(
               String(aggregate.evidenceJson),
             ),
@@ -2042,12 +2074,33 @@ export const openIntegrationRuntime = (
     };
   };
 
-  const resolveOperation = (input: {
+  const executeGit = (
+    request: GitIntegrationRequest,
+  ): Promise<GitIntegrationResult> => {
+    const active = activeGitExecutions.get(request.operationId);
+    if (active) return active;
+    const execution = (async () => {
+      try {
+        return await options.gitAdapter.execute(request);
+      } catch (error) {
+        return adapterFailure(error);
+      }
+    })();
+    activeGitExecutions.set(request.operationId, execution);
+    void execution.finally(() => {
+      if (activeGitExecutions.get(request.operationId) === execution) {
+        activeGitExecutions.delete(request.operationId);
+      }
+    });
+    return execution;
+  };
+
+  const resolveOperation = async (input: {
     readonly view: IntegrationGenerationView;
     readonly entry: CompletedCodeReviewCoveragePackage;
     readonly request: GitIntegrationRequest;
     readonly ordinal: number;
-  }): boolean => {
+  }): Promise<boolean> => {
     const planned = input.view.operations.find(
       (operation) =>
         operation.workPackageVersionId === input.entry.workPackageVersionId,
@@ -2065,18 +2118,17 @@ export const openIntegrationRuntime = (
           `Integration operation ${persisted.id} has changed immutable input.`,
         );
       }
-      try {
-        result = options.gitAdapter.reconcile(input.request);
-      } catch (error) {
-        result = adapterFailure(error);
-      }
-      if (result.status === "not-applied") {
-        if (persisted.state === "unknown") return false;
+      const active = activeGitExecutions.get(input.request.operationId);
+      if (active) result = await active;
+      else
         try {
-          result = options.gitAdapter.execute(input.request);
+          result = await options.gitAdapter.reconcile(input.request);
         } catch (error) {
           result = adapterFailure(error);
         }
+      if (result.status === "not-applied") {
+        if (persisted.state === "unknown") return false;
+        result = await executeGit(input.request);
       }
     } else {
       options.failureInjection?.(
@@ -2104,11 +2156,7 @@ export const openIntegrationRuntime = (
         return resolveOperation({ ...input, view: readOne(input.view.id) });
       }
       options.failureInjection?.("after-intent", input.request.operationId);
-      try {
-        result = options.gitAdapter.execute(input.request);
-      } catch (error) {
-        result = adapterFailure(error);
-      }
+      result = await executeGit(input.request);
       options.failureInjection?.("after-effect", input.request.operationId);
     }
     if (result.status === "succeeded") {
@@ -2249,10 +2297,10 @@ export const openIntegrationRuntime = (
     return false;
   };
 
-  const executePending = (
+  const executePending = async (
     generationId: string,
     reconcileBlocked = false,
-  ): IntegrationGenerationView => {
+  ): Promise<IntegrationGenerationView> => {
     let view = readOne(generationId);
     if (["failed", "passed"].includes(view.state)) {
       throw new IntegrationRuntimeError(
@@ -2285,11 +2333,54 @@ export const openIntegrationRuntime = (
           "The exact completed Code Review coverage is no longer eligible; no new Git effect was attempted.",
         );
       }
-      if (!resolveOperation({ view, entry, request, ordinal })) {
+      if (!(await resolveOperation({ view, entry, request, ordinal }))) {
         return readOne(generationId);
       }
     }
     return readOne(generationId);
+  };
+
+  const resumeBlockedExecutionStage = (input: {
+    readonly view: IntegrationGenerationView;
+    readonly operationKey: string;
+    readonly phase: "validation" | "aggregate-review";
+  }): IntegrationGenerationView => {
+    if (input.view.state !== "blocked") return input.view;
+    const stage = database
+      .prepare(
+        `SELECT state FROM integration_execution_stages
+          WHERE operation_key = ? AND generation_id = ? AND phase = ?`,
+      )
+      .get(input.operationKey, input.view.id, input.phase) as
+      { readonly state: string } | undefined;
+    if (!stage || !["succeeded", "failed"].includes(stage.state)) {
+      return input.view;
+    }
+    const now = clock().toISOString();
+    database
+      .prepare(
+        `UPDATE integration_generations
+            SET state = ?, failure_code = NULL, failure_message = NULL,
+                updated_at = ?
+          WHERE id = ? AND state = 'blocked'`,
+      )
+      .run(
+        input.phase === "validation" ? "validating" : "aggregate-review",
+        now,
+        input.view.id,
+      );
+    options.pipelineRuntime.resumeIntegrationInTransaction?.({
+      runId: input.view.manifest.runId,
+      nodeRunId: input.view.manifest.nodeRunId,
+      generationId: input.view.id,
+    });
+    database
+      .prepare(
+        `UPDATE integration_defects SET status = 'closed', closed_at = ?
+          WHERE generation_id = ? AND kind = 'reconciliation' AND status = 'open'`,
+      )
+      .run(now, input.view.id);
+    return readOne(input.view.id);
   };
 
   const recordValidation = (input: {
@@ -2301,7 +2392,12 @@ export const openIntegrationRuntime = (
     >;
   }): IntegrationGenerationView => {
     assertRuntimeActor(input.actor);
-    const view = readOne(input.command.generationId);
+    let view = readOne(input.command.generationId);
+    view = resumeBlockedExecutionStage({
+      view,
+      operationKey: `${view.id}:validation:${input.command.validationId}`,
+      phase: "validation",
+    });
     if (view.state !== "validating") {
       throw new IntegrationRuntimeError(
         "INTEGRATION_VALIDATION_STATE_INVALID",
@@ -2423,8 +2519,7 @@ export const openIntegrationRuntime = (
           WHERE generation_id = ? AND validation_id = ?`,
       )
       .get(view.id, input.command.validationId) as
-      | { readonly recordHash: string }
-      | undefined;
+      { readonly recordHash: string } | undefined;
     if (existingRecord) {
       if (existingRecord.recordHash !== recordHash) {
         throw new IntegrationRuntimeError(
@@ -2653,7 +2748,12 @@ export const openIntegrationRuntime = (
         "Aggregate independent Review Runtime is unavailable.",
       );
     }
-    const view = readOne(input.command.generationId);
+    let view = readOne(input.command.generationId);
+    view = resumeBlockedExecutionStage({
+      view,
+      operationKey: `${view.id}:aggregate-review`,
+      phase: "aggregate-review",
+    });
     if (view.state !== "aggregate-review") {
       throw new IntegrationRuntimeError(
         "INTEGRATION_AGGREGATE_REVIEW_STATE_INVALID",
@@ -2859,11 +2959,37 @@ export const openIntegrationRuntime = (
 
   return {
     inspect,
+    nextGenerationNumber: (runId, nodeRunId) => {
+      const identities = database
+        .prepare(
+          `SELECT id FROM integration_generations
+            WHERE run_id = ? AND node_run_id = ?
+           UNION
+           SELECT entity_id AS id FROM runtime_audit_records
+            WHERE run_id = ? AND node_run_id = ?
+              AND action = 'integration.generation-blocked'`,
+        )
+        .all(runId, nodeRunId, runId, nodeRunId) as Array<{
+        readonly id: string;
+      }>;
+      const highest = identities.reduce((current, entry) => {
+        const match = /:g(\d+)$/.exec(entry.id);
+        return match ? Math.max(current, Number(match[1])) : current;
+      }, 0);
+      return highest + 1;
+    },
     inspectPending: () => {
       const ids = database
         .prepare(
           `SELECT id FROM integration_generations
             WHERE state IN ('pending', 'running', 'validating', 'aggregate-review')
+               OR (
+                 state = 'blocked' AND EXISTS (
+                   SELECT 1 FROM integration_execution_stages
+                    WHERE integration_execution_stages.generation_id = integration_generations.id
+                      AND integration_execution_stages.state IN ('running', 'reconciling', 'unknown')
+                 )
+               )
             ORDER BY updated_at, id`,
         )
         .all() as Array<{ readonly id: string }>;
@@ -2871,16 +2997,202 @@ export const openIntegrationRuntime = (
     },
     dispatchInTransaction,
     executePending,
-    reconcilePending: () => {
+    reconcilePending: async () => {
       const ids = database
         .prepare(
           `SELECT DISTINCT generation_id AS id FROM integration_operations
             WHERE state IN ('intent', 'running', 'unknown') ORDER BY updated_at, id`,
         )
         .all() as Array<{ readonly id: string }>;
-      for (const entry of ids) executePending(entry.id, true);
+      for (const entry of ids) await executePending(entry.id, true);
       return ids.length;
     },
+    cancelPendingGit: async ({ runId, nodeRunId }) => {
+      if (!options.gitAdapter.cancel) return;
+      const operations = database
+        .prepare(
+          `SELECT integration_operations.id
+             FROM integration_operations
+             JOIN integration_generations
+               ON integration_generations.id = integration_operations.generation_id
+            WHERE integration_generations.run_id = ?
+              AND integration_generations.node_run_id = ?
+              AND integration_operations.state IN ('intent', 'running')`,
+        )
+        .all(runId, nodeRunId) as Array<{ readonly id: string }>;
+      await Promise.all(
+        operations.map(async (operation) => {
+          try {
+            await options.gitAdapter.cancel!(operation.id);
+          } catch {
+            // Cancellation is advisory; exact Git reconciliation owns truth.
+          }
+        }),
+      );
+    },
+    claimExecutionStage: (input) => {
+      const requestJson = canonicalJson(input.request);
+      const requestHash = sha256(requestJson);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const existing = database
+          .prepare(
+            `SELECT generation_id AS generationId, phase,
+                    target_key AS targetKey, request_json AS requestJson,
+                    request_hash AS requestHash, state,
+                    result_json AS resultJson
+               FROM integration_execution_stages WHERE operation_key = ?`,
+          )
+          .get(input.operationKey) as
+          | {
+              readonly generationId: string;
+              readonly phase: string;
+              readonly targetKey: string;
+              readonly requestJson: string;
+              readonly requestHash: string;
+              readonly state: string;
+              readonly resultJson: string | null;
+            }
+          | undefined;
+        if (!existing) {
+          if (!input.createIfMissing) {
+            database.exec("COMMIT");
+            return { mode: "missing" } as const;
+          }
+          const now = clock().toISOString();
+          database
+            .prepare(
+              `INSERT INTO integration_execution_stages(
+                 id, operation_key, generation_id, phase, target_key,
+                 request_json, request_hash, state, result_json, result_hash,
+                 created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              input.operationKey,
+              input.generationId,
+              input.phase,
+              input.targetKey,
+              requestJson,
+              requestHash,
+              now,
+              now,
+            );
+          database.exec("COMMIT");
+          return { mode: "execute" } as const;
+        }
+        if (
+          existing.generationId !== input.generationId ||
+          existing.phase !== input.phase ||
+          existing.targetKey !== input.targetKey ||
+          existing.requestHash !== requestHash ||
+          existing.requestJson !== requestJson
+        ) {
+          throw new IntegrationRuntimeError(
+            "INTEGRATION_CONFLICT",
+            `Integration execution stage ${input.operationKey} was reused with changed frozen input.`,
+          );
+        }
+        if (existing.state === "succeeded" || existing.state === "failed") {
+          if (!existing.resultJson) {
+            throw new IntegrationRuntimeError(
+              "INTEGRATION_CONFLICT",
+              `Terminal Integration execution stage ${input.operationKey} has no result authority.`,
+            );
+          }
+          database.exec("COMMIT");
+          return {
+            mode: "terminal",
+            result: parseJson<unknown>(existing.resultJson),
+          } as const;
+        }
+        database
+          .prepare(
+            `UPDATE integration_execution_stages
+                SET state = 'reconciling', updated_at = ?
+              WHERE operation_key = ? AND state IN ('running', 'reconciling', 'unknown')`,
+          )
+          .run(clock().toISOString(), input.operationKey);
+        database.exec("COMMIT");
+        return { mode: "reconcile" } as const;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+    recordExecutionStageResult: (input) => {
+      const requestJson = canonicalJson(input.request);
+      const requestHash = sha256(requestJson);
+      const resultJson = canonicalJson(input.result);
+      const resultHash = sha256(resultJson);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const updated = database
+          .prepare(
+            `UPDATE integration_execution_stages
+                SET state = ?, result_json = ?, result_hash = ?, updated_at = ?
+              WHERE operation_key = ? AND request_hash = ? AND request_json = ?
+                AND state IN ('running', 'reconciling', 'unknown')`,
+          )
+          .run(
+            input.state,
+            resultJson,
+            resultHash,
+            clock().toISOString(),
+            input.operationKey,
+            requestHash,
+            requestJson,
+          );
+        if (Number(updated.changes) !== 1) {
+          const existing = database
+            .prepare(
+              `SELECT state, result_hash AS resultHash
+                 FROM integration_execution_stages WHERE operation_key = ?`,
+            )
+            .get(input.operationKey) as
+            | { readonly state: string; readonly resultHash: string | null }
+            | undefined;
+          if (
+            !existing ||
+            existing.state !== input.state ||
+            existing.resultHash !== resultHash
+          ) {
+            throw new IntegrationRuntimeError(
+              "INTEGRATION_CONFLICT",
+              `Integration execution stage ${input.operationKey} result conflicts with its frozen authority.`,
+            );
+          }
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+    inspectExecutionStageRequests: (generationId) =>
+      (
+        database
+          .prepare(
+            `SELECT operation_key AS operationKey, phase, request_json AS requestJson,
+                    state
+               FROM integration_execution_stages
+              WHERE generation_id = ?
+                AND state IN ('running', 'reconciling', 'unknown')
+              ORDER BY created_at, operation_key`,
+          )
+          .all(generationId) as Array<{
+          readonly operationKey: string;
+          readonly phase: "validation" | "aggregate-review";
+          readonly requestJson: string;
+          readonly state: "running" | "reconciling" | "unknown";
+        }>
+      ).map((entry) => ({
+        operationKey: entry.operationKey,
+        phase: entry.phase,
+        request: parseJson<unknown>(entry.requestJson),
+        state: entry.state,
+      })),
     blockPending: (generationId, failure) => {
       const commandId = `integration-generation:${generationId}:block-pending`;
       persistGenerationBlockUnitOfWork({

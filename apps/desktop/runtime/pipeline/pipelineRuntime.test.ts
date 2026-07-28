@@ -135,6 +135,129 @@ const projectSpecGraph = (
 });
 
 describe("Pipeline aggregate Reviewer execution", () => {
+  it("dispatches Integration cancellation for node-attempt.cancel and Run pause", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        {
+          id: "complete",
+          type: "complete",
+          name: "Complete",
+          handlerKindId: "run-complete@1",
+        },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    const cancellations: Array<{ runId: string; nodeRunId: string }> = [];
+    fixture.database.pipelineRuntime.registerIntegrationCancellationDispatcher(
+      async (input) => {
+        cancellations.push(input);
+      },
+    );
+    const markIntegrationRunning = (runId: string, suffix: string) => {
+      const view = fixture.database.pipelineRuntime.inspectRun(runId);
+      const integration = view.nodes.find(
+        (node) => node.pipelineNodeId === "integration",
+      )!;
+      const attemptId = `integration-attempt-${suffix}`;
+      const scheduler = new DatabaseSync(fixture.database.path);
+      try {
+        scheduler
+          .prepare("UPDATE department_runs SET status = 'running' WHERE id = ?")
+          .run(runId);
+        scheduler
+          .prepare("UPDATE node_runs SET status = 'running' WHERE id = ?")
+          .run(integration.id);
+        scheduler
+          .prepare(
+            `INSERT INTO node_attempts(
+             id, node_run_id, attempt_number, snapshot_revision_id, reason,
+             status, structured_result_json, failure_code, failure_message,
+             created_at, started_at, completed_at
+           ) VALUES (?, ?, 1, ?, 'initial', 'running', NULL, NULL, NULL,
+                     ?, ?, NULL)`,
+          )
+          .run(
+            attemptId,
+            integration.id,
+            view.snapshot.id,
+            new Date().toISOString(),
+            new Date().toISOString(),
+          );
+        scheduler
+          .prepare("UPDATE node_runs SET attempt_count = 1 WHERE id = ?")
+          .run(integration.id);
+      } finally {
+        scheduler.close();
+      }
+      return { attemptId, integration };
+    };
+
+    try {
+      const first = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const firstRunning = markIntegrationRunning(first.run.id, "cancel");
+      const cancelResult = fixture.database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "cancel-integration-attempt",
+        actor: {
+          type: "human",
+          id: "user-local",
+          authenticatedBy: "local-session",
+        },
+        expectedRevision: first.run.revision,
+        command: {
+          type: "node-attempt.cancel",
+          runId: first.run.id,
+          attemptId: firstRunning.attemptId,
+        },
+      });
+      assert.equal(cancelResult.status, "succeeded");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const second = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const secondRunning = markIntegrationRunning(second.run.id, "pause");
+      await fixture.database.pipelineRuntime.controlRun({
+        runId: second.run.id,
+        expectedRevision: second.run.revision,
+        action: "pause",
+      });
+
+      assert.deepEqual(cancellations, [
+        {
+          runId: first.run.id,
+          nodeRunId: firstRunning.integration.id,
+        },
+        {
+          runId: second.run.id,
+          nodeRunId: secondRunning.integration.id,
+        },
+      ]);
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("uses Integration-owned execution facts and reconciliation receipts", async () => {
     const fixture = setup(undefined, (positionId) => ({
       nodes: [
@@ -163,27 +286,41 @@ describe("Pipeline aggregate Reviewer execution", () => {
         { from: "integration", to: "complete" },
       ],
     }));
+    let adapterExecutions = 0;
+    let signalExecutionStarted!: () => void;
+    const executionStarted = new Promise<void>((resolve) => {
+      signalExecutionStarted = resolve;
+    });
+    let releaseExecution!: () => void;
+    const executionReleased = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
     const adapter = createScriptedReviewerExecutionAdapter({
-      execute: () => ({
-        status: "succeeded",
-        providerId: "scripted-reviewer",
-        isolation: {
-          readOnlyFilesystem: true,
-          independentGitDatabase: true,
-          independentSessionStorage: true,
-          independentCredentialScope: true,
-          independentMutableCache: true,
-          inputAllowlist: true,
-          mechanism: "fixture",
-          mechanismVersion: "1",
-        },
-        isolationEvidence: ["aggregate-isolation"],
-        output: {
-          result: "PASS",
-          conditions: [],
-          evidenceRefs: ["integrated-commit"],
-        },
-      }),
+      execute: async () => {
+        adapterExecutions += 1;
+        signalExecutionStarted();
+        await executionReleased;
+        return {
+          status: "succeeded",
+          providerId: "scripted-reviewer",
+          isolation: {
+            readOnlyFilesystem: true,
+            independentGitDatabase: true,
+            independentSessionStorage: true,
+            independentCredentialScope: true,
+            independentMutableCache: true,
+            inputAllowlist: true,
+            mechanism: "fixture",
+            mechanismVersion: "1",
+          },
+          isolationEvidence: ["aggregate-isolation"],
+          output: {
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: ["integrated-commit"],
+          },
+        };
+      },
     });
 
     try {
@@ -294,11 +431,37 @@ describe("Pipeline aggregate Reviewer execution", () => {
         adapter,
       };
 
-      const executed =
-        await fixture.database.pipelineRuntime.executeIntegrationReviewStage(
-          input,
+      const executionPromise =
+        fixture.database.pipelineRuntime.executeIntegrationReviewStage(input);
+      await executionStarted;
+      const contenderPromise =
+        fixture.database.pipelineRuntime.executeIntegrationReviewStage(input);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const leaseInspection = new DatabaseSync(fixture.database.path);
+      try {
+        assert.equal(
+          Number(
+            leaseInspection
+              .prepare(
+                `SELECT COUNT(*) AS count FROM execution_leases
+                  WHERE operation_key = ? AND released_at IS NULL`,
+              )
+              .get(request.operationKey)!.count,
+          ),
+          1,
         );
+      } finally {
+        leaseInspection.close();
+      }
+      assert.equal(adapterExecutions, 1);
+      releaseExecution();
+      const [executed, contender] = await Promise.all([
+        executionPromise,
+        contenderPromise,
+      ]);
       assert.equal(executed.status, "succeeded");
+      assert.notEqual(contender.status, "succeeded");
+      assert.equal(adapterExecutions, 1);
       const reconciled =
         await fixture.database.pipelineRuntime.executeIntegrationReviewStage({
           ...input,
@@ -603,6 +766,104 @@ describe("Pipeline Runtime", () => {
         ],
       });
     } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("keeps an unknown Integration effect reconciling until terminal evidence resumes the same Attempt", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "integration",
+          type: "ai-task",
+          name: "Integration",
+          positionId,
+          handlerKindId: "integration@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "integration" },
+        { from: "integration", to: "complete" },
+      ],
+    }));
+    const raw = new DatabaseSync(fixture.database.path);
+    let blockedAttemptStatus: string | undefined;
+    try {
+      fixture.database.pipelineRuntime.registerIntegrationExecutor(
+        async (input) => {
+          fixture.database.pipelineRuntime.startIntegrationInTransaction({
+            ...input,
+            generationId: "generation-reconcile",
+          });
+          fixture.database.pipelineRuntime.blockIntegrationInTransaction({
+            ...input,
+            generationId: "generation-reconcile",
+            failure: {
+              code: "RECONCILE_UNKNOWN",
+              message: "provider outcome is not yet provable",
+            },
+          });
+          blockedAttemptStatus = String(
+            raw
+              .prepare(
+                `SELECT status FROM node_attempts
+                  WHERE node_run_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+              )
+              .get(input.nodeRunId)!.status,
+          );
+          fixture.database.pipelineRuntime.resumeIntegrationInTransaction({
+            ...input,
+            generationId: "generation-reconcile",
+          });
+          fixture.database.pipelineRuntime.completeIntegrationInTransaction({
+            ...input,
+            generationId: "generation-reconcile",
+            passAuthorityHash: "a".repeat(64),
+            repositoryCommits: [
+              {
+                repositoryReference: "/repositories/api",
+                commit: "b".repeat(40),
+              },
+            ],
+          });
+        },
+      );
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const completed = await fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+
+      assert.equal(blockedAttemptStatus, "reconciling");
+      assert.equal(
+        completed.nodes.find((node) => node.pipelineNodeId === "integration")
+          ?.status,
+        "succeeded",
+      );
+      assert.equal(
+        raw
+          .prepare(
+            `SELECT status FROM node_attempts
+              WHERE node_run_id = (
+                SELECT id FROM node_runs
+                 WHERE run_id = ? AND pipeline_node_id = 'integration'
+              ) ORDER BY attempt_number DESC LIMIT 1`,
+          )
+          .get(started.run.id)!.status,
+        "succeeded",
+      );
+    } finally {
+      raw.close();
       fixture.database.close();
     }
   });

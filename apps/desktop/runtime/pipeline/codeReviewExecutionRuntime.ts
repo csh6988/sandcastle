@@ -91,8 +91,7 @@ export const openCodeReviewExecutionRuntime = (options: {
           ORDER BY node_attempts.attempt_number DESC LIMIT 1`,
       )
       .get(input.nodeRunId, input.runId, input.handlerKindId) as
-      | { readonly attemptId: string }
-      | undefined;
+      { readonly attemptId: string } | undefined;
     if (!attempt) {
       throw runtimeError(
         "CODE_REVIEW_EXECUTION_STATE_INVALID",
@@ -137,34 +136,81 @@ export const openCodeReviewExecutionRuntime = (options: {
       )
       .find((value): value is string => Boolean(value));
 
+    const busyResult = (): ReviewerExecutionResult =>
+      providerExecutionRef
+        ? { status: "running", providerExecutionRef }
+        : {
+            status: "unknown",
+            code: "RECONCILE_UNKNOWN",
+            message: `Reviewer execution ${input.operationKey} already has an active execution claim whose provider result is not yet provable.`,
+            evidence: [],
+          };
+
+    const activeLease = existing.leases.find(
+      (lease) =>
+        lease.releasedAt === null &&
+        Date.parse(lease.expiresAt) > clock().getTime(),
+    );
+    if (activeLease) return busyResult();
+
     const issueLease = (
       leaseKind: "execution" | "reconciliation",
-    ): ExecutionLeaseContext & {
-      readonly target: { readonly kind: "node-attempt"; readonly id: string };
-    } => {
+    ):
+      | (ExecutionLeaseContext & {
+          readonly target: {
+            readonly kind: "node-attempt";
+            readonly id: string;
+          };
+        })
+      | null => {
       const issuedAt = clock();
       const issuedAtIso = issuedAt.toISOString();
-      const executionEpoch =
-        Math.max(0, ...existing.leases.map((lease) => lease.executionEpoch)) +
-        (leaseKind === "execution" && reconciliation ? 2 : 1);
       const leaseId = randomUUID();
       const target = { kind: "node-attempt" as const, id: attempt.attemptId };
-      const lease = {
-        leaseId,
-        leaseKind,
-        operationKey: input.operationKey,
-        target,
-        executionEpoch,
-        fenceToken: `code-review-fence:${randomUUID()}`,
-      };
       database.exec("BEGIN IMMEDIATE");
       try {
-        database
+        const current = database
           .prepare(
-            `UPDATE execution_leases SET released_at = ?
-              WHERE operation_key = ? AND released_at IS NULL`,
+            `SELECT id, expires_at AS expiresAt
+               FROM execution_leases
+              WHERE operation_key = ? AND released_at IS NULL
+              ORDER BY execution_epoch DESC LIMIT 1`,
           )
-          .run(issuedAtIso, input.operationKey);
+          .get(input.operationKey) as
+          { readonly id: string; readonly expiresAt: string } | undefined;
+        if (current) {
+          if (
+            leaseKind !== "reconciliation" ||
+            Date.parse(current.expiresAt) > issuedAt.getTime()
+          ) {
+            database.exec("COMMIT");
+            return null;
+          }
+          const released = database
+            .prepare(
+              `UPDATE execution_leases SET released_at = ?
+                WHERE id = ? AND released_at IS NULL AND expires_at <= ?`,
+            )
+            .run(issuedAtIso, current.id, issuedAtIso);
+          if (Number(released.changes) !== 1) {
+            database.exec("COMMIT");
+            return null;
+          }
+        }
+        const epoch = database
+          .prepare(
+            `SELECT COALESCE(MAX(execution_epoch), 0) + 1 AS executionEpoch
+               FROM execution_leases WHERE operation_key = ?`,
+          )
+          .get(input.operationKey) as { readonly executionEpoch: number };
+        const lease = {
+          leaseId,
+          leaseKind,
+          operationKey: input.operationKey,
+          target,
+          executionEpoch: Number(epoch.executionEpoch),
+          fenceToken: `code-review-fence:${randomUUID()}`,
+        };
         database
           .prepare(
             `INSERT INTO execution_leases(
@@ -179,7 +225,7 @@ export const openCodeReviewExecutionRuntime = (options: {
             attempt.attemptId,
             leaseKind,
             input.operationKey,
-            executionEpoch,
+            lease.executionEpoch,
             lease.fenceToken,
             input.workerId,
             issuedAtIso,
@@ -188,11 +234,11 @@ export const openCodeReviewExecutionRuntime = (options: {
             ).toISOString(),
           );
         database.exec("COMMIT");
+        return lease;
       } catch (error) {
         database.exec("ROLLBACK");
         throw error;
       }
-      return lease;
     };
 
     const runWithLease = async (
@@ -286,8 +332,7 @@ export const openCodeReviewExecutionRuntime = (options: {
                 ORDER BY created_at, id LIMIT 1`,
             )
             .get(input.reviewerSessionId, input.reviewerAiMemberId) as
-            | { readonly id: string }
-            | undefined;
+            { readonly id: string } | undefined;
           if (!participant) {
             throw new ExecutionFactError(
               "EXECUTION_ADAPTER_PROTOCOL",
@@ -919,6 +964,7 @@ export const openCodeReviewExecutionRuntime = (options: {
 
     if (reconciliation) {
       const reconciliationLease = issueLease("reconciliation");
+      if (!reconciliationLease) return busyResult();
       const sink = createExecutionFactSink({
         database,
         lease: reconciliationLease,
@@ -993,7 +1039,9 @@ export const openCodeReviewExecutionRuntime = (options: {
         };
       }
       resumeReconciledAttempt(reconciliationLease.leaseId);
-      return runWithLease(issueLease("execution"), (sink, signal) =>
+      const executionLease = issueLease("execution");
+      if (!executionLease) return busyResult();
+      return runWithLease(executionLease, (sink, signal) =>
         input.adapter.reattach!(
           input.request,
           result.providerExecutionRef,
@@ -1002,7 +1050,9 @@ export const openCodeReviewExecutionRuntime = (options: {
         ),
       );
     }
-    return runWithLease(issueLease("execution"), (sink, signal) =>
+    const executionLease = issueLease("execution");
+    if (!executionLease) return busyResult();
+    return runWithLease(executionLease, (sink, signal) =>
       input.adapter.execute(input.request, sink, signal),
     );
   };

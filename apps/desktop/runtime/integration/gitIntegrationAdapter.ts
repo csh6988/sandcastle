@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { lstatSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -22,8 +22,15 @@ export class GitIntegrationAdapterError extends Error {
 const zeroCommit = "0".repeat(40);
 
 type GitExecutionBoundary = {
+  readonly executable: string;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+};
+
+type GitCommandResult = {
+  readonly status: number | null;
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
 };
 
 const assertNotCancelled = (boundary: GitExecutionBoundary): void => {
@@ -68,52 +75,130 @@ const gitEnvironment = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv =>
     ...overrides,
   }) satisfies NodeJS.ProcessEnv;
 
-const git = (
+const timeoutError = (): NodeJS.ErrnoException => {
+  const error = new Error(
+    "The Integration Git command exceeded its bounded execution time.",
+  ) as NodeJS.ErrnoException;
+  error.code = "ETIMEDOUT";
+  return error;
+};
+
+const runCommand = (
+  args: readonly string[],
+  options: {
+    readonly env?: NodeJS.ProcessEnv;
+    readonly input?: Buffer;
+    readonly boundary: GitExecutionBoundary;
+  },
+): Promise<GitCommandResult> => {
+  const { boundary } = options;
+  assertNotCancelled(boundary);
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    let cancelled = false;
+    let settled = false;
+    const child = spawn(boundary.executable, [...args], {
+      env: options.env ?? gitEnvironment(),
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    const terminate = (reason: "cancelled" | "timeout") => {
+      if (settled) return;
+      cancelled = reason === "cancelled";
+      timedOut = reason === "timeout";
+      child.kill(reason === "timeout" ? "SIGKILL" : "SIGTERM");
+    };
+    const onAbort = () => terminate("cancelled");
+    boundary.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => terminate("timeout"), boundary.timeoutMs);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      boundary.signal?.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+    child.once("close", (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      boundary.signal?.removeEventListener("abort", onAbort);
+      if (cancelled) {
+        reject(
+          new GitIntegrationAdapterError(
+            "INTEGRATION_GIT_CANCELLED",
+            "The Integration Git operation was cancelled before its outcome was proven.",
+          ),
+        );
+        return;
+      }
+      if (timedOut) {
+        reject(timeoutError());
+        return;
+      }
+      resolve({
+        status,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+      });
+    });
+    if (options.input) child.stdin.end(options.input);
+    else child.stdin.end();
+  });
+};
+
+const git = async (
   repositoryRoot: string,
   args: readonly string[],
   options: {
     readonly env?: NodeJS.ProcessEnv;
     readonly input?: Buffer;
-    readonly boundary?: GitExecutionBoundary;
-  } = {},
-): string => {
-  const boundary = options.boundary ?? { timeoutMs: 30_000 };
-  assertNotCancelled(boundary);
-  const value = execFileSync("git", ["-C", repositoryRoot, ...args], {
-    encoding: "utf8",
-    env: options.env ?? gitEnvironment(),
-    timeout: boundary.timeoutMs,
-    killSignal: "SIGKILL",
-    ...(options.input ? { input: options.input } : {}),
-  }).trim();
-  assertNotCancelled(boundary);
-  return value;
+    readonly boundary: GitExecutionBoundary;
+  },
+): Promise<string> => {
+  const result = await runCommand(["-C", repositoryRoot, ...args], options);
+  if (result.status !== 0) {
+    const error = new Error(
+      result.stderr.toString("utf8").trim() ||
+        `Git command ${args[0] ?? "unknown"} failed.`,
+    ) as NodeJS.ErrnoException;
+    error.code = "INTEGRATION_GIT_COMMAND_FAILED";
+    throw error;
+  }
+  assertNotCancelled(options.boundary);
+  return result.stdout.toString("utf8").trim();
 };
 
-const gitBuffer = (
+const gitBuffer = async (
   repositoryRoot: string,
   args: readonly string[],
   boundary: GitExecutionBoundary,
-): Buffer => {
-  assertNotCancelled(boundary);
-  const value = execFileSync("git", ["-C", repositoryRoot, ...args], {
-    encoding: "buffer",
+): Promise<Buffer> => {
+  const result = await runCommand(["-C", repositoryRoot, ...args], {
+    boundary,
     env: gitEnvironment(),
-    timeout: boundary.timeoutMs,
-    killSignal: "SIGKILL",
   });
+  if (result.status !== 0) {
+    const error = new Error(
+      result.stderr.toString("utf8").trim() || "Git command failed.",
+    ) as NodeJS.ErrnoException;
+    error.code = "INTEGRATION_GIT_COMMAND_FAILED";
+    throw error;
+  }
   assertNotCancelled(boundary);
-  return value;
+  return result.stdout;
 };
 
-const refTip = (
+const refTip = async (
   repositoryRoot: string,
   ref: string,
   boundary: GitExecutionBoundary,
-): string | null => {
-  assertNotCancelled(boundary);
-  const result = spawnSync(
-    "git",
+): Promise<string | null> => {
+  const result = await runCommand(
     [
       "-C",
       repositoryRoot,
@@ -122,39 +207,30 @@ const refTip = (
       "--quiet",
       `${ref}^{commit}`,
     ],
-    {
-      encoding: "utf8",
-      env: gitEnvironment(),
-      timeout: boundary.timeoutMs,
-      killSignal: "SIGKILL",
-    },
+    { boundary, env: gitEnvironment() },
   );
   assertNotCancelled(boundary);
-  if (result.error) throw result.error;
   if (result.status === 1) return null;
   if (result.status !== 0) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_GIT_UNQUERYABLE",
-      result.stderr.trim() || `Git ref ${ref} could not be queried.`,
+      result.stderr.toString("utf8").trim() ||
+        `Git ref ${ref} could not be queried.`,
     );
   }
-  return result.stdout.trim();
+  return result.stdout.toString("utf8").trim();
 };
 
-const validateRefName = (
+const validateRefName = async (
   branch: string,
   kind: "integration" | "source",
   boundary: GitExecutionBoundary,
-) => {
-  assertNotCancelled(boundary);
-  const check = spawnSync("git", ["check-ref-format", "--branch", branch], {
-    encoding: "utf8",
+): Promise<void> => {
+  const check = await runCommand(["check-ref-format", "--branch", branch], {
+    boundary,
     env: gitEnvironment(),
-    timeout: boundary.timeoutMs,
-    killSignal: "SIGKILL",
   });
   assertNotCancelled(boundary);
-  if (check.error) throw check.error;
   if (
     check.status !== 0 ||
     branch.includes("\\") ||
@@ -170,10 +246,10 @@ const validateRefName = (
   }
 };
 
-const resolveRepository = (
+const resolveRepository = async (
   repositoryReference: string,
   boundary: GitExecutionBoundary,
-): string => {
+): Promise<string> => {
   if (!isAbsolute(repositoryReference)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REPOSITORY_INVALID",
@@ -209,9 +285,11 @@ const resolveRepository = (
   let commonDir: string;
   try {
     topLevel = realpathSync(
-      git(root, ["rev-parse", "--show-toplevel"], { boundary }),
+      await git(root, ["rev-parse", "--show-toplevel"], { boundary }),
     );
-    const common = git(root, ["rev-parse", "--git-common-dir"], { boundary });
+    const common = await git(root, ["rev-parse", "--git-common-dir"], {
+      boundary,
+    });
     commonDir = realpathSync(isAbsolute(common) ? common : join(root, common));
   } catch (error) {
     if (isBoundaryError(error)) throw error;
@@ -229,24 +307,16 @@ const resolveRepository = (
   return root;
 };
 
-const symbolicRefTarget = (
+const symbolicRefTarget = async (
   repositoryRoot: string,
   ref: string,
   boundary: GitExecutionBoundary,
-): string | null => {
-  assertNotCancelled(boundary);
-  const result = spawnSync(
-    "git",
+): Promise<string | null> => {
+  const result = await runCommand(
     ["-C", repositoryRoot, "symbolic-ref", "--quiet", ref],
-    {
-      encoding: "utf8",
-      env: gitEnvironment(),
-      timeout: boundary.timeoutMs,
-      killSignal: "SIGKILL",
-    },
+    { boundary, env: gitEnvironment() },
   );
   assertNotCancelled(boundary);
-  if (result.error) throw result.error;
   if (result.status === 1) return null;
   if (result.status !== 0) {
     throw new GitIntegrationAdapterError(
@@ -254,15 +324,15 @@ const symbolicRefTarget = (
       `Git ref ${ref} could not be inspected safely.`,
     );
   }
-  return result.stdout.trim();
+  return result.stdout.toString("utf8").trim();
 };
 
-const refIsCheckedOut = (
+const refIsCheckedOut = async (
   repositoryRoot: string,
   ref: string,
   boundary: GitExecutionBoundary,
-): boolean =>
-  git(repositoryRoot, ["worktree", "list", "--porcelain"], { boundary })
+): Promise<boolean> =>
+  (await git(repositoryRoot, ["worktree", "list", "--porcelain"], { boundary }))
     .split("\n")
     .some((line) => line === `branch ${ref}`);
 
@@ -275,19 +345,22 @@ type PreparedIntegration = {
   readonly conflictFiles: readonly string[];
 };
 
-const prepare = (
+const prepare = async (
   input: GitIntegrationRequest,
   boundary: GitExecutionBoundary,
-): PreparedIntegration => {
-  validateRefName(input.integrationBranch, "integration", boundary);
-  validateRefName(input.sourceBranch, "source", boundary);
+): Promise<PreparedIntegration> => {
+  await validateRefName(input.integrationBranch, "integration", boundary);
+  await validateRefName(input.sourceBranch, "source", boundary);
   if (input.sourceBranch === input.integrationBranch) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
       "An Integration operation cannot use its generation branch as a source branch.",
     );
   }
-  const repositoryRoot = resolveRepository(input.repositoryReference, boundary);
+  const repositoryRoot = await resolveRepository(
+    input.repositoryReference,
+    boundary,
+  );
   for (const [label, value] of [
     ["base commit", input.baseCommit],
     ["source commit", input.sourceCommit],
@@ -307,13 +380,13 @@ const prepare = (
     );
   }
   const sourceRef = `refs/heads/${input.sourceBranch}`;
-  if (symbolicRefTarget(repositoryRoot, sourceRef, boundary)) {
+  if (await symbolicRefTarget(repositoryRoot, sourceRef, boundary)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
       "The reviewed source branch cannot be a symbolic ref.",
     );
   }
-  const sourceTip = refTip(repositoryRoot, sourceRef, boundary);
+  const sourceTip = await refTip(repositoryRoot, sourceRef, boundary);
   if (sourceTip !== input.sourceCommit) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_SOURCE_DRIFT",
@@ -321,20 +394,28 @@ const prepare = (
     );
   }
   try {
-    git(repositoryRoot, ["cat-file", "-e", `${input.baseCommit}^{commit}`], {
-      boundary,
-    });
-    git(repositoryRoot, ["cat-file", "-e", `${input.sourceCommit}^{commit}`], {
-      boundary,
-    });
-    git(
+    await git(
+      repositoryRoot,
+      ["cat-file", "-e", `${input.baseCommit}^{commit}`],
+      {
+        boundary,
+      },
+    );
+    await git(
+      repositoryRoot,
+      ["cat-file", "-e", `${input.sourceCommit}^{commit}`],
+      { boundary },
+    );
+    await git(
       repositoryRoot,
       ["merge-base", "--is-ancestor", input.baseCommit, input.sourceCommit],
       { boundary },
     );
-    git(repositoryRoot, ["cat-file", "-e", `${input.expectedTip}^{commit}`], {
-      boundary,
-    });
+    await git(
+      repositoryRoot,
+      ["cat-file", "-e", `${input.expectedTip}^{commit}`],
+      { boundary },
+    );
   } catch (error) {
     if (isBoundaryError(error)) throw error;
     throw new GitIntegrationAdapterError(
@@ -343,25 +424,28 @@ const prepare = (
     );
   }
   const integrationRef = `refs/heads/${input.integrationBranch}`;
-  if (symbolicRefTarget(repositoryRoot, integrationRef, boundary)) {
+  if (await symbolicRefTarget(repositoryRoot, integrationRef, boundary)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
       "The Integration generation branch cannot be a symbolic ref.",
     );
   }
-  if (refIsCheckedOut(repositoryRoot, integrationRef, boundary)) {
+  if (await refIsCheckedOut(repositoryRoot, integrationRef, boundary)) {
     throw new GitIntegrationAdapterError(
       "INTEGRATION_REF_INVALID",
       "The Integration generation branch cannot be checked out in a Worktree.",
     );
   }
-  const currentTip = refTip(repositoryRoot, integrationRef, boundary);
+  const currentTip = await refTip(repositoryRoot, integrationRef, boundary);
   const scratch = mkdtempSync(join(tmpdir(), "sandcastle-integration-index-"));
   const indexPath = join(scratch, "index");
   const env = gitEnvironment({ GIT_INDEX_FILE: indexPath });
   try {
-    git(repositoryRoot, ["read-tree", input.expectedTip], { env, boundary });
-    const delta = gitBuffer(
+    await git(repositoryRoot, ["read-tree", input.expectedTip], {
+      env,
+      boundary,
+    });
+    const delta = await gitBuffer(
       repositoryRoot,
       [
         "diff",
@@ -376,8 +460,7 @@ const prepare = (
       ],
       boundary,
     );
-    const applied = spawnSync(
-      "git",
+    const applied = await runCommand(
       [
         "-C",
         repositoryRoot,
@@ -387,21 +470,13 @@ const prepare = (
         "--binary",
         "--whitespace=nowarn",
       ],
-      {
-        env,
-        input: delta,
-        encoding: "utf8",
-        timeout: boundary.timeoutMs,
-        killSignal: "SIGKILL",
-      },
+      { env, input: delta, boundary },
     );
     assertNotCancelled(boundary);
-    if (applied.error) throw applied.error;
     if (applied.status !== 0) {
-      const conflictFiles = git(repositoryRoot, ["ls-files", "-u"], {
-        env,
-        boundary,
-      })
+      const conflictFiles = (
+        await git(repositoryRoot, ["ls-files", "-u"], { env, boundary })
+      )
         .split("\n")
         .filter(Boolean)
         .map((line) => line.split("\t").at(-1)!)
@@ -416,7 +491,7 @@ const prepare = (
         conflictFiles,
       };
     }
-    const tree = git(repositoryRoot, ["write-tree"], { env, boundary });
+    const tree = await git(repositoryRoot, ["write-tree"], { env, boundary });
     const commitEnvironment: NodeJS.ProcessEnv = {
       ...gitEnvironment(),
       GIT_AUTHOR_NAME: "Sandcastle Integration Adapter",
@@ -426,7 +501,7 @@ const prepare = (
       GIT_COMMITTER_EMAIL: "integration@sandcastle.invalid",
       GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
     };
-    const resultingCommit = git(
+    const resultingCommit = await git(
       repositoryRoot,
       ["commit-tree", tree, "-p", input.expectedTip],
       {
@@ -475,12 +550,18 @@ const succeeded = (
 });
 
 export const openLocalGitIntegrationAdapter = (
-  options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+  options: {
+    readonly timeoutMs?: number;
+    readonly signal?: AbortSignal;
+    readonly gitExecutable?: string;
+  } = {},
 ): GitIntegrationAdapter => {
-  const boundary: GitExecutionBoundary = {
+  const active = new Map<string, AbortController>();
+  const boundary = (signal?: AbortSignal): GitExecutionBoundary => ({
+    executable: options.gitExecutable ?? "git",
     timeoutMs: options.timeoutMs ?? 30_000,
-    ...(options.signal ? { signal: options.signal } : {}),
-  };
+    ...(signal ? { signal } : options.signal ? { signal: options.signal } : {}),
+  });
   const unknown = (
     error: unknown,
   ): Extract<GitIntegrationResult, { status: "unknown" }> => ({
@@ -499,105 +580,119 @@ export const openLocalGitIntegrationAdapter = (
     },
   });
   return {
-    execute: (input) => {
-      let prepared: PreparedIntegration;
+    execute: async (input) => {
+      const controller = new AbortController();
+      const abortFromParent = () => controller.abort();
+      if (options.signal?.aborted) controller.abort();
+      else
+        options.signal?.addEventListener("abort", abortFromParent, {
+          once: true,
+        });
+      active.set(input.operationId, controller);
+      const executionBoundary = boundary(controller.signal);
       try {
-        prepared = prepare(input, boundary);
-      } catch (error) {
+        let prepared: PreparedIntegration;
+        try {
+          prepared = await prepare(input, executionBoundary);
+        } catch (error) {
+          if (
+            error instanceof GitIntegrationAdapterError &&
+            error.code !== "INTEGRATION_GIT_CANCELLED"
+          ) {
+            return {
+              status: "failed",
+              writeStatus: "not-started",
+              code: error.code,
+              message: error.message,
+              evidence: {
+                causeCode: error.code,
+                requestHash: input.requestHash,
+                expectedTip: input.expectedTip,
+              },
+            };
+          }
+          return unknown(error);
+        }
+        if (prepared.conflictFiles.length > 0) {
+          return {
+            status: "conflict",
+            writeStatus: "not-started",
+            code: "INTEGRATION_GIT_CONFLICT",
+            message:
+              "The reviewed full-tree delta conflicts with the exact Integration branch tip.",
+            evidence: {
+              baseCommit: input.baseCommit,
+              sourceCommit: input.sourceCommit,
+              targetCommit: input.expectedTip,
+              conflictFiles: prepared.conflictFiles,
+            },
+          };
+        }
+        if (prepared.currentTip === prepared.resultingCommit) {
+          return succeeded(input, prepared);
+        }
         if (
-          error instanceof GitIntegrationAdapterError &&
-          error.code !== "INTEGRATION_GIT_CANCELLED"
+          prepared.currentTip !== null &&
+          prepared.currentTip !== input.expectedTip
         ) {
           return {
             status: "failed",
             writeStatus: "not-started",
-            code: error.code,
-            message: error.message,
+            code: "INTEGRATION_CONFLICT",
+            message: `Integration branch is at ${prepared.currentTip}, not expected tip ${input.expectedTip}.`,
             evidence: {
-              causeCode: error.code,
-              requestHash: input.requestHash,
               expectedTip: input.expectedTip,
+              actualTip: prepared.currentTip,
+              resultingCommit: prepared.resultingCommit,
             },
           };
         }
-        return unknown(error);
-      }
-      if (prepared.conflictFiles.length > 0) {
-        return {
-          status: "conflict",
-          writeStatus: "not-started",
-          code: "INTEGRATION_GIT_CONFLICT",
-          message:
-            "The reviewed full-tree delta conflicts with the exact Integration branch tip.",
-          evidence: {
-            baseCommit: input.baseCommit,
-            sourceCommit: input.sourceCommit,
-            targetCommit: input.expectedTip,
-            conflictFiles: prepared.conflictFiles,
-          },
-        };
-      }
-      if (prepared.currentTip === prepared.resultingCommit) {
-        return succeeded(input, prepared);
-      }
-      if (
-        prepared.currentTip !== null &&
-        prepared.currentTip !== input.expectedTip
-      ) {
-        return {
-          status: "failed",
-          writeStatus: "not-started",
-          code: "INTEGRATION_CONFLICT",
-          message: `Integration branch is at ${prepared.currentTip}, not expected tip ${input.expectedTip}.`,
-          evidence: {
-            expectedTip: input.expectedTip,
-            actualTip: prepared.currentTip,
-            resultingCommit: prepared.resultingCommit,
-          },
-        };
-      }
-      const expectedOld = prepared.currentTip ?? zeroCommit;
-      try {
-        git(
-          prepared.repositoryRoot,
-          [
-            "update-ref",
-            "--no-deref",
-            "-m",
-            `sandcastle integration ${input.operationId}`,
+        const expectedOld = prepared.currentTip ?? zeroCommit;
+        try {
+          await git(
+            prepared.repositoryRoot,
+            [
+              "update-ref",
+              "--no-deref",
+              "-m",
+              `sandcastle integration ${input.operationId}`,
+              prepared.integrationRef,
+              prepared.resultingCommit,
+              expectedOld,
+            ],
+            { boundary: executionBoundary },
+          );
+        } catch (error) {
+          if (isBoundaryError(error)) return unknown(error);
+          const observed = await refTip(
+            prepared.repositoryRoot,
             prepared.integrationRef,
-            prepared.resultingCommit,
-            expectedOld,
-          ],
-          { boundary },
-        );
-      } catch (error) {
-        if (isBoundaryError(error)) return unknown(error);
-        const observed = refTip(
-          prepared.repositoryRoot,
-          prepared.integrationRef,
-          boundary,
-        );
-        if (observed === prepared.resultingCommit) {
-          return succeeded(input, prepared);
+            executionBoundary,
+          );
+          if (observed === prepared.resultingCommit) {
+            return succeeded(input, prepared);
+          }
+          return {
+            status: "failed",
+            writeStatus: "not-started",
+            code: "INTEGRATION_CONFLICT",
+            message: "Integration branch changed during compare-and-swap.",
+            evidence: {
+              expectedTip: prepared.currentTip,
+              actualTip: observed,
+              resultingCommit: prepared.resultingCommit,
+            },
+          };
         }
-        return {
-          status: "failed",
-          writeStatus: "not-started",
-          code: "INTEGRATION_CONFLICT",
-          message: "Integration branch changed during compare-and-swap.",
-          evidence: {
-            expectedTip: prepared.currentTip,
-            actualTip: observed,
-            resultingCommit: prepared.resultingCommit,
-          },
-        };
+        return succeeded(input, prepared);
+      } finally {
+        active.delete(input.operationId);
+        options.signal?.removeEventListener("abort", abortFromParent);
       }
-      return succeeded(input, prepared);
     },
-    reconcile: (input): GitIntegrationReconciliation => {
+    reconcile: async (input): Promise<GitIntegrationReconciliation> => {
       try {
-        const prepared = prepare(input, boundary);
+        const prepared = await prepare(input, boundary());
         if (prepared.conflictFiles.length > 0) {
           return {
             status: "conflict",
@@ -645,6 +740,9 @@ export const openLocalGitIntegrationAdapter = (
           evidence: { error: String(error) },
         };
       }
+    },
+    cancel: async (operationId) => {
+      active.get(operationId)?.abort();
     },
   };
 };

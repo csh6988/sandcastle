@@ -45,8 +45,7 @@ const openReceiptHarness = (input?: {
   const storage = new DatabaseSync(":memory:");
   migrateCompanyDatabase(storage);
   let persistedSession:
-    | { readonly sessionId: string; readonly participantId: string }
-    | undefined;
+    { readonly sessionId: string; readonly participantId: string } | undefined;
   const database = {
     exec: (sql: string) => storage.exec(sql),
     prepare: (sql: string) => {
@@ -70,6 +69,10 @@ const openReceiptHarness = (input?: {
   let adapterExecutions = 0;
   let recordMutations = 0;
   let recordedInput: unknown;
+  let signalExecutionStarted: (() => void) | undefined;
+  const executionStarted = new Promise<void>((resolve) => {
+    signalExecutionStarted = resolve;
+  });
   let releaseExecutions: (() => void) | undefined;
   const concurrentExecutions = new Promise<void>((resolve) => {
     releaseExecutions = resolve;
@@ -78,7 +81,7 @@ const openReceiptHarness = (input?: {
     execute: async () => {
       adapterExecutions += 1;
       if (input?.waitForConcurrentExecutions) {
-        if (adapterExecutions === 2) releaseExecutions?.();
+        signalExecutionStarted?.();
         await concurrentExecutions;
       }
       return {
@@ -199,6 +202,8 @@ const openReceiptHarness = (input?: {
     integratedCommit,
     adapterExecutions: () => adapterExecutions,
     recordMutations: () => recordMutations,
+    executionStarted,
+    releaseExecutions: () => releaseExecutions?.(),
   };
 };
 
@@ -668,14 +673,18 @@ describe("Aggregate Integration Review executor", () => {
       acceptanceCriteria: ["npm test"],
     };
 
-    const [left, right] = await Promise.all([
-      harness.executor.execute(input),
-      harness.executor.execute(input),
-    ]);
+    const leftPromise = harness.executor.execute(input);
+    await harness.executionStarted;
+    const rightPromise = harness.executor.execute(input);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const concurrentExecutionCount = harness.adapterExecutions();
+    harness.releaseExecutions();
+    const [left, right] = await Promise.all([leftPromise, rightPromise]);
 
     assert.deepEqual(left, right);
     assert.equal(left.status, "completed");
-    assert.equal(harness.adapterExecutions(), 2);
+    assert.equal(concurrentExecutionCount, 1);
+    assert.equal(harness.adapterExecutions(), 1);
     assert.equal(harness.recordMutations(), 1);
     assert.equal(
       Number(

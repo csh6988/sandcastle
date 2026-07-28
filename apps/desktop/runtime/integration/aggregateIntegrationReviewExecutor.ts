@@ -124,6 +124,14 @@ export const openAggregateIntegrationReviewExecutor = (options: {
 }): AggregateIntegrationReviewExecutor => {
   const clock = options.clock ?? (() => new Date());
   mkdirSync(options.workspaceRoot, { recursive: true, mode: 0o700 });
+  const inFlight = new Map<
+    string,
+    {
+      readonly inputHash: string;
+      readonly reconcileExisting: boolean;
+      readonly promise: Promise<AggregateIntegrationReviewResult>;
+    }
+  >();
 
   const makeReadOnly = (path: string): void => {
     const entry = lstatSync(path);
@@ -447,7 +455,7 @@ export const openAggregateIntegrationReviewExecutor = (options: {
     return { sessionId: session.id, participantId: participant.id };
   };
 
-  const execute = async (
+  const executeOnce = async (
     input: AggregateIntegrationReviewInput,
     reconcileExisting: boolean,
   ): Promise<AggregateIntegrationReviewResult> => {
@@ -749,6 +757,44 @@ export const openAggregateIntegrationReviewExecutor = (options: {
             : "Aggregate Reviewer result was invalid.",
         evidence: { operationKey: input.operationKey },
       };
+    }
+  };
+
+  const execute = async (
+    input: AggregateIntegrationReviewInput,
+    reconcileExisting: boolean,
+  ): Promise<AggregateIntegrationReviewResult> => {
+    const inputHash = sha256(canonicalJson(input));
+    const existing = inFlight.get(input.operationKey);
+    if (existing) {
+      if (existing.inputHash !== inputHash) {
+        return {
+          status: "unknown",
+          code: "INTEGRATION_AGGREGATE_REVIEW_CONFLICT",
+          message:
+            "Aggregate Review operation is already executing with different frozen input.",
+          evidence: { operationKey: input.operationKey },
+        };
+      }
+      const result = await existing.promise;
+      if (
+        !reconcileExisting &&
+        existing.reconcileExisting &&
+        result.status === "not-applied"
+      ) {
+        return execute(input, false);
+      }
+      return result;
+    }
+    const promise = executeOnce(input, reconcileExisting);
+    const claim = { inputHash, reconcileExisting, promise };
+    inFlight.set(input.operationKey, claim);
+    try {
+      return await promise;
+    } finally {
+      if (inFlight.get(input.operationKey) === claim) {
+        inFlight.delete(input.operationKey);
+      }
     }
   };
 
