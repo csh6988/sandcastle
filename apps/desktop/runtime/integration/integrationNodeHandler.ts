@@ -393,6 +393,7 @@ export const openIntegrationNodeHandler = (options: {
         result,
       });
     }
+    if (paused) return;
     const commandId = `${input.operationKey}:completed`;
     executeCommand({
       generationId: generation.id,

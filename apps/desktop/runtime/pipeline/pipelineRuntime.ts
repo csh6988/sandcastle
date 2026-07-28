@@ -6003,6 +6003,11 @@ export const openPipelineRuntime = (
             )
             .all(input.runId) as Array<{ readonly nodeRunId: string }>)
         : [];
+    let resumableIntegrations: Array<{
+      readonly nodeRunId: string;
+      readonly attemptId: string;
+      readonly generationId: string;
+    }> = [];
     database.exec("BEGIN IMMEDIATE");
     try {
       if (input.action === "pause") {
@@ -6041,7 +6046,7 @@ export const openPipelineRuntime = (
             `Department Run ${input.runId} is not paused.`,
           );
         }
-        const resumableIntegrations = database
+        resumableIntegrations = database
           .prepare(
             `SELECT node_runs.id AS nodeRunId,
                     node_attempts.id AS attemptId,
@@ -6275,6 +6280,40 @@ export const openPipelineRuntime = (
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
+    }
+    if (input.action === "resume" && integrationExecutor) {
+      for (const integration of resumableIntegrations) {
+        try {
+          await integrationExecutor({
+            runId: input.runId,
+            nodeRunId: integration.nodeRunId,
+          });
+        } catch (error) {
+          const currentIntegration = inspectRun(input.runId).nodes.find(
+            (node) => node.id === integration.nodeRunId,
+          );
+          if (currentIntegration?.status !== "running") continue;
+          database.exec("BEGIN IMMEDIATE");
+          try {
+            blockIntegrationInTransaction({
+              runId: input.runId,
+              nodeRunId: integration.nodeRunId,
+              generationId: integration.generationId,
+              failure: {
+                code: "INTEGRATION_RESUME_DISPATCH_FAILED",
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : "Integration resume dispatch failed.",
+              },
+            });
+            database.exec("COMMIT");
+          } catch (blockError) {
+            database.exec("ROLLBACK");
+            throw blockError;
+          }
+        }
+      }
     }
     if (input.action === "pause" || input.action === "cancel") {
       const cancellation = Promise.all([
