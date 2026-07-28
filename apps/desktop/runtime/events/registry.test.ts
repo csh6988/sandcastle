@@ -81,6 +81,12 @@ const agUiRegistryFixture = [
   "work-package.started@1:custom",
   "work-package.self-check@1:custom",
   "work-package.failed@1:custom",
+  "code-review.planned@1:custom",
+  "code-review.workspace.ready@1:custom",
+  "code-review.workspace.blocked@1:custom",
+  "code-review.workspace.unknown@1:custom",
+  "code-review.authority.created@1:custom",
+  "code-review.defect.created@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -491,6 +497,50 @@ describe("Runtime Event registry", () => {
             workPackageId: "work-package-1",
             workPackageVersionId: "work-package-version-1",
             state: "running",
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+    );
+  });
+
+  it("requires exact Code Review, Work Package, and Version identities", () => {
+    const registry = createRuntimeEventRegistry();
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "code-review.authority.created",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          topicId: "code-review-topic-1",
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+        },
+        payload: {
+          codeReviewId: "code-review-1",
+          workPackageId: "work-package-1",
+          workPackageVersionId: "work-package-version-1",
+          qualityGateResultId: "code-gate-1",
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "code-review.authority.created",
+          scope: {
+            companyId: "company",
+            projectId: "project-1",
+            runId: "run-1",
+            topicId: "code-review-topic-1",
+            workPackageId: "work-package-1",
+          },
+          payload: {
+            codeReviewId: "code-review-1",
+            workPackageId: "work-package-1",
+            workPackageVersionId: "work-package-version-1",
           },
         }),
       (error: unknown) =>

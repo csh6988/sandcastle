@@ -11,6 +11,7 @@ import {
   ProductDiscoveryViewSchema,
   ProductReviewStateViewSchema,
   ReviewTopicViewSchema,
+  CodeReviewViewSchema,
   type CommandEnvelope,
   type CommandResult,
   type ApplicationView,
@@ -26,6 +27,8 @@ import {
   type ProductReviewStateView,
   type ReviewTopicView,
   type ReviewEnvelopeCommand,
+  type CodeReviewEnvelopeCommand,
+  type CodeReviewView,
   type MemoryEnvelopeCommand,
   MemoryCandidateViewSchema,
   MemoryDecisionViewSchema,
@@ -82,6 +85,10 @@ import {
   WorkPackageRuntimeError,
   type WorkPackageRuntime,
 } from "./workspaces/workPackages.js";
+import {
+  CodeReviewRuntimeError,
+  type CodeReviewRuntime,
+} from "./review/codeReviewRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -196,6 +203,14 @@ export const companyCommandDefinitions = {
   },
   "review.recheck.submit": {
     primaryAggregate: "review-topic",
+    expectedRevisionRequired: true,
+  },
+  "code-review.start": {
+    primaryAggregate: "work-package",
+    expectedRevisionRequired: true,
+  },
+  "code-review.converge": {
+    primaryAggregate: "work-package",
     expectedRevisionRequired: true,
   },
   "workspace-allocation.provision": {
@@ -320,6 +335,9 @@ const deterministicError = (
   if (error instanceof ReviewRuntimeError) {
     return { code: error.code, message: error.message };
   }
+  if (error instanceof CodeReviewRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
   if (error instanceof RuntimeMemoryError) {
     return { code: error.code, message: error.message };
   }
@@ -436,6 +454,156 @@ const executeReviewCommand = (
       result = { status: "rejected", error: rejection, effectIds: [] };
     }
 
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    if (
+      error instanceof Error &&
+      (("errcode" in error && error.errcode === 5) ||
+        /database (?:is )?(?:locked|busy)/i.test(error.message))
+    ) {
+      throw new CompanyCommandError(
+        "STORE_BUSY",
+        "Company database is busy; retry the same Command ID.",
+      );
+    }
+    throw error;
+  }
+};
+
+const executeCodeReviewCommand = (
+  database: DatabaseSync,
+  codeReviews: CodeReviewRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<CodeReviewView> => {
+  if (!envelope.command.type.startsWith("code-review.")) {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Code Review command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) {
+        return commandIdReuse(
+          envelope.commandId,
+        ) as CommandResult<CodeReviewView>;
+      }
+      return CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<CodeReviewView>;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<CodeReviewView>;
+    database.exec("SAVEPOINT code_review_command");
+    try {
+      const value = codeReviews.dispatchInTransaction({
+        commandId: envelope.commandId,
+        actor: envelope.actor,
+        expectedRevision: envelope.expectedRevision,
+        command: envelope.command as CodeReviewEnvelopeCommand,
+      });
+      database.exec("RELEASE code_review_command");
+      const effectIds = (
+        database
+          .prepare(
+            `SELECT id FROM runtime_audit_records
+              WHERE command_id = ? ORDER BY created_at, id`,
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      result = {
+        status: "succeeded",
+        value: CodeReviewViewSchema.parse(value),
+        effectIds,
+      };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO code_review_command");
+      database.exec("RELEASE code_review_command");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
     const resultJson = canonicalJson(result);
     database
       .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
@@ -2505,6 +2673,7 @@ export const openCompanyCommandRegistry = (
   memory?: RuntimeMemory,
   memoryFailure?: (point: MemoryCommandFailurePoint) => void,
   workPackageRuntime?: WorkPackageRuntime,
+  codeReviewRuntime?: CodeReviewRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
@@ -2521,6 +2690,20 @@ export const openCompanyCommandRegistry = (
         database,
         workPackageRuntime,
         envelope as CommandEnvelope<WorkPackageEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type.startsWith("code-review.")) {
+      if (!codeReviewRuntime) {
+        throw new CompanyCommandError(
+          "CODE_REVIEW_RUNTIME_UNAVAILABLE",
+          "Code Review Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeCodeReviewCommand(
+        database,
+        codeReviewRuntime,
+        envelope,
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
     }

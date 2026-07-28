@@ -283,6 +283,92 @@ describe("Company Runtime client", () => {
     assert.equal(inspected.asOfSequence, 19);
   });
 
+  it("parses Code Review authority through a verified Query envelope", async () => {
+    const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
+    const view = {
+      id: "code-review-1",
+      topicId: "code-review-topic-1",
+      manifest: {
+        schemaVersion: 1 as const,
+        projectId: "project-1",
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        workPackageId: "work-package-1",
+        workPackageVersionId: "work-package-version-1",
+        assignmentId: "assignment-1",
+        nodeRunId: "node-run-1",
+        nodeAttemptId: "node-attempt-1",
+        repositoryReference: "/tmp/repository",
+        baseCommit: "a".repeat(40),
+        workspaceImportId: "workspace-import-1",
+        sourceCommit: "b".repeat(40),
+        diffArtifactVersionId: "diff-artifact-version-1",
+        diffHash: "c".repeat(64),
+        specRevisionIds: ["application-spec:r1"],
+        harnessSnapshotIds: ["harness:tdd@1"],
+        acceptanceCriteria: ["Independent PASS gates Integration."],
+        selfCheck: {
+          id: "self-check-1",
+          hash: "d".repeat(64),
+          commands: ["npm test"],
+          logRefs: ["artifact:self-check-log"],
+          evidenceRefs: ["artifact:self-check-evidence"],
+        },
+        permissions: ["repository.read"],
+        errorHandlingInputs: [],
+        crossApplicationImpactInputs: [],
+        excludedContext: ["producer-workspace" as const],
+      },
+      manifestHash: "e".repeat(64),
+      workspace: {
+        id: "reviewer-workspace-1",
+        operationKey: "code-review:code-review-1:workspace",
+        state: "ready" as const,
+        reviewerAiMemberId: "reviewer-member",
+        reviewerPositionId: "reviewer-position",
+        reviewerSessionId: "reviewer-session-1",
+        reviewNodeRunId: "code-review-node-1",
+        providerId: "isolated-reviewer",
+        workspaceRef: "reviewer-workspace:1",
+        capabilitySnapshotHash: "f".repeat(64),
+        independenceEvidenceHash: "1".repeat(64),
+        failureCode: null,
+        failureMessage: null,
+      },
+      gateResult: null,
+      authority: null,
+      defects: [],
+      integrationEligible: false,
+    };
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        requests.push(request);
+        return {
+          id: request.id,
+          ok: true,
+          result: { view: [view], asOfSequence: 20 },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+
+    const inspected = await client.query({
+      type: "code-reviews.inspect",
+      runId: "run-1",
+    });
+
+    assert.equal(inspected[0]?.id, "code-review-1");
+    assert.equal(inspected[0]?.manifest.sourceCommit, "b".repeat(40));
+    assert.equal(requests[0]?.kind, "query");
+    assert.equal(
+      requests[0]?.kind === "query" && "envelope" in requests[0]
+        ? requests[0].envelope.query.type
+        : null,
+      "code-reviews.inspect",
+    );
+  });
+
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
     const transport = {

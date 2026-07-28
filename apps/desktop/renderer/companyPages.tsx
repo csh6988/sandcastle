@@ -20,6 +20,7 @@ import type {
   ProductReviewStateView,
   TechnicalReviewStateView,
   WorkPackageGraphView,
+  CodeReviewView,
   ProductProposalContent,
   ProjectEditorView,
   ReviewTopicView,
@@ -2211,6 +2212,85 @@ export function ReviewTopicsPanel({
   );
 }
 
+export function CodeReviewAuthorityPanel({
+  reviews,
+}: {
+  readonly reviews: readonly CodeReviewView[];
+}) {
+  return (
+    <section className="review-topics" data-code-review-authority>
+      <header className="page-heading">
+        <div>
+          <span className="eyebrow">Integration authority</span>
+          <h2>Independent Code Review</h2>
+          <p>
+            Runtime-owned manifests bind each review to one exact Work Package
+            Version, imported source commit, canonical diff, and self-check.
+          </p>
+        </div>
+      </header>
+      {reviews.length === 0 ? (
+        <div className="empty-state" data-code-review-empty>
+          No independent Code Review has been scheduled for this Run.
+        </div>
+      ) : (
+        <div className="catalog-grid">
+          {reviews.map((review) => (
+            <article className="catalog-card" key={review.id}>
+              <div className="project-card-top">
+                <div>
+                  <span className="eyebrow">
+                    {review.manifest.workPackageVersionId}
+                  </span>
+                  <strong>{review.manifest.sourceCommit}</strong>
+                </div>
+                <span className="pill" data-code-review-status>
+                  {review.integrationEligible
+                    ? "Integration eligible"
+                    : review.gateResult
+                      ? review.gateResult.result
+                      : review.workspace.state === "blocked"
+                        ? "Review blocked"
+                        : "Awaiting independent PASS"}
+                </span>
+              </div>
+              <dl className="catalog-meta">
+                <div>
+                  <dt>Canonical diff</dt>
+                  <dd>
+                    <code>{review.manifest.diffHash}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Reviewer Session</dt>
+                  <dd>{review.workspace.reviewerSessionId}</dd>
+                </div>
+                <div>
+                  <dt>Reviewer Workspace</dt>
+                  <dd>{review.workspace.state}</dd>
+                </div>
+              </dl>
+              {review.authority ? (
+                <p data-code-review-pass-authority>
+                  Immutable PASS authority {review.authority.id} · Gate{" "}
+                  {review.authority.qualityGateResultId}
+                </p>
+              ) : null}
+              {review.defects.length > 0 ? (
+                <p data-code-review-defects>
+                  {review.defects.filter((defect) => defect.status !== "closed")
+                    .length || "No"}{" "}
+                  open defect(s)
+                </p>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ProductReviewStatePanel({
   state,
 }: {
@@ -2311,6 +2391,22 @@ export const inspectProjectRunWorkPackages = async (
   }
 };
 
+export const inspectProjectRunCodeReviews = async (
+  runtime: {
+    readonly query: (query: {
+      readonly type: "code-reviews.inspect";
+      readonly runId: string;
+    }) => Promise<{ readonly view: readonly CodeReviewView[] }>;
+  },
+  runId: string,
+): Promise<readonly CodeReviewView[]> => {
+  try {
+    return (await runtime.query({ type: "code-reviews.inspect", runId })).view;
+  } catch {
+    return [];
+  }
+};
+
 export function ProjectDetailWorkPackages({
   active,
   graph,
@@ -2406,6 +2502,7 @@ export function ProjectDetailView({
     useState<TechnicalReviewStateView | null>(null);
   const [workPackageGraph, setWorkPackageGraph] =
     useState<WorkPackageGraphView | null>(null);
+  const [codeReviews, setCodeReviews] = useState<readonly CodeReviewView[]>([]);
   const [proposalDraft, setProposalDraft] = useState<ProductProposalContent>({
     goal: project.goal,
     users: [],
@@ -2468,6 +2565,22 @@ export function ProjectDetailView({
     inspectProjectRunWorkPackages(window.sandcastle, selectedRun.run.id).then(
       (graph) => {
         if (active) setWorkPackageGraph(graph);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [selectedRun?.run.id]);
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setCodeReviews([]);
+      return;
+    }
+    let active = true;
+    inspectProjectRunCodeReviews(window.sandcastle, selectedRun.run.id).then(
+      (reviews) => {
+        if (active) setCodeReviews(reviews);
       },
     );
     return () => {
@@ -2632,12 +2745,14 @@ export function ProjectDetailView({
           })
           .then((result) => result.view)
           .catch(() => null),
+        inspectProjectRunCodeReviews(window.sandcastle, selectedRun.run.id),
       ])
-        .then(([nextRun, artifacts, graph]) => {
+        .then(([nextRun, artifacts, graph, reviews]) => {
           if (!active) return;
           setSelectedRun(nextRun);
           setRunArtifacts(artifacts);
           setWorkPackageGraph(graph);
+          setCodeReviews(reviews);
           setRuns((current) =>
             current.map((run) =>
               run.run.id === nextRun.run.id ? nextRun : run,
@@ -3531,7 +3646,10 @@ export function ProjectDetailView({
         </section>
       ) : null}
       {activeTab === "reviews" ? (
-        <ReviewTopicsPanel topics={reviewTopics} />
+        <>
+          <CodeReviewAuthorityPanel reviews={codeReviews} />
+          <ReviewTopicsPanel topics={reviewTopics} />
+        </>
       ) : null}
       {activeTab === "memory" ? (
         <section className="create-panel" data-project-memory>

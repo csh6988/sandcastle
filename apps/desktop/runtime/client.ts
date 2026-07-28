@@ -33,6 +33,7 @@ import {
   ProductReviewStateViewSchema,
   TechnicalReviewStateViewSchema,
   ReviewTopicViewSchema,
+  CodeReviewViewSchema,
   WorkspaceAllocationViewSchema,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
@@ -209,6 +210,7 @@ export const createCompanyRuntimeClientFromTransport = (
         query.type === "technical-review.inspect" ||
         query.type === "review.topic.inspect" ||
         query.type === "review.topics.list" ||
+        query.type === "code-reviews.inspect" ||
         query.type === "run.supervision.inspect" ||
         query.type === "artifact.inspect" ||
         query.type === "artifact.lineage.inspect" ||
@@ -293,6 +295,10 @@ export const createCompanyRuntimeClientFromTransport = (
         ) as unknown as CompanyQueryResult<Query>;
       case "review.topics.list":
         return ReviewTopicViewSchema.array().parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "code-reviews.inspect":
+        return CodeReviewViewSchema.array().parse(
           queryValue,
         ) as unknown as CompanyQueryResult<Query>;
       case "departments.list":

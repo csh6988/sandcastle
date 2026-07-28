@@ -543,6 +543,22 @@ _Avoid_: "group chat" (misses scope and execution controls), "company channel" (
 A bounded **Discussion topic** attached to a product proposal, technical design, implementation Diff, verification result, or **Memory candidate**. It has a declared review scope and acceptance criteria, preserves each eligible reviewer-participant's independent finding before discussion, records owner responses, conflict resolution, and evidence, and freezes the reviewer quorum used for its final Gate vote. Owner-participants and moderators do not submit independent findings or count toward quorum/Gate votes. Fresh re-review must introduce at least one eligible reviewer who did not submit an initial finding, and a `PASS` requires every counted eligible vote to pass with no blocking finding. A Review topic cannot approve its own output or bypass a human gate declared by the pipeline.
 _Avoid_: "free-form debate" (the topic has a finite quality objective), "approval chat" (discussion is evidence for a gate, not the authority), merging participant answers into one anonymous opinion
 
+**Independent Code Review**:
+A formal review of one exact Work Package Version and its Runtime-imported source commit by an eligible non-producer in a fresh Session and isolated read-only **Reviewer Workspace**. It produces evidence for a code-kind **Quality Gate Result** and cannot silently downgrade to self-review or shared writable execution.
+_Avoid_: developer self-check, peer chat, serial review in the producer Workspace
+
+**Code Review manifest**:
+The immutable input identity for an **Independent Code Review**, binding the exact Assignment, Node Attempt, imported commit, canonical Diff, self-check, Specs, Harness, acceptance criteria, and excluded context.
+_Avoid_: current branch state, mutable review checklist, unbounded producer context
+
+**Reviewer Workspace**:
+The isolated read-only Workspace used by an independent Reviewer with a fresh Session, allowlisted inputs, and separate Git, credentials, Session storage, and mutable cache from the producer.
+_Avoid_: Developer Workspace, bind mount, no-sandbox review, shared writable checkout
+
+**Code Review authority**:
+The immutable Integration authority created only from a fresh independent code-kind `PASS` bound to the current exact Work Package Version, source commit, Diff hash, and Reviewer independence evidence, with no open obligation.
+_Avoid_: review status, `CONDITIONAL_PASS`, developer self-check, historical PASS
+
 **Quality Gate Result**:
 An immutable terminal result (`PASS`, `CONDITIONAL_PASS`, or `FAIL`) over one kind-discriminated exact input-manifest hash, with evidence and conditions. Product, Repository-readiness, technical, code, aggregate, Test, final-candidate, and Memory gates freeze their own required IDs/revisions/hashes rather than relying on generic Artifact lists. A Review-topic result remains blocked until its frozen eligible-reviewer quorum is met; any counted `FAIL` vote yields `FAIL`, otherwise any counted `CONDITIONAL_PASS` yields `CONDITIONAL_PASS`, and only unanimous counted `PASS` votes with no blocking finding yield `PASS`. Only `PASS` satisfies a downstream production contract or promotes a Snapshot.
 _Avoid_: "current review status" (mutable projection), a chat conclusion, treating low-risk conditions as a PASS

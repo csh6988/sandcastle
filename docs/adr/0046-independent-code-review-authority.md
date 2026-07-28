@@ -1,0 +1,5 @@
+# Independent Code Review creates exact, isolated Integration authority
+
+Formal Code Review reuses the generic Review Runtime for Topics, findings, bounded discussion, revisions, fresh rechecks, and immutable Gate Results, while a dedicated deep module freezes the Work Package-specific manifest and composes Reviewer Workspace, Defect/rework, and Integration-authority policy. The Reviewer must be a non-producer in a fresh Session attached to the declared `code-review@1` Node and an independent read-only Workspace; provider isolation is proven through intent/reconcile evidence, and failure blocks the Review Node and Run through the Pipeline Runtime rather than downgrading to shared execution.
+
+Only a current independent code-kind `PASS` bound to the exact active Work Package Version, Runtime-imported source commit, canonical Diff hash, self-check, and independence evidence creates immutable Integration authority. `CONDITIONAL_PASS` and `FAIL` instead create durable Defects and fresh Work Package execution resources while retaining all prior evidence, so downstream Integration never infers approval from mutable status, a historical Gate, or Developer self-check.
