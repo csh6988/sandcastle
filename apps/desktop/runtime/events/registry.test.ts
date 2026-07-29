@@ -102,6 +102,19 @@ const agUiRegistryFixture = [
   "integration.generation.completed@1:custom",
   "integration.operation.intent-recorded@1:custom",
   "integration.operation.finalized@1:custom",
+  "test.case.revised@1:custom",
+  "test.run.accepted@1:custom",
+  "test.run.started@1:custom",
+  "test.run.reconciling@1:custom",
+  "test.run.unknown@1:custom",
+  "test.assertion.recorded@1:custom",
+  "test.evidence.recorded@1:custom",
+  "test.defect.created@1:custom",
+  "test.defect.closed@1:custom",
+  "test.run.completed@1:custom",
+  "test.run.failed@1:custom",
+  "test.run.blocked@1:custom",
+  "test.run.cancelled@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -147,7 +160,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 15);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 16);
 
     assert.deepEqual(
       registry
@@ -267,7 +280,7 @@ describe("Runtime Event registry", () => {
     );
   });
 
-  it("adds v15 Integration events without changing retained v14 contracts", () => {
+  it("adds v16 Test events without changing retained v15 contracts", () => {
     const registry = createRuntimeEventRegistry();
     assert.doesNotThrow(() =>
       registry.validate({

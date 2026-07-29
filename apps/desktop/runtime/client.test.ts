@@ -13,6 +13,12 @@ import {
 import { RuntimeRequestSchema, type RuntimeResponse } from "./interface.js";
 import { scriptedDepartmentRun } from "./testing/runContract.js";
 
+const actor = {
+  type: "test-driver" as const,
+  id: "runtime-client-test",
+  authenticatedBy: "ipc-token" as const,
+};
+
 const integrationGenerationView = {
   id: "generation-1",
   manifest: {
@@ -58,6 +64,22 @@ const integrationGenerationView = {
   defects: [],
   aggregateReview: null,
   passAuthorityHash: null,
+};
+
+const testRunView = {
+  id: "test-run-1",
+  requestId: "request-1",
+  manifest: { schemaVersion: 1 },
+  manifestHash: "e".repeat(64),
+  viewHash: "f".repeat(64),
+  state: "passed" as const,
+  passAuthorityHash: "1".repeat(64),
+  assertions: [],
+  evidence: [],
+  defects: [],
+  obligations: [],
+  createdAt: "2026-07-29T00:00:00.000Z",
+  updatedAt: "2026-07-29T00:00:00.000Z",
 };
 
 describe("Company Runtime client", () => {
@@ -472,6 +494,46 @@ describe("Company Runtime client", () => {
     assert.equal(started.status, "succeeded");
     if (started.status === "succeeded") {
       assert.equal(started.value.id, "generation-1");
+    }
+  });
+
+  it("parses Test Run Query Views and Commands through the typed Runtime tunnel", async () => {
+    const transport = {
+      request: async (input: unknown): Promise<RuntimeResponse> => {
+        const request = RuntimeRequestSchema.parse(input);
+        return {
+          id: request.id,
+          ok: true,
+          result:
+            request.kind === "query"
+              ? { view: testRunView, asOfSequence: 31 }
+              : {
+                  status: "succeeded",
+                  value: testRunView,
+                  effectIds: ["audit-test-1"],
+                },
+        };
+      },
+    };
+    const client = createCompanyRuntimeClientFromTransport(transport, "token");
+    const inspected = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "test-query-1",
+      principal: actor,
+      consumerId: "test-engineer",
+      query: { type: "test-runs.inspect", testRunId: "test-run-1" },
+    });
+    const completed = await client.executeEnvelope({
+      schemaVersion: 1,
+      commandId: "test-complete-1",
+      actor,
+      consumerId: "test-engineer",
+      command: { type: "test.run.complete", testRunId: "test-run-1" },
+    });
+    assert.equal(inspected.view.viewHash, "f".repeat(64));
+    assert.equal(completed.status, "succeeded");
+    if (completed.status === "succeeded") {
+      assert.equal(completed.value.passAuthorityHash, "1".repeat(64));
     }
   });
 

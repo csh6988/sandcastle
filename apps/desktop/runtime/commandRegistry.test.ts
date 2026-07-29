@@ -13,9 +13,13 @@ import {
 import { openProjectConfiguration } from "./project/projectConfiguration.js";
 import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
 import { migrateCompanyDatabase } from "./storage/migrations.js";
-import type { IntegrationRuntime } from "./integration/integrationRuntime.js";
+import type {
+  IntegrationGenerationView,
+  IntegrationRuntime,
+} from "./integration/integrationRuntime.js";
 import { openIntegrationRuntime } from "./integration/integrationRuntime.js";
 import { openRuntimeEvents } from "./events/subscription.js";
+import { openTestRuntime } from "./testing/testRuntime.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -27,6 +31,374 @@ const actor = {
 };
 
 describe("Company Runtime command registry", () => {
+  it("persists Test Case revision, audit, outbox, trigger context, and replay receipt in one unit of work", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+    try {
+      const project = database.catalog.createProject({
+        name: "Checkout",
+        goal: "Test checkout",
+      });
+      const envelope = {
+        schemaVersion: 1 as const,
+        commandId: "test-case-revision-command-1",
+        actor,
+        consumerId: "desktop-test-engineer",
+        command: {
+          type: "test.case-revision.register" as const,
+          testCaseId: "test-case-1",
+          revisionId: "test-case-1-r1",
+          projectId: project.id,
+          manifest: {
+            schemaVersion: 1 as const,
+            ownerPositionId: "position-test-engineer",
+            requirementIds: ["requirement-19"],
+            workPackageVersions: [],
+            preconditions: ["exact Integration PASS"],
+            uiActions: [{ id: "action-1", kind: "click", target: "run-test" }],
+            assertions: [
+              {
+                id: "assertion-1",
+                ui: { kind: "text", expected: "passed" },
+                runtime: { kind: "state", expected: "passed" },
+              },
+            ],
+            fixture: { id: "fixture-1", scriptHashes: ["a".repeat(64)] },
+            evidencePolicy: {
+              retentionClass: "durable" as const,
+              redactionProfile: "default",
+              requiredKinds: ["ui", "runtime"],
+            },
+            cleanup: { policy: "always", required: true },
+          },
+        },
+      };
+
+      const first = database.commandRegistry.execute(envelope);
+      const replay = database.commandRegistry.execute(envelope);
+      assert.deepEqual(replay, first);
+      assert.equal(first.status, "succeeded");
+      assert.equal(first.effectIds.length, 1);
+      const event = database.events
+        .readAfter(0, 100)
+        .find((entry) => entry.type === "test.case.revised");
+      assert.equal(event?.testCaseRevisionId, "test-case-1-r1");
+      assert.equal(event?.registryVersion, 16);
+
+      const inspected = new DatabaseSync(database.path);
+      try {
+        assert.equal(
+          Number(
+            (
+              inspected
+                .prepare(
+                  "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+                )
+                .get(envelope.commandId) as { readonly count: unknown }
+            ).count,
+          ),
+          1,
+        );
+        assert.equal(
+          Number(
+            (
+              inspected
+                .prepare(
+                  "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ? AND actor_id = ? AND consumer_id = ?",
+                )
+                .get(envelope.commandId, actor.id, envelope.consumerId) as {
+                readonly count: unknown;
+              }
+            ).count,
+          ),
+          1,
+        );
+        assert.equal(
+          Number(
+            (
+              inspected
+                .prepare(
+                  "SELECT COUNT(*) AS count FROM runtime_unit_of_work_context",
+                )
+                .get() as { readonly count: unknown }
+            ).count,
+          ),
+          0,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it("persists Test defect record and close commands with replay-safe trigger context", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const clock = () => new Date("2026-07-29T00:00:00.000Z");
+    const generation = {
+      id: "generation-test-command",
+      manifest: {
+        schemaVersion: 1 as const,
+        generationId: "generation-test-command",
+        generation: 1,
+        projectId: "project-test-command",
+        runId: "run-test-command",
+        snapshotRevisionId: "snapshot-test-command",
+        nodeRunId: "integration-node-test-command",
+        coverageId: "coverage-test-command",
+        coverageNodeRunId: "review-node-test-command",
+        coverageNodeAttemptId: "review-attempt-test-command",
+        coverageHash: "a".repeat(64),
+        repositories: [
+          {
+            repositoryReference: "repo-test-command",
+            baseCommit: "1".repeat(40),
+            integrationBranch: "integration/run-test-command/g1",
+          },
+        ],
+        packages: [],
+        dependencyOrder: [],
+        contractVersions: [],
+        integrationConditions: [],
+        requiredValidations: [],
+      },
+      manifestHash: "b".repeat(64),
+      state: "passed" as const,
+      repositoryResults: [
+        {
+          id: "repository-result-test-command",
+          repositoryReference: "repo-test-command",
+          baseCommit: "1".repeat(40),
+          integrationBranch: "integration/run-test-command/g1",
+          state: "succeeded" as const,
+          expectedTip: "1".repeat(40),
+          integratedCommit: "2".repeat(40),
+          validationRecords: [],
+        },
+      ],
+      operations: [],
+      defects: [],
+      aggregateReview: {
+        id: "aggregate-review-test-command",
+        topicId: "topic-test-command",
+        qualityGateResultId: "gate-test-command",
+        input: {},
+        inputHash: "c".repeat(64),
+        result: "PASS" as const,
+        evidence: ["artifact-version:test-command"],
+      },
+      passAuthorityHash: "d".repeat(64),
+    } as IntegrationGenerationView;
+    const events = openRuntimeEvents(database, { clock });
+    const testRuntime = openTestRuntime(database, {
+      integrationAuthority: { readPassAuthority: () => generation },
+      events,
+      clock,
+    });
+    const revision = testRuntime.registerCaseRevision({
+      testCaseId: "case-test-command",
+      revisionId: "case-test-command-r1",
+      projectId: "project-test-command",
+      manifest: {
+        schemaVersion: 1,
+        ownerPositionId: "position-test-engineer",
+        requirementIds: ["requirement-19"],
+        workPackageVersions: [],
+        preconditions: ["exact Integration PASS"],
+        uiActions: [{ id: "action-1", kind: "click", target: "run-test" }],
+        assertions: [
+          {
+            id: "assertion-1",
+            ui: { kind: "text", expected: "passed" },
+            runtime: { kind: "state", expected: "passed" },
+          },
+        ],
+        fixture: { id: "fixture-test-command", scriptHashes: ["e".repeat(64)] },
+        evidencePolicy: {
+          retentionClass: "durable",
+          redactionProfile: "default",
+          requiredKinds: ["ui", "runtime"],
+        },
+        cleanup: { policy: "always", required: true },
+      },
+    });
+    testRuntime.createRun({
+      testRunId: "test-run-command",
+      requestId: "test-run-command-request",
+      projectId: "project-test-command",
+      runId: "run-test-command",
+      snapshotRevisionId: "snapshot-test-command",
+      nodeRunId: "test-node-command",
+      nodeAttemptId: "test-attempt-command",
+      sessionId: "test-session-command",
+      testCaseRevisions: [{ id: revision.id, hash: revision.manifestHash }],
+      integrationAuthority: {
+        generationId: generation.id,
+        manifestHash: generation.manifestHash,
+        passAuthorityHash: generation.passAuthorityHash!,
+        repositoryCommits: [
+          { repositoryReference: "repo-test-command", commit: "2".repeat(40) },
+        ],
+      },
+      build: {
+        artifactVersionId: "build-test-command",
+        digest: "f".repeat(64),
+      },
+      executionProfile: { id: "profile-test-command", hash: "1".repeat(64) },
+      companyDirectoryFingerprint: "2".repeat(64),
+      fixture: { id: "fixture-test-command", scriptHashes: ["e".repeat(64)] },
+      clock: { instant: clock().toISOString(), seed: "seed-test-command" },
+      environment: { platform: "darwin", architecture: "arm64" },
+      capabilities: ["electron", "runtime-query"],
+    });
+    const registry = openCompanyCommandRegistry(
+      database,
+      openProjectConfiguration(database),
+      undefined,
+      clock,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testRuntime,
+    );
+    const record = {
+      schemaVersion: 1 as const,
+      commandId: "test-defect-record-command",
+      actor,
+      consumerId: "desktop-test-engineer",
+      command: {
+        type: "test.defect.record" as const,
+        id: "test-defect-command",
+        testRunId: "test-run-command",
+        testCaseRevisionId: revision.id,
+        assertionId: "assertion-1",
+        responsibility: {
+          kind: "ui-runtime-contract" as const,
+          owner: "shared" as const,
+        },
+        evidence: { refs: ["artifact-version:test-command"] },
+      },
+    };
+    const recorded = registry.execute(record);
+    assert.deepEqual(registry.execute(record), recorded);
+    assert.equal(recorded.status, "succeeded");
+    if (recorded.status !== "succeeded") assert.fail("record command failed");
+    assert.equal(
+      (recorded.value.defects[0] as { readonly status: string } | undefined)
+        ?.status,
+      "open",
+    );
+    const conflictingRecord = registry.execute({
+      ...record,
+      command: {
+        ...record.command,
+        evidence: { refs: ["artifact-version:changed"] },
+      },
+    });
+    assert.equal(conflictingRecord.status, "rejected");
+    if (conflictingRecord.status === "rejected") {
+      assert.equal(conflictingRecord.error.code, "COMMAND_ID_REUSE");
+    }
+
+    const close = {
+      schemaVersion: 1 as const,
+      commandId: "test-defect-close-command",
+      actor,
+      consumerId: "desktop-test-engineer",
+      command: {
+        type: "test.defect.close" as const,
+        defectId: "test-defect-command",
+        resolutionId: "test-defect-resolution-command",
+        resolution: {
+          evidenceRefs: ["artifact-version:resolution-test-command"],
+        },
+      },
+    };
+    const closed = registry.execute(close);
+    assert.deepEqual(registry.execute(close), closed);
+    assert.equal(closed.status, "succeeded");
+    if (closed.status !== "succeeded") assert.fail("close command failed");
+    assert.equal(
+      (closed.value.defects[0] as { readonly status: string } | undefined)
+        ?.status,
+      "closed",
+    );
+    const conflictingClose = registry.execute({
+      ...close,
+      command: {
+        ...close.command,
+        resolution: { evidenceRefs: ["artifact-version:changed-resolution"] },
+      },
+    });
+    assert.equal(conflictingClose.status, "rejected");
+    if (conflictingClose.status === "rejected") {
+      assert.equal(conflictingClose.error.code, "COMMAND_ID_REUSE");
+    }
+
+    for (const commandId of [record.commandId, close.commandId]) {
+      assert.equal(
+        Number(
+          (
+            database
+              .prepare(
+                "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ? AND actor_id = ? AND consumer_id = ?",
+              )
+              .get(commandId, actor.id, "desktop-test-engineer") as {
+              readonly count: unknown;
+            }
+          ).count,
+        ),
+        1,
+      );
+      assert.equal(
+        Number(
+          (
+            database
+              .prepare(
+                "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+              )
+              .get(commandId) as { readonly count: unknown }
+          ).count,
+        ),
+        1,
+      );
+    }
+    assert.equal(
+      events
+        .readAfter(0, 100)
+        .filter((event) => event.type.startsWith("test.defect.")).length,
+      2,
+    );
+    assert.equal(
+      Number(
+        (
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_unit_of_work_context",
+            )
+            .get() as { readonly count: unknown }
+        ).count,
+      ),
+      0,
+    );
+    database.close();
+  });
+
   it("replays Integration Commands and rejects changed input under the same Command ID", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);

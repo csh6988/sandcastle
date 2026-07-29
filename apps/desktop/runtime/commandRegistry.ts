@@ -13,6 +13,8 @@ import {
   ReviewTopicViewSchema,
   CodeReviewViewSchema,
   IntegrationGenerationViewSchema,
+  TestCaseRevisionViewSchema,
+  TestRunViewSchema,
   type CommandEnvelope,
   type CommandResult,
   type ApplicationView,
@@ -32,6 +34,9 @@ import {
   type CodeReviewView,
   type IntegrationEnvelopeCommand,
   type IntegrationGenerationView,
+  type TestEnvelopeCommand,
+  type TestCaseRevisionView,
+  type TestRunView,
   type MemoryEnvelopeCommand,
   MemoryCandidateViewSchema,
   MemoryDecisionViewSchema,
@@ -96,6 +101,7 @@ import {
   IntegrationRuntimeError,
   type IntegrationRuntime,
 } from "./integration/integrationRuntime.js";
+import { TestRuntimeError, type TestRuntime } from "./testing/testRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -358,6 +364,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof IntegrationRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof TestRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof RuntimeMemoryError) {
@@ -819,6 +828,236 @@ const executeIntegrationCommand = (
       if (!rejection) throw error;
       database.exec("ROLLBACK TO integration_command");
       database.exec("RELEASE integration_command");
+      result = { status: "rejected", error: rejection, effectIds: [] };
+    }
+    const resultJson = canonicalJson(result);
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (transactionStarted) database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
+const executeTestCommand = (
+  database: DatabaseSync,
+  testRuntime: TestRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<TestCaseRevisionView | TestRunView> => {
+  if (!envelope.command.type.startsWith("test.")) {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Test command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, status,
+                result_json AS resultJson, result_hash AS resultHash,
+                effect_ids_json AS effectIdsJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly status: string;
+          readonly resultJson: string;
+          readonly resultHash: string;
+          readonly effectIdsJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      if (!sameRequest) {
+        database.exec("COMMIT");
+        return commandIdReuse(envelope.commandId) as CommandResult<
+          TestCaseRevisionView | TestRunView
+        >;
+      }
+      try {
+        if (
+          receipt.status !== "completed" ||
+          sha256(receipt.resultJson) !== receipt.resultHash
+        )
+          throw new Error("receipt integrity invalid");
+        const parsed = CommandResultSchema.parse(
+          JSON.parse(receipt.resultJson),
+        );
+        const replay = (
+          parsed.status === "succeeded"
+            ? {
+                ...parsed,
+                value:
+                  envelope.command.type === "test.case-revision.register"
+                    ? TestCaseRevisionViewSchema.parse(parsed.value)
+                    : TestRunViewSchema.parse(parsed.value),
+              }
+            : parsed
+        ) as CommandResult<TestCaseRevisionView | TestRunView>;
+        const storedEffectIds = JSON.parse(receipt.effectIdsJson) as unknown;
+        const actualEffectIds = (
+          database
+            .prepare(
+              "SELECT id FROM runtime_audit_records WHERE command_id = ? ORDER BY created_at, id",
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        if (
+          !Array.isArray(storedEffectIds) ||
+          canonicalJson(replay) !== receipt.resultJson ||
+          canonicalJson(replay.effectIds) !== canonicalJson(storedEffectIds) ||
+          canonicalJson(storedEffectIds) !== canonicalJson(actualEffectIds)
+        )
+          throw new Error("receipt effect IDs invalid");
+        database.exec("COMMIT");
+        return replay;
+      } catch {
+        throw new CompanyCommandError(
+          "COMMAND_RECEIPT_INVALID",
+          `Command ${envelope.commandId} has an invalid completed receipt.`,
+        );
+      }
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<TestCaseRevisionView | TestRunView>;
+    database.exec("SAVEPOINT test_command");
+    try {
+      const command = envelope.command as TestEnvelopeCommand;
+      const value = (() => {
+        switch (command.type) {
+          case "test.case-revision.register":
+            return testRuntime.registerCaseRevision({
+              testCaseId: command.testCaseId,
+              revisionId: command.revisionId,
+              projectId: command.projectId,
+              ...(command.supersedesRevisionId
+                ? { supersedesRevisionId: command.supersedesRevisionId }
+                : {}),
+              manifest: command.manifest as Parameters<
+                TestRuntime["registerCaseRevision"]
+              >[0]["manifest"],
+            });
+          case "test.run.create":
+            return testRuntime.createRun(command.input);
+          case "test.assertion.record":
+            return testRuntime.recordAssertion({
+              ...command,
+              ...(command.required === undefined
+                ? {}
+                : { required: command.required }),
+            });
+          case "test.evidence.record":
+            return testRuntime.recordEvidence(
+              command as Parameters<TestRuntime["recordEvidence"]>[0],
+            );
+          case "test.defect.record":
+            return testRuntime.recordDefect({
+              id: command.id,
+              testRunId: command.testRunId,
+              testCaseRevisionId: command.testCaseRevisionId,
+              ...(command.assertionId
+                ? { assertionId: command.assertionId }
+                : {}),
+              responsibility: command.responsibility,
+              evidence: command.evidence,
+            });
+          case "test.defect.close":
+            return testRuntime.closeDefect({
+              defectId: command.defectId,
+              resolutionId: command.resolutionId,
+              resolution: command.resolution,
+            });
+          case "test.run.complete":
+            return testRuntime.complete(command.testRunId);
+        }
+      })();
+      database.exec("RELEASE test_command");
+      const effectIds = (
+        database
+          .prepare(
+            "SELECT id FROM runtime_audit_records WHERE command_id = ? ORDER BY created_at, id",
+          )
+          .all(envelope.commandId) as Array<{ readonly id: string }>
+      ).map((row) => row.id);
+      result = {
+        status: "succeeded",
+        value:
+          command.type === "test.case-revision.register"
+            ? TestCaseRevisionViewSchema.parse(value)
+            : TestRunViewSchema.parse(value),
+        effectIds,
+      };
+    } catch (error) {
+      const rejection = deterministicError(error);
+      if (!rejection) throw error;
+      database.exec("ROLLBACK TO test_command");
+      database.exec("RELEASE test_command");
       result = { status: "rejected", error: rejection, effectIds: [] };
     }
     const resultJson = canonicalJson(result);
@@ -2882,6 +3121,7 @@ export const openCompanyCommandRegistry = (
   workPackageRuntime?: WorkPackageRuntime,
   codeReviewRuntime?: CodeReviewRuntime,
   integrationRuntime?: IntegrationRuntime,
+  testRuntime?: TestRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
@@ -2925,6 +3165,20 @@ export const openCompanyCommandRegistry = (
       return executeIntegrationCommand(
         database,
         integrationRuntime,
+        envelope,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type.startsWith("test.")) {
+      if (!testRuntime) {
+        throw new CompanyCommandError(
+          "TEST_RUNTIME_UNAVAILABLE",
+          "Test Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeTestCommand(
+        database,
+        testRuntime,
         envelope,
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;

@@ -249,6 +249,9 @@ export type IntegrationEnvelopeCommand =
 
 export interface IntegrationRuntime {
   readonly inspect: (runId: string) => readonly IntegrationGenerationView[];
+  readonly readPassAuthority: (
+    generationId: string,
+  ) => IntegrationGenerationView;
   readonly isRunPaused?: (runId: string) => boolean;
   readonly nextGenerationNumber: (runId: string, nodeRunId: string) => number;
   readonly inspectPending: () => readonly IntegrationGenerationView[];
@@ -930,6 +933,82 @@ export const openIntegrationRuntime = (
       )
       .all(runId) as Array<{ readonly id: string }>;
     return ids.map((entry) => readOne(entry.id));
+  };
+
+  const readPassAuthority = (
+    generationId: string,
+  ): IntegrationGenerationView => {
+    const view = readOne(generationId);
+    const repositoryCommits = view.repositoryResults
+      .map((repository) => ({
+        repositoryId: repository.repositoryReference,
+        commit: repository.integratedCommit,
+      }))
+      .sort((left, right) =>
+        left.repositoryId.localeCompare(right.repositoryId),
+      );
+    const expectedPassAuthorityHash =
+      view.aggregateReview &&
+      view.aggregateReview.result === "PASS" &&
+      view.passAuthorityHash
+        ? sha256(
+            canonicalJson({
+              schemaVersion: 1,
+              integrationGenerationId: view.id,
+              integrationManifestHash: view.manifestHash,
+              repositoryCommits,
+              aggregateQualityGateResultId:
+                view.aggregateReview.qualityGateResultId,
+              aggregateManifestHash: view.aggregateReview.inputHash,
+              evidence: [...view.aggregateReview.evidence].sort(),
+            }),
+          )
+        : null;
+    const validationsAreExact = view.repositoryResults.every((repository) =>
+      repository.validationRecords.every((record) => {
+        const validation = {
+          validationId: record.validationId,
+          status: record.status,
+          kind: record.kind,
+          evidenceRefs: [...record.evidenceRefs].sort(),
+          responsibleWorkPackageVersionIds: [
+            ...record.responsibleWorkPackageVersionIds,
+          ].sort(),
+          contractFailure: record.contractFailure,
+        };
+        return record.recordHash === sha256(canonicalJson(validation));
+      }),
+    );
+    const eligible =
+      view.state === "passed" &&
+      view.manifest.generationId === view.id &&
+      view.manifestHash === sha256(canonicalJson(view.manifest)) &&
+      view.passAuthorityHash !== null &&
+      view.passAuthorityHash === expectedPassAuthorityHash &&
+      view.aggregateReview?.result === "PASS" &&
+      view.aggregateReview.inputHash ===
+        sha256(canonicalJson(view.aggregateReview.input)) &&
+      view.defects.every((defect) => defect.status === "closed") &&
+      view.repositoryResults.every(
+        (repository) =>
+          repository.state === "succeeded" &&
+          repository.integratedCommit !== null,
+      ) &&
+      view.operations.every(
+        (operation) =>
+          operation.state === "succeeded" &&
+          operation.resultingCommit !== null &&
+          operation.requestHash !== null &&
+          operation.receiptHash !== null,
+      ) &&
+      validationsAreExact;
+    if (!eligible) {
+      throw new IntegrationRuntimeError(
+        "INTEGRATION_PASS_AUTHORITY_INELIGIBLE",
+        `Integration Generation ${generationId} is not an exact immutable PASS authority.`,
+      );
+    }
+    return view;
   };
 
   const integrationWorkerActor: ActorRef = {
@@ -3080,6 +3159,7 @@ export const openIntegrationRuntime = (
 
   return {
     inspect,
+    readPassAuthority,
     isRunPaused: (runId) =>
       (
         database
