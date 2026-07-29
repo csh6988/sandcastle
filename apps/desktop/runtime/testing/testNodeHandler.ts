@@ -1,6 +1,10 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { PipelineRuntime } from "../pipeline/pipelineRuntime.js";
-import type { TestRunView, TestRuntime } from "./testRuntime.js";
+import type {
+  TestExecutionAdapter,
+  TestRunView,
+  TestRuntime,
+} from "./testRuntime.js";
 import { TestRuntimeError } from "./testRuntime.js";
 
 export interface TestNodeHandler {
@@ -9,6 +13,7 @@ export interface TestNodeHandler {
     readonly nodeRunId: string;
   }) => Promise<void>;
   readonly reconcilePending: () => Promise<number>;
+  readonly cancelPending: (testRunId: string) => Promise<void>;
 }
 
 const deterministicTestRunId = (runId: string, nodeRunId: string): string =>
@@ -24,8 +29,15 @@ export const openTestNodeHandler = (options: {
     | "failTestInTransaction"
     | "completeTestInTransaction"
   >;
-  readonly tests: Pick<TestRuntime, "inspect">;
+  readonly tests: Pick<
+    TestRuntime,
+    "inspect" | "execute" | "reconcile" | "cancel" | "complete"
+  >;
+  readonly executionAdapters?: readonly TestExecutionAdapter[];
 }): TestNodeHandler => {
+  const adapters = new Map(
+    (options.executionAdapters ?? []).map((adapter) => [adapter.id, adapter]),
+  );
   const nodeState = (nodeRunId: string): string | null => {
     const row = options.database
       .prepare("SELECT status FROM node_runs WHERE id = ?")
@@ -135,6 +147,61 @@ export const openTestNodeHandler = (options: {
       throw error;
     }
     transition({ ...input, testRun });
+    if (["passed", "failed", "cancelled", "blocked"].includes(testRun.state))
+      return;
+    for (const operation of testRun.manifest.executionOperations) {
+      const execution = testRun.executions.find(
+        (entry) => entry.id === operation.id,
+      );
+      if (execution?.state === "succeeded") continue;
+      const adapter = adapters.get(operation.adapterId);
+      if (!adapter) {
+        options.pipelineRuntime.blockTestInTransaction({
+          ...input,
+          testRunId: testRun.id,
+          failure: {
+            code: "TEST_EXECUTION_ADAPTER_UNAVAILABLE",
+            message: `Frozen Test adapter ${operation.adapterId} is unavailable.`,
+          },
+        });
+        return;
+      }
+      testRun = execution
+        ? await options.tests.reconcile({
+            testRunId: testRun.id,
+            operationId: operation.id,
+            adapter,
+          })
+        : await options.tests.execute({
+            testRunId: testRun.id,
+            operationId: operation.id,
+            input: operation.input,
+            adapter,
+          });
+      transition({ ...input, testRun });
+      if (testRun.state !== "running") return;
+    }
+    if (
+      testRun.manifest.executionOperations.length > 0 &&
+      testRun.manifest.executionOperations.every((operation) =>
+        testRun.executions.some(
+          (execution) =>
+            execution.id === operation.id && execution.state === "succeeded",
+        ),
+      )
+    ) {
+      try {
+        testRun = options.tests.complete(testRun.id);
+      } catch (error) {
+        if (
+          error instanceof TestRuntimeError &&
+          error.code === "TEST_RUN_PASS_INCOMPLETE"
+        )
+          return;
+        throw error;
+      }
+      transition({ ...input, testRun });
+    }
   };
 
   const reconcilePending = async (): Promise<number> => {
@@ -154,14 +221,52 @@ export const openTestNodeHandler = (options: {
       readonly nodeRunId: string;
     }>;
     for (const row of rows) {
-      transition({
-        runId: row.runId,
-        nodeRunId: row.nodeRunId,
-        testRun: options.tests.inspect(row.testRunId),
-      });
+      await executeReady({ runId: row.runId, nodeRunId: row.nodeRunId });
     }
     return rows.length;
   };
 
-  return { executeReady, reconcilePending };
+  const cancelPending: TestNodeHandler["cancelPending"] = async (testRunId) => {
+    let run: TestRunView;
+    try {
+      run = options.tests.inspect(testRunId);
+    } catch (error) {
+      if (
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_RUN_NOT_FOUND"
+      )
+        return;
+      throw error;
+    }
+    if (["passed", "failed", "cancelled"].includes(run.state)) return;
+    for (const operation of run.manifest.executionOperations) {
+      const execution = run.executions.find(
+        (entry) => entry.id === operation.id,
+      );
+      if (
+        !execution ||
+        ["succeeded", "failed", "cancelled"].includes(execution.state)
+      )
+        continue;
+      const adapter = adapters.get(operation.adapterId);
+      if (!adapter) {
+        throw new TestRuntimeError(
+          "TEST_EXECUTION_ADAPTER_UNAVAILABLE",
+          `Frozen Test adapter ${operation.adapterId} is unavailable for cancellation.`,
+        );
+      }
+      run = await options.tests.cancel({
+        testRunId,
+        operationId: operation.id,
+        adapter,
+      });
+    }
+    transition({
+      runId: run.manifest.runId,
+      nodeRunId: run.manifest.nodeRunId,
+      testRun: run,
+    });
+  };
+
+  return { executeReady, reconcilePending, cancelPending };
 };

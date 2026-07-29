@@ -1,13 +1,29 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import type { ArtifactRegistry } from "../artifactRegistry.js";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import { openRuntimeEvents } from "../events/subscription.js";
 import type { IntegrationGenerationView } from "../integration/integrationRuntime.js";
+import { CommandEnvelopeSchema } from "../interface.js";
 import { openTestRuntime, TestRuntimeError } from "./testRuntime.js";
 
 const hash = (character: string): string => character.repeat(64);
 const commit = (character: string): string => character.repeat(40);
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+const canonicalHash = (value: unknown): string =>
+  createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex");
 
 const passedGeneration = (): IntegrationGenerationView =>
   ({
@@ -31,7 +47,32 @@ const passedGeneration = (): IntegrationGenerationView =>
           integrationBranch: "integration/run-1/g1",
         },
       ],
-      packages: [],
+      packages: [
+        {
+          workPackageId: "package-1",
+          workPackageVersionId: "package-1-v1",
+          applicationId: "application-1",
+          repositoryReference: "repo-a",
+          baseCommit: commit("1"),
+          sourceBranch: "work/package-1",
+          sourceCommit: commit("2"),
+          diffHash: hash("7"),
+          authorityId: "code-authority-1",
+          qualityGateResultId: "code-gate-1",
+          reviewContext: {
+            codeReviewManifestId: "code-review-1",
+            codeReviewManifestHash: hash("8"),
+            diffArtifactVersionId: "diff-version-1",
+            specRevisionIds: ["spec-1"],
+            harnessSnapshotIds: ["harness-1"],
+            acceptanceCriteria: ["requirement-19"],
+            selfCheckEvidenceRefs: ["self-check-1"],
+          },
+          dependencies: [],
+          contractVersions: [],
+          integrationConditions: [],
+        },
+      ],
       dependencyOrder: [],
       contractVersions: [],
       integrationConditions: [],
@@ -65,15 +106,95 @@ const passedGeneration = (): IntegrationGenerationView =>
     passAuthorityHash: hash("d"),
   }) as IntegrationGenerationView;
 
-const openFixture = (withEvents = false) => {
+const openFixture = (withEvents = false, withArtifactAuthority = false) => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
   database.exec("PRAGMA foreign_keys = OFF");
+  const frozenProfile = {
+    id: "profile-1",
+    revision: 0,
+    name: "Test profile",
+    providerRef: "scripted-execution",
+    model: "fixture-v1",
+    sandboxRef: "no-sandbox",
+    branchStrategy: "head",
+    limits: { timeoutSeconds: 30, maxIterations: 1, maxTokens: null },
+    retryPolicy: { maxAttempts: 0 },
+    permissionPolicy: "deny",
+    secretReferenceIds: [],
+  };
+  const snapshotPayload = {
+    schemaVersion: 1,
+    executionProfiles: [frozenProfile],
+  };
+  database.exec(`
+    INSERT INTO projects(id, company_id, name, goal, status, created_at)
+    VALUES ('project-1', 'company', 'Project', 'Test', 'active', '2026-07-29T00:00:00.000Z');
+    INSERT INTO department_runs(id, project_id, department_id, status, created_at, snapshot_revision_id, updated_at)
+    VALUES ('run-1', 'project-1', 'software-rnd', 'running', '2026-07-29T00:00:00.000Z', 'snapshot-1', '2026-07-29T00:00:00.000Z');
+    INSERT INTO node_runs(id, run_id, pipeline_node_id, node_type, status, handler_kind_id, created_at, updated_at)
+    VALUES ('test-node-1', 'run-1', 'test', 'ai-task', 'running', 'test@1', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+    INSERT INTO node_attempts(id, node_run_id, attempt_number, snapshot_revision_id, reason, status, created_at, started_at)
+    VALUES ('test-attempt-1', 'test-node-1', 1, 'snapshot-1', 'initial', 'running', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+    INSERT INTO ai_members(id, department_id, display_name, status, created_at)
+    VALUES ('tester-ai', 'software-rnd', 'Tester', 'active', '2026-07-29T00:00:00.000Z');
+    INSERT INTO positions(id, department_id, name, responsibility, ai_member_id, sort_order, created_at)
+    VALUES ('position-test-engineer', 'software-rnd', 'Test engineer', 'Independent testing', 'tester-ai', 1, '2026-07-29T00:00:00.000Z');
+    INSERT INTO interaction_sessions(id, mode, project_id, run_id, node_run_id, status, created_at)
+    VALUES ('test-session-1', 'run-collaboration', 'project-1', 'run-1', 'test-node-1', 'active', '2026-07-29T00:00:00.000Z');
+    INSERT INTO session_participants(id, session_id, participant_type, participant_ref, role, created_at)
+    VALUES ('tester-participant', 'test-session-1', 'ai-member', 'tester-ai', 'test-engineer', '2026-07-29T00:00:00.000Z');
+    INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
+    VALUES ('build-artifact', 'project-1', 'build', 'Test build', 'accepted', '2026-07-29T00:00:00.000Z');
+    INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
+    VALUES ('build-1', 'build-artifact', 1, 'artifacts/build.tar', '${hash("f")}', 42, 'accepted', 'run-1', 'snapshot-1', '2026-07-29T00:00:00.000Z');
+    INSERT INTO work_packages(id, project_id, run_id, technical_baseline_id, state, created_at, updated_at)
+    VALUES ('package-1', 'project-1', 'run-1', 'technical-baseline-1', 'ready', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+    INSERT INTO work_package_versions(id, work_package_id, version, application_id, repository_reference, node_run_id, manifest_json, manifest_hash, status, created_at)
+    VALUES ('package-1-v1', 'package-1', 1, 'application-1', 'repo-a', 'development-node-1', '{}', '${hash("6")}', 'ready', '2026-07-29T00:00:00.000Z');
+  `);
+  database
+    .prepare(
+      `INSERT INTO run_snapshot_revisions(
+         id, run_id, revision, schema_version, canonical_json, hash, created_at
+       ) VALUES (?, ?, 1, 1, ?, ?, ?)`,
+    )
+    .run(
+      "snapshot-1",
+      "run-1",
+      JSON.stringify(snapshotPayload),
+      canonicalHash(snapshotPayload),
+      "2026-07-29T00:00:00.000Z",
+    );
   const generation = passedGeneration();
-  const events = withEvents ? openRuntimeEvents(database) : undefined;
+  const runtimeEvents = openRuntimeEvents(database);
+  const events = withEvents ? runtimeEvents : undefined;
+  const artifactBytes = new Map<string, Buffer>();
+  const artifactLocators = new Map<string, string>();
   const runtime = openTestRuntime(database, {
     integrationAuthority: { readPassAuthority: () => generation },
-    ...(events ? { events } : {}),
+    events: runtimeEvents,
+    ...(withArtifactAuthority
+      ? {
+          artifacts: {
+            readContent: (versionId: string) => {
+              const bytes = artifactBytes.get(versionId);
+              if (!bytes)
+                throw new Error(`Artifact ${versionId} bytes not found.`);
+              return bytes;
+            },
+            verify: (versionId: string) =>
+              artifactBytes.has(versionId) ? "verified" : "unavailable",
+            inspect: (versionId: string) =>
+              ({
+                version: {
+                  contentRef: artifactLocators.get(versionId) ?? "",
+                },
+                inputs: [],
+              }) as unknown as ReturnType<ArtifactRegistry["inspect"]>,
+          },
+        }
+      : {}),
     clock: () => new Date("2026-07-29T00:00:00.000Z"),
   });
   const revisionInput = {
@@ -84,17 +205,33 @@ const openFixture = (withEvents = false) => {
       schemaVersion: 1 as const,
       ownerPositionId: "position-test-engineer",
       requirementIds: ["requirement-19"],
-      workPackageVersions: [],
+      workPackageVersions: [
+        {
+          workPackageId: "package-1",
+          workPackageVersionId: "package-1-v1",
+          manifestHash: hash("6"),
+        },
+      ],
       preconditions: ["integration authority is PASS"],
       uiActions: [{ id: "action-1", kind: "click", target: "run-test" }],
       assertions: [
         {
           id: "assertion-1",
+          operationId: "operation-1",
           ui: { kind: "text", expected: "passed" },
           runtime: { kind: "test-run-state", expected: "passed" },
         },
       ],
       fixture: { id: "fixture-1", scriptHashes: [hash("e")] },
+      executionOperations: [
+        {
+          id: "operation-1",
+          kind: "electron" as const,
+          adapterId: "scripted-test",
+          input: { kind: "electron" },
+          inputHash: canonicalHash({ kind: "electron" }),
+        },
+      ],
       evidencePolicy: {
         retentionClass: "durable" as const,
         redactionProfile: "default",
@@ -105,7 +242,7 @@ const openFixture = (withEvents = false) => {
   };
   const revision = runtime.registerCaseRevision(revisionInput);
   const runInput = {
-    testRunId: "test-run-1",
+    testRunId: "test:run-1:test-node-1",
     requestId: "request-1",
     projectId: "project-1",
     runId: "run-1",
@@ -123,9 +260,18 @@ const openFixture = (withEvents = false) => {
       ],
     },
     build: { artifactVersionId: "build-1", digest: hash("f") },
-    executionProfile: { id: "profile-1", hash: hash("1") },
+    executionProfile: { id: "profile-1", hash: canonicalHash(frozenProfile) },
     companyDirectoryFingerprint: hash("2"),
     fixture: { id: "fixture-1", scriptHashes: [hash("e")] },
+    executionOperations: [
+      {
+        id: "operation-1",
+        kind: "electron" as const,
+        adapterId: "scripted-test",
+        input: { kind: "electron" },
+        inputHash: canonicalHash({ kind: "electron" }),
+      },
+    ],
     clock: { instant: "2026-07-29T00:00:00.000Z", seed: "seed-1" },
     environment: { platform: "darwin", architecture: "arm64" },
     capabilities: ["electron", "runtime-query"],
@@ -138,10 +284,668 @@ const openFixture = (withEvents = false) => {
     revision,
     revisionInput,
     runInput,
+    artifactBytes,
+    artifactLocators,
+  };
+};
+
+const succeedRequiredExecution = async (
+  fixture: ReturnType<typeof openFixture>,
+): Promise<void> => {
+  await fixture.runtime.execute({
+    testRunId: fixture.runInput.testRunId,
+    operationId: "operation-1",
+    input: { kind: "electron" },
+    adapter: {
+      id: "scripted-test",
+      execute: () => ({
+        state: "succeeded" as const,
+        providerReceipt: { id: "receipt-1" },
+        evidenceRef: "execution-fact:1",
+      }),
+      reconcile: () => ({
+        state: "succeeded" as const,
+        providerReceipt: { id: "receipt-1" },
+        evidenceRef: "execution-fact:1",
+      }),
+    },
+  });
+};
+
+const seedEvidenceArtifact = (
+  fixture: ReturnType<typeof openFixture>,
+  input: {
+    readonly id: string;
+    readonly contentHash: string;
+    readonly byteSize: number;
+    readonly locator: string;
+    readonly storedLocator?: string;
+  },
+): void => {
+  fixture.database
+    .prepare(
+      `INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
+       VALUES (?, ?, 'test-evidence', ?, 'accepted', ?)`,
+    )
+    .run(
+      `artifact:${input.id}`,
+      fixture.runInput.projectId,
+      input.id,
+      "2026-07-29T00:00:00.000Z",
+    );
+  fixture.database
+    .prepare(
+      `INSERT INTO artifact_versions(
+         id, artifact_id, version, content_ref, content_hash, byte_size,
+         status, producing_run_id, snapshot_revision_id, created_at
+       ) VALUES (?, ?, 1, ?, ?, ?, 'accepted', ?, ?, ?)`,
+    )
+    .run(
+      input.id,
+      `artifact:${input.id}`,
+      input.storedLocator ?? input.locator,
+      input.contentHash,
+      input.byteSize,
+      fixture.runInput.runId,
+      fixture.runInput.snapshotRevisionId,
+      "2026-07-29T00:00:00.000Z",
+    );
+  fixture.artifactLocators.set(input.id, input.locator);
+};
+
+const seedFreshTestAttempt = (
+  fixture: ReturnType<typeof openFixture>,
+  suffix: string,
+): void => {
+  fixture.database.exec(`
+    INSERT INTO node_runs(id, run_id, pipeline_node_id, node_type, status, handler_kind_id, created_at, updated_at)
+    VALUES ('test-node-${suffix}', 'run-1', 'test-rerun-${suffix}', 'ai-task', 'running', 'test@1', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+    INSERT INTO node_attempts(id, node_run_id, attempt_number, snapshot_revision_id, reason, status, created_at, started_at)
+    VALUES ('test-attempt-${suffix}', 'test-node-${suffix}', 1, 'snapshot-1', 'request-changes', 'running', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+    INSERT INTO interaction_sessions(id, mode, project_id, run_id, node_run_id, status, created_at)
+    VALUES ('test-session-${suffix}', 'run-collaboration', 'project-1', 'run-1', 'test-node-${suffix}', 'active', '2026-07-29T00:00:00.000Z');
+    INSERT INTO session_participants(id, session_id, participant_type, participant_ref, role, created_at)
+    VALUES ('tester-participant-${suffix}', 'test-session-${suffix}', 'ai-member', 'tester-ai', 'test-engineer', '2026-07-29T00:00:00.000Z');
+  `);
+};
+
+const trustedCorrelation = (
+  fixture: ReturnType<typeof openFixture>,
+  artifactVersionIds: readonly string[],
+) => {
+  const view = fixture.runtime.inspect(fixture.runInput.testRunId);
+  const eventSequence = Number(
+    (
+      fixture.database
+        .prepare(
+          "SELECT MAX(sequence) AS sequence FROM runtime_event_outbox WHERE run_id = ? AND node_run_id = ?",
+        )
+        .get(fixture.runInput.runId, fixture.runInput.nodeRunId) as {
+        readonly sequence: number;
+      }
+    ).sequence,
+  );
+  const eventType = String(
+    (
+      fixture.database
+        .prepare("SELECT type FROM runtime_event_outbox WHERE sequence = ?")
+        .get(eventSequence) as { readonly type: string }
+    ).type,
+  );
+  const commandId = "trusted-ui-command";
+  fixture.database
+    .prepare(
+      `INSERT INTO command_deduplication(
+         command_id, actor_type, actor_id, authenticated_by, consumer_id,
+         schema_version, request_hash, status, result_json, result_hash,
+         effect_ids_json, completed_at
+       ) VALUES (?, 'human', 'test-driver', 'electron-fixture', NULL, 1, ?,
+                 'completed', ?, ?, '[]', ?)`,
+    )
+    .run(
+      commandId,
+      hash("3"),
+      JSON.stringify({ status: "succeeded", value: {} }),
+      hash("4"),
+      "2026-07-29T00:00:00.000Z",
+    );
+  fixture.database
+    .prepare(
+      `INSERT INTO runtime_audit_records(
+         id, action, entity_type, entity_id, run_id, node_run_id,
+         created_at, command_id, actor_type, actor_id, authenticated_by
+       ) VALUES (?, 'fixture.ui-action', 'test-run', ?, ?, ?, ?, ?, 'human',
+                 'test-driver', 'electron-fixture')`,
+    )
+    .run(
+      "trusted-ui-audit",
+      fixture.runInput.testRunId,
+      fixture.runInput.runId,
+      fixture.runInput.nodeRunId,
+      "2026-07-29T00:00:00.000Z",
+      commandId,
+    );
+  const viewSyncTokenHash = hash("5");
+  fixture.database
+    .prepare(
+      `INSERT INTO consumed_view_sync_tokens(
+         token_hash, nonce_hash, consumer_id, principal_hash, query_hash,
+         view_hash, sequence, expires_at, consumed_at, command_id
+       ) VALUES (?, ?, 'fixture-consumer', ?, 'test-runs.inspect', ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      viewSyncTokenHash,
+      hash("6"),
+      hash("7"),
+      view.viewHash,
+      eventSequence,
+      "2026-07-29T01:00:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "fixture-view-ack",
+    );
+  return {
+    commandId,
+    eventSequence,
+    runtimeEventType: eventType,
+    queryAsOfSequence: eventSequence,
+    queryViewHash: view.viewHash,
+    viewSyncTokenHash,
+    snapshotRevisionId: fixture.runInput.snapshotRevisionId,
+    runId: fixture.runInput.runId,
+    nodeRunId: fixture.runInput.nodeRunId,
+    nodeAttemptId: fixture.runInput.nodeAttemptId,
+    sessionId: fixture.runInput.sessionId,
+    artifactVersionIds,
   };
 };
 
 describe("Test Runtime", () => {
+  it("atomically materializes paired assertions and verified Artifact evidence from a terminal execution result", async () => {
+    const fixture = openFixture(true, true);
+    fixture.runtime.createRun(fixture.runInput);
+    const uiBytes = Buffer.from("real renderer screenshot");
+    const runtimeBytes = Buffer.from('{"state":"reconciling"}');
+    const evidence = [
+      {
+        id: "artifact-version-ui",
+        bytes: uiBytes,
+        locator: "evidence/ui.png",
+      },
+      {
+        id: "artifact-version-runtime",
+        bytes: runtimeBytes,
+        locator: "evidence/runtime.json",
+      },
+    ];
+    for (const entry of evidence) {
+      seedEvidenceArtifact(fixture, {
+        id: entry.id,
+        contentHash: createHash("sha256").update(entry.bytes).digest("hex"),
+        byteSize: entry.bytes.byteLength,
+        locator: entry.locator,
+        storedLocator: `/private/company/.sandcastle/artifacts/${entry.id}.bin`,
+      });
+      fixture.artifactBytes.set(entry.id, entry.bytes);
+    }
+    const correlation = trustedCorrelation(
+      fixture,
+      evidence.map((entry) => entry.id),
+    );
+
+    const executed = await fixture.runtime.execute({
+      testRunId: fixture.runInput.testRunId,
+      operationId: "operation-1",
+      input: { kind: "electron" },
+      adapter: {
+        id: "scripted-test",
+        execute: () => ({
+          state: "succeeded" as const,
+          providerReceipt: { id: "receipt-materialized" },
+          result: {
+            schemaVersion: 1,
+            assertions: [
+              {
+                testCaseRevisionId: fixture.revision.id,
+                assertionId: "assertion-1",
+                uiStatus: "passed",
+                runtimeStatus: "passed",
+                correlation,
+              },
+            ],
+            evidence: [
+              {
+                id: "evidence-ui",
+                testCaseRevisionId: fixture.revision.id,
+                assertionId: "assertion-1",
+                kind: "screenshot",
+                mediaType: "image/png",
+                contentHash: createHash("sha256").update(uiBytes).digest("hex"),
+                byteSize: uiBytes.byteLength,
+                artifactVersionId: "artifact-version-ui",
+                redactionProfile: "default",
+                retentionClass: "durable",
+                locator: "evidence/ui.png",
+                metadata: { renderer: true },
+              },
+              {
+                id: "evidence-runtime",
+                testCaseRevisionId: fixture.revision.id,
+                assertionId: "assertion-1",
+                kind: "runtime",
+                mediaType: "application/json",
+                contentHash: createHash("sha256")
+                  .update(runtimeBytes)
+                  .digest("hex"),
+                byteSize: runtimeBytes.byteLength,
+                artifactVersionId: "artifact-version-runtime",
+                redactionProfile: "default",
+                retentionClass: "durable",
+                locator: "evidence/runtime.json",
+                metadata: { authoritativeQuery: true },
+              },
+              {
+                id: "evidence-cleanup",
+                testCaseRevisionId: fixture.revision.id,
+                assertionId: null,
+                kind: "cleanup",
+                mediaType: "application/json",
+                contentHash: createHash("sha256").update("").digest("hex"),
+                byteSize: 0,
+                artifactVersionId: null,
+                redactionProfile: "default",
+                retentionClass: "durable",
+                locator: null,
+                metadata: { verified: true, rootFingerprint: hash("a") },
+              },
+            ],
+          },
+        }),
+        reconcile: () => ({ state: "unknown" as const }),
+      },
+    });
+
+    assert.equal(executed.assertions.length, 1);
+    assert.equal(executed.evidence.length, 3);
+    assert.equal(
+      fixture.runtime.complete(fixture.runInput.testRunId).state,
+      "passed",
+    );
+    fixture.database.close();
+  });
+
+  it("rolls back a terminal fact whose Artifact bytes do not match the frozen evidence descriptor", async () => {
+    const fixture = openFixture(true, true);
+    fixture.runtime.createRun(fixture.runInput);
+    const declaredBytes = Buffer.from("declared evidence");
+    seedEvidenceArtifact(fixture, {
+      id: "artifact-version-tampered",
+      contentHash: createHash("sha256").update(declaredBytes).digest("hex"),
+      byteSize: declaredBytes.byteLength,
+      locator: "evidence/tampered.json",
+    });
+    fixture.artifactBytes.set(
+      "artifact-version-tampered",
+      Buffer.from("different bytes"),
+    );
+
+    await assert.rejects(
+      fixture.runtime.execute({
+        testRunId: fixture.runInput.testRunId,
+        operationId: "operation-1",
+        input: { kind: "electron" },
+        adapter: {
+          id: "scripted-test",
+          execute: () => ({
+            state: "succeeded" as const,
+            providerReceipt: { id: "receipt-tampered" },
+            result: {
+              schemaVersion: 1,
+              assertions: [],
+              evidence: [
+                {
+                  id: "evidence-tampered",
+                  testCaseRevisionId: fixture.revision.id,
+                  assertionId: "assertion-1",
+                  kind: "runtime",
+                  mediaType: "application/json",
+                  contentHash: createHash("sha256")
+                    .update(declaredBytes)
+                    .digest("hex"),
+                  byteSize: declaredBytes.byteLength,
+                  artifactVersionId: "artifact-version-tampered",
+                  redactionProfile: "default",
+                  retentionClass: "durable",
+                  locator: "evidence/tampered.json",
+                  metadata: {},
+                },
+              ],
+            },
+          }),
+          reconcile: () => ({ state: "unknown" as const }),
+        },
+      }),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_EVIDENCE_ARTIFACT_INVALID",
+    );
+    assert.equal(
+      (
+        fixture.database
+          .prepare("SELECT COUNT(*) AS count FROM test_execution_facts")
+          .get() as { readonly count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      fixture.runtime.inspect(fixture.runInput.testRunId).evidence.length,
+      0,
+    );
+    fixture.database.close();
+  });
+
+  it("reconcile materializes a terminal result once after a crash between effect and fact persistence", async () => {
+    const fixture = openFixture(true);
+    fixture.runtime.createRun(fixture.runInput);
+    const terminalResult = {
+      schemaVersion: 1 as const,
+      assertions: [],
+      evidence: [
+        {
+          id: "evidence-cleanup-on-reconcile",
+          testCaseRevisionId: fixture.revision.id,
+          assertionId: null,
+          kind: "cleanup" as const,
+          mediaType: "application/json",
+          contentHash: createHash("sha256").update("").digest("hex"),
+          byteSize: 0,
+          artifactVersionId: null,
+          redactionProfile: "default",
+          retentionClass: "durable" as const,
+          locator: null,
+          metadata: { verified: true, rootFingerprint: hash("a") },
+        },
+      ],
+    };
+    const adapter = {
+      id: "scripted-test",
+      execute: () => ({
+        state: "succeeded" as const,
+        providerReceipt: { id: "receipt-reconcile" },
+        result: terminalResult,
+      }),
+      reconcile: () => ({
+        state: "succeeded" as const,
+        providerReceipt: { id: "receipt-reconcile" },
+        result: terminalResult,
+      }),
+    };
+
+    await assert.rejects(
+      fixture.runtime.execute({
+        testRunId: fixture.runInput.testRunId,
+        operationId: "operation-1",
+        input: { kind: "electron" },
+        adapter,
+        failureInjection: (point) => {
+          if (point === "after-effect") throw new Error("crash-after-effect");
+        },
+      }),
+      /crash-after-effect/,
+    );
+    assert.equal(
+      fixture.runtime.inspect(fixture.runInput.testRunId).evidence.length,
+      0,
+    );
+    await fixture.runtime.reconcile({
+      testRunId: fixture.runInput.testRunId,
+      operationId: "operation-1",
+      adapter,
+    });
+    await fixture.runtime.reconcile({
+      testRunId: fixture.runInput.testRunId,
+      operationId: "operation-1",
+      adapter,
+    });
+    assert.equal(
+      fixture.runtime.inspect(fixture.runInput.testRunId).evidence.length,
+      1,
+    );
+    fixture.database.close();
+  });
+
+  it("rejects renderer-authored assertion verdict Commands", () => {
+    const parsed = CommandEnvelopeSchema.safeParse({
+      commandId: "forged-test-assertion",
+      schemaVersion: 1,
+      actor: {
+        type: "human",
+        id: "renderer-user",
+        authenticatedBy: "local-session",
+      },
+      command: {
+        type: "test.assertion.record",
+        testRunId: "test-run-1",
+        testCaseRevisionId: "case-1-r1",
+        assertionId: "assertion-1",
+        required: false,
+        uiStatus: "passed",
+        runtimeStatus: "passed",
+        correlation: {
+          commandId: "unrelated-command",
+          eventSequence: 1,
+          queryAsOfSequence: 1,
+          queryViewHash: hash("a"),
+          snapshotRevisionId: "snapshot-1",
+          runId: "run-1",
+          nodeRunId: "test-node-1",
+          nodeAttemptId: "test-attempt-1",
+          sessionId: "test-session-1",
+          artifactVersionIds: ["made-up-artifact"],
+        },
+      },
+    });
+
+    assert.equal(parsed.success, false);
+  });
+
+  it("does not let caller-declared optional assertions or fabricated evidence create PASS", () => {
+    const fixture = openFixture();
+    fixture.runtime.createRun(fixture.runInput);
+    const correlation = {
+      commandId: "made-up-command",
+      eventSequence: 0,
+      runtimeEventType: "test.run.started",
+      queryAsOfSequence: 0,
+      queryViewHash: fixture.runtime.inspect(fixture.runInput.testRunId)
+        .viewHash,
+      viewSyncTokenHash: hash("9"),
+      snapshotRevisionId: fixture.runInput.snapshotRevisionId,
+      runId: fixture.runInput.runId,
+      nodeRunId: fixture.runInput.nodeRunId,
+      nodeAttemptId: fixture.runInput.nodeAttemptId,
+      sessionId: fixture.runInput.sessionId,
+      artifactVersionIds: ["made-up-artifact"],
+    };
+    assert.throws(
+      () =>
+        fixture.runtime.recordAssertion({
+          operationId: "operation-1",
+          testRunId: fixture.runInput.testRunId,
+          testCaseRevisionId: fixture.revision.id,
+          assertionId: "assertion-1",
+          required: false,
+          uiStatus: "failed",
+          runtimeStatus: "failed",
+          correlation,
+        }),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_ASSERTION_REQUIREDNESS_FROZEN",
+    );
+    assert.throws(
+      () =>
+        fixture.runtime.recordEvidence({
+          id: "forged-runtime",
+          operationId: "operation-1",
+          testRunId: fixture.runInput.testRunId,
+          testCaseRevisionId: fixture.revision.id,
+          assertionId: "assertion-1",
+          kind: "runtime",
+          mediaType: "application/json",
+          contentHash: hash("8"),
+          byteSize: 42,
+          artifactVersionId: "made-up-artifact",
+          redactionProfile: "default",
+          retentionClass: "durable",
+          locator: "evidence/forged-runtime",
+          metadata: {},
+        }),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_OBSERVATION_SOURCE_INVALID",
+    );
+
+    assert.throws(() => fixture.runtime.complete(fixture.runInput.testRunId));
+    fixture.database.close();
+  });
+
+  it("freezes all child evidence after a Test Run becomes terminal", () => {
+    const fixture = openFixture();
+    fixture.runtime.createRun(fixture.runInput);
+    fixture.database
+      .prepare(
+        "UPDATE test_runs SET state = 'passed', pass_authority_hash = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(hash("9"), "2026-07-29T00:00:01.000Z", fixture.runInput.testRunId);
+
+    assert.throws(
+      () =>
+        fixture.database
+          .prepare(
+            `INSERT INTO test_evidence(
+               id, test_run_id, test_case_revision_id, assertion_id, kind,
+               media_type, content_hash, byte_size, artifact_version_id,
+               redaction_profile, retention_class, locator, metadata_json,
+               created_at
+             ) VALUES (?, ?, ?, ?, 'runtime', 'application/json', ?, 2, NULL,
+                       'default', 'durable', 'evidence/late.json', '{}', ?)`,
+          )
+          .run(
+            "late-evidence",
+            fixture.runInput.testRunId,
+            fixture.revision.id,
+            "assertion-1",
+            hash("8"),
+            "2026-07-29T00:00:02.000Z",
+          ),
+      /Terminal Test Run children are immutable/,
+    );
+    fixture.database.close();
+  });
+
+  it("rejects Test Runs whose project, Run, or Snapshot differs from exact Integration authority", () => {
+    for (const changed of [
+      { projectId: "project-other" },
+      { runId: "run-other" },
+      { snapshotRevisionId: "snapshot-other" },
+    ]) {
+      const fixture = openFixture();
+      assert.throws(
+        () =>
+          fixture.runtime.createRun({
+            ...fixture.runInput,
+            ...changed,
+          }),
+        (error: unknown) =>
+          error instanceof TestRuntimeError &&
+          error.code === "INTEGRATION_AUTHORITY_LINEAGE_MISMATCH",
+      );
+      fixture.database.close();
+    }
+  });
+
+  it("derives build and Execution Profile identity from authoritative registries", () => {
+    for (const [changed, expectedCode] of [
+      [
+        { build: { artifactVersionId: "build-1", digest: hash("0") } },
+        "TEST_BUILD_AUTHORITY_INVALID",
+      ],
+      [
+        { executionProfile: { id: "profile-1", hash: hash("0") } },
+        "TEST_EXECUTION_PROFILE_INVALID",
+      ],
+    ] as const) {
+      const fixture = openFixture();
+      assert.throws(
+        () => fixture.runtime.createRun({ ...fixture.runInput, ...changed }),
+        (error: unknown) =>
+          error instanceof TestRuntimeError && error.code === expectedCode,
+      );
+      fixture.database.close();
+    }
+  });
+
+  it("requires exact package and acceptance-criterion coverage from frozen Case revisions", () => {
+    const fixture = openFixture();
+    const incomplete = fixture.runtime.registerCaseRevision({
+      ...fixture.revisionInput,
+      revisionId: "case-1-r2",
+      supersedesRevisionId: fixture.revision.id,
+      manifest: {
+        ...fixture.revisionInput.manifest,
+        requirementIds: [],
+        workPackageVersions: [],
+      },
+    });
+    assert.throws(
+      () =>
+        fixture.runtime.createRun({
+          ...fixture.runInput,
+          testCaseRevisions: [
+            { id: incomplete.id, hash: incomplete.manifestHash },
+          ],
+        }),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_CASE_COVERAGE_INCOMPLETE",
+    );
+    fixture.database.close();
+  });
+
+  it("rejects a Test engineer who shares an implementation Agent identity", () => {
+    const fixture = openFixture();
+    fixture.database
+      .prepare(
+        `INSERT INTO work_package_assignments(
+           id, work_package_version_id, node_attempt_id, position_id,
+           ai_member_id, agent_adapter_id, rationale_json, allocation_id,
+           interaction_session_id, sandbox_identity, evidence_scope, state,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 'self-check-passed', ?, ?)`,
+      )
+      .run(
+        "assignment-1",
+        "package-1-v1",
+        "developer-attempt-1",
+        "position-test-engineer",
+        "tester-ai",
+        "scripted-execution",
+        "allocation-1",
+        "developer-session-1",
+        "sandbox-1",
+        "evidence-scope-1",
+        "2026-07-29T00:00:00.000Z",
+        "2026-07-29T00:00:00.000Z",
+      );
+    assert.throws(
+      () => fixture.runtime.createRun(fixture.runInput),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_ENGINEER_NOT_INDEPENDENT",
+    );
+    fixture.database.close();
+  });
+
   it("accepts only the exact closed PASS Integration Generation authority", () => {
     const { database, generation, runtime, runInput } = openFixture();
     const run = runtime.createRun(runInput);
@@ -216,33 +1020,31 @@ describe("Test Runtime", () => {
     database.close();
   });
 
-  it("requires paired UI and Runtime assertions with correlated immutable evidence before PASS", () => {
-    const { database, runtime, revision, runInput } = openFixture();
-    runtime.createRun(runInput);
-    const correlation = {
-      commandId: "command-1",
-      eventSequence: 8,
-      queryAsOfSequence: 8,
-      queryViewHash: runtime.inspect(runInput.testRunId).viewHash,
-      snapshotRevisionId: runInput.snapshotRevisionId,
-      runId: runInput.runId,
-      nodeRunId: runInput.nodeRunId,
-      nodeAttemptId: runInput.nodeAttemptId,
-      sessionId: runInput.sessionId,
-      artifactVersionIds: ["artifact-version-1"],
-    };
-    runtime.recordAssertion({
-      testRunId: runInput.testRunId,
-      testCaseRevisionId: revision.id,
+  it("requires paired UI and Runtime assertions with correlated immutable evidence before PASS", async () => {
+    const fixture = openFixture();
+    fixture.runtime.createRun(fixture.runInput);
+    await succeedRequiredExecution(fixture);
+    seedEvidenceArtifact(fixture, {
+      id: "artifact-version-1",
+      contentHash: hash("4"),
+      byteSize: 42,
+      locator: "evidence/screenshot.png",
+    });
+    const correlation = trustedCorrelation(fixture, ["artifact-version-1"]);
+    fixture.runtime.recordAssertion({
+      operationId: "operation-1",
+      testRunId: fixture.runInput.testRunId,
+      testCaseRevisionId: fixture.revision.id,
       assertionId: "assertion-1",
       uiStatus: "passed",
       runtimeStatus: "missing",
       correlation,
     });
-    runtime.recordEvidence({
+    fixture.runtime.recordEvidence({
       id: "evidence-1",
-      testRunId: runInput.testRunId,
-      testCaseRevisionId: revision.id,
+      operationId: "operation-1",
+      testRunId: fixture.runInput.testRunId,
+      testCaseRevisionId: fixture.revision.id,
       assertionId: "assertion-1",
       kind: "ui",
       mediaType: "image/png",
@@ -255,7 +1057,7 @@ describe("Test Runtime", () => {
       metadata: { commandId: "command-1" },
     });
     assert.throws(
-      () => runtime.complete(runInput.testRunId),
+      () => fixture.runtime.complete(fixture.runInput.testRunId),
       (error: unknown) =>
         error instanceof TestRuntimeError &&
         error.code === "TEST_RUN_PASS_INCOMPLETE",
@@ -263,20 +1065,35 @@ describe("Test Runtime", () => {
 
     const fresh = openFixture();
     fresh.runtime.createRun(fresh.runInput);
+    await succeedRequiredExecution(fresh);
+    seedEvidenceArtifact(fresh, {
+      id: "artifact-version-runtime",
+      contentHash: hash("5"),
+      byteSize: 42,
+      locator: "evidence/runtime.json",
+    });
+    seedEvidenceArtifact(fresh, {
+      id: "artifact-version-ui",
+      contentHash: hash("6"),
+      byteSize: 42,
+      locator: "evidence/ui.png",
+    });
+    const freshCorrelation = trustedCorrelation(fresh, [
+      "artifact-version-ui",
+      "artifact-version-runtime",
+    ]);
     fresh.runtime.recordAssertion({
+      operationId: "operation-1",
       testRunId: fresh.runInput.testRunId,
       testCaseRevisionId: fresh.revision.id,
       assertionId: "assertion-1",
       uiStatus: "passed",
       runtimeStatus: "passed",
-      correlation: {
-        ...correlation,
-        artifactVersionIds: ["artifact-version-ui", "artifact-version-runtime"],
-        queryViewHash: fresh.runtime.inspect(fresh.runInput.testRunId).viewHash,
-      },
+      correlation: freshCorrelation,
     });
     fresh.runtime.recordEvidence({
       id: "evidence-1",
+      operationId: "operation-1",
       testRunId: fresh.runInput.testRunId,
       testCaseRevisionId: fresh.revision.id,
       assertionId: "assertion-1",
@@ -298,6 +1115,7 @@ describe("Test Runtime", () => {
     );
     const uiEvidence = {
       id: "evidence-ui",
+      operationId: "operation-1",
       testRunId: fresh.runInput.testRunId,
       testCaseRevisionId: fresh.revision.id,
       assertionId: "assertion-1",
@@ -321,8 +1139,24 @@ describe("Test Runtime", () => {
         }),
       (error: unknown) =>
         error instanceof TestRuntimeError &&
-        error.code === "TEST_EVIDENCE_CONFLICT",
+        error.code === "TEST_EVIDENCE_ARTIFACT_INVALID",
     );
+    fresh.runtime.recordEvidence({
+      id: "cleanup-evidence",
+      operationId: "operation-1",
+      testRunId: fresh.runInput.testRunId,
+      testCaseRevisionId: fresh.revision.id,
+      assertionId: null,
+      kind: "cleanup",
+      mediaType: "application/json",
+      contentHash: hash("9"),
+      byteSize: 0,
+      artifactVersionId: null,
+      redactionProfile: "default",
+      retentionClass: "durable",
+      locator: null,
+      metadata: { verified: true, rootFingerprint: hash("a") },
+    });
     const passed = fresh.runtime.complete(fresh.runInput.testRunId);
     assert.equal(passed.state, "passed");
     assert.match(passed.passAuthorityHash!, /^[a-f0-9]{64}$/);
@@ -332,7 +1166,7 @@ describe("Test Runtime", () => {
       "generation-1",
     );
     fresh.database.close();
-    database.close();
+    fixture.database.close();
   });
 
   it("reconciles crash, timeout, cancellation, and accepted non-terminal effects without blind resend", async () => {
@@ -340,6 +1174,7 @@ describe("Test Runtime", () => {
     runtime.createRun(runInput);
     let executions = 0;
     const adapter = {
+      id: "scripted-test",
       execute: () => {
         executions += 1;
         return {
@@ -385,13 +1220,13 @@ describe("Test Runtime", () => {
     second.runtime.createRun(second.runInput);
     await second.runtime.execute({
       testRunId: second.runInput.testRunId,
-      operationId: "operation-2",
-      input: { kind: "contract" },
+      operationId: "operation-1",
+      input: { kind: "electron" },
       adapter,
     });
     const cancelled = await second.runtime.cancel({
       testRunId: second.runInput.testRunId,
-      operationId: "operation-2",
+      operationId: "operation-1",
       adapter,
     });
     assert.equal(cancelled.state, "unknown");
@@ -399,22 +1234,61 @@ describe("Test Runtime", () => {
     database.close();
   });
 
+  it("atomically records a responsibility-preserving defect and obligation for terminal execution failure", async () => {
+    const fixture = openFixture();
+    fixture.runtime.createRun(fixture.runInput);
+    const failed = await fixture.runtime.execute({
+      testRunId: fixture.runInput.testRunId,
+      operationId: "operation-1",
+      input: { kind: "electron" },
+      adapter: {
+        id: "scripted-test",
+        execute: () => ({
+          state: "failed" as const,
+          providerReceipt: { id: "failure-receipt" },
+          evidenceRef: "execution-failure:operation-1",
+          result: { code: "ASSERTION_FAILED" },
+        }),
+        reconcile: () => ({ state: "unknown" as const }),
+      },
+    });
+
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.defects.length, 1);
+    assert.equal(failed.defects[0]?.status, "open");
+    assert.deepEqual(failed.defects[0]?.responsibility, {
+      kind: "unknown",
+      candidateWorkPackageVersionIds: ["package-1-v1"],
+      reason:
+        "Terminal Test execution failed before responsibility could be uniquely proven.",
+    });
+    assert.equal(failed.obligations.length, 1);
+    assert.equal(failed.obligations[0]?.id, "test-obligation:operation-1");
+    assert.equal(failed.obligations[0]?.status, "open");
+    fixture.database.close();
+  });
+
   it("reconciles crashes on both sides of the external effect without duplicating it", async () => {
     const beforeEffect = openFixture(true);
     beforeEffect.runtime.createRun(beforeEffect.runInput);
     let beforeExecutions = 0;
     const beforeAdapter = {
+      id: "scripted-test",
       execute: () => {
         beforeExecutions += 1;
-        return { state: "succeeded" as const, evidenceRef: "fact:before" };
+        return {
+          state: "succeeded" as const,
+          providerReceipt: { id: "receipt-before" },
+          evidenceRef: "fact:before",
+        };
       },
       reconcile: () => ({ state: "not-started" as const }),
     };
     await assert.rejects(
       beforeEffect.runtime.execute({
         testRunId: beforeEffect.runInput.testRunId,
-        operationId: "operation-before",
-        input: { kind: "runtime" },
+        operationId: "operation-1",
+        input: { kind: "electron" },
         adapter: beforeAdapter,
         failureInjection: (point) => {
           if (point === "after-intent") throw new Error("crash-after-intent");
@@ -425,7 +1299,7 @@ describe("Test Runtime", () => {
     assert.equal(beforeExecutions, 0);
     await beforeEffect.runtime.reconcile({
       testRunId: beforeEffect.runInput.testRunId,
-      operationId: "operation-before",
+      operationId: "operation-1",
       adapter: beforeAdapter,
     });
     assert.equal(
@@ -434,7 +1308,7 @@ describe("Test Runtime", () => {
           ?.readAfter(0, 100)
           .slice()
           .reverse()
-          .find((event) => event.type === "test.run.started")?.payload as
+          .find((event) => event.type === "test.run.reconciling")?.payload as
           | { readonly state?: string }
           | undefined
       )?.state,
@@ -442,8 +1316,8 @@ describe("Test Runtime", () => {
     );
     const resumed = await beforeEffect.runtime.execute({
       testRunId: beforeEffect.runInput.testRunId,
-      operationId: "operation-before",
-      input: { kind: "runtime" },
+      operationId: "operation-1",
+      input: { kind: "electron" },
       adapter: beforeAdapter,
     });
     assert.equal(resumed.state, "running");
@@ -453,19 +1327,25 @@ describe("Test Runtime", () => {
     afterEffect.runtime.createRun(afterEffect.runInput);
     let afterExecutions = 0;
     const afterAdapter = {
+      id: "scripted-test",
       execute: () => {
         afterExecutions += 1;
-        return { state: "succeeded" as const, evidenceRef: "fact:after" };
+        return {
+          state: "succeeded" as const,
+          providerReceipt: { id: "receipt-after" },
+          evidenceRef: "fact:after",
+        };
       },
       reconcile: () => ({
         state: "succeeded" as const,
+        providerReceipt: { id: "receipt-after" },
         evidenceRef: "fact:after",
       }),
     };
     await assert.rejects(
       afterEffect.runtime.execute({
         testRunId: afterEffect.runInput.testRunId,
-        operationId: "operation-after",
+        operationId: "operation-1",
         input: { kind: "electron" },
         adapter: afterAdapter,
         failureInjection: (point) => {
@@ -477,7 +1357,7 @@ describe("Test Runtime", () => {
     assert.equal(afterExecutions, 1);
     const reconciled = await afterEffect.runtime.reconcile({
       testRunId: afterEffect.runInput.testRunId,
-      operationId: "operation-after",
+      operationId: "operation-1",
       adapter: afterAdapter,
     });
     assert.equal(reconciled.state, "running");
@@ -486,29 +1366,23 @@ describe("Test Runtime", () => {
     afterEffect.database.close();
   });
 
-  it("rejects stale Query correlation even when the Test Run view hash still matches", () => {
+  it("rejects stale Query correlation even when the Test Run view hash still matches", async () => {
     const fixture = openFixture(true);
     fixture.runtime.createRun(fixture.runInput);
-    const view = fixture.runtime.inspect(fixture.runInput.testRunId);
+    await succeedRequiredExecution(fixture);
+    const correlation = trustedCorrelation(fixture, ["artifact-version-1"]);
     assert.throws(
       () =>
         fixture.runtime.recordAssertion({
+          operationId: "operation-1",
           testRunId: fixture.runInput.testRunId,
           testCaseRevisionId: fixture.revision.id,
           assertionId: "assertion-1",
           uiStatus: "passed",
           runtimeStatus: "passed",
           correlation: {
-            commandId: "stale-command",
-            eventSequence: 0,
-            queryAsOfSequence: 0,
-            queryViewHash: view.viewHash,
-            snapshotRevisionId: fixture.runInput.snapshotRevisionId,
-            runId: fixture.runInput.runId,
-            nodeRunId: fixture.runInput.nodeRunId,
-            nodeAttemptId: fixture.runInput.nodeAttemptId,
-            sessionId: fixture.runInput.sessionId,
-            artifactVersionIds: ["artifact-version-1"],
+            ...correlation,
+            queryAsOfSequence: correlation.queryAsOfSequence - 1,
           },
         }),
       (error: unknown) =>
@@ -518,9 +1392,32 @@ describe("Test Runtime", () => {
     fixture.database.close();
   });
 
-  it("tracks discriminated defect responsibility, immutable resolution, and fresh rerun authority", () => {
+  it("tracks discriminated defect responsibility, immutable resolution, and fresh rerun authority", async () => {
     const fixture = openFixture();
     fixture.runtime.createRun(fixture.runInput);
+    await succeedRequiredExecution(fixture);
+    seedEvidenceArtifact(fixture, {
+      id: "fix-evidence-1",
+      contentHash: hash("b"),
+      byteSize: 42,
+      locator: "evidence/fix.json",
+    });
+    fixture.runtime.recordEvidence({
+      id: "fix-evidence-1",
+      operationId: "operation-1",
+      testRunId: fixture.runInput.testRunId,
+      testCaseRevisionId: fixture.revision.id,
+      assertionId: "assertion-1",
+      kind: "runtime",
+      mediaType: "application/json",
+      contentHash: hash("b"),
+      byteSize: 42,
+      artifactVersionId: "fix-evidence-1",
+      redactionProfile: "default",
+      retentionClass: "durable",
+      locator: "evidence/fix.json",
+      metadata: {},
+    });
     const responsibilities = [
       {
         kind: "work-package" as const,
@@ -623,10 +1520,23 @@ describe("Test Runtime", () => {
         fixture: { id: "fixture-2", scriptHashes: [hash("8")] },
       },
     });
+    fixture.database.exec(`
+      INSERT INTO node_runs(id, run_id, pipeline_node_id, node_type, status, handler_kind_id, created_at, updated_at)
+      VALUES ('test-node-2', 'run-1', 'test-rerun', 'ai-task', 'running', 'test@1', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+      INSERT INTO node_attempts(id, node_run_id, attempt_number, snapshot_revision_id, reason, status, created_at, started_at)
+      VALUES ('test-attempt-2', 'test-node-2', 1, 'snapshot-1', 'retry', 'running', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z');
+      INSERT INTO interaction_sessions(id, mode, project_id, run_id, node_run_id, status, created_at)
+      VALUES ('test-session-2', 'run-collaboration', 'project-1', 'run-1', 'test-node-2', 'active', '2026-07-29T00:00:00.000Z');
+      INSERT INTO session_participants(id, session_id, participant_type, participant_ref, role, created_at)
+      VALUES ('tester-participant-2', 'test-session-2', 'ai-member', 'tester-ai', 'test-engineer', '2026-07-29T00:00:00.000Z');
+    `);
     const fresh = fixture.runtime.createRun({
       ...fixture.runInput,
-      testRunId: "test-run-fixture-change",
+      testRunId: "test:run-1:test-node-2",
       requestId: "request-fixture-change",
+      nodeRunId: "test-node-2",
+      nodeAttemptId: "test-attempt-2",
+      sessionId: "test-session-2",
       testCaseRevisions: [
         { id: fixtureRevision.id, hash: fixtureRevision.manifestHash },
       ],
@@ -641,5 +1551,119 @@ describe("Test Runtime", () => {
       fixture.runtime.inspect(fixture.runInput.testRunId).manifestHash,
     );
     fixture.database.close();
+  });
+
+  it("routes persisted Test defect responsibility and enforces fresh rework lineage", () => {
+    const scenarios = [
+      {
+        responsibility: {
+          kind: "work-package" as const,
+          workPackageId: "package-1",
+          workPackageVersionId: "package-1-v1",
+        },
+        destination: "work-package",
+      },
+      {
+        responsibility: {
+          kind: "contract" as const,
+          contractId: "contract-1",
+          version: "1",
+          producerApplicationId: "app-api",
+          consumerApplicationId: "app-web",
+          candidateWorkPackageVersionIds: ["package-1-v1", "package-2-v1"],
+        },
+        destination: "contract",
+      },
+      {
+        responsibility: {
+          kind: "aggregate" as const,
+          candidateWorkPackageVersionIds: ["package-1-v1", "package-2-v1"],
+        },
+        destination: "triage",
+      },
+      {
+        responsibility: {
+          kind: "unknown" as const,
+          candidateWorkPackageVersionIds: ["package-1-v1"],
+          reason: "Evidence cannot uniquely attribute the mismatch.",
+        },
+        destination: "triage",
+      },
+    ];
+
+    scenarios.forEach((scenario, index) => {
+      const fixture = openFixture();
+      const prior = fixture.runtime.createRun(fixture.runInput);
+      fixture.runtime.recordDefect({
+        id: `rework-defect-${index}`,
+        testRunId: prior.id,
+        testCaseRevisionId: fixture.revision.id,
+        assertionId: "assertion-1",
+        responsibility: scenario.responsibility,
+        evidence: { refs: [`failure-evidence-${index}`] },
+      });
+      fixture.database
+        .prepare("UPDATE test_runs SET state = 'failed' WHERE id = ?")
+        .run(prior.id);
+      const revision = fixture.runtime.registerCaseRevision({
+        ...fixture.revisionInput,
+        revisionId: `case-1-r${index + 2}`,
+        supersedesRevisionId: fixture.revision.id,
+        manifest: {
+          ...fixture.revisionInput.manifest,
+          fixture: {
+            id: `fixture-${index + 2}`,
+            scriptHashes: [String(index + 2).repeat(64)],
+          },
+        },
+      });
+      const suffix = String(index + 2);
+      seedFreshTestAttempt(fixture, suffix);
+      const nextRun = {
+        ...fixture.runInput,
+        testRunId: `test:run-1:test-node-${suffix}`,
+        requestId: `request-rework-${suffix}`,
+        nodeRunId: `test-node-${suffix}`,
+        nodeAttemptId: `test-attempt-${suffix}`,
+        sessionId: `test-session-${suffix}`,
+        testCaseRevisions: [{ id: revision.id, hash: revision.manifestHash }],
+        fixture: revision.manifest.fixture,
+      };
+      const rework = fixture.runtime.createReworkRun({
+        defectId: `rework-defect-${index}`,
+        input: nextRun,
+      });
+
+      assert.equal(rework.route.destination, scenario.destination);
+      assert.equal(rework.lineage.integrationAuthority, "reuse-exact-pass");
+      assert.equal(rework.lineage.priorTestRunId, prior.id);
+      assert.equal(rework.run.id, nextRun.testRunId);
+      assert.equal(
+        fixture.runtime.inspect(prior.id).manifestHash,
+        prior.manifestHash,
+      );
+
+      assert.throws(
+        () =>
+          fixture.runtime.createReworkRun({
+            defectId: `rework-defect-${index}`,
+            input: {
+              ...nextRun,
+              testRunId: `${nextRun.testRunId}-code-change`,
+              requestId: `${nextRun.requestId}-code-change`,
+              integrationAuthority: {
+                ...nextRun.integrationAuthority,
+                repositoryCommits: [
+                  { repositoryReference: "repo-a", commit: commit("3") },
+                ],
+              },
+            },
+          }),
+        (error: unknown) =>
+          error instanceof TestRuntimeError &&
+          error.code === "TEST_REWORK_FRESH_INTEGRATION_REQUIRED",
+      );
+      fixture.database.close();
+    });
   });
 });

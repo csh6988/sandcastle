@@ -257,34 +257,75 @@ const integrationEventPayloadSchema = z
   })
   .passthrough();
 
-const testEventPayloadSchema = z
+const testCaseRevisedPayloadSchema = z
   .object({
-    testRunId: z.string().trim().min(1).optional(),
-    testCaseRevisionId: z.string().trim().min(1).optional(),
-    state: z
-      .enum([
-        "scheduled",
-        "running",
-        "reconciling",
-        "unknown",
-        "passed",
-        "failed",
-        "blocked",
-        "cancelled",
-      ])
-      .optional(),
-    manifestHash: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/)
-      .optional(),
-    passAuthorityHash: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/)
-      .optional(),
-    assertionId: z.string().trim().min(1).optional(),
-    evidenceId: z.string().trim().min(1).optional(),
-    defectId: z.string().trim().min(1).optional(),
+    testCaseRevisionId: z.string().trim().min(1),
+    manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const testRunAcceptedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    state: z.literal("scheduled"),
+    manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const testRunExecutionPayloadSchema = (
+  state: "running" | "reconciling" | "unknown" | "failed" | "cancelled",
+) =>
+  z
+    .object({
+      testRunId: z.string().trim().min(1),
+      state: z.literal(state),
+      operationId: z.string().trim().min(1),
+    })
+    .strict();
+
+const testAssertionRecordedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    testCaseRevisionId: z.string().trim().min(1),
+    assertionId: z.string().trim().min(1),
+  })
+  .strict();
+
+const testEvidenceRecordedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    evidenceId: z.string().trim().min(1),
+  })
+  .strict();
+
+const testDefectCreatedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    defectId: z.string().trim().min(1),
     operationId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+const testDefectClosedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    defectId: z.string().trim().min(1),
+  })
+  .strict();
+
+const testRunCompletedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    state: z.literal("passed"),
+    manifestHash: z.string().regex(/^[a-f0-9]{64}$/),
+    passAuthorityHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const testRunBlockedPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1),
+    state: z.literal("blocked"),
   })
   .strict();
 
@@ -1116,26 +1157,36 @@ const definitions = [
     type: "test.case.revised",
     schemaVersion: 1,
     requiredTopLevelIds: ["companyId", "projectId", "testCaseRevisionId"],
-    payloadSchema: testEventPayloadSchema,
+    payloadSchema: testCaseRevisedPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",
   },
-  ...[
-    "test.run.accepted",
-    "test.run.started",
-    "test.run.reconciling",
-    "test.run.unknown",
-    "test.assertion.recorded",
-    "test.evidence.recorded",
-    "test.defect.created",
-    "test.defect.closed",
-    "test.run.completed",
-    "test.run.failed",
-    "test.run.blocked",
-    "test.run.cancelled",
-  ].map(
-    (type) =>
+  ...(
+    [
+      ["test.run.accepted", testRunAcceptedPayloadSchema, []],
+      ["test.run.started", testRunExecutionPayloadSchema("running"), []],
+      [
+        "test.run.reconciling",
+        testRunExecutionPayloadSchema("reconciling"),
+        [],
+      ],
+      ["test.run.unknown", testRunExecutionPayloadSchema("unknown"), []],
+      [
+        "test.assertion.recorded",
+        testAssertionRecordedPayloadSchema,
+        ["testCaseRevisionId"],
+      ],
+      ["test.evidence.recorded", testEvidenceRecordedPayloadSchema, []],
+      ["test.defect.created", testDefectCreatedPayloadSchema, ["defectId"]],
+      ["test.defect.closed", testDefectClosedPayloadSchema, ["defectId"]],
+      ["test.run.completed", testRunCompletedPayloadSchema, []],
+      ["test.run.failed", testRunExecutionPayloadSchema("failed"), []],
+      ["test.run.blocked", testRunBlockedPayloadSchema, []],
+      ["test.run.cancelled", testRunExecutionPayloadSchema("cancelled"), []],
+    ] as const
+  ).map(
+    ([type, payloadSchema, additionalTopLevelIds]) =>
       ({
         type,
         schemaVersion: 1,
@@ -1145,12 +1196,9 @@ const definitions = [
           "runId",
           "nodeRunId",
           "testRunId",
-          ...(type === "test.assertion.recorded"
-            ? (["testCaseRevisionId"] as const)
-            : []),
-          ...(type.startsWith("test.defect.") ? (["defectId"] as const) : []),
+          ...additionalTopLevelIds,
         ],
-        payloadSchema: testEventPayloadSchema,
+        payloadSchema,
         retentionClass: "durable",
         agUiMapping: "custom",
         acpMapping: "custom",

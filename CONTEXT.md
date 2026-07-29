@@ -663,8 +663,8 @@ Immutable, retention-classified evidence from a **Test run** that correlates an 
 _Avoid_: mutable test logs, uncorrelated screenshots, Agent self-attestation, Renderer state as workflow truth
 
 **Test defect**:
-A traceable failure raised by a **Test run** against a requirement, Work Package, Artifact, Runtime contract, or interaction expectation. It links the failing Test case, exact evidence, affected revision and Node run when applicable, and the suspected owner; fixing it follows the same review and re-test loop as an **Integration defect**.
-_Avoid_: "bug note" (lacks reproducible evidence), silently changing a Test case to hide a failure
+A traceable failure raised by a **Test run** against a requirement, Work Package, producer/consumer Contract, Artifact, Runtime contract, or interaction expectation. It links the failing Test case, exact evidence, affected revision and Node run when applicable, and either one evidenced responsibility or explicit aggregate/unknown candidates; resolving it creates a fresh Test run and never rewrites the failed history.
+_Avoid_: "bug note" (lacks reproducible evidence), caller-selected blame without persisted evidence, silently changing a Test case to hide a failure
 
 **Repository readiness check**:
 A pre-execution check that confirms every repository and application named by a Project or **Work Package** can participate safely in the declared pipeline. It records repository identity and revision, clean/dirty state policy, branch and Worktree capability, build and test entry points, required local services or secrets by reference, cross-application contracts, and any blocking readiness defect before development starts.

@@ -2382,17 +2382,31 @@ describe("Test authority schema migration", () => {
         .map((row) => (row as { readonly name: string }).name),
       [...expected].sort(),
     );
-    assert.equal(
-      Number(
-        (
-          database
-            .prepare(
-              "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'test_%immutable%'",
-            )
-            .get() as { readonly count: unknown }
-        ).count,
-      ),
-      15,
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'test_%immutable%' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      [
+        "test_assertion_results_immutable_delete",
+        "test_assertion_results_immutable_update",
+        "test_case_revisions_immutable_delete",
+        "test_case_revisions_immutable_update",
+        "test_defect_resolutions_immutable_delete",
+        "test_defect_resolutions_immutable_update",
+        "test_defects_immutable_delete",
+        "test_evidence_immutable_delete",
+        "test_evidence_immutable_update",
+        "test_execution_facts_immutable_delete",
+        "test_execution_facts_immutable_update",
+        "test_execution_operations_immutable_delete",
+        "test_run_case_revisions_immutable_delete",
+        "test_run_case_revisions_immutable_update",
+        "test_run_obligations_immutable_delete",
+        "test_runs_immutable_delete",
+      ],
     );
     database.close();
   });

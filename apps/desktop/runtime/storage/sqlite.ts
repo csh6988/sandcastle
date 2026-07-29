@@ -135,7 +135,11 @@ import {
   type IntegrationValidationProvider,
 } from "../integration/integrationValidationExecutor.js";
 import { openAggregateIntegrationReviewExecutor } from "../integration/aggregateIntegrationReviewExecutor.js";
-import { openTestRuntime, type TestRuntime } from "../testing/testRuntime.js";
+import {
+  openTestRuntime,
+  type TestExecutionAdapter,
+  type TestRuntime,
+} from "../testing/testRuntime.js";
 import {
   openTestNodeHandler,
   type TestNodeHandler,
@@ -295,6 +299,14 @@ export const openCompanyDatabase = (
           | "during-failure-finalization",
         operationId: string,
       ) => void;
+    };
+    readonly testRuntime?: {
+      readonly executionAdapters?: readonly TestExecutionAdapter[];
+      readonly executionAdapterFactory?: (input: {
+        readonly database: DatabaseSync;
+        readonly tests: TestRuntime;
+        readonly artifacts: ArtifactRegistry;
+      }) => readonly TestExecutionAdapter[];
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -474,9 +486,18 @@ export const openCompanyDatabase = (
   });
   const testRuns = openTestRuntime(database, {
     integrationAuthority: integrations,
+    artifacts: artifactRegistry,
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const testExecutionAdapters = [
+    ...(options.testRuntime?.executionAdapters ?? []),
+    ...(options.testRuntime?.executionAdapterFactory?.({
+      database,
+      tests: testRuns,
+      artifacts: artifactRegistry,
+    }) ?? []),
+  ];
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -560,8 +581,14 @@ export const openCompanyDatabase = (
     database,
     pipelineRuntime,
     tests: testRuns,
+    executionAdapters: testExecutionAdapters,
   });
   pipelineRuntime.registerTestExecutor(testNodeHandler.executeReady);
+  pipelineRuntime.registerTestCancellationDispatcher(async (input) => {
+    await testNodeHandler.cancelPending(
+      `test:${input.runId}:${input.nodeRunId}`,
+    );
+  });
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
