@@ -67,12 +67,14 @@ export const reconcileCompanyRuntimeStartup = async (
     | "interaction"
     | "codeReviewNodeHandler"
     | "integrationNodeHandler"
+    | "testNodeHandler"
   >,
 ): Promise<void> => {
   await database.pipelineRuntime.reconcilePendingExecutions();
   await database.interaction.reconcilePendingTurns();
   await database.codeReviewNodeHandler.reconcilePending();
   await database.integrationNodeHandler.reconcilePending();
+  await database.testNodeHandler.reconcilePending();
 };
 
 const tokenDigest = (token: string): Buffer =>
@@ -447,6 +449,8 @@ export const startCompanyRuntimeServer = async (
                     return database.codeReviews.inspect(query.runId);
                   case "integration-generations.inspect":
                     return database.integrations.inspect(query.runId);
+                  case "test-runs.inspect":
+                    return database.testRuns.inspect(query.testRunId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -527,6 +531,8 @@ export const startCompanyRuntimeServer = async (
                   return database.codeReviews.inspect(request.query.runId);
                 case "integration-generations.inspect":
                   return database.integrations.inspect(request.query.runId);
+                case "test-runs.inspect":
+                  return database.testRuns.inspect(request.query.testRunId);
                 case "departments.list":
                   return database.catalog.departments();
                 case "department.inspect":

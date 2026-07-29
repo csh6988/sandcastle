@@ -13,6 +13,14 @@ const requiredEnvironment = (name: string): string => {
 };
 
 const main = async (): Promise<void> => {
+  if (
+    process.env.SANDCASTLE_ELECTRON_TEST_FIXTURE_CONFIG ||
+    process.env.SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION
+  ) {
+    throw new Error(
+      "Electron Test fixture configuration is accepted only by the dedicated test-only Runtime entrypoint.",
+    );
+  }
   const executionAdapter = await loadConfiguredExecutionAdapter();
   const interactionExecutionAdapter =
     await loadConfiguredInteractionExecutionAdapter();

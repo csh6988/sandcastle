@@ -2585,6 +2585,7 @@ describe("Integration Runtime generation manifest", () => {
       "aggregate-gate-pass",
     );
     assert.deepEqual(passed.aggregateReview?.input, manifest);
+    assert.deepEqual(runtime.readPassAuthority("generation-pass"), passed);
     assert.equal(
       pipelineCalls.some(
         (call) =>
@@ -2646,5 +2647,11 @@ describe("Integration Runtime generation manifest", () => {
     assert.equal(failed.state, "failed");
     assert.equal(failed.passAuthorityHash, null);
     assert.equal(failed.defects[0]?.kind, "aggregate");
+    assert.throws(
+      () => runtime.readPassAuthority("generation-conditional"),
+      (error: unknown) =>
+        error instanceof IntegrationRuntimeError &&
+        error.code === "INTEGRATION_PASS_AUTHORITY_INELIGIBLE",
+    );
   });
 });

@@ -776,6 +776,79 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("dispatches test@1 through the registered Runtime executor and keeps Run, Node, and Attempt writes in Pipeline Runtime", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "test",
+          type: "ai-task",
+          name: "Test",
+          positionId,
+          handlerKindId: "test@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "test" },
+        { from: "test", to: "complete" },
+      ],
+    }));
+    try {
+      fixture.database.pipelineRuntime.registerTestExecutor(async (input) => {
+        const started = fixture.database.pipelineRuntime.startTestInTransaction(
+          {
+            ...input,
+            testRunId: "test-run-1",
+          },
+        );
+        fixture.database.pipelineRuntime.blockTestInTransaction({
+          ...input,
+          testRunId: "test-run-1",
+          failure: {
+            code: "TEST_EXECUTION_RECONCILIATION_REQUIRED",
+            message: "The external Test effect is not yet proven terminal.",
+          },
+        });
+        fixture.database.pipelineRuntime.resumeTestInTransaction({
+          ...input,
+          testRunId: "test-run-1",
+        });
+        fixture.database.pipelineRuntime.completeTestInTransaction({
+          ...input,
+          testRunId: "test-run-1",
+          passAuthorityHash: "a".repeat(64),
+        });
+        assert.ok(started.nodeAttemptId);
+      });
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const completed = await fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const node = completed.nodes.find(
+        (candidate) => candidate.pipelineNodeId === "test",
+      );
+      assert.equal(node?.status, "succeeded");
+      assert.equal(node?.attempts.length, 1);
+      assert.equal(node?.attempts[0]?.status, "succeeded");
+      assert.deepEqual(node?.result, {
+        testRunId: "test-run-1",
+        passAuthorityHash: "a".repeat(64),
+      });
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("keeps an unknown Integration effect reconciling until terminal evidence resumes the same Attempt", async () => {
     const fixture = setup(undefined, (positionId) => ({
       nodes: [

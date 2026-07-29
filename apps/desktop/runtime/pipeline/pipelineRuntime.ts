@@ -215,6 +215,12 @@ export interface PipelineRuntime {
       readonly nodeRunId: string;
     }) => Promise<void>,
   ) => void;
+  readonly registerTestExecutor: (
+    executor: (input: {
+      readonly runId: string;
+      readonly nodeRunId: string;
+    }) => Promise<void>,
+  ) => void;
   readonly registerIntegrationCancellationDispatcher: (
     dispatcher: (input: {
       readonly runId: string;
@@ -372,6 +378,34 @@ export interface PipelineRuntime {
       readonly repositoryReference: string;
       readonly commit: string;
     }[];
+  }) => void;
+  readonly startTestInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly testRunId: string;
+  }) => { readonly nodeAttemptId: string };
+  readonly blockTestInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly testRunId: string;
+    readonly failure: { readonly code: string; readonly message: string };
+  }) => void;
+  readonly resumeTestInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly testRunId: string;
+  }) => void;
+  readonly failTestInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly testRunId: string;
+    readonly failure: { readonly code: string; readonly message: string };
+  }) => void;
+  readonly completeTestInTransaction: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly testRunId: string;
+    readonly passAuthorityHash: string;
   }) => void;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
@@ -680,6 +714,17 @@ export const openPipelineRuntime = (
     (executor) => {
       integrationExecutor = executor;
     };
+  let testExecutor:
+    | ((input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+      }) => Promise<void>)
+    | undefined;
+  const registerTestExecutor: PipelineRuntime["registerTestExecutor"] = (
+    executor,
+  ) => {
+    testExecutor = executor;
+  };
   let integrationCancellationDispatcher:
     | ((input: {
         readonly runId: string;
@@ -7175,6 +7220,345 @@ export const openPipelineRuntime = (
       });
     };
 
+  const startTestInTransaction: PipelineRuntime["startTestInTransaction"] = (
+    input,
+  ) => {
+    const current = database
+      .prepare(
+        `SELECT node_runs.status AS nodeStatus,
+                node_runs.attempt_count AS attemptCount,
+                node_runs.handler_kind_id AS handlerKindId,
+                department_runs.status AS runStatus,
+                department_runs.snapshot_revision_id AS snapshotRevisionId
+           FROM node_runs
+           JOIN department_runs ON department_runs.id = node_runs.run_id
+          WHERE node_runs.id = ? AND node_runs.run_id = ?`,
+      )
+      .get(input.nodeRunId, input.runId) as
+      | {
+          readonly nodeStatus: string;
+          readonly attemptCount: number;
+          readonly handlerKindId: string;
+          readonly runStatus: string;
+          readonly snapshotRevisionId: string;
+        }
+      | undefined;
+    if (
+      !current ||
+      current.handlerKindId !== "test@1" ||
+      !["ready", "blocked"].includes(current.nodeStatus) ||
+      !["ready", "running", "blocked"].includes(current.runStatus)
+    ) {
+      throw new PipelineRuntimeError(
+        "TEST_START_STATE_INVALID",
+        `Test Node Run ${input.nodeRunId} cannot start from its current Pipeline state.`,
+      );
+    }
+    const now = clock().toISOString();
+    const nodeAttemptId = randomUUID();
+    const result = canonicalPipelineJson({ testRunId: input.testRunId });
+    database
+      .prepare(
+        `UPDATE node_runs
+            SET status = 'running', attempt_count = attempt_count + 1,
+                result_json = ?, failure_code = NULL, failure_message = NULL,
+                updated_at = ?
+          WHERE id = ? AND run_id = ? AND handler_kind_id = 'test@1'
+            AND status IN ('ready', 'blocked')`,
+      )
+      .run(result, now, input.nodeRunId, input.runId);
+    database
+      .prepare(
+        `UPDATE department_runs
+            SET status = 'running', revision = revision + 1, updated_at = ?
+          WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+      )
+      .run(now, input.runId);
+    database
+      .prepare(
+        `INSERT INTO node_attempts(
+           id, node_run_id, attempt_number, snapshot_revision_id, reason,
+           status, structured_result_json, failure_code, failure_message,
+           created_at, started_at, completed_at
+         ) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, NULL, ?, ?, NULL)`,
+      )
+      .run(
+        nodeAttemptId,
+        input.nodeRunId,
+        current.attemptCount + 1,
+        current.snapshotRevisionId,
+        current.attemptCount === 0 ? "initial" : "recovery",
+        result,
+        now,
+        now,
+      );
+    appendRuntimeMutation({
+      action: "node.test-start",
+      entityType: "node-run",
+      entityId: input.nodeRunId,
+      eventType: "node.status.changed",
+      additionalEventType: "node.started",
+      runId: input.runId,
+      nodeRunId: input.nodeRunId,
+      nodeAttemptId,
+      before: { status: current.nodeStatus },
+      after: {
+        status: "running",
+        runStatus: "running",
+        testRunId: input.testRunId,
+      },
+      createdAt: now,
+    });
+    return { nodeAttemptId };
+  };
+
+  const blockTestInTransaction: PipelineRuntime["blockTestInTransaction"] = (
+    input,
+  ) => {
+    const now = clock().toISOString();
+    const node = database
+      .prepare(
+        `UPDATE node_runs
+            SET status = 'blocked', failure_code = ?, failure_message = ?,
+                updated_at = ?
+          WHERE id = ? AND run_id = ? AND handler_kind_id = 'test@1'
+            AND status IN ('ready', 'running', 'blocked')`,
+      )
+      .run(
+        input.failure.code,
+        input.failure.message,
+        now,
+        input.nodeRunId,
+        input.runId,
+      );
+    if (node.changes !== 1) {
+      throw new PipelineRuntimeError(
+        "TEST_BLOCK_STATE_INVALID",
+        `Test Node Run ${input.nodeRunId} is not blockable.`,
+      );
+    }
+    database
+      .prepare(
+        `UPDATE node_attempts
+            SET status = 'reconciling', recoverable = 1, failure_code = ?,
+                failure_message = ?, completed_at = NULL
+          WHERE id = (
+            SELECT id FROM node_attempts WHERE node_run_id = ?
+              AND status IN ('running', 'reconciling')
+            ORDER BY attempt_number DESC LIMIT 1
+          )`,
+      )
+      .run(input.failure.code, input.failure.message, input.nodeRunId);
+    const run = database
+      .prepare(
+        `UPDATE department_runs
+            SET status = CASE WHEN status = 'paused' THEN status ELSE 'blocked' END,
+                revision = revision + 1, updated_at = ?
+          WHERE id = ? AND status IN ('ready', 'running', 'blocked', 'paused')`,
+      )
+      .run(now, input.runId);
+    if (run.changes !== 1) {
+      throw new PipelineRuntimeError(
+        "TEST_BLOCK_STATE_INVALID",
+        `Department Run ${input.runId} is not blockable.`,
+      );
+    }
+    appendRuntimeMutation({
+      action: "run.test-blocked",
+      entityType: "department-run",
+      entityId: input.runId,
+      eventType: "run.blocked",
+      runId: input.runId,
+      nodeRunId: input.nodeRunId,
+      before: { status: "running" },
+      after: {
+        status: "blocked",
+        testRunId: input.testRunId,
+        failure: input.failure,
+      },
+      createdAt: now,
+    });
+  };
+
+  const resumeTestInTransaction: PipelineRuntime["resumeTestInTransaction"] = (
+    input,
+  ) => {
+    const now = clock().toISOString();
+    const runStatus = database
+      .prepare("SELECT status FROM department_runs WHERE id = ?")
+      .get(input.runId) as { readonly status: string } | undefined;
+    if (runStatus?.status === "paused") return;
+    const node = database
+      .prepare(
+        `UPDATE node_runs
+            SET status = 'running', failure_code = NULL,
+                failure_message = NULL, updated_at = ?
+          WHERE id = ? AND run_id = ? AND handler_kind_id = 'test@1'
+            AND status = 'blocked'`,
+      )
+      .run(now, input.nodeRunId, input.runId);
+    const attempt = database
+      .prepare(
+        `UPDATE node_attempts
+            SET status = 'running', recoverable = 0, failure_code = NULL,
+                failure_message = NULL, completed_at = NULL
+          WHERE id = (
+            SELECT id FROM node_attempts WHERE node_run_id = ?
+              AND status = 'reconciling'
+            ORDER BY attempt_number DESC LIMIT 1
+          )`,
+      )
+      .run(input.nodeRunId);
+    const run = database
+      .prepare(
+        `UPDATE department_runs
+            SET status = 'running', revision = revision + 1, updated_at = ?
+          WHERE id = ? AND status = 'blocked'`,
+      )
+      .run(now, input.runId);
+    if (node.changes !== 1 || attempt.changes !== 1 || run.changes !== 1) {
+      throw new PipelineRuntimeError(
+        "TEST_RESUME_STATE_INVALID",
+        `Test Node Run ${input.nodeRunId} has no reconciling Attempt to resume.`,
+      );
+    }
+    appendRuntimeMutation({
+      action: "node.test-reconciled",
+      entityType: "node-run",
+      entityId: input.nodeRunId,
+      eventType: "node.status.changed",
+      additionalEventType: "node.started",
+      runId: input.runId,
+      nodeRunId: input.nodeRunId,
+      before: { status: "blocked" },
+      after: {
+        status: "running",
+        runStatus: "running",
+        testRunId: input.testRunId,
+      },
+      createdAt: now,
+    });
+  };
+
+  const failTestInTransaction: PipelineRuntime["failTestInTransaction"] = (
+    input,
+  ) => {
+    const now = clock().toISOString();
+    const node = database
+      .prepare(
+        `UPDATE node_runs
+            SET status = 'failed', failure_code = ?, failure_message = ?,
+                updated_at = ?
+          WHERE id = ? AND run_id = ? AND handler_kind_id = 'test@1'
+            AND status IN ('ready', 'running', 'blocked')`,
+      )
+      .run(
+        input.failure.code,
+        input.failure.message,
+        now,
+        input.nodeRunId,
+        input.runId,
+      );
+    database
+      .prepare(
+        `UPDATE node_attempts
+            SET status = 'failed', recoverable = 0, failure_code = ?,
+                failure_message = ?, completed_at = ?
+          WHERE id = (
+            SELECT id FROM node_attempts WHERE node_run_id = ?
+              AND status IN ('running', 'reconciling')
+            ORDER BY attempt_number DESC LIMIT 1
+          )`,
+      )
+      .run(input.failure.code, input.failure.message, now, input.nodeRunId);
+    database
+      .prepare(
+        `UPDATE department_runs
+            SET status = 'failed', revision = revision + 1, updated_at = ?
+          WHERE id = ? AND status IN ('ready', 'running', 'blocked')`,
+      )
+      .run(now, input.runId);
+    if (node.changes !== 1) {
+      throw new PipelineRuntimeError(
+        "TEST_FAIL_STATE_INVALID",
+        `Test Node Run ${input.nodeRunId} cannot fail from its current state.`,
+      );
+    }
+    appendRuntimeMutation({
+      action: "node.test-failed",
+      entityType: "node-run",
+      entityId: input.nodeRunId,
+      eventType: "node.status.changed",
+      additionalEventType: "node.failed",
+      runId: input.runId,
+      nodeRunId: input.nodeRunId,
+      before: { status: "running" },
+      after: {
+        status: "failed",
+        runStatus: "failed",
+        testRunId: input.testRunId,
+        failure: input.failure,
+      },
+      createdAt: now,
+    });
+  };
+
+  const completeTestInTransaction: PipelineRuntime["completeTestInTransaction"] =
+    (input) => {
+      const now = clock().toISOString();
+      const result = {
+        testRunId: input.testRunId,
+        passAuthorityHash: input.passAuthorityHash,
+      };
+      const node = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'succeeded', result_json = ?, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'test@1'
+              AND status = 'running'`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId, input.runId);
+      const attempt = database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'succeeded', structured_result_json = ?,
+                  failure_code = NULL, failure_message = NULL, completed_at = ?
+            WHERE id = (
+              SELECT id FROM node_attempts WHERE node_run_id = ?
+                AND status = 'running'
+              ORDER BY attempt_number DESC LIMIT 1
+            )`,
+        )
+        .run(canonicalPipelineJson(result), now, input.nodeRunId);
+      if (node.changes !== 1 || attempt.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "TEST_COMPLETE_STATE_INVALID",
+          `Test Node Run ${input.nodeRunId} has no running Attempt to complete.`,
+        );
+      }
+      refreshQueuedNodes(input.runId, now);
+      database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'running', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, input.runId);
+      appendRuntimeMutation({
+        action: "node.test-complete",
+        entityType: "node-run",
+        entityId: input.nodeRunId,
+        eventType: "node.status.changed",
+        additionalEventType: "node.succeeded",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: { status: "succeeded", ...result },
+        createdAt: now,
+      });
+    };
+
   const startIntegrationInTransaction: PipelineRuntime["startIntegrationInTransaction"] =
     (input) => {
       const current = database
@@ -9335,6 +9719,17 @@ export const openPipelineRuntime = (
         return inspectRun(input.runId);
       }
 
+      if (ready.handler?.handlerKindId === "test@1") {
+        if (!testExecutor) {
+          throw new PipelineRuntimeError(
+            "TEST_EXECUTOR_UNAVAILABLE",
+            "The frozen test@1 Node has no registered Runtime executor.",
+          );
+        }
+        await testExecutor({ runId: input.runId, nodeRunId: ready.id });
+        return inspectRun(input.runId);
+      }
+
       if ((executionAdapter.maxConcurrentNodes ?? 1) > 1) {
         const concurrent = readyNodes
           .map((candidate) => ({
@@ -10222,6 +10617,7 @@ export const openPipelineRuntime = (
     executeReady,
     registerCodeReviewExecutor,
     registerIntegrationExecutor,
+    registerTestExecutor,
     registerIntegrationCancellationDispatcher,
     executeCodeReviewStage,
     executeIntegrationReviewStage,
@@ -10244,6 +10640,11 @@ export const openPipelineRuntime = (
     failIntegrationInTransaction,
     requeueIntegrationRecoveryInTransaction,
     completeIntegrationInTransaction,
+    startTestInTransaction,
+    blockTestInTransaction,
+    resumeTestInTransaction,
+    failTestInTransaction,
+    completeTestInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,

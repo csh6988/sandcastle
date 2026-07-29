@@ -196,6 +196,22 @@ const integrationGenerationView = {
   passAuthorityHash: null,
 };
 
+const testRunView = {
+  id: "test-run-1",
+  requestId: "request-1",
+  manifest: { schemaVersion: 1 },
+  manifestHash: "e".repeat(64),
+  viewHash: "f".repeat(64),
+  state: "passed" as const,
+  passAuthorityHash: "1".repeat(64),
+  assertions: [],
+  evidence: [],
+  defects: [],
+  obligations: [],
+  createdAt: "2026-07-29T00:00:00.000Z",
+  updatedAt: "2026-07-29T00:00:00.000Z",
+};
+
 describe("Sandcastle preload bridge", () => {
   it("parses Workspace command results through the typed tunnel", async () => {
     const bridge = createSandcastleBridge(async (channel) => {
@@ -376,6 +392,33 @@ describe("Sandcastle preload bridge", () => {
     assert.equal(started.status, "succeeded");
     if (started.status === "succeeded") {
       assert.equal(started.value.id, "generation-1");
+    }
+  });
+
+  it("parses Test Run Query Views and Commands through the typed tunnel", async () => {
+    const bridge = createSandcastleBridge(async (_channel, payload) => {
+      const request = payload as { readonly operation?: string };
+      return request.operation === "query"
+        ? { view: testRunView, asOfSequence: 31 }
+        : {
+            status: "succeeded",
+            value: testRunView,
+            effectIds: ["audit-test-1"],
+          };
+    });
+
+    const inspected = await bridge.query({
+      type: "test-runs.inspect",
+      testRunId: "test-run-1",
+    });
+    const completed = await bridge.execute({
+      commandId: "test-complete-1",
+      command: { type: "test.run.complete", testRunId: "test-run-1" },
+    });
+    assert.equal(inspected.view.viewHash, "f".repeat(64));
+    assert.equal(completed.status, "succeeded");
+    if (completed.status === "succeeded") {
+      assert.equal(completed.value.passAuthorityHash, "1".repeat(64));
     }
   });
 

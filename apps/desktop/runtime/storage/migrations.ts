@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 46;
+export const CURRENT_SCHEMA_VERSION = 47;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4812,6 +4812,273 @@ const migrations: readonly CompanyMigration[] = [
         );
       }
       if (!activeLeaseIndex) database.exec(activeLeaseIndexSql);
+    },
+  },
+  {
+    version: 47,
+    name: "versioned_test_cases_and_runs",
+    migrate: (database) => {
+      const createTestSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE test_cases (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            created_at TEXT NOT NULL
+          ) STRICT;
+
+          CREATE TABLE test_case_revisions (
+            id TEXT PRIMARY KEY,
+            test_case_id TEXT NOT NULL REFERENCES test_cases(id),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            supersedes_revision_id TEXT REFERENCES test_case_revisions(id),
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE (test_case_id, revision),
+            UNIQUE (test_case_id, manifest_hash)
+          ) STRICT;
+
+          CREATE TABLE test_runs (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+            node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+            node_attempt_id TEXT NOT NULL REFERENCES node_attempts(id),
+            session_id TEXT NOT NULL REFERENCES interaction_sessions(id),
+            integration_generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+            integration_manifest_hash TEXT NOT NULL CHECK (length(integration_manifest_hash) = 64),
+            integration_pass_authority_hash TEXT NOT NULL CHECK (length(integration_pass_authority_hash) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            state TEXT NOT NULL CHECK (
+              state IN ('scheduled', 'running', 'reconciling', 'unknown', 'passed', 'failed', 'blocked', 'cancelled')
+            ),
+            pass_authority_hash TEXT CHECK (pass_authority_hash IS NULL OR length(pass_authority_hash) = 64),
+            failure_code TEXT,
+            failure_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+
+          CREATE TABLE test_run_case_revisions (
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            test_case_revision_id TEXT NOT NULL REFERENCES test_case_revisions(id),
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            PRIMARY KEY (test_run_id, test_case_revision_id),
+            UNIQUE (test_run_id, ordinal)
+          ) STRICT;
+
+          CREATE TABLE test_execution_operations (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            operation_key TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            state TEXT NOT NULL CHECK (
+              state IN ('intent', 'running', 'reconciling', 'unknown', 'succeeded', 'failed', 'cancelled')
+            ),
+            fact_json TEXT,
+            fact_hash TEXT CHECK (fact_hash IS NULL OR length(fact_hash) = 64),
+            receipt_json TEXT,
+            receipt_hash TEXT CHECK (receipt_hash IS NULL OR length(receipt_hash) = 64),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (test_run_id, id)
+          ) STRICT;
+
+          CREATE TABLE test_execution_facts (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES test_execution_operations(id),
+            state TEXT NOT NULL CHECK (state IN ('not-started', 'accepted', 'running', 'succeeded', 'failed', 'cancelled', 'unknown')),
+            fact_json TEXT NOT NULL,
+            fact_hash TEXT NOT NULL CHECK (length(fact_hash) = 64),
+            evidence_ref TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (operation_id, fact_hash)
+          ) STRICT;
+
+          CREATE TABLE test_assertion_results (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            test_case_revision_id TEXT NOT NULL REFERENCES test_case_revisions(id),
+            assertion_id TEXT NOT NULL,
+            required INTEGER NOT NULL CHECK (required IN (0, 1)),
+            ui_status TEXT NOT NULL CHECK (ui_status IN ('passed', 'failed', 'missing', 'unknown')),
+            runtime_status TEXT NOT NULL CHECK (runtime_status IN ('passed', 'failed', 'missing', 'unknown')),
+            correlation_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL CHECK (length(result_hash) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE (test_run_id, test_case_revision_id, assertion_id)
+          ) STRICT;
+
+          CREATE TABLE test_evidence (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            test_case_revision_id TEXT REFERENCES test_case_revisions(id),
+            assertion_id TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('ui', 'runtime', 'screenshot', 'log', 'payload', 'receipt', 'cleanup')),
+            media_type TEXT NOT NULL,
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+            artifact_version_id TEXT,
+            redaction_profile TEXT NOT NULL,
+            retention_class TEXT NOT NULL CHECK (retention_class IN ('transient', 'standard', 'durable')),
+            locator TEXT,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          ) STRICT;
+
+          CREATE TABLE test_defects (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            test_case_revision_id TEXT NOT NULL REFERENCES test_case_revisions(id),
+            assertion_id TEXT,
+            integration_generation_id TEXT NOT NULL REFERENCES integration_generations(id),
+            responsibility_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+          ) STRICT;
+
+          CREATE TABLE test_defect_resolutions (
+            id TEXT PRIMARY KEY,
+            defect_id TEXT NOT NULL REFERENCES test_defects(id),
+            resolution_json TEXT NOT NULL,
+            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+
+          CREATE TABLE test_run_obligations (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            description TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+          ) STRICT;
+
+          CREATE INDEX test_case_revisions_case_idx ON test_case_revisions(test_case_id, revision, id);
+          CREATE INDEX test_runs_run_idx ON test_runs(run_id, created_at, id);
+          CREATE INDEX test_runs_state_idx ON test_runs(state, updated_at, id);
+          CREATE INDEX test_execution_operations_state_idx ON test_execution_operations(state, updated_at, operation_key);
+          CREATE INDEX test_evidence_run_idx ON test_evidence(test_run_id, test_case_revision_id, assertion_id, id);
+          CREATE INDEX test_defects_run_idx ON test_defects(test_run_id, status, created_at, id);
+          CREATE INDEX test_run_obligations_run_idx ON test_run_obligations(test_run_id, status, created_at, id);
+
+          CREATE TRIGGER test_case_revisions_immutable_update BEFORE UPDATE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
+          CREATE TRIGGER test_case_revisions_immutable_delete BEFORE DELETE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
+          CREATE TRIGGER test_runs_identity_update BEFORE UPDATE ON test_runs
+          WHEN NEW.id <> OLD.id OR NEW.request_id <> OLD.request_id OR NEW.project_id <> OLD.project_id
+            OR NEW.run_id <> OLD.run_id OR NEW.snapshot_revision_id <> OLD.snapshot_revision_id
+            OR NEW.node_run_id <> OLD.node_run_id OR NEW.node_attempt_id <> OLD.node_attempt_id
+            OR NEW.session_id <> OLD.session_id OR NEW.integration_generation_id <> OLD.integration_generation_id
+            OR NEW.integration_manifest_hash <> OLD.integration_manifest_hash
+            OR NEW.integration_pass_authority_hash <> OLD.integration_pass_authority_hash
+            OR NEW.manifest_json <> OLD.manifest_json OR NEW.manifest_hash <> OLD.manifest_hash
+            OR NEW.request_hash <> OLD.request_hash OR NEW.created_at <> OLD.created_at
+          BEGIN SELECT RAISE(ABORT, 'Test Run manifest is immutable'); END;
+          CREATE TRIGGER test_runs_terminal_update BEFORE UPDATE ON test_runs
+          WHEN OLD.state IN ('passed', 'failed', 'blocked', 'cancelled') AND (
+            NEW.state IS NOT OLD.state OR NEW.pass_authority_hash IS NOT OLD.pass_authority_hash
+            OR NEW.failure_code IS NOT OLD.failure_code OR NEW.failure_message IS NOT OLD.failure_message
+            OR NEW.updated_at IS NOT OLD.updated_at
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run is immutable'); END;
+          CREATE TRIGGER test_runs_immutable_delete BEFORE DELETE ON test_runs BEGIN SELECT RAISE(ABORT, 'Test Run evidence is immutable'); END;
+          CREATE TRIGGER test_run_case_revisions_immutable_update BEFORE UPDATE ON test_run_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Run case coverage is immutable'); END;
+          CREATE TRIGGER test_run_case_revisions_immutable_delete BEFORE DELETE ON test_run_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Run case coverage is immutable'); END;
+          CREATE TRIGGER test_execution_operations_identity_update BEFORE UPDATE ON test_execution_operations
+          WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id OR NEW.operation_key <> OLD.operation_key
+            OR NEW.request_json <> OLD.request_json OR NEW.request_hash <> OLD.request_hash OR NEW.created_at <> OLD.created_at
+          BEGIN SELECT RAISE(ABORT, 'Test execution intent is immutable'); END;
+          CREATE TRIGGER test_execution_operations_terminal_update BEFORE UPDATE ON test_execution_operations
+          WHEN OLD.state IN ('succeeded', 'failed', 'cancelled') AND (
+            NEW.state IS NOT OLD.state OR NEW.fact_json IS NOT OLD.fact_json OR NEW.fact_hash IS NOT OLD.fact_hash
+            OR NEW.receipt_json IS NOT OLD.receipt_json OR NEW.receipt_hash IS NOT OLD.receipt_hash
+            OR NEW.updated_at IS NOT OLD.updated_at
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test execution is immutable'); END;
+          CREATE TRIGGER test_execution_operations_immutable_delete BEFORE DELETE ON test_execution_operations BEGIN SELECT RAISE(ABORT, 'Test execution evidence is immutable'); END;
+          CREATE TRIGGER test_execution_facts_immutable_update BEFORE UPDATE ON test_execution_facts BEGIN SELECT RAISE(ABORT, 'Test execution fact is immutable'); END;
+          CREATE TRIGGER test_execution_facts_immutable_delete BEFORE DELETE ON test_execution_facts BEGIN SELECT RAISE(ABORT, 'Test execution fact is immutable'); END;
+          CREATE TRIGGER test_assertion_results_immutable_update BEFORE UPDATE ON test_assertion_results BEGIN SELECT RAISE(ABORT, 'Test assertion result is immutable'); END;
+          CREATE TRIGGER test_assertion_results_immutable_delete BEFORE DELETE ON test_assertion_results BEGIN SELECT RAISE(ABORT, 'Test assertion result is immutable'); END;
+          CREATE TRIGGER test_evidence_immutable_update BEFORE UPDATE ON test_evidence BEGIN SELECT RAISE(ABORT, 'Test evidence is immutable'); END;
+          CREATE TRIGGER test_evidence_immutable_delete BEFORE DELETE ON test_evidence BEGIN SELECT RAISE(ABORT, 'Test evidence is immutable'); END;
+          CREATE TRIGGER test_defects_identity_update BEFORE UPDATE ON test_defects
+          WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id OR NEW.test_case_revision_id <> OLD.test_case_revision_id
+            OR NEW.assertion_id IS NOT OLD.assertion_id OR NEW.integration_generation_id <> OLD.integration_generation_id
+            OR NEW.responsibility_json <> OLD.responsibility_json OR NEW.evidence_json <> OLD.evidence_json
+            OR NEW.created_at <> OLD.created_at
+          BEGIN SELECT RAISE(ABORT, 'Test defect evidence is immutable'); END;
+          CREATE TRIGGER test_defects_immutable_delete BEFORE DELETE ON test_defects BEGIN SELECT RAISE(ABORT, 'Test defect evidence is immutable'); END;
+          CREATE TRIGGER test_defect_resolutions_immutable_update BEFORE UPDATE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
+          CREATE TRIGGER test_defect_resolutions_immutable_delete BEFORE DELETE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
+        `);
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createTestSchema(reference);
+        const expectedObjects = reference
+          .prepare(
+            "SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'test_%' ORDER BY name",
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+        const actualObjects = database
+          .prepare(
+            "SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'test_%' ORDER BY name",
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+        if (actualObjects.length === 0) {
+          createTestSchema(database);
+        } else {
+          const actualByName = new Map(
+            actualObjects.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(
+            expectedObjects.map((entry) => entry.name),
+          );
+          const incompatible = expectedObjects
+            .filter((expected) => {
+              const actual = actualByName.get(expected.name);
+              return (
+                !actual ||
+                actual.type !== expected.type ||
+                normalizeSql(actual.sql) !== normalizeSql(expected.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actualObjects
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Test schema is incompatible: ${incompatible.join(", ")}`,
+            );
+          }
+        }
+      } finally {
+        reference.close();
+      }
     },
   },
 ];

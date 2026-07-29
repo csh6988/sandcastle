@@ -135,6 +135,11 @@ import {
   type IntegrationValidationProvider,
 } from "../integration/integrationValidationExecutor.js";
 import { openAggregateIntegrationReviewExecutor } from "../integration/aggregateIntegrationReviewExecutor.js";
+import { openTestRuntime, type TestRuntime } from "../testing/testRuntime.js";
+import {
+  openTestNodeHandler,
+  type TestNodeHandler,
+} from "../testing/testNodeHandler.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -161,6 +166,8 @@ export interface CompanyDatabase {
   readonly codeReviews: CodeReviewRuntime;
   readonly codeReviewNodeHandler: CodeReviewNodeHandler;
   readonly integrations: IntegrationRuntime;
+  readonly testRuns: TestRuntime;
+  readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
   readonly schemaVersion: () => number;
   readonly eventSequence: () => number;
@@ -465,6 +472,11 @@ export const openCompanyDatabase = (
       : {}),
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const testRuns = openTestRuntime(database, {
+    integrationAuthority: integrations,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -493,6 +505,7 @@ export const openCompanyDatabase = (
     workPackages,
     codeReviews,
     integrations,
+    testRuns,
   );
   const codeReviewNodeHandler = openCodeReviewNodeHandler(database, {
     events,
@@ -543,6 +556,12 @@ export const openCompanyDatabase = (
   pipelineRuntime.registerIntegrationCancellationDispatcher(
     integrationNodeHandler.cancelPending,
   );
+  const testNodeHandler = openTestNodeHandler({
+    database,
+    pipelineRuntime,
+    tests: testRuns,
+  });
+  pipelineRuntime.registerTestExecutor(testNodeHandler.executeReady);
   workspaces.reconcile();
   pipelineRuntime.reconcileWorkPackageImports();
   codeReviews.reconcilePendingReviewerWorkspaces();
@@ -572,6 +591,8 @@ export const openCompanyDatabase = (
     codeReviews,
     codeReviewNodeHandler,
     integrations,
+    testRuns,
+    testNodeHandler,
     integrationNodeHandler,
     schemaVersion: () => {
       const row = database

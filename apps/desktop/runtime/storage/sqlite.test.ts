@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
-import { CURRENT_SCHEMA_VERSION } from "./migrations.js";
+import {
+  CURRENT_SCHEMA_VERSION,
+  migrateCompanyDatabase,
+} from "./migrations.js";
 import { openCompanyDatabase, restoreCompanyDatabase } from "./sqlite.js";
 
 const tempCompanyDir = (): string =>
@@ -468,6 +471,10 @@ describe("Company database migrations", () => {
             {
               version: 46,
               name: "multi_repository_integration_generations",
+            },
+            {
+              version: 47,
+              name: "versioned_test_cases_and_runs",
             },
           ],
         );
@@ -2133,7 +2140,7 @@ describe("Company database migrations", () => {
 
     const upgraded = openCompanyDatabase(companyDir);
     try {
-      assert.equal(upgraded.schemaVersion(), 46);
+      assert.equal(upgraded.schemaVersion(), CURRENT_SCHEMA_VERSION);
       const inspected = new DatabaseSync(upgraded.path);
       try {
         assert.deepEqual(
@@ -2340,6 +2347,94 @@ describe("Company database migrations", () => {
         inspected.close();
       }
     }
+  });
+});
+
+describe("Test authority schema migration", () => {
+  it("upgrades v46 to the complete immutable v47 Test schema", () => {
+    const companyDir = tempCompanyDir();
+    const opened = openCompanyDatabase(companyDir);
+    assert.equal(opened.schemaVersion(), 47);
+    opened.close();
+
+    const database = new DatabaseSync(
+      join(companyDir, ".sandcastle", "company.sqlite"),
+    );
+    const expected = [
+      "test_cases",
+      "test_case_revisions",
+      "test_runs",
+      "test_run_case_revisions",
+      "test_execution_operations",
+      "test_execution_facts",
+      "test_assertion_results",
+      "test_evidence",
+      "test_defects",
+      "test_defect_resolutions",
+      "test_run_obligations",
+    ];
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name LIKE 'test_%' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      [...expected].sort(),
+    );
+    assert.equal(
+      Number(
+        (
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'test_%immutable%'",
+            )
+            .get() as { readonly count: unknown }
+        ).count,
+      ),
+      15,
+    );
+    database.close();
+  });
+
+  it("adopts a complete compatible v47 schema and rejects a partial one transactionally", () => {
+    const compatibleDir = tempCompanyDir();
+    openCompanyDatabase(compatibleDir).close();
+    const compatiblePath = join(compatibleDir, ".sandcastle", "company.sqlite");
+    const compatible = new DatabaseSync(compatiblePath);
+    compatible.exec(`
+      UPDATE schema_metadata SET value = '46' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 47;
+      PRAGMA user_version = 46;
+    `);
+    assert.equal(migrateCompanyDatabase(compatible), 47);
+    compatible.close();
+
+    const partialDir = tempCompanyDir();
+    openCompanyDatabase(partialDir).close();
+    const partialPath = join(partialDir, ".sandcastle", "company.sqlite");
+    const partial = new DatabaseSync(partialPath);
+    partial.exec(`
+      DROP TRIGGER test_evidence_immutable_delete;
+      UPDATE schema_metadata SET value = '46' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 47;
+      PRAGMA user_version = 46;
+    `);
+    assert.throws(
+      () => migrateCompanyDatabase(partial),
+      /Existing Test schema is incompatible: test_evidence_immutable_delete/,
+    );
+    assert.equal(
+      (
+        partial
+          .prepare(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+          )
+          .get() as { readonly value: string }
+      ).value,
+      "46",
+    );
+    partial.close();
   });
 });
 describe("Company database backups", () => {

@@ -650,9 +650,17 @@ _Avoid_: "test report" (too narrow), "execution result" (the report verifies exe
 A versioned, executable acceptance description owned by the Test Engineer position. It identifies the requirement or Work Package coverage, preconditions, actions, expected UI and authoritative Runtime outcomes, permitted fixtures, and evidence to capture. A user-visible behavior is not covered merely because a button or label exists; the Test case must assert the public UI and Runtime contract together where both are in scope.
 _Avoid_: "checklist item" (does not define executable evidence), "snapshot" (a screenshot is only one possible observation), testing component internals instead of public behavior
 
+**Test Case revision**:
+An immutable revision of a **Test case** that freezes its requirement and Work Package coverage, preconditions, UI actions, paired UI/Runtime assertions, fixture, evidence policy, and cleanup contract. Superseding it creates a new revision and never rewrites evidence from an earlier **Test run**.
+_Avoid_: editing a Test case in place, treating a fixture change as the same revision, deleting an assertion to hide a failure
+
 **Test run**:
 One recorded execution of one or more **Test cases** against a declared build, Company Directory, **Execution Profile**, and Runtime fixture. It preserves the environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status so a result can be replayed or compared without relying on memory or a manually refreshed page.
 _Avoid_: "QA session" (too informal), "smoke test" (only one possible suite), treating a green UI assertion as the authoritative Runtime result
+
+**Test evidence**:
+Immutable, retention-classified evidence from a **Test run** that correlates an exact Test Case revision and assertion with UI actions, command identity, Runtime event sequence, authoritative Query View hash, and inspectable Artifact or payload references. A screenshot, label, or Agent statement alone is not sufficient evidence of authoritative Runtime behavior.
+_Avoid_: mutable test logs, uncorrelated screenshots, Agent self-attestation, Renderer state as workflow truth
 
 **Test defect**:
 A traceable failure raised by a **Test run** against a requirement, Work Package, Artifact, Runtime contract, or interaction expectation. It links the failing Test case, exact evidence, affected revision and Node run when applicable, and the suspected owner; fixing it follows the same review and re-test loop as an **Integration defect**.

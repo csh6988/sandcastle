@@ -16,6 +16,7 @@
     "dist:windows": "npm run build && electron-builder --win nsis --x64",
     "test": "tsx --test \"tests/**/*.test.ts\" \"main/**/*.test.ts\" \"runtime/**/*.test.ts\" \"preload/**/*.test.ts\" \"renderer/**/*.test.tsx\"",
     "test:electron-smoke": "electron scripts/electron-runtime-smoke.mjs",
+    "test:electron-test-fixture": "electron scripts/electron-test-fixture.mjs",
     "test:packaged-app-smoke": "node scripts/run-packaged-app-smoke.mjs",
     "verify:windows-package": "node scripts/verify-windows-package.mjs",
     "test:runtime-capacity": "tsx scripts/runtime-capacity-smoke.ts",
@@ -53,6 +54,8 @@
       "dist-electron/**",
       "!dist-electron/**/*.test.js",
       "!dist-electron/**/*.test.js.map",
+      "!dist-electron/runtime/testing/electronTestFixtureEntry.js",
+      "!dist-electron/runtime/testing/electronTestFixtureEntry.js.map",
       "dist/**",
       "assets/**",
       "package.json"

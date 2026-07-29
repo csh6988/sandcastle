@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 15;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 16;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -34,6 +34,8 @@ export interface RuntimeEventScope {
   readonly workPackageVersionId?: string;
   readonly integrationGenerationId?: string;
   readonly integrationOperationId?: string;
+  readonly testCaseRevisionId?: string;
+  readonly testRunId?: string;
   readonly defectId?: string;
   readonly permissionRequestId?: string;
   readonly memoryCandidateId?: string;
@@ -254,6 +256,37 @@ const integrationEventPayloadSchema = z
     ]),
   })
   .passthrough();
+
+const testEventPayloadSchema = z
+  .object({
+    testRunId: z.string().trim().min(1).optional(),
+    testCaseRevisionId: z.string().trim().min(1).optional(),
+    state: z
+      .enum([
+        "scheduled",
+        "running",
+        "reconciling",
+        "unknown",
+        "passed",
+        "failed",
+        "blocked",
+        "cancelled",
+      ])
+      .optional(),
+    manifestHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    passAuthorityHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    assertionId: z.string().trim().min(1).optional(),
+    evidenceId: z.string().trim().min(1).optional(),
+    defectId: z.string().trim().min(1).optional(),
+    operationId: z.string().trim().min(1).optional(),
+  })
+  .strict();
 
 const applicationSpecRevisedPayloadSchema = z
   .object({
@@ -1074,6 +1107,50 @@ const definitions = [
             : []),
         ],
         payloadSchema: integrationEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  {
+    type: "test.case.revised",
+    schemaVersion: 1,
+    requiredTopLevelIds: ["companyId", "projectId", "testCaseRevisionId"],
+    payloadSchema: testEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  ...[
+    "test.run.accepted",
+    "test.run.started",
+    "test.run.reconciling",
+    "test.run.unknown",
+    "test.assertion.recorded",
+    "test.evidence.recorded",
+    "test.defect.created",
+    "test.defect.closed",
+    "test.run.completed",
+    "test.run.failed",
+    "test.run.blocked",
+    "test.run.cancelled",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "nodeRunId",
+          "testRunId",
+          ...(type === "test.assertion.recorded"
+            ? (["testCaseRevisionId"] as const)
+            : []),
+          ...(type.startsWith("test.defect.") ? (["defectId"] as const) : []),
+        ],
+        payloadSchema: testEventPayloadSchema,
         retentionClass: "durable",
         agUiMapping: "custom",
         acpMapping: "custom",
