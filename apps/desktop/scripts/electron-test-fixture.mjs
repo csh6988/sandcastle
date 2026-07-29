@@ -1,23 +1,30 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, MessageChannelMain, ipcMain } from "electron";
-import { DatabaseSync } from "node:sqlite";
 import { createCompanyRuntimeSupervisor } from "../dist-electron/main/companyRuntimeSupervisor.js";
 import { registerRuntimeIpc } from "../dist-electron/main/runtimeIpc.js";
+import { startShellServer } from "../dist-electron/server/shellServer.js";
 import { openCompanyDatabase } from "../dist-electron/runtime/storage/sqlite.js";
-import { createScriptedExecutionAdapter } from "../dist-electron/runtime/adapters/scriptedExecutionAdapter.js";
 import {
   createElectronTestFixture,
-  deriveElectronTestFixtureRuntimeToken,
+  loadElectronTestFixtureConfig,
   normalizeTestEvidenceLocator,
+  verifyTestEvidenceFile,
 } from "../dist-electron/runtime/testing/electronTestFixture.js";
+import { createIntegrationAuthorityFixture } from "../dist-electron/runtime/testing/integrationAuthorityFixture.js";
 
 const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const canonicalize = (value) => {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value === null || typeof value !== "object") return value;
@@ -29,6 +36,11 @@ const canonicalize = (value) => {
   );
 };
 const canonicalJson = (value) => JSON.stringify(canonicalize(value));
+const sha256 = (value) =>
+  createHash("sha256")
+    .update(Buffer.isBuffer(value) ? value : String(value))
+    .digest("hex");
+const hashValue = (value) => sha256(canonicalJson(value));
 
 const scriptRoot = mkdtempSync(
   join(tmpdir(), "sandcastle-electron-test-scripts-"),
@@ -45,6 +57,7 @@ writeFileSync(
   JSON.stringify({ response: "fixture interaction passed" }),
   { mode: 0o600 },
 );
+
 const fixture = createElectronTestFixture({
   fixtureId: "electron-test-fixture-v1",
   testRunId: "pending",
@@ -69,396 +82,311 @@ const fixture = createElectronTestFixture({
 });
 
 let supervisor;
+let shell;
 let window;
 let runtimeIpc;
+const runtimeLogs = [];
 app.commandLine.appendSwitch("disable-gpu");
 
-const seedAuthority = async () => {
-  const database = openCompanyDatabase(fixture.config.companyDirectory, {
-    executionAdapter: createScriptedExecutionAdapter(),
-    clock: () => new Date(fixture.config.fakeClock),
-  });
-  const project = database.catalog.createProject({
-    name: "Electron Test Fixture",
-    goal: "Verify a scoped versioned Test Run through the real desktop boundary.",
-  });
-  const department = database.catalog.createDepartment({ name: "Quality" });
-  const position = database.catalog.createPosition({
-    departmentId: department.id,
-    name: "Test engineer",
-    responsibility: "Own independent UI and Runtime assertions.",
-    aiMemberDisplayName: "Fixture Tester",
-    aiMemberProfile: "Independent deterministic Test engineer.",
-    aiMemberResponsibilityMetadata: { scope: "test" },
-  }).positions[0];
-  assert.ok(position);
-  const profile = database.catalog.saveExecutionProfile({
-    departmentId: department.id,
-    expectedRevision: 0,
-    name: "Fixture scripted execution",
-    providerRef: "scripted-execution",
-    model: "fixture-v1",
-    sandboxRef: "no-sandbox",
-    branchStrategy: "head",
-    timeoutSeconds: 30,
-    maxIterations: 1,
-    maxTokens: null,
-    retryMaxAttempts: 0,
-    permissionPolicy: "deny",
-    secretReferenceIds: [],
-  }).executionProfiles[0];
-  assert.ok(profile);
-  database.catalog.updateDepartment({
-    departmentId: department.id,
-    expectedRevision: 0,
-    name: department.name,
-    description: "Scoped Electron Test fixture.",
-    inputArtifactContracts: [],
-    outputArtifactContracts: [],
-    defaultExecutionProfileId: profile.id,
-  });
-  const draft = database.pipelineConfiguration.saveDraft({
-    departmentId: department.id,
-    expectedRevision: 0,
-    graph: {
-      nodes: [
-        {
-          id: "start",
-          type: "start",
-          name: "Start",
-          handlerKindId: "run-start@1",
-        },
-        {
-          id: "test",
-          type: "ai-task",
-          name: "Test",
-          positionId: position.id,
-          handlerKindId: "test@1",
-        },
-        {
-          id: "complete",
-          type: "complete",
-          name: "Complete",
-          handlerKindId: "run-complete@1",
-        },
-      ],
-      edges: [
-        { from: "start", to: "test" },
-        { from: "test", to: "complete" },
-      ],
-    },
-  });
-  database.pipelineConfiguration.publish({
-    departmentId: department.id,
-    expectedRevision: draft.draft.revision,
-  });
-  const started = database.pipelineRuntime.startRun({
-    projectId: project.id,
-    departmentId: department.id,
-  });
-  const running = await database.pipelineRuntime.executeReady({
-    runId: started.run.id,
-    expectedRevision: started.run.revision,
-  });
-  const testNode = running.nodes.find((node) => node.pipelineNodeId === "test");
-  const testAttempt = testNode?.attempts.at(-1);
-  const frozenProfile = running.snapshot.payload.executionProfiles.find(
-    (entry) => entry.id === profile.id,
-  );
-  assert.equal(testNode?.status, "running");
-  assert.ok(testAttempt);
-  assert.ok(frozenProfile);
-  const session = database.interaction.createSession({
-    projectId: project.id,
-    mode: "run-collaboration",
-    runId: running.run.id,
-    nodeRunId: testNode.id,
-  });
-  database.interaction.addParticipant({
-    sessionId: session.id,
-    participantType: "ai-member",
-    participantRef: position.aiMember.id,
-    role: "test-engineer",
-  });
-
-  const generationId = "fixture-generation-1";
-  const repositoryReference = "fixture/repository";
-  const integratedCommit = "2".repeat(40);
-  const aggregateInput = {
-    fixtureId: fixture.config.fixtureId,
-    scope: "aggregate",
-  };
-  const aggregateInputHash = sha256(canonicalJson(aggregateInput));
-  const generationManifest = {
-    schemaVersion: 1,
-    generationId,
-    generation: 1,
-    projectId: project.id,
-    runId: running.run.id,
-    snapshotRevisionId: running.snapshot.id,
-    nodeRunId: testNode.id,
-    coverageId: "fixture-coverage-1",
-    coverageNodeRunId: testNode.id,
-    coverageNodeAttemptId: testAttempt.id,
-    coverageHash: "a".repeat(64),
-    repositories: [
-      {
-        repositoryReference,
-        baseCommit: "1".repeat(40),
-        integrationBranch: `integration/${running.run.id}/g1`,
-      },
-    ],
-    packages: [],
-    dependencyOrder: [],
-    contractVersions: [],
-    integrationConditions: [],
-    requiredValidations: [],
-  };
-  const generationManifestHash = sha256(canonicalJson(generationManifest));
-  const aggregateEvidence = ["artifact-version:fixture-integration-evidence"];
-  const passAuthorityHash = sha256(
-    canonicalJson({
-      schemaVersion: 1,
-      integrationGenerationId: generationId,
-      integrationManifestHash: generationManifestHash,
-      repositoryCommits: [
-        { repositoryId: repositoryReference, commit: integratedCommit },
-      ],
-      aggregateQualityGateResultId: "fixture-aggregate-gate-1",
-      aggregateManifestHash: aggregateInputHash,
-      evidence: aggregateEvidence,
-    }),
-  );
-  const raw = new DatabaseSync(database.path);
-  raw.exec("PRAGMA foreign_keys = OFF");
-  const now = fixture.config.fakeClock;
-  raw
-    .prepare(
-      `INSERT INTO integration_generations(
-    id, project_id, run_id, snapshot_revision_id, node_run_id, generation,
-    coverage_id, coverage_node_run_id, coverage_node_attempt_id, coverage_hash,
-    manifest_json, manifest_hash, state, pass_authority_hash, created_at, updated_at
-  ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'passed', ?, ?, ?)`,
-    )
-    .run(
-      generationId,
-      project.id,
-      running.run.id,
-      running.snapshot.id,
-      testNode.id,
-      generationManifest.coverageId,
-      testNode.id,
-      testAttempt.id,
-      generationManifest.coverageHash,
-      canonicalJson(generationManifest),
-      generationManifestHash,
-      passAuthorityHash,
-      now,
-      now,
-    );
-  raw
-    .prepare(
-      `INSERT INTO integration_repository_results(
-    id, generation_id, repository_reference, base_commit, integration_branch,
-    state, expected_tip, integrated_commit, validation_json, created_at, updated_at
-  ) VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, '{}', ?, ?)`,
-    )
-    .run(
-      "fixture-repository-result-1",
-      generationId,
-      repositoryReference,
-      "1".repeat(40),
-      generationManifest.repositories[0].integrationBranch,
-      "1".repeat(40),
-      integratedCommit,
-      now,
-      now,
-    );
-  raw
-    .prepare(
-      `INSERT INTO integration_aggregate_reviews(
-    id, generation_id, topic_id, quality_gate_result_id, input_json, input_hash,
-    result, evidence_json, pass_authority_hash, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, 'PASS', ?, ?, ?)`,
-    )
-    .run(
-      "fixture-aggregate-review-1",
-      generationId,
-      "fixture-topic-1",
-      "fixture-aggregate-gate-1",
-      canonicalJson(aggregateInput),
-      aggregateInputHash,
-      canonicalJson(aggregateEvidence),
-      passAuthorityHash,
-      now,
-    );
-  raw.close();
-
-  const caseManifestInput = {
-    schemaVersion: 1,
-    ownerPositionId: position.id,
-    requirementIds: [
-      "acceptance-19",
-      "acceptance-20",
-      "acceptance-21",
-      "acceptance-22",
-    ],
-    workPackageVersions: [],
-    preconditions: ["exact PASS Integration Generation is available"],
-    uiActions: [{ id: "fixture-click", kind: "click", target: "#run-test" }],
-    assertions: [
-      {
-        id: "fixture-pair",
-        ui: { kind: "text", expected: "Test ready" },
-        runtime: { kind: "query", expected: "scheduled" },
-      },
-    ],
-    fixture: {
-      id: fixture.config.fixtureId,
-      scriptHashes: Object.values(fixture.config.scriptHashes),
-    },
-    evidencePolicy: {
-      retentionClass: "durable",
-      redactionProfile: "fixture-redacted",
-      requiredKinds: ["ui", "runtime", "screenshot"],
-    },
-    cleanup: { policy: "always", required: true },
-  };
-  const caseRevision = database.testRuns.registerCaseRevision({
-    testCaseId: "fixture-case-1",
-    revisionId: "fixture-case-1-r1",
-    projectId: project.id,
-    manifest: caseManifestInput,
-  });
-  const runInput = {
-    testRunId: `test:${running.run.id}:${testNode.id}`,
-    requestId: "fixture-test-run-request-1",
-    projectId: project.id,
-    runId: running.run.id,
-    snapshotRevisionId: running.snapshot.id,
-    nodeRunId: testNode.id,
-    nodeAttemptId: testAttempt.id,
-    sessionId: session.id,
-    testCaseRevisions: [
-      { id: caseRevision.id, hash: caseRevision.manifestHash },
-    ],
-    integrationAuthority: {
-      generationId,
-      manifestHash: generationManifestHash,
-      passAuthorityHash,
-      repositoryCommits: [{ repositoryReference, commit: integratedCommit }],
-    },
-    build: {
-      artifactVersionId: "artifact-version:fixture-build",
-      digest: "b".repeat(64),
-    },
-    executionProfile: {
-      id: profile.id,
-      hash: sha256(canonicalJson(frozenProfile)),
-    },
-    companyDirectoryFingerprint: fixture.config.companyDirectoryFingerprint,
-    fixture: {
-      id: fixture.config.fixtureId,
-      scriptHashes: Object.values(fixture.config.scriptHashes),
-    },
-    clock: {
-      instant: fixture.config.fakeClock,
-      seed: fixture.config.repeatableIdSeed,
-    },
-    environment: {
-      platform: process.platform,
-      architecture: process.arch,
-      electron: process.versions.electron,
-    },
-    capabilities: [
-      "electron",
-      "main-ipc",
-      "preload",
-      "query-view",
-      "runtime-child",
-      "sqlite",
-    ],
-  };
-  const testCaseRevisions = [...runInput.testCaseRevisions].sort((a, b) =>
-    a.id.localeCompare(b.id),
-  );
-  const manifest = {
-    ...runInput,
-    schemaVersion: 1,
-    testCaseRevisions,
-    integrationAuthority: {
-      ...runInput.integrationAuthority,
-      repositoryCommits: [
-        ...runInput.integrationAuthority.repositoryCommits,
-      ].sort((a, b) =>
-        a.repositoryReference.localeCompare(b.repositoryReference),
-      ),
-    },
-    fixture: {
-      ...runInput.fixture,
-      scriptHashes: [...new Set(runInput.fixture.scriptHashes)].sort(),
-    },
-    capabilities: [...new Set(runInput.capabilities)].sort(),
-    coverageHash: sha256(canonicalJson(testCaseRevisions)),
-    integrationCoverage: {
-      coverageId: generationManifest.coverageId,
-      coverageNodeRunId: generationManifest.coverageNodeRunId,
-      coverageNodeAttemptId: generationManifest.coverageNodeAttemptId,
-      coverageHash: generationManifest.coverageHash,
-      packageAuthorities: [],
-      aggregateReviewId: "fixture-aggregate-review-1",
-      aggregateGateResultId: "fixture-aggregate-gate-1",
-      aggregateInputHash,
-      evidenceRefs: aggregateEvidence,
-    },
-  };
-  fixture.bindTestRunManifestHash(sha256(canonicalJson(manifest)));
-  database.close();
-  return {
-    project,
-    running,
-    testNode,
-    testAttempt,
-    caseRevision,
-    caseManifestInput,
-    runInput,
-  };
+const fixtureUrl = (base, route) => {
+  const url = new URL(base);
+  url.searchParams.set("fixture", hashValue(route));
+  url.hash = `electron-test-fixture=${encodeURIComponent(JSON.stringify(route))}`;
+  return url.toString();
 };
 
-const clickButton = async () => {
-  const bounds = await window.webContents.executeJavaScript(`(() => {
-    const rect = document.querySelector('#run-test').getBoundingClientRect();
-    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
-  })()`);
+const waitForTitle = async (suffix, timeoutMs = 10_000) => {
+  const expected = `Sandcastle T17 Fixture — ${suffix}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (window.getTitle() === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  let statusMarkup = "unavailable";
+  try {
+    await debuggerSession.sendCommand("DOM.enable");
+    const document = await debuggerSession.sendCommand("DOM.getDocument");
+    const target = await debuggerSession.sendCommand("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector: "#test-status",
+    });
+    if (target.nodeId !== 0) {
+      const status = await debuggerSession.sendCommand("DOM.getOuterHTML", {
+        nodeId: target.nodeId,
+      });
+      statusMarkup = status.outerHTML;
+    }
+  } finally {
+    debuggerSession.detach();
+  }
+  throw new Error(
+    `Timed out waiting for renderer title ${expected}; found ${window.getTitle()}; status ${statusMarkup}; Runtime diagnostics ${JSON.stringify(supervisor?.diagnostics())}; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
+  );
+};
+
+const clickFixtureButton = async () => {
+  app.focus({ steal: true });
+  window.show();
+  window.focus();
+  window.webContents.focus();
+  const deadline = Date.now() + 1_000;
+  while (!window.isFocused() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(
+    window.isFocused(),
+    true,
+    "Electron fixture window did not focus.",
+  );
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  let point;
+  try {
+    await debuggerSession.sendCommand("DOM.enable");
+    const document = await debuggerSession.sendCommand("DOM.getDocument");
+    const target = await debuggerSession.sendCommand("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector: "#run-test",
+    });
+    assert.notEqual(target.nodeId, 0, "Electron fixture button was not found.");
+    const box = await debuggerSession.sendCommand("DOM.getBoxModel", {
+      nodeId: target.nodeId,
+    });
+    point = {
+      x: Math.round((box.model.border[0] + box.model.border[4]) / 2),
+      y: Math.round((box.model.border[1] + box.model.border[5]) / 2),
+    };
+  } finally {
+    debuggerSession.detach();
+  }
+  window.webContents.sendInputEvent({ type: "mouseMove", ...point });
   window.webContents.sendInputEvent({
     type: "mouseDown",
-    x: bounds.x,
-    y: bounds.y,
     button: "left",
     clickCount: 1,
+    ...point,
   });
   window.webContents.sendInputEvent({
     type: "mouseUp",
-    x: bounds.x,
-    y: bounds.y,
     button: "left",
     clickCount: 1,
+    ...point,
   });
 };
 
-const waitFor = async (expression, timeoutMs = 5000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await window.webContents.executeJavaScript(expression, true);
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Timed out waiting for renderer expression: ${expression}`);
+const registerEvidence = (database, seeded, input) => {
+  const artifact = database.artifactRegistry.registerVersion({
+    projectId: seeded.projectId,
+    type: input.type,
+    schemaVersion: "1",
+    logicalName: input.logicalName,
+    content: input.bytes,
+    status: "produced",
+    producer: {
+      runId: seeded.runId,
+      nodeRunId: seeded.testNodeRunId,
+      nodeAttemptId: seeded.testNodeAttemptId,
+      snapshotRevisionId: seeded.snapshotRevisionId,
+      aiMemberId: seeded.testOwnerAiMemberId,
+      positionId: seeded.testOwnerPositionId,
+      sessionId: seeded.testSessionId,
+    },
+  });
+  return {
+    id: input.id,
+    testCaseRevisionId: "fixture-case-1-r1",
+    assertionId: "fixture-pair",
+    kind: input.kind,
+    mediaType: input.mediaType,
+    contentHash: artifact.contentHash,
+    byteSize: artifact.byteSize,
+    artifactVersionId: artifact.id,
+    redactionProfile: "fixture-redacted",
+    retentionClass: "durable",
+    locator: artifact.contentRef,
+    metadata: input.metadata,
+  };
+};
+
+const caseManifestFor = (seeded, operation) => ({
+  schemaVersion: 1,
+  ownerPositionId: seeded.testOwnerPositionId,
+  requirementIds: [
+    ...new Set(
+      seeded.integrationAuthority.manifest.packages.flatMap(
+        (entry) => entry.reviewContext.acceptanceCriteria,
+      ),
+    ),
+  ].sort(),
+  workPackageVersions: [...seeded.workPackageCoverage].sort((left, right) =>
+    left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+  ),
+  preconditions: ["exact PASS Integration Generation is available"],
+  uiActions: [{ id: "fixture-click", kind: "click", target: "#run-test" }],
+  assertions: [
+    {
+      id: "fixture-pair",
+      operationId: operation.id,
+      ui: { kind: "button", expected: "Run Test" },
+      runtime: { kind: "query", expected: "reconciling" },
+    },
+  ],
+  fixture: {
+    id: fixture.config.fixtureId,
+    scriptHashes: Object.values(fixture.config.scriptHashes).sort(),
+  },
+  executionOperations: [operation],
+  evidencePolicy: {
+    retentionClass: "durable",
+    redactionProfile: "fixture-redacted",
+    requiredKinds: ["runtime", "screenshot"],
+  },
+  cleanup: { policy: "always", required: true },
+});
+
+const runInputFor = (seeded, caseRevisionHash, operation) => ({
+  testRunId: `test:${seeded.runId}:${seeded.testNodeRunId}`,
+  requestId: "fixture-test-run-request-1",
+  projectId: seeded.projectId,
+  runId: seeded.runId,
+  snapshotRevisionId: seeded.snapshotRevisionId,
+  nodeRunId: seeded.testNodeRunId,
+  nodeAttemptId: seeded.testNodeAttemptId,
+  sessionId: seeded.testSessionId,
+  testCaseRevisions: [{ id: "fixture-case-1-r1", hash: caseRevisionHash }],
+  integrationAuthority: {
+    generationId: seeded.integrationAuthority.id,
+    manifestHash: seeded.integrationAuthority.manifestHash,
+    passAuthorityHash: seeded.integrationAuthority.passAuthorityHash,
+    repositoryCommits: seeded.integrationAuthority.repositoryResults
+      .map((entry) => ({
+        repositoryReference: entry.repositoryReference,
+        commit: entry.integratedCommit,
+      }))
+      .sort((left, right) =>
+        left.repositoryReference.localeCompare(right.repositoryReference),
+      ),
+  },
+  build: seeded.build,
+  executionProfile: seeded.testExecutionProfile,
+  companyDirectoryFingerprint: fixture.config.companyDirectoryFingerprint,
+  fixture: {
+    id: fixture.config.fixtureId,
+    scriptHashes: Object.values(fixture.config.scriptHashes),
+  },
+  executionOperations: [operation],
+  clock: {
+    instant: fixture.config.fakeClock,
+    seed: fixture.config.repeatableIdSeed,
+  },
+  environment: {
+    platform: process.platform,
+    architecture: process.arch,
+    electron: process.versions.electron,
+  },
+  capabilities: [
+    "electron",
+    "main-ipc",
+    "preload",
+    "query-view",
+    "runtime-child",
+    "sqlite",
+  ],
+});
+
+const routeFor = (seeded, operation) => {
+  const caseManifest = caseManifestFor(seeded, operation);
+  const caseRevisionHash = hashValue({
+    ...caseManifest,
+    testCaseId: "fixture-case-1",
+    revisionId: "fixture-case-1-r1",
+    revision: 1,
+    supersedesRevisionId: null,
+  });
+  const runInput = runInputFor(seeded, caseRevisionHash, operation);
+  return {
+    schemaVersion: 1,
+    restoreOnLoad: false,
+    testRunId: runInput.testRunId,
+    caseCommandId: "fixture-case-register",
+    caseCommand: {
+      type: "test.case-revision.register",
+      testCaseId: "fixture-case-1",
+      revisionId: "fixture-case-1-r1",
+      projectId: seeded.projectId,
+      manifest: caseManifest,
+    },
+    runCommandId: "fixture-test-run-create",
+    runCommand: { type: "test.run.create", input: runInput },
+  };
+};
+
+const manifestFor = (seeded, route) => {
+  const input = route.runCommand.input;
+  const testCaseRevisions = [...input.testCaseRevisions].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  return {
+    ...input,
+    schemaVersion: 1,
+    testCaseRevisions,
+    integrationAuthority: {
+      ...input.integrationAuthority,
+      repositoryCommits: [...input.integrationAuthority.repositoryCommits].sort(
+        (left, right) =>
+          left.repositoryReference.localeCompare(right.repositoryReference),
+      ),
+    },
+    fixture: {
+      ...input.fixture,
+      scriptHashes: [...new Set(input.fixture.scriptHashes)].sort(),
+    },
+    executionOperations: [...input.executionOperations].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    ),
+    capabilities: [...new Set(input.capabilities)].sort(),
+    coverageHash: hashValue(testCaseRevisions),
+    integrationCoverage: {
+      coverageId: seeded.integrationAuthority.manifest.coverageId,
+      coverageNodeRunId: seeded.integrationAuthority.manifest.coverageNodeRunId,
+      coverageNodeAttemptId:
+        seeded.integrationAuthority.manifest.coverageNodeAttemptId,
+      coverageHash: seeded.integrationAuthority.manifest.coverageHash,
+      packageAuthorities: seeded.integrationAuthority.manifest.packages
+        .map((entry) => ({
+          workPackageId: entry.workPackageId,
+          workPackageVersionId: entry.workPackageVersionId,
+          authorityId: entry.authorityId,
+          qualityGateResultId: entry.qualityGateResultId,
+          sourceCommit: entry.sourceCommit,
+          diffHash: entry.diffHash,
+        }))
+        .sort((left, right) =>
+          left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+        ),
+      aggregateReviewId: seeded.integrationAuthority.aggregateReview.id,
+      aggregateGateResultId:
+        seeded.integrationAuthority.aggregateReview.qualityGateResultId,
+      aggregateInputHash: seeded.integrationAuthority.aggregateReview.inputHash,
+      evidenceRefs: [
+        ...seeded.integrationAuthority.aggregateReview.evidence,
+      ].sort(),
+    },
+  };
 };
 
 const run = async () => {
-  const seeded = await seedAuthority();
-  fixture.consumeIpcToken(fixture.config.ipcToken);
+  const seeded = await createIntegrationAuthorityFixture({
+    companyDirectory: fixture.config.companyDirectory,
+    companyDirectoryFingerprint: fixture.config.companyDirectoryFingerprint,
+    fixtureId: fixture.config.fixtureId,
+    repositoryDirectory: fixture.config.repositoryDirectory,
+    worktreeDirectory: fixture.config.worktreeDirectory,
+    fakeClock: fixture.config.fakeClock,
+    repeatableIdSeed: fixture.config.repeatableIdSeed,
+  });
   supervisor = createCompanyRuntimeSupervisor({
     runtimeEntry: join(
       desktopRoot,
@@ -469,21 +397,25 @@ const run = async () => {
     ),
     environment: {
       SANDCASTLE_ELECTRON_TEST_FIXTURE_CONFIG: fixture.configPath,
-      SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION:
-        deriveElectronTestFixtureRuntimeToken(fixture.config),
+      SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION: fixture.authorization,
       SANDCASTLE_ELECTRON_TEST_FIXTURE_PACKAGED: app.isPackaged ? "1" : "0",
     },
+    onLog: (line) => runtimeLogs.push(line),
+  });
+  shell = await startShellServer({
+    rendererDist: join(desktopRoot, "dist"),
+    port: 0,
   });
   runtimeIpc = registerRuntimeIpc(ipcMain, () => supervisor, {
     getWindow: () => window,
-    allowedOrigins: ["null"],
+    allowedOrigins: [new URL(shell.url).origin],
     createMessageChannel: () => new MessageChannelMain(),
   });
-  const health = await supervisor.start(fixture.config.companyDirectory);
   window = new BrowserWindow({
-    show: false,
-    width: 640,
-    height: 480,
+    show: true,
+    width: 960,
+    height: 720,
+    skipTaskbar: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -491,149 +423,226 @@ const run = async () => {
       sandbox: true,
     },
   });
+
+  const placeholderOperation = {
+    id: "fixture-electron-operation",
+    kind: "electron",
+    adapterId: "scripted-execution",
+    input: { schemaVersion: 1, fixtureId: fixture.config.fixtureId },
+  };
+  placeholderOperation.inputHash = hashValue(placeholderOperation.input);
   await window.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><meta charset="utf-8"><button id="run-test">Run Test</button><output id="status">Idle</output>`)}`,
+    fixtureUrl(shell.url, routeFor(seeded, placeholderOperation)),
   );
-  await window.webContents.executeJavaScript(
-    `(() => {
-    const runInput = ${JSON.stringify(seeded.runInput)};
-    const caseInput = ${JSON.stringify({
-      testCaseId: "fixture-case-1",
-      revisionId: "fixture-case-1-r1",
-      projectId: seeded.project.id,
-      manifest: seeded.caseManifestInput,
-    })};
-    let phase = 0;
-    const must = (result) => {
-      if (result.status !== 'succeeded') throw new Error(result.error.code + ': ' + result.error.message);
-      return result.value;
-    };
-    document.querySelector('#run-test').addEventListener('click', async () => {
-      try {
-        if (phase === 0) {
-          must(await window.sandcastle.execute({ commandId: 'fixture-case-register', command: { type: 'test.case-revision.register', ...caseInput } }));
-          must(await window.sandcastle.execute({ commandId: 'fixture-test-run-create', command: { type: 'test.run.create', input: runInput } }));
-          const query = await window.sandcastle.query({ type: 'test-runs.inspect', testRunId: runInput.testRunId });
-          if (query.view.state !== 'scheduled') throw new Error('Test Run was not scheduled.');
-          document.querySelector('#status').textContent = 'Test ready';
-          document.querySelector('#run-test').textContent = 'Complete Test Run';
-          window.__fixturePhase = 'ready';
-          phase = 1;
-          return;
-        }
-        const query = await window.sandcastle.query({ type: 'test-runs.inspect', testRunId: runInput.testRunId });
-        const uiPassed = document.querySelector('#status').textContent === 'Test ready';
-        const runtimePassed = query.view.state === 'scheduled' && query.view.manifest.runId === runInput.runId;
-        must(await window.sandcastle.execute({ commandId: 'fixture-screenshot-evidence', command: {
-          type: 'test.evidence.record', id: 'fixture-screenshot', testRunId: runInput.testRunId,
-          testCaseRevisionId: 'fixture-case-1-r1', assertionId: 'fixture-pair', kind: 'screenshot', mediaType: 'image/png',
-          contentHash: window.__fixtureScreenshot.hash, byteSize: window.__fixtureScreenshot.byteSize,
-          artifactVersionId: 'artifact-version:fixture-ui', redactionProfile: 'fixture-redacted', retentionClass: 'durable',
-          locator: window.__fixtureScreenshot.locator, metadata: { commandId: 'fixture-test-run-create', renderer: true }
-        } }));
-        must(await window.sandcastle.execute({ commandId: 'fixture-runtime-evidence', command: {
-          type: 'test.evidence.record', id: 'fixture-runtime-payload', testRunId: runInput.testRunId,
-          testCaseRevisionId: 'fixture-case-1-r1', assertionId: 'fixture-pair', kind: 'runtime', mediaType: 'application/json',
-          contentHash: '${"c".repeat(64)}', byteSize: 64, artifactVersionId: 'artifact-version:fixture-runtime',
-          redactionProfile: 'fixture-redacted', retentionClass: 'durable', locator: 'payload/runtime-query.json',
-          metadata: { asOfSequence: query.asOfSequence, viewHash: query.view.viewHash }
-        } }));
-        const correlated = await window.sandcastle.query({ type: 'test-runs.inspect', testRunId: runInput.testRunId });
-        must(await window.sandcastle.execute({ commandId: 'fixture-paired-assertion', command: {
-          type: 'test.assertion.record', testRunId: runInput.testRunId, testCaseRevisionId: 'fixture-case-1-r1', assertionId: 'fixture-pair',
-          uiStatus: uiPassed ? 'passed' : 'failed', runtimeStatus: runtimePassed ? 'passed' : 'failed', correlation: {
-            commandId: 'fixture-test-run-create', eventSequence: correlated.asOfSequence, queryAsOfSequence: correlated.asOfSequence,
-            queryViewHash: correlated.view.viewHash, snapshotRevisionId: runInput.snapshotRevisionId, runId: runInput.runId,
-            nodeRunId: runInput.nodeRunId, nodeAttemptId: runInput.nodeAttemptId, sessionId: runInput.sessionId,
-            artifactVersionIds: ['artifact-version:fixture-ui', 'artifact-version:fixture-runtime']
-          }
-        } }));
-        const passed = must(await window.sandcastle.execute({ commandId: 'fixture-test-run-complete', command: { type: 'test.run.complete', testRunId: runInput.testRunId } }));
-        document.querySelector('#status').textContent = passed.state === 'passed' ? 'PASS' : passed.state;
-        window.__fixtureResult = passed;
-        window.__fixturePhase = 'complete';
-      } catch (error) {
-        window.__fixtureError = String(error && error.stack ? error.stack : error);
-      }
-    });
-  })()`,
-    true,
+  await waitForTitle("idle");
+  const screenshotBytes = window.webContents.capturePage
+    ? (await window.webContents.capturePage()).toPNG()
+    : Buffer.alloc(0);
+  assert.ok(screenshotBytes.byteLength > 0);
+  const screenshotLocator = normalizeTestEvidenceLocator(
+    "screenshots/fixture-idle.png",
   );
-  await clickButton();
-  await waitFor("window.__fixturePhase === 'ready' || window.__fixtureError");
-  const firstPhaseError = await window.webContents.executeJavaScript(
-    "window.__fixtureError || null",
-  );
-  if (firstPhaseError) throw new Error(firstPhaseError);
-  const screenshot = await window.webContents.capturePage();
-  const screenshotBytes = screenshot.toPNG();
-  const locator = normalizeTestEvidenceLocator("screenshots/test-run.png");
+  mkdirSync(join(fixture.config.evidenceDirectory, "screenshots"), {
+    recursive: true,
+    mode: 0o700,
+  });
   writeFileSync(
-    join(fixture.config.evidenceDirectory, "test-run.png"),
+    join(fixture.config.evidenceDirectory, screenshotLocator),
     screenshotBytes,
     { mode: 0o600 },
   );
-  await window.webContents.executeJavaScript(
-    `window.__fixtureScreenshot = ${JSON.stringify({ hash: sha256(screenshotBytes), byteSize: screenshotBytes.byteLength, locator })}`,
+  verifyTestEvidenceFile({
+    evidenceDirectory: fixture.config.evidenceDirectory,
+    locator: screenshotLocator,
+    contentHash: sha256(screenshotBytes),
+    byteSize: screenshotBytes.byteLength,
+  });
+  const runtimePayloadBytes = Buffer.from(
+    canonicalJson({
+      schemaVersion: 1,
+      fixtureId: fixture.config.fixtureId,
+      runId: seeded.runId,
+      integrationGenerationId: seeded.integrationAuthority.id,
+      integrationManifestHash: seeded.integrationAuthority.manifestHash,
+      integrationPassAuthorityHash:
+        seeded.integrationAuthority.passAuthorityHash,
+    }),
   );
-  await clickButton();
-  await waitFor(
-    "window.__fixturePhase === 'complete' || window.__fixtureError",
+  const runtimeLocator = normalizeTestEvidenceLocator(
+    "payload/runtime-authority.json",
   );
-  const rendererError = await window.webContents.executeJavaScript(
-    "window.__fixtureError || null",
+  mkdirSync(join(fixture.config.evidenceDirectory, "payload"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  writeFileSync(
+    join(fixture.config.evidenceDirectory, runtimeLocator),
+    runtimePayloadBytes,
+    { mode: 0o600 },
   );
-  assert.equal(rendererError, null);
-  const passed = await window.webContents.executeJavaScript(
-    "window.__fixtureResult",
-  );
-  assert.equal(passed.state, "passed");
-  assert.equal(passed.manifestHash, fixture.config.testRunManifestHash);
+  verifyTestEvidenceFile({
+    evidenceDirectory: fixture.config.evidenceDirectory,
+    locator: runtimeLocator,
+    contentHash: sha256(runtimePayloadBytes),
+    byteSize: runtimePayloadBytes.byteLength,
+  });
 
-  await supervisor.stop();
-  await supervisor.start(fixture.config.companyDirectory);
-  runtimeIpc.revokeWindow();
-  await window.reload();
-  const recovered = await window.webContents.executeJavaScript(
-    `window.sandcastle.query({ type: 'test-runs.inspect', testRunId: ${JSON.stringify(seeded.runInput.testRunId)} })`,
-    true,
+  const evidenceDatabase = openCompanyDatabase(fixture.config.companyDirectory);
+  let screenshotEvidence;
+  let runtimeEvidence;
+  try {
+    screenshotEvidence = registerEvidence(evidenceDatabase, seeded, {
+      id: "fixture-screenshot",
+      kind: "screenshot",
+      type: "test-screenshot",
+      mediaType: "image/png",
+      logicalName: "fixture-idle-screenshot",
+      bytes: screenshotBytes,
+      metadata: { locator: screenshotLocator, renderer: "actual-app-bundle" },
+    });
+    runtimeEvidence = registerEvidence(evidenceDatabase, seeded, {
+      id: "fixture-runtime-payload",
+      kind: "runtime",
+      type: "test-runtime-payload",
+      mediaType: "application/json",
+      logicalName: "fixture-runtime-authority",
+      bytes: runtimePayloadBytes,
+      metadata: { locator: runtimeLocator, source: "authoritative-runtime" },
+    });
+  } finally {
+    evidenceDatabase.close();
+  }
+
+  const marker = readFileSync(
+    join(fixture.config.companyDirectory, ".sandcastle-test-company"),
+    "utf8",
   );
-  const pipeline = await window.webContents.executeJavaScript(
-    `window.sandcastle.runtime.inspectRun(${JSON.stringify(seeded.running.run.id)})`,
-    true,
+  const rootFingerprint = sha256(`${fixture.root}\n${marker}`);
+  const operationInput = {
+    schemaVersion: 1,
+    fixtureId: fixture.config.fixtureId,
+    testCaseRevisionId: "fixture-case-1-r1",
+    assertionId: "fixture-pair",
+    correlationCommandId: "fixture-test-run-create",
+    evidence: [screenshotEvidence, runtimeEvidence],
+    cleanupEvidence: {
+      id: "fixture-cleanup-receipt",
+      testCaseRevisionId: "fixture-case-1-r1",
+      assertionId: null,
+      kind: "cleanup",
+      mediaType: "application/json",
+      contentHash: rootFingerprint,
+      byteSize: 0,
+      artifactVersionId: null,
+      redactionProfile: "fixture-redacted",
+      retentionClass: "durable",
+      locator: null,
+      metadata: { verified: true, rootFingerprint },
+    },
+  };
+  const operation = {
+    id: "fixture-electron-operation",
+    kind: "electron",
+    adapterId: "scripted-execution",
+    input: operationInput,
+    inputHash: hashValue(operationInput),
+  };
+  const route = routeFor(seeded, operation);
+  fixture.bindTestRunManifestHash(hashValue(manifestFor(seeded, route)));
+
+  const health = await supervisor.start(fixture.config.companyDirectory);
+  await window.loadURL(fixtureUrl(shell.url, route));
+  await waitForTitle("idle");
+  await clickFixtureButton();
+  await waitForTitle("ready");
+  await clickFixtureButton();
+  await waitForTitle("pass");
+
+  await window.loadURL(
+    fixtureUrl(shell.url, { ...route, restoreOnLoad: true }),
   );
-  const audit = await window.webContents.executeJavaScript(
-    `window.sandcastle.runtime.audit({ runId: ${JSON.stringify(seeded.running.run.id)}, limit: 100 })`,
-    true,
-  );
-  const events = await window.webContents.executeJavaScript(
-    "window.sandcastle.runtime.events({ afterSequence: 0, limit: 100 })",
-    true,
-  );
+  await waitForTitle("pass");
+
+  const query = (requestId, value) =>
+    supervisor.queryEnvelope({
+      schemaVersion: 1,
+      requestId,
+      principal: {
+        type: "test-driver",
+        id: "electron-test-fixture",
+        authenticatedBy: "ipc-token",
+      },
+      consumerId: "electron-test-fixture-driver",
+      query: value,
+    });
+  const recovered = await query("fixture-test-run-inspect", {
+    type: "test-runs.inspect",
+    testRunId: route.testRunId,
+  });
+  const pipeline = await supervisor.inspectRun(seeded.runId);
+  const audit = await supervisor.audit({ runId: seeded.runId, limit: 200 });
+  const events = await supervisor.events({ afterSequence: 0, limit: 200 });
+  const downstream = await query("fixture-test-pass-authority", {
+    type: "test-pass-authority.inspect",
+    testRunId: route.testRunId,
+  });
   assert.equal(recovered.view.state, "passed");
+  assert.equal(recovered.view.executions[0]?.state, "succeeded");
+  assert.ok(recovered.view.executions[0]?.receiptHash);
+  assert.equal(recovered.view.assertions[0]?.uiStatus, "passed");
+  assert.equal(recovered.view.assertions[0]?.runtimeStatus, "passed");
+  assert.ok(recovered.view.assertions[0]?.correlation.viewSyncTokenHash);
+  assert.equal(recovered.view.evidence.length, 3);
   assert.equal(
     pipeline.nodes.find((node) => node.pipelineNodeId === "test")?.status,
     "succeeded",
   );
   assert.equal(
-    audit.some((record) => record.action === "test.run.completed"),
+    audit.some((record) => record.action === "node.test-complete"),
     true,
   );
   assert.equal(
     events.some((event) => event.type === "test.run.completed"),
     true,
   );
+  assert.equal(downstream.view.testRunId, route.testRunId);
   assert.equal(health.schemaVersion, 47);
+  assert.throws(
+    () =>
+      loadElectronTestFixtureConfig({
+        configPath: fixture.configPath,
+        authorization: fixture.authorization,
+        packaged: false,
+        entrypoint: "electron-test-fixture",
+      }),
+    (error) => error?.code === "FIXTURE_AUTHORIZATION_ALREADY_CONSUMED",
+  );
+
   process.stdout.write(
-    `${JSON.stringify({ status: "ok", testRunId: recovered.view.id, passAuthorityHash: recovered.view.passAuthorityHash, runtimePid: (await supervisor.health()).pid, schemaVersion: health.schemaVersion, auditRecords: audit.length, runtimeEvents: events.length })}\n`,
+    `${JSON.stringify({
+      status: "ok",
+      testRunId: recovered.view.id,
+      passAuthorityHash: recovered.view.passAuthorityHash,
+      integrationGenerationId: seeded.integrationAuthority.id,
+      runtimePid: (await supervisor.health()).pid,
+      schemaVersion: health.schemaVersion,
+      auditRecords: audit.length,
+      runtimeEvents: events.length,
+      renderer: "dist",
+      reloaded: true,
+    })}\n`,
   );
 };
 
 const cleanup = async () => {
+  runtimeIpc?.revokeWindow();
   window?.destroy();
   await supervisor?.stop().catch(() => undefined);
-  if (fixture) fixture.cleanup();
+  await shell?.close().catch(() => undefined);
+  fixture.cleanup();
+  assert.equal(existsSync(fixture.root), false);
   rmSync(scriptRoot, { recursive: true, force: true });
+  assert.equal(existsSync(scriptRoot), false);
 };
 
 app.whenReady().then(async () => {
@@ -642,7 +651,7 @@ app.whenReady().then(async () => {
     await run();
   } catch (error) {
     process.stderr.write(
-      `[electron-test-fixture] ${String(error && error.stack ? error.stack : error)}\n`,
+      `[electron-test-fixture] ${String(error?.stack ?? error)}\n`,
     );
     exitCode = 1;
   } finally {

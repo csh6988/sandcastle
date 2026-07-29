@@ -69,12 +69,91 @@ const integrationGenerationView = {
 const testRunView = {
   id: "test-run-1",
   requestId: "request-1",
-  manifest: { schemaVersion: 1 },
+  manifest: {
+    schemaVersion: 1 as const,
+    testRunId: "test-run-1",
+    requestId: "request-1",
+    projectId: "project-1",
+    runId: "run-1",
+    snapshotRevisionId: "snapshot-1",
+    nodeRunId: "test-node-1",
+    nodeAttemptId: "test-attempt-1",
+    sessionId: "test-session-1",
+    testCaseRevisions: [{ id: "test-case-revision-1", hash: "2".repeat(64) }],
+    integrationAuthority: {
+      generationId: "generation-1",
+      manifestHash: "3".repeat(64),
+      passAuthorityHash: "4".repeat(64),
+      repositoryCommits: [
+        {
+          repositoryReference: "/repositories/api",
+          commit: "5".repeat(40),
+        },
+      ],
+    },
+    build: {
+      artifactVersionId: "artifact-version-1",
+      digest: "6".repeat(64),
+    },
+    executionProfile: { id: "profile-1", hash: "7".repeat(64) },
+    companyDirectoryFingerprint: "8".repeat(64),
+    fixture: { id: "fixture-1", scriptHashes: ["9".repeat(64)] },
+    executionOperations: [
+      {
+        id: "operation-1",
+        kind: "runtime" as const,
+        adapterId: "scripted-test",
+        input: { check: "runtime" },
+        inputHash: "a".repeat(64),
+      },
+    ],
+    clock: { instant: "2026-07-29T00:00:00.000Z", seed: "seed-1" },
+    environment: {},
+    capabilities: [],
+    coverageHash: "b".repeat(64),
+    integrationCoverage: {
+      coverageId: "coverage-1",
+      coverageNodeRunId: "review-node-1",
+      coverageNodeAttemptId: "review-attempt-1",
+      coverageHash: "c".repeat(64),
+      packageAuthorities: [],
+      aggregateReviewId: "aggregate-review-1",
+      aggregateGateResultId: "aggregate-gate-1",
+      aggregateInputHash: "d".repeat(64),
+      evidenceRefs: ["artifact-version-1"],
+    },
+  },
   manifestHash: "e".repeat(64),
   viewHash: "f".repeat(64),
   state: "passed" as const,
   passAuthorityHash: "1".repeat(64),
-  assertions: [],
+  executions: [],
+  assertions: [
+    {
+      id: "test-run-1:assertion-1",
+      operationId: "operation-1",
+      testCaseRevisionId: "test-case-revision-1",
+      assertionId: "assertion-1",
+      required: true,
+      uiStatus: "passed" as const,
+      runtimeStatus: "passed" as const,
+      correlation: {
+        commandId: "test-command-1",
+        eventSequence: 31,
+        runtimeEventType: "test.run.reconciling",
+        queryAsOfSequence: 31,
+        queryViewHash: "a".repeat(64),
+        viewSyncTokenHash: "b".repeat(64),
+        snapshotRevisionId: "snapshot-1",
+        runId: "run-1",
+        nodeRunId: "test-node-1",
+        nodeAttemptId: "test-attempt-1",
+        sessionId: "test-session-1",
+        artifactVersionIds: ["artifact-version-1"],
+      },
+      resultHash: "c".repeat(64),
+    },
+  ],
   evidence: [],
   defects: [],
   obligations: [],
@@ -535,6 +614,98 @@ describe("Company Runtime client", () => {
     if (completed.status === "succeeded") {
       assert.equal(completed.value.passAuthorityHash, "1".repeat(64));
     }
+  });
+
+  it("rejects malformed and future Test Run Query Views", async () => {
+    for (const view of [
+      { ...testRunView, manifest: { schemaVersion: 2 } },
+      { ...testRunView, assertions: [{}] },
+    ]) {
+      const client = createCompanyRuntimeClientFromTransport(
+        {
+          request: async (input: unknown): Promise<RuntimeResponse> => {
+            const request = RuntimeRequestSchema.parse(input);
+            return {
+              id: request.id,
+              ok: true,
+              result: { view, asOfSequence: 31 },
+            };
+          },
+        },
+        "token",
+      );
+
+      await assert.rejects(
+        client.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "test-query-invalid",
+          principal: actor,
+          consumerId: "test-engineer",
+          query: { type: "test-runs.inspect", testRunId: "test-run-1" },
+        }),
+      );
+    }
+  });
+
+  it("reads immutable PASS Test authority by exact Test Run ID", async () => {
+    const authority = {
+      schemaVersion: 1 as const,
+      testRunId: "test-run-1",
+      manifestHash: "e".repeat(64),
+      passAuthorityHash: "1".repeat(64),
+      integrationAuthority: testRunView.manifest.integrationAuthority,
+      testCaseRevisions: testRunView.manifest.testCaseRevisions,
+      coverageHash: testRunView.manifest.coverageHash,
+      build: testRunView.manifest.build,
+      snapshotRevisionId: testRunView.manifest.snapshotRevisionId,
+      executionProfile: testRunView.manifest.executionProfile,
+      companyDirectoryFingerprint:
+        testRunView.manifest.companyDirectoryFingerprint,
+      fixture: testRunView.manifest.fixture,
+      environment: testRunView.manifest.environment,
+      capabilities: testRunView.manifest.capabilities,
+      assertionResultHashes: ["2".repeat(64)],
+      evidence: [
+        {
+          id: "evidence-1",
+          contentHash: "3".repeat(64),
+          artifactVersionId: "artifact-version-1",
+          locator: "evidence/runtime.json",
+        },
+      ],
+      evidenceHashes: ["3".repeat(64)],
+      defectResolutions: [],
+      obligations: [{ id: "obligation-1", status: "closed" as const }],
+      openDefectIds: [],
+      openObligationIds: [],
+    };
+    const client = createCompanyRuntimeClientFromTransport(
+      {
+        request: async (input: unknown): Promise<RuntimeResponse> => {
+          const request = RuntimeRequestSchema.parse(input);
+          return {
+            id: request.id,
+            ok: true,
+            result: { view: authority, asOfSequence: 32 },
+          };
+        },
+      },
+      "token",
+    );
+
+    const result = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "test-authority-query-1",
+      principal: actor,
+      consumerId: "candidate-runtime",
+      query: {
+        type: "test-pass-authority.inspect",
+        testRunId: "test-run-1",
+      },
+    });
+
+    assert.equal(result.view.testRunId, "test-run-1");
+    assert.equal(result.view.passAuthorityHash, "1".repeat(64));
   });
 
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {

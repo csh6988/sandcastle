@@ -1079,6 +1079,15 @@ export type IntegrationGenerationView = z.infer<
   typeof IntegrationGenerationViewSchema
 >;
 
+const JsonPayloadSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(z.unknown()),
+  z.record(z.unknown()),
+]);
+
 const TestCaseRevisionManifestInputSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -1100,7 +1109,7 @@ const TestCaseRevisionManifestInputSchema = z
           id: z.string().trim().min(1),
           kind: z.string().trim().min(1),
           target: z.string().trim().min(1),
-          input: z.unknown().optional(),
+          input: JsonPayloadSchema.optional(),
         })
         .strict(),
     ),
@@ -1108,11 +1117,18 @@ const TestCaseRevisionManifestInputSchema = z
       z
         .object({
           id: z.string().trim().min(1),
+          operationId: z.string().trim().min(1),
           ui: z
-            .object({ kind: z.string().trim().min(1), expected: z.unknown() })
+            .object({
+              kind: z.string().trim().min(1),
+              expected: JsonPayloadSchema,
+            })
             .strict(),
           runtime: z
-            .object({ kind: z.string().trim().min(1), expected: z.unknown() })
+            .object({
+              kind: z.string().trim().min(1),
+              expected: JsonPayloadSchema,
+            })
             .strict(),
         })
         .strict(),
@@ -1123,6 +1139,19 @@ const TestCaseRevisionManifestInputSchema = z
         scriptHashes: z.array(Sha256Schema),
       })
       .strict(),
+    executionOperations: z
+      .array(
+        z
+          .object({
+            id: z.string().trim().min(1),
+            kind: z.enum(["runtime", "contract", "build", "electron"]),
+            adapterId: z.string().trim().min(1),
+            input: JsonPayloadSchema,
+            inputHash: Sha256Schema,
+          })
+          .strict(),
+      )
+      .min(1),
     evidencePolicy: z
       .object({
         retentionClass: z.enum(["transient", "standard", "durable"]),
@@ -1182,6 +1211,19 @@ const TestRunManifestInputSchema = z
         scriptHashes: z.array(Sha256Schema),
       })
       .strict(),
+    executionOperations: z
+      .array(
+        z
+          .object({
+            id: z.string().trim().min(1),
+            kind: z.enum(["runtime", "contract", "build", "electron"]),
+            adapterId: z.string().trim().min(1),
+            input: JsonPayloadSchema,
+            inputHash: Sha256Schema,
+          })
+          .strict(),
+      )
+      .min(1),
     clock: z
       .object({
         instant: z.string().datetime(),
@@ -1197,8 +1239,10 @@ const TestAssertionCorrelationSchema = z
   .object({
     commandId: z.string().trim().min(1),
     eventSequence: z.number().int().nonnegative(),
+    runtimeEventType: z.string().trim().min(1),
     queryAsOfSequence: z.number().int().nonnegative(),
     queryViewHash: Sha256Schema,
+    viewSyncTokenHash: Sha256Schema,
     snapshotRevisionId: z.string().trim().min(1),
     runId: z.string().trim().min(1),
     nodeRunId: z.string().trim().min(1),
@@ -1254,7 +1298,12 @@ export const TestCaseRevisionViewSchema = z
     projectId: z.string().trim().min(1),
     revision: z.number().int().positive(),
     supersedesRevisionId: z.string().trim().min(1).nullable(),
-    manifest: z.unknown(),
+    manifest: TestCaseRevisionManifestInputSchema.extend({
+      testCaseId: z.string().trim().min(1),
+      revisionId: z.string().trim().min(1),
+      revision: z.number().int().positive(),
+      supersedesRevisionId: z.string().trim().min(1).nullable(),
+    }).strict(),
     manifestHash: Sha256Schema,
     createdAt: z.string().datetime(),
   })
@@ -1264,7 +1313,34 @@ export const TestRunViewSchema = z
   .object({
     id: z.string().trim().min(1),
     requestId: z.string().trim().min(1),
-    manifest: z.unknown(),
+    manifest: TestRunManifestInputSchema.extend({
+      schemaVersion: z.literal(1),
+      coverageHash: Sha256Schema,
+      integrationCoverage: z
+        .object({
+          coverageId: z.string().trim().min(1),
+          coverageNodeRunId: z.string().trim().min(1),
+          coverageNodeAttemptId: z.string().trim().min(1),
+          coverageHash: Sha256Schema,
+          packageAuthorities: z.array(
+            z
+              .object({
+                workPackageId: z.string().trim().min(1),
+                workPackageVersionId: z.string().trim().min(1),
+                authorityId: z.string().trim().min(1),
+                qualityGateResultId: z.string().trim().min(1),
+                sourceCommit: z.string().regex(/^[a-f0-9]{40}$/),
+                diffHash: Sha256Schema,
+              })
+              .strict(),
+          ),
+          aggregateReviewId: z.string().trim().min(1),
+          aggregateGateResultId: z.string().trim().min(1),
+          aggregateInputHash: Sha256Schema,
+          evidenceRefs: z.array(z.string().trim().min(1)),
+        })
+        .strict(),
+    }).strict(),
     manifestHash: Sha256Schema,
     viewHash: Sha256Schema,
     state: z.enum([
@@ -1278,10 +1354,92 @@ export const TestRunViewSchema = z
       "cancelled",
     ]),
     passAuthorityHash: Sha256Schema.nullable(),
-    assertions: z.array(z.unknown()),
-    evidence: z.array(z.unknown()),
-    defects: z.array(z.unknown()),
-    obligations: z.array(z.unknown()),
+    executions: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          state: z.enum([
+            "intent",
+            "running",
+            "reconciling",
+            "unknown",
+            "succeeded",
+            "failed",
+            "cancelled",
+          ]),
+          requestHash: Sha256Schema,
+          receiptHash: Sha256Schema.nullable(),
+        })
+        .strict(),
+    ),
+    assertions: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          operationId: z.string().trim().min(1),
+          testCaseRevisionId: z.string().trim().min(1),
+          assertionId: z.string().trim().min(1),
+          required: z.boolean(),
+          uiStatus: z.enum(["passed", "failed", "missing", "unknown"]),
+          runtimeStatus: z.enum(["passed", "failed", "missing", "unknown"]),
+          correlation: TestAssertionCorrelationSchema,
+          resultHash: Sha256Schema,
+        })
+        .strict(),
+    ),
+    evidence: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          testRunId: z.string().trim().min(1),
+          operationId: z.string().trim().min(1),
+          testCaseRevisionId: z.string().trim().min(1).nullable(),
+          assertionId: z.string().trim().min(1).nullable(),
+          kind: z.enum([
+            "ui",
+            "runtime",
+            "screenshot",
+            "log",
+            "payload",
+            "receipt",
+            "cleanup",
+          ]),
+          mediaType: z.string().trim().min(1),
+          contentHash: Sha256Schema,
+          byteSize: z.number().int().nonnegative(),
+          artifactVersionId: z.string().trim().min(1).nullable(),
+          redactionProfile: z.string().trim().min(1),
+          retentionClass: z.enum(["transient", "standard", "durable"]),
+          locator: z.string().trim().min(1).nullable(),
+          metadata: z.unknown(),
+          createdAt: z.string().datetime(),
+        })
+        .strict(),
+    ),
+    defects: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          testRunId: z.string().trim().min(1),
+          testCaseRevisionId: z.string().trim().min(1),
+          assertionId: z.string().trim().min(1).nullable(),
+          integrationGenerationId: z.string().trim().min(1),
+          responsibility: TestDefectResponsibilitySchema,
+          evidence: z.unknown(),
+          status: z.enum(["open", "closed"]),
+          createdAt: z.string().datetime(),
+          closedAt: z.string().datetime().nullable(),
+        })
+        .strict(),
+    ),
+    obligations: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          status: z.enum(["open", "closed"]),
+        })
+        .strict(),
+    ),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -1289,6 +1447,58 @@ export const TestRunViewSchema = z
 
 export type TestCaseRevisionView = z.infer<typeof TestCaseRevisionViewSchema>;
 export type TestRunView = z.infer<typeof TestRunViewSchema>;
+
+export const TestPassAuthorityViewSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    testRunId: z.string().trim().min(1),
+    manifestHash: Sha256Schema,
+    passAuthorityHash: Sha256Schema,
+    integrationAuthority: TestRunManifestInputSchema.shape.integrationAuthority,
+    testCaseRevisions: TestRunManifestInputSchema.shape.testCaseRevisions,
+    coverageHash: Sha256Schema,
+    build: TestRunManifestInputSchema.shape.build,
+    snapshotRevisionId: z.string().trim().min(1),
+    executionProfile: TestRunManifestInputSchema.shape.executionProfile,
+    companyDirectoryFingerprint: Sha256Schema,
+    fixture: TestRunManifestInputSchema.shape.fixture,
+    environment: TestRunManifestInputSchema.shape.environment,
+    capabilities: TestRunManifestInputSchema.shape.capabilities,
+    assertionResultHashes: z.array(Sha256Schema),
+    evidence: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          contentHash: Sha256Schema,
+          artifactVersionId: z.string().trim().min(1).nullable(),
+          locator: z.string().trim().min(1).nullable(),
+        })
+        .strict(),
+    ),
+    evidenceHashes: z.array(Sha256Schema),
+    defectResolutions: z.array(
+      z
+        .object({
+          defectId: z.string().trim().min(1),
+          resolutionId: z.string().trim().min(1),
+          resolutionHash: Sha256Schema,
+        })
+        .strict(),
+    ),
+    obligations: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          status: z.literal("closed"),
+        })
+        .strict(),
+    ),
+    openDefectIds: z.array(z.string().trim().min(1)),
+    openObligationIds: z.array(z.string().trim().min(1)),
+  })
+  .strict();
+
+export type TestPassAuthorityView = z.infer<typeof TestPassAuthorityViewSchema>;
 
 export const ReviewTopicViewSchema = z.object({
   topic: z.object({
@@ -2910,6 +3120,10 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
     testRunId: z.string().trim().min(1),
   }),
   z.object({
+    type: z.literal("test-pass-authority.inspect"),
+    testRunId: z.string().trim().min(1),
+  }),
+  z.object({
     type: z.literal("product.discovery.inspect"),
     projectId: z.string().trim().min(1),
   }),
@@ -3042,59 +3256,61 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
                             ? readonly IntegrationGenerationView[]
                             : Query["type"] extends "test-runs.inspect"
                               ? TestRunView
-                              : Query["type"] extends "product.discovery.inspect"
-                                ? ProductDiscoveryView
-                                : Query["type"] extends "product-review.inspect"
-                                  ? ProductReviewStateView
-                                  : Query["type"] extends "technical-review.inspect"
-                                    ? TechnicalReviewStateView
-                                    : Query["type"] extends "departments.list"
-                                      ? readonly CompanyDepartment[]
-                                      : Query["type"] extends "department.inspect"
-                                        ? DepartmentInspect
-                                        : Query["type"] extends "department.skill-configuration.inspect"
-                                          ? SkillConfigurationView
-                                          : Query["type"] extends "department.pipeline.inspect"
-                                            ? DepartmentPipelineEditorView
-                                            : Query["type"] extends "department.pipeline.validate"
-                                              ? PipelineValidationResult
-                                              : Query["type"] extends "runs.list"
-                                                ? readonly DepartmentRunView[]
-                                                : Query["type"] extends "run.supervision.inspect"
-                                                  ? RunSupervisionView
-                                                  : Query["type"] extends "execution.inspect"
-                                                    ? ExecutionInspectionView
-                                                    : Query["type"] extends "runtime.audit"
-                                                      ? readonly RuntimeAuditRecord[]
-                                                      : Query["type"] extends
-                                                            | "runtime.events"
-                                                            | "runtime.events.consumer"
-                                                        ? readonly RuntimeEventRecord[]
-                                                        : Query["type"] extends "artifacts.list"
-                                                          ? readonly ArtifactVersionView[]
-                                                          : Query["type"] extends "artifact.inspect"
-                                                            ? ArtifactLineageView
-                                                            : Query["type"] extends "artifact.lineage.inspect"
-                                                              ? ArtifactLineageGraphView
-                                                              : Query["type"] extends "interactions.list"
-                                                                ? readonly InteractionView[]
-                                                                : Query["type"] extends "interaction.inspect"
-                                                                  ? InteractionView
-                                                                  : Query["type"] extends "ag-ui.events"
-                                                                    ? AgUiReplayView
-                                                                    : Query["type"] extends "memory.candidates.list"
-                                                                      ? readonly MemoryCandidateView[]
-                                                                      : Query["type"] extends "memory.records.list"
-                                                                        ? readonly LegacyMemoryRecordView[]
-                                                                        : Query["type"] extends "memory.entries.list"
-                                                                          ? readonly MemoryEntryView[]
-                                                                          : Query["type"] extends "memory.selections.list"
-                                                                            ? readonly RunMemorySelectionView[]
-                                                                            : Query["type"] extends "memory.legacy-records.list"
-                                                                              ? readonly LegacyMemoryRecordView[]
-                                                                              : Query["type"] extends "runtime.diagnostics"
-                                                                                ? RuntimeDiagnosticsView
-                                                                                : DepartmentRunView;
+                              : Query["type"] extends "test-pass-authority.inspect"
+                                ? TestPassAuthorityView
+                                : Query["type"] extends "product.discovery.inspect"
+                                  ? ProductDiscoveryView
+                                  : Query["type"] extends "product-review.inspect"
+                                    ? ProductReviewStateView
+                                    : Query["type"] extends "technical-review.inspect"
+                                      ? TechnicalReviewStateView
+                                      : Query["type"] extends "departments.list"
+                                        ? readonly CompanyDepartment[]
+                                        : Query["type"] extends "department.inspect"
+                                          ? DepartmentInspect
+                                          : Query["type"] extends "department.skill-configuration.inspect"
+                                            ? SkillConfigurationView
+                                            : Query["type"] extends "department.pipeline.inspect"
+                                              ? DepartmentPipelineEditorView
+                                              : Query["type"] extends "department.pipeline.validate"
+                                                ? PipelineValidationResult
+                                                : Query["type"] extends "runs.list"
+                                                  ? readonly DepartmentRunView[]
+                                                  : Query["type"] extends "run.supervision.inspect"
+                                                    ? RunSupervisionView
+                                                    : Query["type"] extends "execution.inspect"
+                                                      ? ExecutionInspectionView
+                                                      : Query["type"] extends "runtime.audit"
+                                                        ? readonly RuntimeAuditRecord[]
+                                                        : Query["type"] extends
+                                                              | "runtime.events"
+                                                              | "runtime.events.consumer"
+                                                          ? readonly RuntimeEventRecord[]
+                                                          : Query["type"] extends "artifacts.list"
+                                                            ? readonly ArtifactVersionView[]
+                                                            : Query["type"] extends "artifact.inspect"
+                                                              ? ArtifactLineageView
+                                                              : Query["type"] extends "artifact.lineage.inspect"
+                                                                ? ArtifactLineageGraphView
+                                                                : Query["type"] extends "interactions.list"
+                                                                  ? readonly InteractionView[]
+                                                                  : Query["type"] extends "interaction.inspect"
+                                                                    ? InteractionView
+                                                                    : Query["type"] extends "ag-ui.events"
+                                                                      ? AgUiReplayView
+                                                                      : Query["type"] extends "memory.candidates.list"
+                                                                        ? readonly MemoryCandidateView[]
+                                                                        : Query["type"] extends "memory.records.list"
+                                                                          ? readonly LegacyMemoryRecordView[]
+                                                                          : Query["type"] extends "memory.entries.list"
+                                                                            ? readonly MemoryEntryView[]
+                                                                            : Query["type"] extends "memory.selections.list"
+                                                                              ? readonly RunMemorySelectionView[]
+                                                                              : Query["type"] extends "memory.legacy-records.list"
+                                                                                ? readonly LegacyMemoryRecordView[]
+                                                                                : Query["type"] extends "runtime.diagnostics"
+                                                                                  ? RuntimeDiagnosticsView
+                                                                                  : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -4121,46 +4337,6 @@ export const TestRunCreateEnvelopeCommandSchema = z
   })
   .strict();
 
-export const TestAssertionRecordEnvelopeCommandSchema = z
-  .object({
-    type: z.literal("test.assertion.record"),
-    testRunId: z.string().trim().min(1),
-    testCaseRevisionId: z.string().trim().min(1),
-    assertionId: z.string().trim().min(1),
-    required: z.boolean().optional(),
-    uiStatus: z.enum(["passed", "failed", "missing", "unknown"]),
-    runtimeStatus: z.enum(["passed", "failed", "missing", "unknown"]),
-    correlation: TestAssertionCorrelationSchema,
-  })
-  .strict();
-
-export const TestEvidenceRecordEnvelopeCommandSchema = z
-  .object({
-    type: z.literal("test.evidence.record"),
-    id: z.string().trim().min(1),
-    testRunId: z.string().trim().min(1),
-    testCaseRevisionId: z.string().trim().min(1).nullable(),
-    assertionId: z.string().trim().min(1).nullable(),
-    kind: z.enum([
-      "ui",
-      "runtime",
-      "screenshot",
-      "log",
-      "payload",
-      "receipt",
-      "cleanup",
-    ]),
-    mediaType: z.string().trim().min(1),
-    contentHash: Sha256Schema,
-    byteSize: z.number().int().nonnegative(),
-    artifactVersionId: z.string().trim().min(1).nullable(),
-    redactionProfile: z.string().trim().min(1),
-    retentionClass: z.enum(["transient", "standard", "durable"]),
-    locator: z.string().trim().min(1).nullable(),
-    metadata: z.unknown(),
-  })
-  .strict();
-
 export const TestRunCompleteEnvelopeCommandSchema = z
   .object({
     type: z.literal("test.run.complete"),
@@ -4196,8 +4372,6 @@ export const TestDefectCloseEnvelopeCommandSchema = z
 export type TestEnvelopeCommand =
   | z.infer<typeof TestCaseRevisionRegisterEnvelopeCommandSchema>
   | z.infer<typeof TestRunCreateEnvelopeCommandSchema>
-  | z.infer<typeof TestAssertionRecordEnvelopeCommandSchema>
-  | z.infer<typeof TestEvidenceRecordEnvelopeCommandSchema>
   | z.infer<typeof TestDefectRecordEnvelopeCommandSchema>
   | z.infer<typeof TestDefectCloseEnvelopeCommandSchema>
   | z.infer<typeof TestRunCompleteEnvelopeCommandSchema>;
@@ -4356,8 +4530,6 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   IntegrationAggregateReviewRecordEnvelopeCommandSchema,
   TestCaseRevisionRegisterEnvelopeCommandSchema,
   TestRunCreateEnvelopeCommandSchema,
-  TestAssertionRecordEnvelopeCommandSchema,
-  TestEvidenceRecordEnvelopeCommandSchema,
   TestDefectRecordEnvelopeCommandSchema,
   TestDefectCloseEnvelopeCommandSchema,
   TestRunCompleteEnvelopeCommandSchema,

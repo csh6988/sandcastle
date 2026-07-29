@@ -4904,6 +4904,7 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TABLE test_assertion_results (
             id TEXT PRIMARY KEY,
             test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            operation_id TEXT NOT NULL REFERENCES test_execution_operations(id),
             test_case_revision_id TEXT NOT NULL REFERENCES test_case_revisions(id),
             assertion_id TEXT NOT NULL,
             required INTEGER NOT NULL CHECK (required IN (0, 1)),
@@ -4918,6 +4919,7 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TABLE test_evidence (
             id TEXT PRIMARY KEY,
             test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            operation_id TEXT NOT NULL REFERENCES test_execution_operations(id),
             test_case_revision_id TEXT REFERENCES test_case_revisions(id),
             assertion_id TEXT,
             kind TEXT NOT NULL CHECK (kind IN ('ui', 'runtime', 'screenshot', 'log', 'payload', 'receipt', 'cleanup')),
@@ -5018,6 +5020,50 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TRIGGER test_defects_immutable_delete BEFORE DELETE ON test_defects BEGIN SELECT RAISE(ABORT, 'Test defect evidence is immutable'); END;
           CREATE TRIGGER test_defect_resolutions_immutable_update BEFORE UPDATE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
           CREATE TRIGGER test_defect_resolutions_immutable_delete BEFORE DELETE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
+          CREATE TRIGGER test_run_case_revisions_terminal_insert BEFORE INSERT ON test_run_case_revisions
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_execution_operations_terminal_run_insert BEFORE INSERT ON test_execution_operations
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_execution_operations_terminal_run_update BEFORE UPDATE ON test_execution_operations
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = OLD.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_execution_facts_terminal_run_insert BEFORE INSERT ON test_execution_facts
+          WHEN EXISTS (
+            SELECT 1 FROM test_execution_operations AS operations
+            JOIN test_runs ON test_runs.id = operations.test_run_id
+            WHERE operations.id = NEW.operation_id AND test_runs.state IN ('passed', 'failed', 'blocked', 'cancelled')
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_assertion_results_terminal_run_insert BEFORE INSERT ON test_assertion_results
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_evidence_terminal_run_insert BEFORE INSERT ON test_evidence
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_defects_terminal_run_insert BEFORE INSERT ON test_defects
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_defects_terminal_run_update BEFORE UPDATE ON test_defects
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = OLD.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_defect_resolutions_terminal_run_insert BEFORE INSERT ON test_defect_resolutions
+          WHEN EXISTS (
+            SELECT 1 FROM test_defects
+            JOIN test_runs ON test_runs.id = test_defects.test_run_id
+            WHERE test_defects.id = NEW.defect_id AND test_runs.state IN ('passed', 'failed', 'blocked', 'cancelled')
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_run_obligations_immutable_delete BEFORE DELETE ON test_run_obligations BEGIN SELECT RAISE(ABORT, 'Test Run obligation is immutable'); END;
+          CREATE TRIGGER test_run_obligations_identity_update BEFORE UPDATE ON test_run_obligations
+          WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id OR NEW.description <> OLD.description
+            OR NEW.evidence_json <> OLD.evidence_json OR NEW.created_at <> OLD.created_at
+          BEGIN SELECT RAISE(ABORT, 'Test Run obligation identity is immutable'); END;
+          CREATE TRIGGER test_run_obligations_terminal_run_insert BEFORE INSERT ON test_run_obligations
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_run_obligations_terminal_run_update BEFORE UPDATE ON test_run_obligations
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = OLD.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
         `);
       const normalizeSql = (sql: string): string =>
         sql

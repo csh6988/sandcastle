@@ -1,15 +1,20 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,7 +45,11 @@ export type ElectronTestFixtureConfig = {
     readonly scriptPath: string;
     readonly scriptHash: string;
   }[];
-  readonly ipcToken: string;
+  readonly authorizationClaimPath: string;
+  readonly authorizationHash: string;
+  readonly repositoryDirectory: string;
+  readonly worktreeDirectory: string;
+  readonly repositoryCommit: string;
   readonly fakeClock: string;
   readonly repeatableIdSeed: string;
 };
@@ -49,7 +58,8 @@ export interface ElectronTestFixture {
   readonly root: string;
   readonly configPath: string;
   readonly config: ElectronTestFixtureConfig;
-  readonly consumeIpcToken: (candidate: string) => void;
+  readonly authorization: string;
+  readonly authorizationClaimPath: string;
   readonly bindTestRunManifestHash: (manifestHash: string) => void;
   readonly cleanup: () => {
     readonly fixtureId: string;
@@ -116,9 +126,79 @@ export const normalizeTestEvidenceLocator = (input: string): string => {
   return parts.join("/");
 };
 
-export const deriveElectronTestFixtureRuntimeToken = (
+const git = (cwd: string, args: readonly string[]): string =>
+  execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+
+const makeWritableForCleanup = (path: string): void => {
+  const entry = lstatSync(path);
+  if (entry.isSymbolicLink()) return;
+  if (entry.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const child of readdirSync(path)) {
+      makeWritableForCleanup(join(path, child));
+    }
+    return;
+  }
+  chmodSync(path, 0o600);
+};
+
+const claimAuthorization = (
   config: ElectronTestFixtureConfig,
-): string => sha256(`sandcastle-electron-test-fixture\n${config.ipcToken}`);
+  authorization: string,
+  root: string,
+): void => {
+  if (!secureEqual(sha256(authorization), config.authorizationHash)) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CONFIG_INVALID",
+      "Electron Test fixture config identity or authorization is invalid.",
+    );
+  }
+  const claimPath = config.authorizationClaimPath;
+  assertInside(root, claimPath);
+  if (!existsSync(claimPath)) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_AUTHORIZATION_ALREADY_CONSUMED",
+      "Electron Test fixture authorization was already consumed.",
+    );
+  }
+  if (
+    lstatSync(claimPath).isSymbolicLink() ||
+    !statSync(claimPath).isFile() ||
+    (statSync(claimPath).mode & 0o777) !== 0o600
+  ) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CONFIG_INVALID",
+      "Electron Test fixture authorization claim must be a 0600 regular non-symlink file.",
+    );
+  }
+  const claimedPath = `${claimPath}.claimed-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    renameSync(claimPath, claimedPath);
+  } catch {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_AUTHORIZATION_ALREADY_CONSUMED",
+      "Electron Test fixture authorization was already consumed.",
+    );
+  }
+  try {
+    const claimedAuthorization = readFileSync(claimedPath, "utf8");
+    if (
+      !secureEqual(claimedAuthorization, authorization) ||
+      !secureEqual(sha256(claimedAuthorization), config.authorizationHash)
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_CONFIG_INVALID",
+        "Electron Test fixture authorization claim does not match its frozen hash.",
+      );
+    }
+  } finally {
+    unlinkSync(claimedPath);
+  }
+};
 
 export const loadElectronTestFixtureConfig = (input: {
   readonly configPath: string;
@@ -169,10 +249,11 @@ export const loadElectronTestFixtureConfig = (input: {
     typeof config.evidenceDirectory !== "string" ||
     !Array.isArray(config.adapters) ||
     config.adapters.length !== 2 ||
-    !secureEqual(
-      input.authorization,
-      deriveElectronTestFixtureRuntimeToken(config),
-    )
+    typeof config.authorizationClaimPath !== "string" ||
+    typeof config.authorizationHash !== "string" ||
+    typeof config.repositoryDirectory !== "string" ||
+    typeof config.worktreeDirectory !== "string" ||
+    typeof config.repositoryCommit !== "string"
   ) {
     throw new ElectronTestFixtureError(
       "FIXTURE_CONFIG_INVALID",
@@ -187,8 +268,19 @@ export const loadElectronTestFixtureConfig = (input: {
   const root = realpathSync(dirname(configPath));
   const companyDirectory = realpathSync(config.companyDirectory);
   const evidenceDirectory = realpathSync(config.evidenceDirectory);
+  const repositoryDirectory = realpathSync(config.repositoryDirectory);
+  const worktreeDirectory = realpathSync(config.worktreeDirectory);
   assertInside(root, companyDirectory);
   assertInside(root, evidenceDirectory);
+  assertInside(root, repositoryDirectory);
+  assertInside(root, worktreeDirectory);
+  assertHash(config.authorizationHash, "fixture authorization hash");
+  if (!/^[a-f0-9]{40}$/.test(config.repositoryCommit)) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CONFIG_INVALID",
+      "Electron Test fixture repository commit is invalid.",
+    );
+  }
   const marker = readFileSync(
     join(companyDirectory, ".sandcastle-test-company"),
     "utf8",
@@ -221,7 +313,45 @@ export const loadElectronTestFixtureConfig = (input: {
       );
     }
   }
+  if (
+    git(repositoryDirectory, ["rev-parse", "HEAD"]) !==
+      config.repositoryCommit ||
+    git(worktreeDirectory, ["rev-parse", "HEAD"]) !== config.repositoryCommit
+  ) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_REPOSITORY_IDENTITY_MISMATCH",
+      "Electron Test fixture Repository and Worktree do not match the frozen commit.",
+    );
+  }
+  claimAuthorization(config, input.authorization, root);
   return config;
+};
+
+export const verifyTestEvidenceFile = (input: {
+  readonly evidenceDirectory: string;
+  readonly locator: string;
+  readonly contentHash: string;
+  readonly byteSize: number;
+}): string => {
+  assertHash(input.contentHash, "Test evidence content hash");
+  const evidenceDirectory = realpathSync(input.evidenceDirectory);
+  const locator = normalizeTestEvidenceLocator(input.locator);
+  const evidencePath = realpathSync(join(evidenceDirectory, locator));
+  assertInside(evidenceDirectory, evidencePath);
+  const metadata = lstatSync(evidencePath);
+  const bytes = readFileSync(evidencePath);
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isFile() ||
+    metadata.size !== input.byteSize ||
+    sha256(bytes) !== input.contentHash
+  ) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_EVIDENCE_MISMATCH",
+      "Test evidence locator does not resolve to the frozen bytes, hash, and size.",
+    );
+  }
+  return evidencePath;
 };
 
 export const createElectronTestFixture = (input: {
@@ -263,16 +393,41 @@ export const createElectronTestFixture = (input: {
   assertInside(canonicalTempRoot, root);
   const companyDirectory = join(root, "company");
   const evidenceDirectory = join(root, "evidence");
-  const repositoryDirectory = join(root, "repositories");
-  const worktreeDirectory = join(root, "worktrees");
+  const repositoryDirectory = join(root, "repository");
+  const worktreeDirectory = join(root, "worktree");
   for (const directory of [
     companyDirectory,
     evidenceDirectory,
     repositoryDirectory,
-    worktreeDirectory,
   ]) {
     mkdirSync(directory, { mode: 0o700 });
   }
+  git(repositoryDirectory, ["init", "--initial-branch=fixture-main"]);
+  writeFileSync(
+    join(repositoryDirectory, "README.md"),
+    `# ${input.fixtureId}\n\nTemporary Electron Test fixture Repository.\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  git(repositoryDirectory, ["add", "README.md"]);
+  git(repositoryDirectory, [
+    "-c",
+    "user.name=Sandcastle Test Fixture",
+    "-c",
+    "user.email=fixture@sandcastle.invalid",
+    "-c",
+    "commit.gpgSign=false",
+    "commit",
+    "-m",
+    "test: initialize electron fixture repository",
+  ]);
+  const repositoryCommit = git(repositoryDirectory, ["rev-parse", "HEAD"]);
+  git(repositoryDirectory, [
+    "worktree",
+    "add",
+    "--detach",
+    worktreeDirectory,
+    repositoryCommit,
+  ]);
   const marker = JSON.stringify({
     schemaVersion: 1,
     fixtureId: input.fixtureId,
@@ -303,6 +458,13 @@ export const createElectronTestFixture = (input: {
     }
     scriptHashes[adapter.id] = actualHash;
   }
+  const authorization = randomBytes(32).toString("hex");
+  const authorizationClaimPath = join(root, "authorization.claim");
+  writeFileSync(authorizationClaimPath, authorization, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  chmodSync(authorizationClaimPath, 0o600);
   let config: ElectronTestFixtureConfig = {
     schemaVersion: 1,
     fixtureId: input.fixtureId,
@@ -320,7 +482,11 @@ export const createElectronTestFixture = (input: {
         scriptHash: adapter.expectedScriptHash,
       }))
       .sort((left, right) => left.id.localeCompare(right.id)),
-    ipcToken: randomBytes(32).toString("hex"),
+    authorizationClaimPath,
+    authorizationHash: sha256(authorization),
+    repositoryDirectory,
+    worktreeDirectory,
+    repositoryCommit,
     fakeClock: input.fakeClock,
     repeatableIdSeed: input.repeatableIdSeed,
   };
@@ -338,33 +504,25 @@ export const createElectronTestFixture = (input: {
       "Electron Test fixture config must be mode 0600.",
     );
   }
-  let tokenConsumed = false;
   const rootFingerprint = sha256(`${root}\n${marker}`);
   return {
     root,
     configPath,
+    authorization,
+    authorizationClaimPath,
     get config() {
       return config;
     },
     bindTestRunManifestHash: (manifestHash) => {
-      if (tokenConsumed) {
+      if (!existsSync(authorizationClaimPath)) {
         throw new ElectronTestFixtureError(
           "FIXTURE_CONFIG_ALREADY_CONSUMED",
-          "Electron Test fixture config cannot change after its IPC token is consumed.",
+          "Electron Test fixture config cannot change after its authorization is consumed.",
         );
       }
       assertHash(manifestHash, "Test Run manifest hash");
       config = { ...config, testRunManifestHash: manifestHash };
       writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-    },
-    consumeIpcToken: (candidate) => {
-      if (tokenConsumed || candidate !== config.ipcToken) {
-        throw new ElectronTestFixtureError(
-          "FIXTURE_IPC_TOKEN_INVALID",
-          "Electron Test fixture IPC token is invalid or already consumed.",
-        );
-      }
-      tokenConsumed = true;
     },
     cleanup: () => {
       const currentRoot = realpathSync(root);
@@ -379,6 +537,7 @@ export const createElectronTestFixture = (input: {
           "Electron Test fixture cleanup refused an unrecognized directory.",
         );
       }
+      makeWritableForCleanup(currentRoot);
       rmSync(currentRoot, { recursive: true, force: false });
       return { fixtureId: input.fixtureId, rootFingerprint, removed: true };
     },

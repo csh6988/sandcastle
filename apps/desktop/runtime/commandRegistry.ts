@@ -1005,17 +1005,6 @@ const executeTestCommand = (
             });
           case "test.run.create":
             return testRuntime.createRun(command.input);
-          case "test.assertion.record":
-            return testRuntime.recordAssertion({
-              ...command,
-              ...(command.required === undefined
-                ? {}
-                : { required: command.required }),
-            });
-          case "test.evidence.record":
-            return testRuntime.recordEvidence(
-              command as Parameters<TestRuntime["recordEvidence"]>[0],
-            );
           case "test.defect.record":
             return testRuntime.recordDefect({
               id: command.id,

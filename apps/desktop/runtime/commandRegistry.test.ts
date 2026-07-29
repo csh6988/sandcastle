@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,11 +59,21 @@ describe("Company Runtime command registry", () => {
             assertions: [
               {
                 id: "assertion-1",
+                operationId: "operation-1",
                 ui: { kind: "text", expected: "passed" },
                 runtime: { kind: "state", expected: "passed" },
               },
             ],
             fixture: { id: "fixture-1", scriptHashes: ["a".repeat(64)] },
+            executionOperations: [
+              {
+                id: "operation-1",
+                kind: "electron" as const,
+                adapterId: "scripted-test",
+                input: { kind: "electron" },
+                inputHash: "b".repeat(64),
+              },
+            ],
             evidencePolicy: {
               retentionClass: "durable" as const,
               redactionProfile: "default",
@@ -137,6 +148,39 @@ describe("Company Runtime command registry", () => {
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
     const clock = () => new Date("2026-07-29T00:00:00.000Z");
+    const frozenProfile = { id: "profile-test-command" };
+    const frozenProfileHash = createHash("sha256")
+      .update(JSON.stringify(frozenProfile))
+      .digest("hex");
+    database
+      .prepare(
+        `INSERT INTO run_snapshot_revisions(
+           id, run_id, revision, schema_version, canonical_json, hash, created_at
+         ) VALUES (?, ?, 1, 1, ?, ?, ?)`,
+      )
+      .run(
+        "snapshot-test-command",
+        "run-test-command",
+        JSON.stringify({ executionProfiles: [frozenProfile] }),
+        "0".repeat(64),
+        clock().toISOString(),
+      );
+    database.exec(`
+      INSERT INTO positions(id, department_id, name, responsibility, ai_member_id, sort_order, created_at)
+      VALUES ('position-test-engineer', 'software-rnd', 'Test engineer', 'Independent testing', 'tester-ai', 1, '${clock().toISOString()}');
+      INSERT INTO interaction_sessions(id, mode, project_id, run_id, node_run_id, status, created_at)
+      VALUES ('test-session-command', 'run-collaboration', 'project-test-command', 'run-test-command', 'test-node-command', 'active', '${clock().toISOString()}');
+      INSERT INTO session_participants(id, session_id, participant_type, participant_ref, role, created_at)
+      VALUES ('tester-participant-command', 'test-session-command', 'ai-member', 'tester-ai', 'test-engineer', '${clock().toISOString()}');
+      INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
+      VALUES ('build-artifact-command', 'project-test-command', 'build', 'Test build', 'accepted', '${clock().toISOString()}');
+      INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
+      VALUES ('build-test-command', 'build-artifact-command', 1, 'artifacts/build.tar', '${"f".repeat(64)}', 42, 'accepted', 'run-test-command', 'snapshot-test-command', '${clock().toISOString()}');
+      INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
+      VALUES ('resolution-artifact-command', 'project-test-command', 'test-evidence', 'Resolution evidence', 'accepted', '${clock().toISOString()}');
+      INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
+      VALUES ('resolution-evidence-command', 'resolution-artifact-command', 1, 'evidence/resolution.json', '${"4".repeat(64)}', 18, 'accepted', 'run-test-command', 'snapshot-test-command', '${clock().toISOString()}');
+    `);
     const generation = {
       id: "generation-test-command",
       manifest: {
@@ -204,18 +248,28 @@ describe("Company Runtime command registry", () => {
       manifest: {
         schemaVersion: 1,
         ownerPositionId: "position-test-engineer",
-        requirementIds: ["requirement-19"],
+        requirementIds: [],
         workPackageVersions: [],
         preconditions: ["exact Integration PASS"],
         uiActions: [{ id: "action-1", kind: "click", target: "run-test" }],
         assertions: [
           {
             id: "assertion-1",
+            operationId: "operation-1",
             ui: { kind: "text", expected: "passed" },
             runtime: { kind: "state", expected: "passed" },
           },
         ],
         fixture: { id: "fixture-test-command", scriptHashes: ["e".repeat(64)] },
+        executionOperations: [
+          {
+            id: "operation-1",
+            kind: "electron",
+            adapterId: "scripted-test",
+            input: { kind: "electron" },
+            inputHash: "f".repeat(64),
+          },
+        ],
         evidencePolicy: {
           retentionClass: "durable",
           redactionProfile: "default",
@@ -246,13 +300,50 @@ describe("Company Runtime command registry", () => {
         artifactVersionId: "build-test-command",
         digest: "f".repeat(64),
       },
-      executionProfile: { id: "profile-test-command", hash: "1".repeat(64) },
+      executionProfile: {
+        id: "profile-test-command",
+        hash: frozenProfileHash,
+      },
       companyDirectoryFingerprint: "2".repeat(64),
       fixture: { id: "fixture-test-command", scriptHashes: ["e".repeat(64)] },
+      executionOperations: [
+        {
+          id: "operation-1",
+          kind: "electron",
+          adapterId: "scripted-test",
+          input: { kind: "electron" },
+          inputHash: "f".repeat(64),
+        },
+      ],
       clock: { instant: clock().toISOString(), seed: "seed-test-command" },
       environment: { platform: "darwin", architecture: "arm64" },
       capabilities: ["electron", "runtime-query"],
     });
+    database
+      .prepare(
+        `INSERT INTO test_evidence(
+           id, test_run_id, operation_id, test_case_revision_id, assertion_id,
+           kind, media_type, content_hash, byte_size, artifact_version_id,
+           redaction_profile, retention_class, locator, metadata_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "resolution-evidence-command",
+        "test-run-command",
+        "operation-1",
+        revision.id,
+        "assertion-1",
+        "runtime",
+        "application/json",
+        "4".repeat(64),
+        18,
+        "resolution-evidence-command",
+        "default",
+        "durable",
+        "evidence/resolution.json",
+        "{}",
+        clock().toISOString(),
+      );
     const registry = openCompanyCommandRegistry(
       database,
       openProjectConfiguration(database),
@@ -325,7 +416,7 @@ describe("Company Runtime command registry", () => {
         defectId: "test-defect-command",
         resolutionId: "test-defect-resolution-command",
         resolution: {
-          evidenceRefs: ["artifact-version:resolution-test-command"],
+          evidenceRefs: ["resolution-evidence-command"],
         },
       },
     };

@@ -16,6 +16,10 @@ import {
   type Language,
 } from "./i18n.js";
 import { Icon, type IconName } from "./icons.js";
+import {
+  ElectronTestFixturePage,
+  readElectronTestFixtureRoute,
+} from "./electronTestFixturePage.js";
 
 type CompanyNav =
   | "overview"
@@ -48,6 +52,11 @@ export function App() {
     loadPreferredLanguage(window.localStorage, navigator.languages),
   );
   const t = messages[language];
+  const electronTestFixture = readElectronTestFixtureRoute(window.location);
+
+  if (electronTestFixture) {
+    return <ElectronTestFixturePage route={electronTestFixture} />;
+  }
 
   const setLanguage = (nextLanguage: Language) => {
     savePreferredLanguage(window.localStorage, nextLanguage);

@@ -7,6 +7,7 @@ import {
   type ActorRef,
   type RuntimeRequest,
   type RuntimeResponse,
+  type TestRunView,
   type WorkPackageGraphView,
 } from "./interface.js";
 import { CompanyCatalogError } from "./catalog/companyCatalog.js";
@@ -31,6 +32,7 @@ import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import type { ReviewerExecutionAdapter } from "./review/reviewerExecution.js";
 import type { IntegrationValidationProvider } from "./integration/integrationValidationExecutor.js";
+import type { TestExecutionAdapter } from "./testing/testRuntime.js";
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
@@ -44,6 +46,11 @@ export interface CompanyRuntimeServerOptions {
   readonly interactionExecutionAdapter?: ModelOnlyInteractionExecutionAdapter;
   readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
   readonly integrationValidationProvider?: IntegrationValidationProvider;
+  readonly testExecutionAdapterFactory?: (input: {
+    readonly database: import("node:sqlite").DatabaseSync;
+    readonly tests: import("./testing/testRuntime.js").TestRuntime;
+    readonly artifacts: import("./artifactRegistry.js").ArtifactRegistry;
+  }) => readonly TestExecutionAdapter[];
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
@@ -140,6 +147,13 @@ export const startCompanyRuntimeServer = async (
         ? {
             integrationRuntime: {
               validationProvider: options.integrationValidationProvider,
+            },
+          }
+        : {}),
+      ...(options.testExecutionAdapterFactory
+        ? {
+            testRuntime: {
+              executionAdapterFactory: options.testExecutionAdapterFactory,
             },
           }
         : {}),
@@ -405,6 +419,15 @@ export const startCompanyRuntimeServer = async (
                   database.codeReviews.reconcileReviewerWorkspace(
                     request.envelope.command.codeReviewId,
                   );
+                } else if (
+                  request.envelope.command.type === "test.run.create" ||
+                  request.envelope.command.type === "test.run.complete"
+                ) {
+                  const testRun = result.value as unknown as TestRunView;
+                  void database.testNodeHandler.executeReady({
+                    runId: testRun.manifest.runId,
+                    nodeRunId: testRun.manifest.nodeRunId,
+                  });
                 }
               }
               sendResponse(socket, {
@@ -451,6 +474,10 @@ export const startCompanyRuntimeServer = async (
                     return database.integrations.inspect(query.runId);
                   case "test-runs.inspect":
                     return database.testRuns.inspect(query.testRunId);
+                  case "test-pass-authority.inspect":
+                    return database.testRuns.downstreamAuthority(
+                      query.testRunId,
+                    );
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -533,6 +560,10 @@ export const startCompanyRuntimeServer = async (
                   return database.integrations.inspect(request.query.runId);
                 case "test-runs.inspect":
                   return database.testRuns.inspect(request.query.testRunId);
+                case "test-pass-authority.inspect":
+                  return database.testRuns.downstreamAuthority(
+                    request.query.testRunId,
+                  );
                 case "departments.list":
                   return database.catalog.departments();
                 case "department.inspect":

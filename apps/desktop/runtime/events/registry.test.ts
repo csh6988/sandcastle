@@ -296,32 +296,169 @@ describe("Runtime Event registry", () => {
     );
     assert.doesNotThrow(() =>
       registry.validate({
-        type: "integration.generation.completed",
+        type: "test.run.completed",
         scope: {
           companyId: "company",
           projectId: "project-1",
           runId: "run-1",
-          nodeRunId: "integration-node-1",
-          integrationGenerationId: "generation-1",
+          nodeRunId: "test-node-1",
+          testRunId: "test-run-1",
         },
-        payload: { generationId: "generation-1", state: "passed" },
+        payload: {
+          testRunId: "test-run-1",
+          state: "passed",
+          manifestHash: "a".repeat(64),
+          passAuthorityHash: "b".repeat(64),
+        },
       }),
     );
     assert.throws(
       () =>
         registry.validate({
-          type: "integration.generation.completed",
+          type: "test.run.completed",
           scope: {
             companyId: "company",
             projectId: "project-1",
             runId: "run-1",
-            nodeRunId: "integration-node-1",
+            nodeRunId: "test-node-1",
+            testRunId: "test-run-1",
           },
-          payload: { generationId: "generation-1", state: "passed" },
+          payload: {},
         }),
       (error: unknown) =>
         error instanceof RuntimeEventRegistryError &&
-        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+        error.code === "RUNTIME_EVENT_PAYLOAD_INVALID",
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "test.run.completed",
+          schemaVersion: 2,
+          scope: {
+            companyId: "company",
+            projectId: "project-1",
+            runId: "run-1",
+            nodeRunId: "test-node-1",
+            testRunId: "test-run-1",
+          },
+          payload: {
+            testRunId: "test-run-1",
+            state: "passed",
+            manifestHash: "a".repeat(64),
+            passAuthorityHash: "b".repeat(64),
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCHEMA_UNSUPPORTED",
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "test.run.future",
+          scope: { companyId: "company" },
+          payload: {},
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_UNREGISTERED",
+    );
+
+    const runScope = {
+      companyId: "company",
+      projectId: "project-1",
+      runId: "run-1",
+      nodeRunId: "test-node-1",
+      testRunId: "test-run-1",
+    };
+    const exactEvents = [
+      {
+        type: "test.case.revised",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          testCaseRevisionId: "case-r1",
+        },
+        payload: {
+          testCaseRevisionId: "case-r1",
+          manifestHash: "a".repeat(64),
+        },
+      },
+      {
+        type: "test.run.accepted",
+        scope: runScope,
+        payload: {
+          testRunId: "test-run-1",
+          state: "scheduled",
+          manifestHash: "a".repeat(64),
+        },
+      },
+      ...[
+        ["test.run.started", "running"],
+        ["test.run.reconciling", "reconciling"],
+        ["test.run.unknown", "unknown"],
+        ["test.run.failed", "failed"],
+        ["test.run.cancelled", "cancelled"],
+      ].map(([type, state]) => ({
+        type: type!,
+        scope: runScope,
+        payload: {
+          testRunId: "test-run-1",
+          state: state!,
+          operationId: "operation-1",
+        },
+      })),
+      {
+        type: "test.assertion.recorded",
+        scope: { ...runScope, testCaseRevisionId: "case-r1" },
+        payload: {
+          testRunId: "test-run-1",
+          testCaseRevisionId: "case-r1",
+          assertionId: "assertion-1",
+        },
+      },
+      {
+        type: "test.evidence.recorded",
+        scope: runScope,
+        payload: { testRunId: "test-run-1", evidenceId: "evidence-1" },
+      },
+      {
+        type: "test.defect.created",
+        scope: { ...runScope, defectId: "defect-1" },
+        payload: {
+          testRunId: "test-run-1",
+          defectId: "defect-1",
+          operationId: "operation-1",
+        },
+      },
+      {
+        type: "test.defect.closed",
+        scope: { ...runScope, defectId: "defect-1" },
+        payload: { testRunId: "test-run-1", defectId: "defect-1" },
+      },
+      {
+        type: "test.run.blocked",
+        scope: runScope,
+        payload: { testRunId: "test-run-1", state: "blocked" },
+      },
+    ];
+    for (const event of exactEvents) {
+      assert.doesNotThrow(() => registry.validate(event));
+    }
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "test.evidence.recorded",
+          scope: runScope,
+          payload: {
+            testRunId: "test-run-1",
+            evidenceId: "evidence-1",
+            unexpected: true,
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_PAYLOAD_INVALID",
     );
   });
 

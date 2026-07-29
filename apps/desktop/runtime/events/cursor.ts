@@ -112,6 +112,9 @@ const canonicalJson = (value: unknown): string =>
 const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
+export const runtimeQueryViewHash = (value: unknown): string =>
+  sha256(canonicalJson(value));
+
 const principalJson = (principal: ActorRef): string => canonicalJson(principal);
 const principalHash = (principal: ActorRef): string =>
   sha256(principalJson(principal));
@@ -599,7 +602,7 @@ export const openRuntimeEventCursorStore = (
           consumerId: input.consumerId,
           principalHash: principalHash(input.principal),
           queryHash: input.queryHash,
-          viewHash: sha256(canonicalJson(view)),
+          viewHash: runtimeQueryViewHash(view),
           sequence,
           expiresAt,
         });

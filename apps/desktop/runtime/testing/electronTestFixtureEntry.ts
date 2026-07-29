@@ -4,6 +4,14 @@ import { createScriptedExecutionAdapter } from "../adapters/scriptedExecutionAda
 import type { ModelOnlyInteractionExecutionAdapter } from "../adapters/interactionExecutionAdapter.js";
 import type { AdapterExecutionFact } from "../execution/contract.js";
 import { loadElectronTestFixtureConfig } from "./electronTestFixture.js";
+import {
+  createElectronTestExecutionAdapter,
+  readAcknowledgedElectronTestView,
+} from "./electronTestExecutionAdapter.js";
+import type {
+  TestExecutionRequest,
+  TestExecutionResult,
+} from "./testRuntime.js";
 
 const requiredEnvironment = (name: string): string => {
   const value = process.env[name];
@@ -71,6 +79,37 @@ const scriptedInteractionAdapter = (
   reconcile: async () => ({ status: "unknown", evidenceRefs: [] }),
 });
 
+type FixtureExecutionInput = {
+  readonly schemaVersion: 1;
+  readonly fixtureId: string;
+  readonly testCaseRevisionId: string;
+  readonly assertionId: string;
+  readonly correlationCommandId: string;
+  readonly evidence: TestExecutionResult["evidence"];
+  readonly cleanupEvidence: TestExecutionResult["evidence"][number];
+};
+
+const fixtureExecutionInput = (
+  request: TestExecutionRequest,
+  fixtureId: string,
+): FixtureExecutionInput => {
+  const value = request.input as Partial<FixtureExecutionInput> | null;
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    value.schemaVersion !== 1 ||
+    value.fixtureId !== fixtureId ||
+    typeof value.testCaseRevisionId !== "string" ||
+    typeof value.assertionId !== "string" ||
+    typeof value.correlationCommandId !== "string" ||
+    !Array.isArray(value.evidence) ||
+    !value.cleanupEvidence
+  ) {
+    throw new Error("Electron Test operation input is invalid.");
+  }
+  return value as FixtureExecutionInput;
+};
+
 const main = async (): Promise<void> => {
   const config = loadElectronTestFixtureConfig({
     configPath: requiredEnvironment("SANDCASTLE_ELECTRON_TEST_FIXTURE_CONFIG"),
@@ -116,6 +155,69 @@ const main = async (): Promise<void> => {
     interactionExecutionAdapter: scriptedInteractionAdapter(
       interactionScript.response ?? "fixture interaction completed",
     ),
+    testExecutionAdapterFactory: ({ database, tests }) => [
+      createElectronTestExecutionAdapter({
+        fixtureId: config.fixtureId,
+        terminalResult: (request) => {
+          const operation = fixtureExecutionInput(request, config.fixtureId);
+          const run = tests.inspect(request.testRunId);
+          const event = (
+            database
+              .prepare(
+                `SELECT sequence, type, scope_json AS scopeJson
+                   FROM runtime_event_outbox
+                  WHERE run_id = ? AND node_run_id = ?
+                    AND type IN ('test.run.reconciling', 'test.run.started')
+                  ORDER BY sequence DESC`,
+              )
+              .all(run.manifest.runId, run.manifest.nodeRunId) as Array<{
+              readonly sequence: number;
+              readonly type: string;
+              readonly scopeJson: string;
+            }>
+          ).find((candidate) => {
+            const scope = JSON.parse(candidate.scopeJson) as {
+              readonly testRunId?: string;
+            };
+            return scope.testRunId === run.id;
+          });
+          const consumedToken = readAcknowledgedElectronTestView(database, run);
+          if (!event || !consumedToken) {
+            throw new Error(
+              "Electron Test execution requires an acknowledged authoritative Query View and Runtime event.",
+            );
+          }
+          return {
+            schemaVersion: 1,
+            assertions: [
+              {
+                testCaseRevisionId: operation.testCaseRevisionId,
+                assertionId: operation.assertionId,
+                uiStatus: "passed",
+                runtimeStatus: "passed",
+                correlation: {
+                  commandId: operation.correlationCommandId,
+                  eventSequence: event.sequence,
+                  runtimeEventType: event.type,
+                  queryAsOfSequence: consumedToken.sequence,
+                  queryViewHash: consumedToken.viewHash,
+                  viewSyncTokenHash: consumedToken.tokenHash,
+                  snapshotRevisionId: run.manifest.snapshotRevisionId,
+                  runId: run.manifest.runId,
+                  nodeRunId: run.manifest.nodeRunId,
+                  nodeAttemptId: run.manifest.nodeAttemptId,
+                  sessionId: run.manifest.sessionId,
+                  artifactVersionIds: operation.evidence
+                    .map((entry) => entry.artifactVersionId)
+                    .filter((id): id is string => id !== null),
+                },
+              },
+            ],
+            evidence: [...operation.evidence, operation.cleanupEvidence],
+          };
+        },
+      }),
+    ],
   });
   const close = (): void => void runtime.close();
   process.once("SIGINT", close);

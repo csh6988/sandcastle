@@ -27,6 +27,7 @@ import {
   CodeReviewViewSchema,
   IntegrationGenerationViewSchema,
   TestCaseRevisionViewSchema,
+  TestPassAuthorityViewSchema,
   TestRunViewSchema,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
@@ -822,31 +823,35 @@ export const createSandcastleBridge = (
                               )
                             : nextQuery.type === "test-runs.inspect"
                               ? TestRunViewSchema.parse(result.view)
-                              : nextQuery.type === "run.supervision.inspect"
-                                ? RunSupervisionViewSchema.parse(result.view)
-                                : nextQuery.type === "interaction.inspect"
-                                  ? InteractionViewSchema.parse(result.view)
-                                  : nextQuery.type === "memory.candidates.list"
-                                    ? MemoryCandidateViewSchema.array().parse(
-                                        result.view,
-                                      )
+                              : nextQuery.type === "test-pass-authority.inspect"
+                                ? TestPassAuthorityViewSchema.parse(result.view)
+                                : nextQuery.type === "run.supervision.inspect"
+                                  ? RunSupervisionViewSchema.parse(result.view)
+                                  : nextQuery.type === "interaction.inspect"
+                                    ? InteractionViewSchema.parse(result.view)
                                     : nextQuery.type ===
-                                          "memory.records.list" ||
-                                        nextQuery.type ===
-                                          "memory.legacy-records.list"
-                                      ? LegacyMemoryRecordViewSchema.array().parse(
+                                        "memory.candidates.list"
+                                      ? MemoryCandidateViewSchema.array().parse(
                                           result.view,
                                         )
-                                      : nextQuery.type === "memory.entries.list"
-                                        ? MemoryEntryViewSchema.array().parse(
+                                      : nextQuery.type ===
+                                            "memory.records.list" ||
+                                          nextQuery.type ===
+                                            "memory.legacy-records.list"
+                                        ? LegacyMemoryRecordViewSchema.array().parse(
                                             result.view,
                                           )
                                         : nextQuery.type ===
-                                            "memory.selections.list"
-                                          ? RunMemorySelectionViewSchema.array().parse(
+                                            "memory.entries.list"
+                                          ? MemoryEntryViewSchema.array().parse(
                                               result.view,
                                             )
-                                          : result.view;
+                                          : nextQuery.type ===
+                                              "memory.selections.list"
+                                            ? RunMemorySelectionViewSchema.array().parse(
+                                                result.view,
+                                              )
+                                            : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
