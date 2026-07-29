@@ -43,7 +43,7 @@ export type TestCaseRevisionManifestInput = {
   };
   readonly executionOperations: readonly {
     readonly id: string;
-    readonly kind: "runtime" | "contract" | "build" | "electron";
+    readonly kind: "runtime" | "contract" | "build" | "electron" | "cleanup";
     readonly adapterId: string;
     readonly input: unknown;
     readonly inputHash: string;
@@ -53,7 +53,52 @@ export type TestCaseRevisionManifestInput = {
     readonly redactionProfile: string;
     readonly requiredKinds: readonly string[];
   };
-  readonly cleanup: { readonly policy: string; readonly required: boolean };
+  readonly cleanup: {
+    readonly policy: string;
+    readonly required: boolean;
+    readonly operationId: string;
+    readonly rootFingerprint: string;
+    readonly targets: readonly {
+      readonly kind: "repository" | "worktree";
+      readonly pathFingerprint: string;
+    }[];
+  };
+};
+
+export type TestCleanupReceipt = {
+  readonly schemaVersion: 1;
+  readonly kind: "cleanup";
+  readonly receiptId: string;
+  readonly fixtureId: string;
+  readonly operationKey: string;
+  readonly rootFingerprint: string;
+  readonly targets: readonly {
+    readonly kind: "repository" | "worktree";
+    readonly pathFingerprint: string;
+    readonly state: "absent";
+  }[];
+  readonly artifactVersionId: string;
+  readonly contentHash: string;
+};
+
+export type TestScopeRiskInput = {
+  readonly schemaVersion: 1;
+  readonly policy: {
+    readonly revisionId: string;
+    readonly rules: readonly {
+      readonly factorId: string;
+      readonly minimumTier: "low" | "medium" | "high" | "critical";
+    }[];
+    readonly hash: string;
+  };
+  readonly factors: readonly {
+    readonly id: string;
+    readonly present: boolean;
+    readonly evidenceRefs: readonly string[];
+  }[];
+  readonly computedTier: "low" | "medium" | "high" | "critical";
+  readonly evidenceRefs: readonly string[];
+  readonly inputHash: string;
 };
 
 export type TestCaseRevisionManifest = TestCaseRevisionManifestInput & {
@@ -108,7 +153,7 @@ export type TestRunManifestInput = {
   };
   readonly executionOperations: readonly {
     readonly id: string;
-    readonly kind: "runtime" | "contract" | "build" | "electron";
+    readonly kind: "runtime" | "contract" | "build" | "electron" | "cleanup";
     readonly adapterId: string;
     readonly input: unknown;
     readonly inputHash: string;
@@ -116,6 +161,7 @@ export type TestRunManifestInput = {
   readonly clock: { readonly instant: string; readonly seed: string };
   readonly environment: Readonly<Record<string, string>>;
   readonly capabilities: readonly string[];
+  readonly risk: TestScopeRiskInput;
 };
 
 export type TestRunManifest = TestRunManifestInput & {
@@ -178,6 +224,7 @@ export type TestRunView = {
       | "intent"
       | "running"
       | "reconciling"
+      | "not-started"
       | "unknown"
       | "succeeded"
       | "failed"
@@ -259,6 +306,40 @@ export type TestDefectResponsibility =
       readonly reason: string;
     };
 
+export type TestDefectEvidence =
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: "assertion";
+      readonly assertion: {
+        readonly testCaseRevisionId: string;
+        readonly assertionId: string;
+        readonly resultHash: string;
+      };
+      readonly evidenceRefs: readonly string[];
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: "execution";
+      readonly operationId: string;
+      readonly operationKey: string;
+      readonly requestHash: string;
+      readonly factHash: string;
+      readonly evidenceRefs: readonly string[];
+      readonly providerReceiptHash: string | null;
+    };
+
+export type TestDefectResolution = {
+  readonly schemaVersion: 1;
+  readonly resolvedByTestRunId: string;
+  readonly passAuthorityHash: string;
+  readonly assertions: readonly {
+    readonly testCaseRevisionId: string;
+    readonly assertionId: string;
+    readonly resultHash: string;
+    readonly evidenceRefs: readonly string[];
+  }[];
+};
+
 export type TestDefect = {
   readonly id: string;
   readonly testRunId: string;
@@ -266,7 +347,7 @@ export type TestDefect = {
   readonly assertionId: string | null;
   readonly integrationGenerationId: string;
   readonly responsibility: TestDefectResponsibility;
-  readonly evidence: unknown;
+  readonly evidence: TestDefectEvidence;
   readonly status: "open" | "closed";
   readonly createdAt: string;
   readonly closedAt: string | null;
@@ -336,6 +417,80 @@ const TestAssertionCorrelationSchema = z
   })
   .strict();
 
+const TestDefectEvidenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      kind: z.literal("assertion"),
+      assertion: z
+        .object({
+          testCaseRevisionId: z.string().trim().min(1),
+          assertionId: z.string().trim().min(1),
+          resultHash: z.string().regex(/^[a-f0-9]{64}$/),
+        })
+        .strict(),
+      evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+    })
+    .strict(),
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      kind: z.literal("execution"),
+      operationId: z.string().trim().min(1),
+      operationKey: z.string().trim().min(1),
+      requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      factHash: z.string().regex(/^[a-f0-9]{64}$/),
+      evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+      providerReceiptHash: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .nullable(),
+    })
+    .strict(),
+]);
+
+const TestDefectResolutionSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    resolvedByTestRunId: z.string().trim().min(1),
+    passAuthorityHash: z.string().regex(/^[a-f0-9]{64}$/),
+    assertions: z
+      .array(
+        z
+          .object({
+            testCaseRevisionId: z.string().trim().min(1),
+            assertionId: z.string().trim().min(1),
+            resultHash: z.string().regex(/^[a-f0-9]{64}$/),
+            evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+
+const TestCleanupReceiptSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    kind: z.literal("cleanup"),
+    receiptId: z.string().trim().min(1),
+    fixtureId: z.string().trim().min(1),
+    operationKey: z.string().trim().min(1),
+    rootFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    targets: z.array(
+      z
+        .object({
+          kind: z.enum(["repository", "worktree"]),
+          pathFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+          state: z.literal("absent"),
+        })
+        .strict(),
+    ),
+    artifactVersionId: z.string().trim().min(1),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
 const TestExecutionResultSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -394,6 +549,15 @@ export interface TestExecutionAdapter {
   ) => TestExecutionFact | Promise<TestExecutionFact>;
 }
 
+export interface TestFixtureAuthority {
+  readonly read: (fixtureId: string) => {
+    readonly fixtureId: string;
+    readonly companyDirectoryFingerprint: string;
+    readonly scriptHashes: readonly string[];
+    readonly adapterIds: readonly string[];
+  };
+}
+
 export interface TestRuntime {
   readonly registerCaseRevision: (input: {
     readonly testCaseId: string;
@@ -420,9 +584,14 @@ export interface TestRuntime {
     readonly adapter: TestExecutionAdapter;
   }) => Promise<TestRunView>;
   readonly cancel: (input: {
+    readonly cancelOperationId: string;
+    readonly kind?: "pause" | "cancel";
     readonly testRunId: string;
     readonly operationId: string;
     readonly adapter: TestExecutionAdapter;
+    readonly failureInjection?: (
+      point: "after-cancel-intent" | "after-cancel-effect",
+    ) => void;
   }) => Promise<TestRunView>;
   readonly recordAssertion: (input: {
     readonly operationId: string;
@@ -443,12 +612,12 @@ export interface TestRuntime {
     readonly testCaseRevisionId: string;
     readonly assertionId?: string;
     readonly responsibility: TestDefectResponsibility;
-    readonly evidence: unknown;
+    readonly evidence: TestDefectEvidence;
   }) => TestRunView;
   readonly closeDefect: (input: {
     readonly defectId: string;
     readonly resolutionId: string;
-    readonly resolution: unknown;
+    readonly resolution: TestDefectResolution;
   }) => TestRunView;
   readonly createReworkRun: (input: {
     readonly defectId: string;
@@ -482,6 +651,7 @@ export interface TestRuntime {
     readonly fixture: TestRunManifest["fixture"];
     readonly environment: TestRunManifest["environment"];
     readonly capabilities: TestRunManifest["capabilities"];
+    readonly risk: TestRunManifest["risk"];
     readonly assertionResultHashes: readonly string[];
     readonly evidence: readonly {
       readonly id: string;
@@ -520,6 +690,8 @@ const sha256 = (value: unknown): string =>
   createHash("sha256")
     .update(typeof value === "string" ? value : canonicalJson(value))
     .digest("hex");
+const executionStorageId = (testRunId: string, operationId: string): string =>
+  `test-execution:${sha256({ testRunId, operationId })}`;
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
 const sortedUnique = (values: readonly string[]): readonly string[] =>
   [...new Set(values)].sort();
@@ -540,13 +712,20 @@ export const openTestRuntime = (
         generationId: string,
       ) => IntegrationGenerationView;
     };
+    readonly fixtureAuthority?: TestFixtureAuthority;
     readonly artifacts?: Pick<ArtifactRegistry, "verify" | "readContent"> &
       Partial<Pick<ArtifactRegistry, "inspect">>;
     readonly events?: Pick<RuntimeEvents, "append" | "latestSequence">;
     readonly clock?: () => Date;
+    readonly nextId?: () => string;
+    readonly workerFailureInjection?: (
+      point: "after-state" | "after-event",
+      commandId: string,
+    ) => void;
   },
 ): TestRuntime => {
   const clock = options.clock ?? (() => new Date());
+  const nextId = options.nextId ?? randomUUID;
   const inTransaction = <Value>(operation: () => Value): Value => {
     const ownsTransaction =
       database
@@ -603,7 +782,7 @@ export const openTestRuntime = (
            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          randomUUID(),
+          nextId(),
           input.type,
           input.defectId
             ? "test-defect"
@@ -639,6 +818,94 @@ export const openTestRuntime = (
       timestamp: input.timestamp,
     });
   };
+  const workerActor = {
+    type: "runtime-worker",
+    id: "test-runtime",
+    authenticatedBy: "company-runtime",
+  } as const;
+  const workerUnitOfWork = <Value>(input: {
+    readonly commandId: string;
+    readonly request: unknown;
+    readonly result: (value: Value) => unknown;
+    readonly operation: () => Value;
+  }): Value => {
+    const requestJson = canonicalJson(input.request);
+    const requestHash = sha256(requestJson);
+    const existing = database
+      .prepare(
+        `SELECT request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(input.commandId) as
+      | { readonly requestHash: string; readonly resultJson: string }
+      | undefined;
+    if (existing) {
+      if (existing.requestHash !== requestHash)
+        throw new TestRuntimeError(
+          "TEST_WORKER_COMMAND_CONFLICT",
+          `Trusted Test worker command ${input.commandId} was reused with different immutable input.`,
+        );
+      return parseJson<{ readonly value: Value }>(existing.resultJson).value;
+    }
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database
+        .prepare(
+          `INSERT INTO runtime_unit_of_work_context(
+             slot, command_id, actor_type, actor_id, authenticated_by,
+             consumer_id, schema_version
+           ) VALUES (1, ?, ?, ?, ?, 'test-runtime', 1)`,
+        )
+        .run(
+          input.commandId,
+          workerActor.type,
+          workerActor.id,
+          workerActor.authenticatedBy,
+        );
+      const value = input.operation();
+      options.workerFailureInjection?.("after-state", input.commandId);
+      const effectIds = (
+        database
+          .prepare(
+            "SELECT id FROM runtime_audit_records WHERE command_id = ? ORDER BY created_at, id",
+          )
+          .all(input.commandId) as Array<{ readonly id: string }>
+      ).map((entry) => entry.id);
+      options.workerFailureInjection?.("after-event", input.commandId);
+      const resultJson = canonicalJson({
+        status: "succeeded",
+        value: input.result(value),
+        effectIds,
+      });
+      database
+        .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+        .run();
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, 'test-runtime', 1, ?, 'completed', ?, ?, ?, ?)`,
+        )
+        .run(
+          input.commandId,
+          workerActor.type,
+          workerActor.id,
+          workerActor.authenticatedBy,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(effectIds),
+          clock().toISOString(),
+        );
+      database.exec("COMMIT");
+      return value;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
 
   const readCaseRevision = (revisionId: string): TestCaseRevisionView => {
     const row = database
@@ -669,6 +936,53 @@ export const openTestRuntime = (
   };
 
   const registerCaseRevision: TestRuntime["registerCaseRevision"] = (input) => {
+    const duplicateId = (values: readonly string[]): string | undefined =>
+      values.find((value, index) => values.indexOf(value) !== index);
+    const duplicateAction = duplicateId(
+      input.manifest.uiActions.map((entry) => entry.id),
+    );
+    const duplicateAssertion = duplicateId(
+      input.manifest.assertions.map((entry) => entry.id),
+    );
+    const duplicateOperation = duplicateId(
+      input.manifest.executionOperations.map((entry) => entry.id),
+    );
+    const operationIds = new Set(
+      input.manifest.executionOperations.map((entry) => entry.id),
+    );
+    const cleanupTargetKinds = input.manifest.cleanup.targets
+      .map((entry) => entry.kind)
+      .sort();
+    if (
+      duplicateAction ||
+      duplicateAssertion ||
+      duplicateOperation ||
+      input.manifest.assertions.some(
+        (assertion) => !operationIds.has(assertion.operationId),
+      ) ||
+      input.manifest.executionOperations.some(
+        (operation) => operation.inputHash !== sha256(operation.input),
+      ) ||
+      !operationIds.has(input.manifest.cleanup.operationId) ||
+      input.manifest.assertions.some(
+        (assertion) =>
+          assertion.operationId === input.manifest.cleanup.operationId,
+      ) ||
+      input.manifest.executionOperations.find(
+        (operation) => operation.id === input.manifest.cleanup.operationId,
+      )?.kind !== "cleanup" ||
+      !/^[a-f0-9]{64}$/.test(input.manifest.cleanup.rootFingerprint) ||
+      canonicalJson(cleanupTargetKinds) !==
+        canonicalJson(["repository", "worktree"]) ||
+      input.manifest.cleanup.targets.some(
+        (target) => !/^[a-f0-9]{64}$/.test(target.pathFingerprint),
+      )
+    ) {
+      throw new TestRuntimeError(
+        "TEST_CASE_MANIFEST_INVALID",
+        "A Test Case revision requires unique action/assertion/operation identities, exact operation input hashes, and a declared cleanup operation.",
+      );
+    }
     const now = clock().toISOString();
     const existingById = database
       .prepare(
@@ -719,6 +1033,9 @@ export const openTestRuntime = (
       ),
       workPackageVersions: [...input.manifest.workPackageVersions].sort(
         (a, b) => a.workPackageVersionId.localeCompare(b.workPackageVersionId),
+      ),
+      executionOperations: [...input.manifest.executionOperations].sort(
+        (left, right) => left.id.localeCompare(right.id),
       ),
       fixture: {
         ...input.manifest.fixture,
@@ -806,12 +1123,23 @@ export const openTestRuntime = (
       );
     const assertionRows = database
       .prepare(
-        "SELECT id, operation_id AS operationId, test_case_revision_id AS testCaseRevisionId, assertion_id AS assertionId, required, ui_status AS uiStatus, runtime_status AS runtimeStatus, correlation_json AS correlationJson, result_hash AS resultHash FROM test_assertion_results WHERE test_run_id = ? ORDER BY test_case_revision_id, assertion_id",
+        `SELECT results.id, operations.request_json AS operationRequestJson,
+                results.test_case_revision_id AS testCaseRevisionId,
+                results.assertion_id AS assertionId, results.required,
+                results.ui_status AS uiStatus,
+                results.runtime_status AS runtimeStatus,
+                results.correlation_json AS correlationJson,
+                results.result_hash AS resultHash
+           FROM test_assertion_results AS results
+           JOIN test_execution_operations AS operations
+             ON operations.id = results.operation_id
+          WHERE results.test_run_id = ?
+          ORDER BY results.test_case_revision_id, results.assertion_id`,
       )
       .all(testRunId) as Array<Record<string, unknown>>;
     const executionRows = database
       .prepare(
-        `SELECT id, state, request_hash AS requestHash,
+        `SELECT request_json AS requestJson, state, request_hash AS requestHash,
                 receipt_hash AS receiptHash
            FROM test_execution_operations
           WHERE test_run_id = ? ORDER BY created_at, id`,
@@ -819,7 +1147,22 @@ export const openTestRuntime = (
       .all(testRunId) as Array<Record<string, unknown>>;
     const evidenceRows = database
       .prepare(
-        "SELECT id, operation_id AS operationId, test_case_revision_id AS testCaseRevisionId, assertion_id AS assertionId, kind, media_type AS mediaType, content_hash AS contentHash, byte_size AS byteSize, artifact_version_id AS artifactVersionId, redaction_profile AS redactionProfile, retention_class AS retentionClass, locator, metadata_json AS metadataJson, created_at AS createdAt FROM test_evidence WHERE test_run_id = ? ORDER BY created_at, id",
+        `SELECT evidence.id, operations.request_json AS operationRequestJson,
+                evidence.test_case_revision_id AS testCaseRevisionId,
+                evidence.assertion_id AS assertionId, evidence.kind,
+                evidence.media_type AS mediaType,
+                evidence.content_hash AS contentHash,
+                evidence.byte_size AS byteSize,
+                evidence.artifact_version_id AS artifactVersionId,
+                evidence.redaction_profile AS redactionProfile,
+                evidence.retention_class AS retentionClass, evidence.locator,
+                evidence.metadata_json AS metadataJson,
+                evidence.created_at AS createdAt
+           FROM test_evidence AS evidence
+           JOIN test_execution_operations AS operations
+             ON operations.id = evidence.operation_id
+          WHERE evidence.test_run_id = ?
+          ORDER BY evidence.created_at, evidence.id`,
       )
       .all(testRunId) as Array<Record<string, unknown>>;
     const defectRows = database
@@ -845,7 +1188,8 @@ export const openTestRuntime = (
         ? String(row.passAuthorityHash)
         : null,
       executions: executionRows.map((entry) => ({
-        id: String(entry.id),
+        id: parseJson<TestExecutionRequest>(String(entry.requestJson))
+          .operationId,
         state: String(
           entry.state,
         ) as TestRunView["executions"][number]["state"],
@@ -854,7 +1198,9 @@ export const openTestRuntime = (
       })),
       assertions: assertionRows.map((entry) => ({
         id: String(entry.id),
-        operationId: String(entry.operationId),
+        operationId: parseJson<TestExecutionRequest>(
+          String(entry.operationRequestJson),
+        ).operationId,
         testCaseRevisionId: String(entry.testCaseRevisionId),
         assertionId: String(entry.assertionId),
         required: Number(entry.required) === 1,
@@ -872,7 +1218,9 @@ export const openTestRuntime = (
       evidence: evidenceRows.map((entry) => ({
         id: String(entry.id),
         testRunId,
-        operationId: String(entry.operationId),
+        operationId: parseJson<TestExecutionRequest>(
+          String(entry.operationRequestJson),
+        ).operationId,
         testCaseRevisionId: entry.testCaseRevisionId
           ? String(entry.testCaseRevisionId)
           : null,
@@ -901,7 +1249,7 @@ export const openTestRuntime = (
         responsibility: parseJson<TestDefectResponsibility>(
           String(entry.responsibilityJson),
         ),
-        evidence: parseJson(String(entry.evidenceJson)),
+        evidence: parseJson<TestDefectEvidence>(String(entry.evidenceJson)),
         status: String(entry.status) as "open" | "closed",
         createdAt: String(entry.createdAt),
         closedAt: entry.closedAt ? String(entry.closedAt) : null,
@@ -1037,6 +1385,121 @@ export const openTestRuntime = (
         "A Test Run requires a non-empty frozen checklist with unique operation IDs.",
       );
     }
+    const derivedFixture = coveredRevisions[0]!.manifest.fixture;
+    if (
+      coveredRevisions.some(
+        (revision) =>
+          canonicalJson(revision.manifest.fixture) !==
+          canonicalJson(derivedFixture),
+      ) ||
+      canonicalJson({
+        ...input.fixture,
+        scriptHashes: sortedUnique(input.fixture.scriptHashes),
+      }) !== canonicalJson(derivedFixture)
+    ) {
+      throw new TestRuntimeError(
+        "TEST_FIXTURE_MANIFEST_CONFLICT",
+        "The Test Run fixture must be derived exactly from its frozen Test Case revisions.",
+      );
+    }
+    const derivedOperations = coveredRevisions
+      .flatMap((revision) => revision.manifest.executionOperations)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const operationById = new Map<string, (typeof derivedOperations)[number]>();
+    for (const operation of derivedOperations) {
+      const existing = operationById.get(operation.id);
+      if (existing && canonicalJson(existing) !== canonicalJson(operation)) {
+        throw new TestRuntimeError(
+          "TEST_EXECUTION_CHECKLIST_CONFLICT",
+          `Frozen Test Case revisions disagree about operation ${operation.id}.`,
+        );
+      }
+      operationById.set(operation.id, operation);
+    }
+    const canonicalDerivedOperations = [...operationById.values()].sort(
+      (left, right) => left.id.localeCompare(right.id),
+    );
+    const canonicalInputOperations = [...input.executionOperations].sort(
+      (left, right) => left.id.localeCompare(right.id),
+    );
+    if (
+      canonicalJson(canonicalInputOperations) !==
+      canonicalJson(canonicalDerivedOperations)
+    ) {
+      throw new TestRuntimeError(
+        "TEST_EXECUTION_CHECKLIST_CONFLICT",
+        "The Test Run operation checklist must be derived exactly from its frozen Test Case revisions.",
+      );
+    }
+    const fixtureAuthority = options.fixtureAuthority?.read(input.fixture.id);
+    if (
+      !fixtureAuthority ||
+      fixtureAuthority.fixtureId !== input.fixture.id ||
+      fixtureAuthority.companyDirectoryFingerprint !==
+        input.companyDirectoryFingerprint ||
+      canonicalJson(sortedUnique(fixtureAuthority.scriptHashes)) !==
+        canonicalJson(sortedUnique(input.fixture.scriptHashes)) ||
+      canonicalJson(sortedUnique(fixtureAuthority.adapterIds)) !==
+        canonicalJson(
+          sortedUnique(
+            input.executionOperations.map((entry) => entry.adapterId),
+          ),
+        )
+    ) {
+      throw new TestRuntimeError(
+        "TEST_FIXTURE_AUTHORITY_INVALID",
+        "The Test Run fixture and Company Directory fingerprint must resolve from trusted Runtime fixture authority.",
+      );
+    }
+    const tierRank = { low: 0, medium: 1, high: 2, critical: 3 } as const;
+    const rules = [...input.risk.policy.rules].sort((left, right) =>
+      left.factorId.localeCompare(right.factorId),
+    );
+    const factors = [...input.risk.factors]
+      .map((factor) => ({
+        ...factor,
+        evidenceRefs: sortedUnique(factor.evidenceRefs),
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const policyHash = sha256({
+      schemaVersion: 1,
+      revisionId: input.risk.policy.revisionId,
+      rules,
+    });
+    const computedTier = factors
+      .filter((factor) => factor.present)
+      .reduce<TestScopeRiskInput["computedTier"]>((tier, factor) => {
+        const rule = rules.find(
+          (candidate) => candidate.factorId === factor.id,
+        );
+        if (!rule) return tier;
+        return tierRank[rule.minimumTier] > tierRank[tier]
+          ? rule.minimumTier
+          : tier;
+      }, "low");
+    const riskInputHash = sha256({
+      schemaVersion: 1,
+      policyRevisionId: input.risk.policy.revisionId,
+      policyHash,
+      factors,
+      evidenceRefs: sortedUnique(input.risk.evidenceRefs),
+    });
+    if (
+      input.risk.schemaVersion !== 1 ||
+      input.risk.policy.hash !== policyHash ||
+      input.risk.inputHash !== riskInputHash ||
+      input.risk.computedTier !== computedTier ||
+      new Set(rules.map((rule) => rule.factorId)).size !== rules.length ||
+      new Set(factors.map((factor) => factor.id)).size !== factors.length ||
+      factors.some((factor) =>
+        factor.present ? factor.evidenceRefs.length === 0 : false,
+      )
+    ) {
+      throw new TestRuntimeError(
+        "TEST_SCOPE_RISK_INVALID",
+        "The Test scope risk input must carry the exact policy hash, deterministic factors, computed tier, and evidence.",
+      );
+    }
     const snapshot = database
       .prepare(
         "SELECT run_id AS runId, canonical_json AS canonicalJson FROM run_snapshot_revisions WHERE id = ?",
@@ -1089,14 +1552,24 @@ export const openTestRuntime = (
           readonly type: string;
         }
       | undefined;
+    const authoritativeBuild = (() => {
+      if (!options.artifacts?.inspect) return null;
+      try {
+        return options.artifacts.inspect(input.build.artifactVersionId).version;
+      } catch {
+        return null;
+      }
+    })();
     if (
       !build ||
       build.projectId !== input.projectId ||
       build.type !== "build" ||
       !["produced", "accepted"].includes(build.status) ||
       build.contentHash !== input.build.digest ||
-      build.producingRunId !== input.runId ||
-      build.snapshotRevisionId !== input.snapshotRevisionId
+      (authoritativeBuild?.producer.runId ?? build.producingRunId) !==
+        input.runId ||
+      (authoritativeBuild?.producer.snapshotRevisionId ??
+        build.snapshotRevisionId) !== input.snapshotRevisionId
     ) {
       throw new TestRuntimeError(
         "TEST_BUILD_AUTHORITY_INVALID",
@@ -1220,6 +1693,8 @@ export const openTestRuntime = (
       input.build.digest,
       input.executionProfile.hash,
       input.companyDirectoryFingerprint,
+      input.risk.policy.hash,
+      input.risk.inputHash,
       ...input.fixture.scriptHashes,
       ...input.executionOperations.map((operation) => operation.inputHash),
     ].forEach((value, index) =>
@@ -1245,6 +1720,12 @@ export const openTestRuntime = (
         left.id.localeCompare(right.id),
       ),
       capabilities: sortedUnique(input.capabilities),
+      risk: {
+        ...input.risk,
+        policy: { ...input.risk.policy, rules },
+        factors,
+        evidenceRefs: sortedUnique(input.risk.evidenceRefs),
+      },
       coverageHash: sha256(testCaseRevisions),
       integrationCoverage: {
         coverageId: authority.manifest.coverageId,
@@ -1374,10 +1855,14 @@ export const openTestRuntime = (
     request: TestExecutionRequest,
     fact: TestExecutionFact,
   ): void => {
-    if (fact.state === "succeeded" && fact.providerReceipt === undefined) {
+    if (
+      (fact.state === "succeeded" && fact.providerReceipt === undefined) ||
+      (["cancelled", "not-started"].includes(fact.state) &&
+        (fact.providerReceipt === undefined || !fact.evidenceRef?.trim()))
+    ) {
       throw new TestRuntimeError(
         "TEST_EXECUTION_RECEIPT_MISSING",
-        `Succeeded Test execution ${request.operationId} requires an exact terminal provider receipt.`,
+        `Terminal Test execution ${request.operationId} requires an exact provider receipt and evidence reference.`,
       );
     }
     let executionResult: TestExecutionResult | undefined;
@@ -1391,8 +1876,61 @@ export const openTestRuntime = (
       }
       executionResult = parsed.data;
     }
+    const run = readRun(request.testRunId);
+    const declaredOperation = run.manifest.executionOperations.find(
+      (operation) => operation.id === request.operationId,
+    );
+    if (fact.state === "succeeded" && declaredOperation?.kind === "cleanup") {
+      const receipt = TestCleanupReceiptSchema.safeParse(fact.providerReceipt);
+      const cleanupContracts = run.manifest.testCaseRevisions
+        .map((entry) => readCaseRevision(entry.id))
+        .filter(
+          (revision) =>
+            revision.manifest.cleanup.operationId === request.operationId,
+        )
+        .map((revision) => revision.manifest.cleanup);
+      const cleanup = cleanupContracts[0];
+      const expectedTargets = cleanup?.targets
+        .map((target) => ({ ...target, state: "absent" as const }))
+        .sort((left, right) => left.kind.localeCompare(right.kind));
+      const receiptTargets = receipt.success
+        ? [...receipt.data.targets].sort((left, right) =>
+            left.kind.localeCompare(right.kind),
+          )
+        : [];
+      const cleanupEvidence = executionResult?.evidence.filter(
+        (entry) => entry.kind === "cleanup",
+      );
+      if (
+        !receipt.success ||
+        !cleanup ||
+        cleanupContracts.some(
+          (candidate) => canonicalJson(candidate) !== canonicalJson(cleanup),
+        ) ||
+        receipt.data.fixtureId !== run.manifest.fixture.id ||
+        receipt.data.operationKey !== request.operationKey ||
+        receipt.data.rootFingerprint !== cleanup.rootFingerprint ||
+        canonicalJson(receiptTargets) !== canonicalJson(expectedTargets) ||
+        !cleanupEvidence ||
+        cleanupEvidence.length !== cleanupContracts.length ||
+        cleanupEvidence.some(
+          (entry) =>
+            entry.artifactVersionId !== receipt.data.artifactVersionId ||
+            entry.contentHash !== receipt.data.contentHash,
+        )
+      ) {
+        throw new TestRuntimeError(
+          "TEST_CLEANUP_FACT_INVALID",
+          "A cleanup operation requires an exact Runtime-owned terminal post-delete receipt and matching Artifact evidence for every frozen cleanup contract.",
+        );
+      }
+    }
     const now = clock().toISOString();
     const factHash = sha256(fact);
+    const storageId = executionStorageId(
+      request.testRunId,
+      request.operationId,
+    );
     const nextState =
       fact.state === "succeeded"
         ? "succeeded"
@@ -1403,166 +1941,215 @@ export const openTestRuntime = (
             : fact.state === "unknown"
               ? "unknown"
               : fact.state === "not-started"
-                ? "intent"
+                ? "not-started"
                 : "reconciling";
-    inTransaction(() => {
-      database
-        .prepare(
-          "INSERT OR IGNORE INTO test_execution_facts(id, operation_id, state, fact_json, fact_hash, evidence_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .run(
-          randomUUID(),
-          request.operationId,
-          fact.state,
-          canonicalJson(fact),
-          factHash,
-          fact.evidenceRef ?? null,
-          now,
-        );
-      database
-        .prepare(
-          "UPDATE test_execution_operations SET state = ?, fact_json = ?, fact_hash = ?, receipt_json = ?, receipt_hash = ?, updated_at = ? WHERE id = ? AND request_hash = ?",
-        )
-        .run(
-          nextState,
-          canonicalJson(fact),
-          factHash,
-          fact.providerReceipt === undefined
-            ? null
-            : canonicalJson(fact.providerReceipt),
-          fact.providerReceipt === undefined
-            ? null
-            : sha256(fact.providerReceipt),
-          now,
-          request.operationId,
-          request.requestHash,
-        );
-      if (executionResult) {
-        materializeExecutionResult(request, executionResult);
-      }
-      if (nextState === "failed") {
-        const failedRun = readRun(request.testRunId);
-        const firstRevision = failedRun.manifest.testCaseRevisions[0];
-        const firstAssertion = firstRevision
-          ? readCaseRevision(firstRevision.id).manifest.assertions[0]
-          : undefined;
-        if (!firstRevision) {
-          throw new TestRuntimeError(
-            "TEST_CASE_COVERAGE_INCOMPLETE",
-            "A failed Test execution cannot be attributed without frozen Test Case coverage.",
+    workerUnitOfWork({
+      commandId: `${request.operationKey}:fact:${factHash}`,
+      request: { request, factHash },
+      result: () => ({ operationId: request.operationId, state: nextState }),
+      operation: () => {
+        database
+          .prepare(
+            "INSERT OR IGNORE INTO test_execution_facts(id, operation_id, state, fact_json, fact_hash, evidence_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            nextId(),
+            storageId,
+            fact.state,
+            canonicalJson(fact),
+            factHash,
+            fact.evidenceRef ?? null,
+            now,
           );
-        }
-        const defectId = `test-defect:${request.operationId}`;
-        const responsibility: TestDefectResponsibility = {
-          kind: "unknown",
-          candidateWorkPackageVersionIds:
-            failedRun.manifest.integrationCoverage.packageAuthorities
-              .map((entry) => entry.workPackageVersionId)
-              .sort(),
-          reason:
-            "Terminal Test execution failed before responsibility could be uniquely proven.",
-        };
-        const evidence = {
-          operationId: request.operationId,
-          operationKey: request.operationKey,
-          requestHash: request.requestHash,
-          factHash,
-          evidenceRef: fact.evidenceRef ?? null,
-          providerReceiptHash:
+        database
+          .prepare(
+            "UPDATE test_execution_operations SET state = ?, fact_json = ?, fact_hash = ?, receipt_json = ?, receipt_hash = ?, updated_at = ? WHERE id = ? AND request_hash = ?",
+          )
+          .run(
+            nextState,
+            canonicalJson(fact),
+            factHash,
+            fact.providerReceipt === undefined
+              ? null
+              : canonicalJson(fact.providerReceipt),
             fact.providerReceipt === undefined
               ? null
               : sha256(fact.providerReceipt),
-        };
-        const insertedDefect = database
-          .prepare(
-            `INSERT OR IGNORE INTO test_defects(
+            now,
+            storageId,
+            request.requestHash,
+          );
+        if (executionResult) {
+          materializeExecutionResult(request, executionResult);
+        }
+        if (nextState === "failed") {
+          const failedRun = readRun(request.testRunId);
+          const firstRevision = failedRun.manifest.testCaseRevisions[0];
+          const firstAssertion = firstRevision
+            ? readCaseRevision(firstRevision.id).manifest.assertions[0]
+            : undefined;
+          if (!firstRevision) {
+            throw new TestRuntimeError(
+              "TEST_CASE_COVERAGE_INCOMPLETE",
+              "A failed Test execution cannot be attributed without frozen Test Case coverage.",
+            );
+          }
+          const defectId = `test-defect:${request.operationId}`;
+          const responsibility: TestDefectResponsibility = {
+            kind: "unknown",
+            candidateWorkPackageVersionIds:
+              failedRun.manifest.integrationCoverage.packageAuthorities
+                .map((entry) => entry.workPackageVersionId)
+                .sort(),
+            reason:
+              "Terminal Test execution failed before responsibility could be uniquely proven.",
+          };
+          const evidence: TestDefectEvidence = {
+            schemaVersion: 1,
+            kind: "execution",
+            operationId: request.operationId,
+            operationKey: request.operationKey,
+            requestHash: request.requestHash,
+            factHash,
+            evidenceRefs: [fact.evidenceRef ?? `execution-fact:${factHash}`],
+            providerReceiptHash:
+              fact.providerReceipt === undefined
+                ? null
+                : sha256(fact.providerReceipt),
+          };
+          const insertedDefect = database
+            .prepare(
+              `INSERT OR IGNORE INTO test_defects(
                id, test_run_id, test_case_revision_id, assertion_id,
                integration_generation_id, responsibility_json, evidence_json,
                status, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
-          )
-          .run(
-            defectId,
-            request.testRunId,
-            firstRevision.id,
-            firstAssertion?.id ?? null,
-            failedRun.manifest.integrationAuthority.generationId,
-            canonicalJson(responsibility),
-            canonicalJson(evidence),
-            now,
-          );
-        const obligationId = `test-obligation:${request.operationId}`;
-        database
-          .prepare(
-            `INSERT OR IGNORE INTO test_run_obligations(
+            )
+            .run(
+              defectId,
+              request.testRunId,
+              firstRevision.id,
+              firstAssertion?.id ?? null,
+              failedRun.manifest.integrationAuthority.generationId,
+              canonicalJson(responsibility),
+              canonicalJson(evidence),
+              now,
+            );
+          const obligationId = `test-obligation:${request.operationId}`;
+          database
+            .prepare(
+              `INSERT OR IGNORE INTO test_run_obligations(
                id, test_run_id, description, evidence_json, status, created_at
              ) VALUES (?, ?, ?, ?, 'open', ?)`,
-          )
-          .run(
-            obligationId,
-            request.testRunId,
-            "Resolve the terminal Test execution failure with fresh evidence and rerun the affected Test Case revision.",
-            canonicalJson(evidence),
-            now,
-          );
-        if (Number(insertedDefect.changes) === 1) {
-          appendEvent({
-            type: "test.defect.created",
-            projectId: failedRun.manifest.projectId,
-            runId: failedRun.manifest.runId,
-            nodeRunId: failedRun.manifest.nodeRunId,
-            testRunId: failedRun.id,
-            defectId,
-            payload: {
+            )
+            .run(
+              obligationId,
+              request.testRunId,
+              "Resolve the terminal Test execution failure with fresh evidence and rerun the affected Test Case revision.",
+              canonicalJson(evidence),
+              now,
+            );
+          if (Number(insertedDefect.changes) === 1) {
+            appendEvent({
+              type: "test.defect.created",
+              projectId: failedRun.manifest.projectId,
+              runId: failedRun.manifest.runId,
+              nodeRunId: failedRun.manifest.nodeRunId,
               testRunId: failedRun.id,
               defectId,
-              operationId: request.operationId,
-            },
-            timestamp: now,
-          });
+              payload: {
+                testRunId: failedRun.id,
+                defectId,
+                operationId: request.operationId,
+              },
+              timestamp: now,
+            });
+          }
         }
-      }
-      database
-        .prepare(
-          "UPDATE test_runs SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('passed', 'failed', 'blocked', 'cancelled')",
-        )
-        .run(
-          nextState === "succeeded"
-            ? "running"
-            : nextState === "intent"
-              ? "reconciling"
-              : nextState,
-          now,
-          request.testRunId,
-        );
-      const eventRun = readRun(request.testRunId);
-      appendEvent({
-        type:
-          nextState === "unknown"
-            ? "test.run.unknown"
-            : nextState === "reconciling" || nextState === "intent"
-              ? "test.run.reconciling"
-              : nextState === "failed"
-                ? "test.run.failed"
-                : nextState === "cancelled"
-                  ? "test.run.cancelled"
-                  : "test.run.started",
-        projectId: eventRun.manifest.projectId,
-        runId: eventRun.manifest.runId,
-        nodeRunId: eventRun.manifest.nodeRunId,
-        testRunId: eventRun.id,
-        payload: {
-          testRunId: eventRun.id,
-          state:
+        database
+          .prepare(
+            "UPDATE test_runs SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('passed', 'failed', 'blocked', 'cancelled')",
+          )
+          .run(
             nextState === "succeeded"
               ? "running"
-              : nextState === "intent"
+              : nextState === "not-started"
                 ? "reconciling"
                 : nextState,
-          operationId: request.operationId,
-        },
-        timestamp: now,
-      });
+            now,
+            request.testRunId,
+          );
+        const eventRun = readRun(request.testRunId);
+        appendEvent({
+          type:
+            nextState === "unknown"
+              ? "test.run.unknown"
+              : nextState === "reconciling" || nextState === "not-started"
+                ? "test.run.reconciling"
+                : nextState === "failed"
+                  ? "test.run.failed"
+                  : nextState === "cancelled"
+                    ? "test.run.cancelled"
+                    : "test.run.started",
+          projectId: eventRun.manifest.projectId,
+          runId: eventRun.manifest.runId,
+          nodeRunId: eventRun.manifest.nodeRunId,
+          testRunId: eventRun.id,
+          payload: {
+            testRunId: eventRun.id,
+            state:
+              nextState === "succeeded"
+                ? "running"
+                : nextState === "not-started"
+                  ? "reconciling"
+                  : nextState,
+            operationId: request.operationId,
+          },
+          timestamp: now,
+        });
+      },
+    });
+  };
+
+  const markExecutionDispatched = (request: TestExecutionRequest): void => {
+    const now = clock().toISOString();
+    workerUnitOfWork({
+      commandId: `${request.operationKey}:dispatch`,
+      request: { requestHash: request.requestHash, state: "running" },
+      result: () => ({ operationId: request.operationId, state: "running" }),
+      operation: () => {
+        const updated = database
+          .prepare(
+            `UPDATE test_execution_operations
+                SET state = 'running', updated_at = ?
+              WHERE id = ? AND request_hash = ? AND state IN ('intent', 'not-started')`,
+          )
+          .run(
+            now,
+            executionStorageId(request.testRunId, request.operationId),
+            request.requestHash,
+          );
+        if (updated.changes !== 1) {
+          throw new TestRuntimeError(
+            "TEST_EXECUTION_RECONCILIATION_REQUIRED",
+            `Test execution ${request.operationId} is not safe to dispatch.`,
+          );
+        }
+        const run = readRun(request.testRunId);
+        appendEvent({
+          type: "test.run.started",
+          projectId: run.manifest.projectId,
+          runId: run.manifest.runId,
+          nodeRunId: run.manifest.nodeRunId,
+          testRunId: run.id,
+          payload: {
+            testRunId: run.id,
+            state: "running",
+            operationId: request.operationId,
+          },
+          timestamp: now,
+        });
+      },
     });
   };
 
@@ -1580,7 +2167,10 @@ export const openTestRuntime = (
       .prepare(
         "SELECT request_hash AS requestHash, state, fact_json AS factJson FROM test_execution_operations WHERE id = ? OR operation_key = ?",
       )
-      .get(input.operationId, request.operationKey) as
+      .get(
+        executionStorageId(input.testRunId, input.operationId),
+        request.operationKey,
+      ) as
       | {
           readonly requestHash: string;
           readonly state: string;
@@ -1596,7 +2186,7 @@ export const openTestRuntime = (
       if (["succeeded", "failed", "cancelled"].includes(existing.state))
         return readRun(input.testRunId);
       const reconciledNotStarted =
-        existing.state === "intent" &&
+        existing.state === "not-started" &&
         existing.factJson !== null &&
         parseJson<TestExecutionFact>(existing.factJson).state === "not-started";
       if (!reconciledNotStarted)
@@ -1604,33 +2194,54 @@ export const openTestRuntime = (
           "TEST_EXECUTION_RECONCILIATION_REQUIRED",
           `Test execution ${input.operationId} must be reconciled before another effect can run.`,
         );
+      markExecutionDispatched(request);
       const fact = await input.adapter.execute(request);
       input.failureInjection?.("after-effect");
       persistFact(request, fact);
       return readRun(input.testRunId);
     }
     const now = clock().toISOString();
-    inTransaction(() => {
-      database
-        .prepare(
-          "INSERT INTO test_execution_operations(id, test_run_id, operation_key, request_json, request_hash, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'intent', ?, ?)",
-        )
-        .run(
-          input.operationId,
-          input.testRunId,
-          request.operationKey,
-          canonicalJson(request),
-          request.requestHash,
-          now,
-          now,
-        );
-      database
-        .prepare(
-          "UPDATE test_runs SET state = 'running', updated_at = ? WHERE id = ? AND state = 'scheduled'",
-        )
-        .run(now, input.testRunId);
+    workerUnitOfWork({
+      commandId: `${request.operationKey}:intent`,
+      request: { request },
+      result: () => ({ operationId: request.operationId, state: "intent" }),
+      operation: () => {
+        database
+          .prepare(
+            "INSERT INTO test_execution_operations(id, test_run_id, operation_key, request_json, request_hash, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'intent', ?, ?)",
+          )
+          .run(
+            executionStorageId(input.testRunId, input.operationId),
+            input.testRunId,
+            request.operationKey,
+            canonicalJson(request),
+            request.requestHash,
+            now,
+            now,
+          );
+        database
+          .prepare(
+            "UPDATE test_runs SET state = 'running', updated_at = ? WHERE id = ? AND state = 'scheduled'",
+          )
+          .run(now, input.testRunId);
+        const intentRun = readRun(input.testRunId);
+        appendEvent({
+          type: "test.run.started",
+          projectId: intentRun.manifest.projectId,
+          runId: intentRun.manifest.runId,
+          nodeRunId: intentRun.manifest.nodeRunId,
+          testRunId: intentRun.id,
+          payload: {
+            testRunId: intentRun.id,
+            state: "running",
+            operationId: request.operationId,
+          },
+          timestamp: now,
+        });
+      },
     });
     input.failureInjection?.("after-intent");
+    markExecutionDispatched(request);
     const fact = await input.adapter.execute(request);
     input.failureInjection?.("after-effect");
     persistFact(request, fact);
@@ -1643,9 +2254,10 @@ export const openTestRuntime = (
       .prepare(
         "SELECT request_json AS requestJson, state FROM test_execution_operations WHERE id = ? AND test_run_id = ?",
       )
-      .get(input.operationId, input.testRunId) as
-      | { readonly requestJson: string; readonly state: string }
-      | undefined;
+      .get(
+        executionStorageId(input.testRunId, input.operationId),
+        input.testRunId,
+      ) as { readonly requestJson: string; readonly state: string } | undefined;
     if (!row)
       throw new TestRuntimeError(
         "TEST_EXECUTION_NOT_FOUND",
@@ -1663,7 +2275,10 @@ export const openTestRuntime = (
       .prepare(
         "UPDATE test_execution_operations SET state = 'reconciling', updated_at = ? WHERE id = ?",
       )
-      .run(clock().toISOString(), input.operationId);
+      .run(
+        clock().toISOString(),
+        executionStorageId(input.testRunId, input.operationId),
+      );
     const fact = await input.adapter.reconcile(request);
     persistFact(request, fact);
     return readRun(input.testRunId);
@@ -1674,9 +2289,10 @@ export const openTestRuntime = (
       .prepare(
         "SELECT request_json AS requestJson, state FROM test_execution_operations WHERE id = ? AND test_run_id = ?",
       )
-      .get(input.operationId, input.testRunId) as
-      | { readonly requestJson: string; readonly state: string }
-      | undefined;
+      .get(
+        executionStorageId(input.testRunId, input.operationId),
+        input.testRunId,
+      ) as { readonly requestJson: string; readonly state: string } | undefined;
     if (!row)
       throw new TestRuntimeError(
         "TEST_EXECUTION_NOT_FOUND",
@@ -1691,10 +2307,214 @@ export const openTestRuntime = (
       request.input,
       input.adapter.id,
     );
-    const fact = input.adapter.cancel
-      ? await input.adapter.cancel(request)
-      : { state: "unknown" as const };
-    persistFact(request, fact);
+    const controlRequest = {
+      schemaVersion: 1 as const,
+      cancelOperationId: input.cancelOperationId,
+      operationId: request.operationId,
+      kind: input.kind ?? "cancel",
+      operationKey: `${request.operationKey}:${input.kind ?? "cancel"}:${input.cancelOperationId}`,
+      requestHash: sha256({
+        cancelOperationId: input.cancelOperationId,
+        kind: input.kind ?? "cancel",
+        operationKey: request.operationKey,
+      }),
+    };
+    const existing = database
+      .prepare(
+        `SELECT id, request_hash AS requestHash, state
+           FROM test_execution_control_operations
+          WHERE id = ? OR operation_key = ?`,
+      )
+      .get(input.cancelOperationId, controlRequest.operationKey) as
+      | {
+          readonly id: string;
+          readonly requestHash: string;
+          readonly state: string;
+        }
+      | undefined;
+    if (existing && existing.requestHash !== controlRequest.requestHash) {
+      throw new TestRuntimeError(
+        "TEST_CANCEL_CONFLICT",
+        `Test cancel operation ${input.cancelOperationId} already has different immutable input.`,
+      );
+    }
+    if (existing?.state === "cancelled") return readRun(input.testRunId);
+    if (!existing) {
+      const now = clock().toISOString();
+      workerUnitOfWork({
+        commandId: `${controlRequest.operationKey}:intent`,
+        request: controlRequest,
+        result: () => ({
+          cancelOperationId: input.cancelOperationId,
+          state: "intent",
+        }),
+        operation: () => {
+          database
+            .prepare(
+              `INSERT INTO test_execution_control_operations(
+                 id, operation_id, kind, operation_key, request_json,
+                 request_hash, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, 'intent', ?, ?)`,
+            )
+            .run(
+              input.cancelOperationId,
+              executionStorageId(input.testRunId, input.operationId),
+              input.kind ?? "cancel",
+              controlRequest.operationKey,
+              canonicalJson(controlRequest),
+              controlRequest.requestHash,
+              now,
+              now,
+            );
+          database
+            .prepare(
+              `UPDATE test_execution_operations SET state = 'reconciling', updated_at = ?
+                WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')`,
+            )
+            .run(now, executionStorageId(input.testRunId, input.operationId));
+          database
+            .prepare(
+              `UPDATE test_runs SET state = 'reconciling', updated_at = ?
+                WHERE id = ? AND state NOT IN ('passed', 'failed', 'blocked', 'cancelled')`,
+            )
+            .run(now, input.testRunId);
+          const cancelRun = readRun(input.testRunId);
+          appendEvent({
+            type: "test.run.reconciling",
+            projectId: cancelRun.manifest.projectId,
+            runId: cancelRun.manifest.runId,
+            nodeRunId: cancelRun.manifest.nodeRunId,
+            testRunId: cancelRun.id,
+            payload: {
+              testRunId: cancelRun.id,
+              state: "reconciling",
+              operationId: request.operationId,
+            },
+            timestamp: now,
+          });
+        },
+      });
+      input.failureInjection?.("after-cancel-intent");
+    }
+    const currentState = existing?.state ?? "intent";
+    const fact =
+      currentState === "not-started"
+        ? input.adapter.cancel
+          ? await input.adapter.cancel(request)
+          : ({ state: "unknown" } as const)
+        : existing
+          ? await input.adapter.reconcile(request)
+          : input.adapter.cancel
+            ? await input.adapter.cancel(request)
+            : ({ state: "unknown" } as const);
+    input.failureInjection?.("after-cancel-effect");
+    if (
+      ["cancelled", "not-started"].includes(fact.state) &&
+      (fact.providerReceipt === undefined || !fact.evidenceRef?.trim())
+    ) {
+      throw new TestRuntimeError(
+        "TEST_CANCEL_RECEIPT_MISSING",
+        `Test cancel operation ${input.cancelOperationId} requires an exact provider receipt and evidence reference.`,
+      );
+    }
+    const factHash = sha256(fact);
+    const nextControlState =
+      fact.state === "cancelled"
+        ? "cancelled"
+        : fact.state === "not-started"
+          ? "not-started"
+          : fact.state === "unknown"
+            ? "unknown"
+            : "reconciling";
+    const now = clock().toISOString();
+    workerUnitOfWork({
+      commandId: `${controlRequest.operationKey}:fact:${factHash}`,
+      request: { controlRequest, factHash },
+      result: () => ({
+        cancelOperationId: input.cancelOperationId,
+        state: nextControlState,
+      }),
+      operation: () => {
+        database
+          .prepare(
+            `UPDATE test_execution_control_operations
+                SET state = ?, fact_json = ?, fact_hash = ?, receipt_json = ?,
+                    receipt_hash = ?, updated_at = ?
+              WHERE id = ? AND request_hash = ?`,
+          )
+          .run(
+            nextControlState,
+            canonicalJson(fact),
+            factHash,
+            fact.providerReceipt === undefined
+              ? null
+              : canonicalJson(fact.providerReceipt),
+            fact.providerReceipt === undefined
+              ? null
+              : sha256(fact.providerReceipt),
+            now,
+            input.cancelOperationId,
+            controlRequest.requestHash,
+          );
+        database
+          .prepare(
+            `UPDATE test_execution_operations
+                SET state = ?, fact_json = ?, fact_hash = ?, receipt_json = ?,
+                    receipt_hash = ?, updated_at = ?
+              WHERE id = ? AND request_hash = ?`,
+          )
+          .run(
+            nextControlState === "cancelled"
+              ? "cancelled"
+              : nextControlState === "unknown"
+                ? "unknown"
+                : "reconciling",
+            canonicalJson(fact),
+            factHash,
+            fact.providerReceipt === undefined
+              ? null
+              : canonicalJson(fact.providerReceipt),
+            fact.providerReceipt === undefined
+              ? null
+              : sha256(fact.providerReceipt),
+            now,
+            executionStorageId(request.testRunId, request.operationId),
+            request.requestHash,
+          );
+        const nextRunState =
+          nextControlState === "cancelled" &&
+          (input.kind ?? "cancel") === "cancel"
+            ? "cancelled"
+            : nextControlState === "unknown"
+              ? "unknown"
+              : "reconciling";
+        database
+          .prepare(
+            `UPDATE test_runs SET state = ?, updated_at = ?
+              WHERE id = ? AND state NOT IN ('passed', 'failed', 'blocked', 'cancelled')`,
+          )
+          .run(nextRunState, now, input.testRunId);
+        const cancelRun = readRun(input.testRunId);
+        appendEvent({
+          type:
+            nextRunState === "cancelled"
+              ? "test.run.cancelled"
+              : nextRunState === "unknown"
+                ? "test.run.unknown"
+                : "test.run.reconciling",
+          projectId: cancelRun.manifest.projectId,
+          runId: cancelRun.manifest.runId,
+          nodeRunId: cancelRun.manifest.nodeRunId,
+          testRunId: cancelRun.id,
+          payload: {
+            testRunId: cancelRun.id,
+            state: nextRunState,
+            operationId: request.operationId,
+          },
+          timestamp: now,
+        });
+      },
+    });
     return readRun(input.testRunId);
   };
 
@@ -1708,7 +2528,7 @@ export const openTestRuntime = (
            FROM test_execution_operations
           WHERE id = ? AND test_run_id = ?`,
       )
-      .get(operationId, testRunId) as
+      .get(executionStorageId(testRunId, operationId), testRunId) as
       | { readonly state: string; readonly receiptHash: string | null }
       | undefined;
     if (
@@ -1875,7 +2695,7 @@ export const openTestRuntime = (
       .run(
         randomUUID(),
         input.testRunId,
-        input.operationId,
+        executionStorageId(input.testRunId, input.operationId),
         input.testCaseRevisionId,
         input.assertionId,
         1,
@@ -1937,6 +2757,45 @@ export const openTestRuntime = (
           `Evidence for assertion ${input.assertionId} must come from frozen Test operation ${declared?.operationId}.`,
         );
       }
+      const cleanup = readCaseRevision(input.testCaseRevisionId).manifest
+        .cleanup;
+      if (
+        input.kind === "cleanup" &&
+        (input.assertionId !== null ||
+          input.operationId !== cleanup.operationId ||
+          input.artifactVersionId === null)
+      ) {
+        throw new TestRuntimeError(
+          "TEST_CLEANUP_EVIDENCE_INVALID",
+          "Cleanup evidence must be produced by the frozen cleanup operation and resolve to a verified Artifact Version.",
+        );
+      }
+      if (input.kind === "cleanup") {
+        const operation = database
+          .prepare(
+            `SELECT receipt_json AS receiptJson
+               FROM test_execution_operations
+              WHERE id = ? AND test_run_id = ? AND state = 'succeeded'`,
+          )
+          .get(
+            executionStorageId(input.testRunId, input.operationId),
+            input.testRunId,
+          ) as { readonly receiptJson: string | null } | undefined;
+        const receipt = operation?.receiptJson
+          ? TestCleanupReceiptSchema.safeParse(parseJson(operation.receiptJson))
+          : undefined;
+        if (
+          !receipt?.success ||
+          receipt.data.artifactVersionId !== input.artifactVersionId ||
+          receipt.data.contentHash !== input.contentHash ||
+          receipt.data.rootFingerprint !== cleanup.rootFingerprint
+        ) {
+          throw new TestRuntimeError(
+            "TEST_CLEANUP_EVIDENCE_INVALID",
+            "Cleanup evidence must match the exact Runtime-owned terminal post-delete receipt.",
+          );
+        }
+      }
       const policy = readCaseRevision(input.testCaseRevisionId).manifest
         .evidencePolicy;
       if (
@@ -1997,42 +2856,33 @@ export const openTestRuntime = (
     const authoritativeContentRef = options.artifacts?.inspect
       ? authoritativeArtifact?.contentRef
       : artifact?.contentRef;
-    const cleanupMetadata = input.metadata as {
-      readonly verified?: unknown;
-      readonly rootFingerprint?: unknown;
-    } | null;
-    const validCleanupReceipt =
-      input.kind === "cleanup" &&
-      cleanupMetadata !== null &&
-      typeof cleanupMetadata === "object" &&
-      cleanupMetadata.verified === true &&
-      typeof cleanupMetadata.rootFingerprint === "string" &&
-      cleanupMetadata.rootFingerprint.length === 64;
+    const authoritativeProducer = authoritativeArtifact?.producer;
     if (
-      !validCleanupReceipt &&
-      (!artifact ||
-        artifact.projectId !== run.manifest.projectId ||
-        artifact.producingRunId !== run.manifest.runId ||
-        artifact.snapshotRevisionId !== run.manifest.snapshotRevisionId ||
-        !["produced", "accepted"].includes(artifact.status) ||
-        artifact.contentHash !== input.contentHash ||
-        Number(artifact.byteSize) !== input.byteSize ||
-        authoritativeContentRef !== input.locator ||
-        (options.artifacts !== undefined &&
-          (verifiedBytes === null ||
-            verifiedBytes.byteLength !== input.byteSize ||
-            createHash("sha256").update(verifiedBytes).digest("hex") !==
-              input.contentHash)))
+      !artifact ||
+      artifact.projectId !== run.manifest.projectId ||
+      (authoritativeProducer?.runId ?? artifact.producingRunId) !==
+        run.manifest.runId ||
+      (authoritativeProducer?.snapshotRevisionId ??
+        artifact.snapshotRevisionId) !== run.manifest.snapshotRevisionId ||
+      !["produced", "accepted"].includes(artifact.status) ||
+      artifact.contentHash !== input.contentHash ||
+      Number(artifact.byteSize) !== input.byteSize ||
+      authoritativeContentRef !== input.locator ||
+      (options.artifacts !== undefined &&
+        (verifiedBytes === null ||
+          verifiedBytes.byteLength !== input.byteSize ||
+          createHash("sha256").update(verifiedBytes).digest("hex") !==
+            input.contentHash))
     ) {
       throw new TestRuntimeError(
         "TEST_EVIDENCE_ARTIFACT_INVALID",
-        "Test evidence must resolve to an exact produced Artifact Version or a verified cleanup receipt.",
+        "Test evidence must resolve to an exact produced and verified Artifact Version.",
       );
     }
     const existing = database
       .prepare(
-        `SELECT test_run_id AS testRunId,
-                operation_id AS operationId,
+        `SELECT evidence.test_run_id AS testRunId,
+                operations.request_json AS operationRequestJson,
                 test_case_revision_id AS testCaseRevisionId,
                 assertion_id AS assertionId, kind, media_type AS mediaType,
                 content_hash AS contentHash, byte_size AS byteSize,
@@ -2040,12 +2890,15 @@ export const openTestRuntime = (
                 redaction_profile AS redactionProfile,
                 retention_class AS retentionClass, locator,
                 metadata_json AS metadataJson
-           FROM test_evidence WHERE id = ?`,
+           FROM test_evidence AS evidence
+           JOIN test_execution_operations AS operations
+             ON operations.id = evidence.operation_id
+          WHERE evidence.id = ?`,
       )
       .get(input.id) as
       | {
           readonly testRunId: string;
-          readonly operationId: string;
+          readonly operationRequestJson: string;
           readonly testCaseRevisionId: string | null;
           readonly assertionId: string | null;
           readonly kind: TestEvidence["kind"];
@@ -2063,7 +2916,9 @@ export const openTestRuntime = (
       const storedInput = {
         id: input.id,
         testRunId: existing.testRunId,
-        operationId: existing.operationId,
+        operationId: parseJson<TestExecutionRequest>(
+          existing.operationRequestJson,
+        ).operationId,
         testCaseRevisionId: existing.testCaseRevisionId,
         assertionId: existing.assertionId,
         kind: existing.kind,
@@ -2090,7 +2945,7 @@ export const openTestRuntime = (
       .run(
         input.id,
         input.testRunId,
-        input.operationId,
+        executionStorageId(input.testRunId, input.operationId),
         input.testCaseRevisionId,
         input.assertionId,
         input.kind,
@@ -2134,6 +2989,71 @@ export const openTestRuntime = (
     }
   };
 
+  const validateDefectResponsibility = (
+    run: TestRunView,
+    responsibility: TestDefectResponsibility,
+  ): void => {
+    const authority = options.integrationAuthority.readPassAuthority(
+      run.manifest.integrationAuthority.generationId,
+    );
+    const packages = new Map(
+      authority.manifest.packages.map((entry) => [
+        entry.workPackageVersionId,
+        entry.workPackageId,
+      ]),
+    );
+    const validateCandidates = (candidateIds: readonly string[]): void => {
+      if (
+        candidateIds.length === 0 ||
+        new Set(candidateIds).size !== candidateIds.length ||
+        candidateIds.some((candidateId) => !packages.has(candidateId))
+      ) {
+        throw new TestRuntimeError(
+          "TEST_DEFECT_RESPONSIBILITY_INVALID",
+          "Test defect responsibility candidates must be unique Work Package Versions frozen by the exact Integration Generation.",
+        );
+      }
+    };
+    switch (responsibility.kind) {
+      case "work-package":
+        if (
+          packages.get(responsibility.workPackageVersionId) !==
+          responsibility.workPackageId
+        ) {
+          throw new TestRuntimeError(
+            "TEST_DEFECT_RESPONSIBILITY_INVALID",
+            "Test defect Work Package responsibility must resolve from the exact Integration Generation lineage.",
+          );
+        }
+        return;
+      case "contract": {
+        validateCandidates(responsibility.candidateWorkPackageVersionIds);
+        const contract = authority.manifest.contractVersions.find(
+          (entry) =>
+            entry.id === responsibility.contractId &&
+            entry.version === responsibility.version &&
+            entry.producerApplicationId ===
+              responsibility.producerApplicationId &&
+            entry.consumerApplicationId ===
+              responsibility.consumerApplicationId,
+        );
+        if (!contract) {
+          throw new TestRuntimeError(
+            "TEST_DEFECT_RESPONSIBILITY_INVALID",
+            "Test defect Contract responsibility must resolve from the exact Integration Generation lineage.",
+          );
+        }
+        return;
+      }
+      case "aggregate":
+      case "unknown":
+        validateCandidates(responsibility.candidateWorkPackageVersionIds);
+        return;
+      case "ui-runtime-contract":
+        return;
+    }
+  };
+
   const recordDefect: TestRuntime["recordDefect"] = (input) => {
     const run = readRun(input.testRunId);
     const covered = run.manifest.testCaseRevisions.some(
@@ -2151,6 +3071,42 @@ export const openTestRuntime = (
         "A Test defect must bind a frozen Test Case revision and declared assertion in the Test Run.",
       );
     }
+    const evidence = TestDefectEvidenceSchema.safeParse(input.evidence);
+    const assertion =
+      input.assertionId === undefined
+        ? undefined
+        : run.assertions.find(
+            (entry) =>
+              entry.testCaseRevisionId === input.testCaseRevisionId &&
+              entry.assertionId === input.assertionId,
+          );
+    if (
+      !evidence.success ||
+      input.assertionId === undefined ||
+      !assertion ||
+      (assertion.uiStatus === "passed" &&
+        assertion.runtimeStatus === "passed") ||
+      evidence.data.kind !== "assertion" ||
+      evidence.data.assertion.testCaseRevisionId !== input.testCaseRevisionId ||
+      evidence.data.assertion.assertionId !== input.assertionId ||
+      evidence.data.assertion.resultHash !== assertion.resultHash ||
+      evidence.data.evidenceRefs.some(
+        (reference) =>
+          !run.evidence.some(
+            (entry) =>
+              (entry.id === reference ||
+                entry.artifactVersionId === reference) &&
+              entry.testCaseRevisionId === input.testCaseRevisionId &&
+              entry.assertionId === input.assertionId,
+          ),
+      )
+    ) {
+      throw new TestRuntimeError(
+        "TEST_DEFECT_EVIDENCE_INVALID",
+        "A Test defect requires versioned evidence bound to one non-passing frozen assertion result.",
+      );
+    }
+    validateDefectResponsibility(run, input.responsibility);
     const existing = database
       .prepare(
         "SELECT test_run_id AS testRunId, test_case_revision_id AS testCaseRevisionId, assertion_id AS assertionId, responsibility_json AS responsibilityJson, evidence_json AS evidenceJson FROM test_defects WHERE id = ?",
@@ -2218,41 +3174,60 @@ export const openTestRuntime = (
         "TEST_DEFECT_NOT_FOUND",
         `Test defect ${input.defectId} was not found.`,
       );
-    const resolution = input.resolution as {
-      readonly evidenceRefs?: unknown;
-    } | null;
-    if (
-      resolution === null ||
-      typeof resolution !== "object" ||
-      !Array.isArray(resolution.evidenceRefs) ||
-      resolution.evidenceRefs.length === 0 ||
-      resolution.evidenceRefs.some(
-        (reference) => typeof reference !== "string" || reference.trim() === "",
-      )
-    ) {
+    const parsedResolution = TestDefectResolutionSchema.safeParse(
+      input.resolution,
+    );
+    if (!parsedResolution.success) {
       throw new TestRuntimeError(
         "TEST_DEFECT_RESOLUTION_INVALID",
-        "Closing a Test defect requires non-empty passing evidence references.",
+        "Closing a Test defect requires a versioned resolution bound to a fresh PASS Test Run.",
       );
     }
-    const unresolvedEvidenceReference = resolution.evidenceRefs.find(
-      (reference) =>
-        !database
-          .prepare(
-            `SELECT 1 AS present FROM test_evidence
-              WHERE test_run_id = ? AND (id = ? OR artifact_version_id = ?)
-              LIMIT 1`,
-          )
-          .get(row.testRunId, reference, reference),
-    );
-    if (unresolvedEvidenceReference) {
+    const resolution = parsedResolution.data;
+    if (resolution.resolvedByTestRunId === row.testRunId) {
       throw new TestRuntimeError(
         "TEST_DEFECT_RESOLUTION_EVIDENCE_INVALID",
-        `Test defect resolution evidence ${unresolvedEvidenceReference} is not immutable evidence from the same Test Run.`,
+        "A Test defect cannot be resolved by evidence from the failed Test Run itself.",
+      );
+    }
+    const rerun = readRun(resolution.resolvedByTestRunId);
+    const original = readRun(row.testRunId);
+    const invalidRerun =
+      rerun.manifest.projectId !== original.manifest.projectId ||
+      rerun.state !== "passed" ||
+      rerun.passAuthorityHash !== resolution.passAuthorityHash ||
+      authorityHashFor(rerun) !== resolution.passAuthorityHash;
+    const invalidAssertion = resolution.assertions.some((entry) => {
+      const assertion = rerun.assertions.find(
+        (candidate) =>
+          candidate.testCaseRevisionId === entry.testCaseRevisionId &&
+          candidate.assertionId === entry.assertionId,
+      );
+      return (
+        !assertion ||
+        assertion.uiStatus !== "passed" ||
+        assertion.runtimeStatus !== "passed" ||
+        assertion.resultHash !== entry.resultHash ||
+        entry.evidenceRefs.some(
+          (reference) =>
+            !rerun.evidence.some(
+              (evidence) =>
+                (evidence.id === reference ||
+                  evidence.artifactVersionId === reference) &&
+                evidence.testCaseRevisionId === entry.testCaseRevisionId &&
+                evidence.assertionId === entry.assertionId,
+            ),
+        )
+      );
+    });
+    if (invalidRerun || invalidAssertion) {
+      throw new TestRuntimeError(
+        "TEST_DEFECT_RESOLUTION_EVIDENCE_INVALID",
+        "Test defect resolution must match paired passing assertions and immutable evidence from the exact fresh PASS Test Run authority.",
       );
     }
     const now = clock().toISOString();
-    const resolutionHash = sha256(input.resolution);
+    const resolutionHash = sha256(resolution);
     const existingResolution = database
       .prepare(
         "SELECT defect_id AS defectId, resolution_hash AS resolutionHash FROM test_defect_resolutions WHERE id = ?",
@@ -2279,7 +3254,7 @@ export const openTestRuntime = (
         .run(
           input.resolutionId,
           input.defectId,
-          canonicalJson(input.resolution),
+          canonicalJson(resolution),
           resolutionHash,
           now,
         );
@@ -2551,8 +3526,8 @@ export const openTestRuntime = (
           (evidence) =>
             evidence.testCaseRevisionId === entry.id &&
             evidence.kind === "cleanup" &&
-            (evidence.metadata as { readonly verified?: unknown } | null)
-              ?.verified === true,
+            evidence.operationId === revision.manifest.cleanup.operationId &&
+            evidence.artifactVersionId !== null,
         )
       );
     });
@@ -2574,7 +3549,7 @@ export const openTestRuntime = (
                 AND facts.fact_hash = operations.fact_hash
               WHERE operations.id = ? AND operations.test_run_id = ?`,
           )
-          .get(operation.id, testRunId) as
+          .get(executionStorageId(testRunId, operation.id), testRunId) as
           | {
               readonly state: string;
               readonly receiptHash: string | null;
@@ -2683,6 +3658,7 @@ export const openTestRuntime = (
       fixture: run.manifest.fixture,
       environment: run.manifest.environment,
       capabilities: run.manifest.capabilities,
+      risk: run.manifest.risk,
       assertionResultHashes: run.assertions
         .map((entry) => entry.resultHash)
         .sort(),

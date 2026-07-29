@@ -402,6 +402,10 @@ export interface CompanyRuntimeSupervisorOptions {
   readonly execArgs?: readonly string[];
   readonly runtimeEntry?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  readonly environmentForLaunch?: (input: {
+    readonly companyDir: string;
+    readonly restartCount: number;
+  }) => Readonly<Record<string, string | undefined>>;
   readonly shutdownTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
   readonly onLog?: (line: string) => void;
@@ -518,6 +522,10 @@ export const createCompanyRuntimeSupervisor = (
     };
     const address = companyRuntimeAddress(companyDir);
     const token = randomBytes(32).toString("base64url");
+    const launchEnvironment = options.environmentForLaunch?.({
+      companyDir,
+      restartCount,
+    });
     const child = spawn(
       executable,
       [...(options.execArgs ?? []), runtimeEntry],
@@ -525,6 +533,7 @@ export const createCompanyRuntimeSupervisor = (
         env: {
           ...process.env,
           ...options.environment,
+          ...launchEnvironment,
           ELECTRON_RUN_AS_NODE: "1",
           SANDCASTLE_COMPANY_DIR: companyDir,
           SANDCASTLE_COMPANY_RUNTIME_ADDRESS: address,

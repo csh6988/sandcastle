@@ -645,6 +645,12 @@ describe("Artifact Registry", () => {
       if (finalized.status !== "succeeded") return;
       assert.equal(finalized.value.integrityStatus, "verified");
       assert.ok(finalized.effectIds.length > 0);
+      assert.deepEqual(
+        database.artifactRegistry
+          .listVersionsForRun("run-1")
+          .map((version) => version.id),
+        [finalized.value.id],
+      );
       const events = database.events.readAfter(0, 100);
       const artifactEvents = events.filter((event) =>
         event.type.startsWith("artifact."),

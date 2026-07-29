@@ -32,7 +32,10 @@ import type { ExecutionAdapter } from "./adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "./adapters/interactionExecutionAdapter.js";
 import type { ReviewerExecutionAdapter } from "./review/reviewerExecution.js";
 import type { IntegrationValidationProvider } from "./integration/integrationValidationExecutor.js";
-import type { TestExecutionAdapter } from "./testing/testRuntime.js";
+import type {
+  TestExecutionAdapter,
+  TestFixtureAuthority,
+} from "./testing/testRuntime.js";
 import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
@@ -50,7 +53,14 @@ export interface CompanyRuntimeServerOptions {
     readonly database: import("node:sqlite").DatabaseSync;
     readonly tests: import("./testing/testRuntime.js").TestRuntime;
     readonly artifacts: import("./artifactRegistry.js").ArtifactRegistry;
+    readonly commandRegistry: import("./commandRegistry.js").CompanyCommandRegistry;
   }) => readonly TestExecutionAdapter[];
+  readonly testBuildFixture?: {
+    readonly clock: () => Date;
+    readonly nextId: () => string;
+    readonly fixtureAuthority: TestFixtureAuthority;
+    readonly setup: (database: CompanyDatabase) => void | Promise<void>;
+  };
   readonly agentHost?: LocalAgentHost;
   readonly principal?: ActorRef;
   readonly consumerId?: string;
@@ -82,6 +92,14 @@ export const reconcileCompanyRuntimeStartup = async (
   await database.codeReviewNodeHandler.reconcilePending();
   await database.integrationNodeHandler.reconcilePending();
   await database.testNodeHandler.reconcilePending();
+};
+
+export const prepareCompanyRuntimeStartup = async (
+  database: CompanyDatabase,
+  setup?: (database: CompanyDatabase) => void | Promise<void>,
+): Promise<void> => {
+  await setup?.(database);
+  await reconcileCompanyRuntimeStartup(database);
 };
 
 const tokenDigest = (token: string): Buffer =>
@@ -133,6 +151,21 @@ export const startCompanyRuntimeServer = async (
     database = openCompanyDatabase(options.companyDir, {
       executionAdapter: options.executionAdapter,
       agentHost: options.agentHost,
+      ...(options.testBuildFixture
+        ? {
+            clock: options.testBuildFixture.clock,
+            testRuntime: {
+              fixtureAuthority: options.testBuildFixture.fixtureAuthority,
+              nextId: options.testBuildFixture.nextId,
+              ...(options.testExecutionAdapterFactory
+                ? {
+                    executionAdapterFactory:
+                      options.testExecutionAdapterFactory,
+                  }
+                : {}),
+            },
+          }
+        : {}),
       ...(options.interactionExecutionAdapter
         ? { interactionExecutionAdapter: options.interactionExecutionAdapter }
         : {}),
@@ -150,7 +183,7 @@ export const startCompanyRuntimeServer = async (
             },
           }
         : {}),
-      ...(options.testExecutionAdapterFactory
+      ...(!options.testBuildFixture && options.testExecutionAdapterFactory
         ? {
             testRuntime: {
               executionAdapterFactory: options.testExecutionAdapterFactory,
@@ -163,7 +196,10 @@ export const startCompanyRuntimeServer = async (
     throw error;
   }
   try {
-    await reconcileCompanyRuntimeStartup(database);
+    await prepareCompanyRuntimeStartup(
+      database,
+      options.testBuildFixture?.setup,
+    );
   } catch (error) {
     database.close();
     releaseLock();

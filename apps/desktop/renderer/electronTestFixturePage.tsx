@@ -177,9 +177,7 @@ export function ElectronTestFixturePage(props: {
           command: props.route.runCommand,
         }),
       );
-      const view = await waitForState(
-        status === "idle" ? ["reconciling", "running", "passed"] : ["passed"],
-      );
+      const view = await waitForState(["reconciling", "running", "passed"]);
       setStatus(view.state === "passed" ? "pass" : "ready");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

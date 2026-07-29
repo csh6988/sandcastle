@@ -28,6 +28,79 @@ const facts: readonly AdapterExecutionFact[] = [
 ];
 
 describe("Scripted Execution Adapter", () => {
+  it("derives a terminal legacy fact from a trusted per-execution test hook", async () => {
+    const adapter = createScriptedExecutionAdapter({
+      onExecute: () => ({
+        kind: "succeeded" as const,
+        structuredResult: { commits: [{ sha: "a".repeat(40) }] },
+      }),
+    });
+
+    assert.deepEqual(
+      await adapter.execute({ node: { id: "development" } } as never),
+      {
+        kind: "succeeded",
+        structuredResult: { commits: [{ sha: "a".repeat(40) }] },
+      },
+    );
+  });
+
+  it("allows a trusted per-execution hook to persist a dynamic terminal fact", async () => {
+    const submitted: AdapterExecutionFact[] = [];
+    const sink: ExecutionEventSink = {
+      record: async (fact) => {
+        submitted.push(fact);
+        return {
+          status: "accepted",
+          executionFactId: `persisted:${fact.factId}`,
+          effectIds: ["source-import-1"],
+          canonicalPayloadHash: "b".repeat(64),
+        };
+      },
+    };
+    const adapter = createScriptedExecutionAdapter({
+      onExecute: async (input, eventSink) => {
+        assert.ok(eventSink);
+        assert.ok(input.request);
+        const fact: AdapterExecutionFact = {
+          adapterSchemaVersion: 1,
+          factId: `${input.request.operationKey}:completed`,
+          ordinal: 1,
+          kind: "completed",
+          schemaVersion: 1,
+          payload: { structuredResult: { commits: [{ sha: "c".repeat(40) }] } },
+          evidenceRefs: ["fixture:private-branch-tip"],
+        };
+        const receipt = await eventSink.record(fact);
+        return {
+          operationKey: input.request.operationKey,
+          terminalExecutionFactId: receipt.executionFactId,
+          status: "succeeded" as const,
+          evidenceRefs: fact.evidenceRefs,
+        };
+      },
+    });
+    const request = {
+      operationKey: "node-attempt:dynamic-1",
+    };
+
+    const completion = await adapter.execute(
+      { node: { id: "development" }, request } as never,
+      sink,
+    );
+
+    assert.equal(submitted.length, 1);
+    assert.deepEqual(completion, {
+      operationKey: request.operationKey,
+      terminalExecutionFactId: `${request.operationKey}:completed`.replace(
+        /^/,
+        "persisted:",
+      ),
+      status: "succeeded",
+      evidenceRefs: ["fixture:private-branch-tip"],
+    });
+  });
+
   it("submits only Adapter Execution Facts and returns the persisted terminal receipt", async () => {
     const submitted: AdapterExecutionFact[] = [];
     const sink: ExecutionEventSink = {

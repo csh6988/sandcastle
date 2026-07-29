@@ -655,7 +655,7 @@ An immutable revision of a **Test case** that freezes its requirement and Work P
 _Avoid_: editing a Test case in place, treating a fixture change as the same revision, deleting an assertion to hide a failure
 
 **Test run**:
-One recorded execution of one or more **Test cases** against a declared build, Company Directory, **Execution Profile**, and Runtime fixture. It preserves the environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status so a result can be replayed or compared without relying on memory or a manually refreshed page.
+One recorded execution of one or more **Test cases** against a declared build, Company Directory, **Execution Profile**, and Runtime fixture. It preserves the deterministic risk policy and result, environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status so a result can be replayed or compared without relying on memory or a manually refreshed page.
 _Avoid_: "QA session" (too informal), "smoke test" (only one possible suite), treating a green UI assertion as the authoritative Runtime result
 
 **Test evidence**:

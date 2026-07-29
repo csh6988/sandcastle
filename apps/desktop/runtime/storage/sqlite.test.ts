@@ -2367,6 +2367,7 @@ describe("Test authority schema migration", () => {
       "test_run_case_revisions",
       "test_execution_operations",
       "test_execution_facts",
+      "test_execution_control_operations",
       "test_assertion_results",
       "test_evidence",
       "test_defects",
@@ -2394,11 +2395,14 @@ describe("Test authority schema migration", () => {
         "test_assertion_results_immutable_update",
         "test_case_revisions_immutable_delete",
         "test_case_revisions_immutable_update",
+        "test_cases_immutable_delete",
+        "test_cases_immutable_update",
         "test_defect_resolutions_immutable_delete",
         "test_defect_resolutions_immutable_update",
         "test_defects_immutable_delete",
         "test_evidence_immutable_delete",
         "test_evidence_immutable_update",
+        "test_execution_control_operations_immutable_delete",
         "test_execution_facts_immutable_delete",
         "test_execution_facts_immutable_update",
         "test_execution_operations_immutable_delete",
@@ -2407,6 +2411,26 @@ describe("Test authority schema migration", () => {
         "test_run_obligations_immutable_delete",
         "test_runs_immutable_delete",
       ],
+    );
+    database.exec(`
+      INSERT INTO projects(id, company_id, name, goal, status, created_at)
+      VALUES ('test-schema-project', 'company', 'Schema', 'Verify immutability', 'active', '2026-07-29T00:00:00.000Z');
+      INSERT INTO test_cases(id, project_id, created_at)
+      VALUES ('test-schema-case', 'test-schema-project', '2026-07-29T00:00:00.000Z');
+    `);
+    assert.throws(
+      () =>
+        database
+          .prepare("UPDATE test_cases SET project_id = ? WHERE id = ?")
+          .run("test-schema-project", "test-schema-case"),
+      /Test Case identity is immutable/,
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare("DELETE FROM test_cases WHERE id = ?")
+          .run("test-schema-case"),
+      /Test Case identity is immutable/,
     );
     database.close();
   });

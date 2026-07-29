@@ -9,8 +9,9 @@ import {
   encodeElectronTestFixtureRoute,
   readElectronTestFixtureRoute,
 } from "./electronTestFixturePage.js";
+import type { ElectronTestFixtureRoute } from "./electronTestFixturePage.js";
 
-const fixtureRoute = {
+const fixtureRoute: ElectronTestFixtureRoute = {
   schemaVersion: 1 as const,
   restoreOnLoad: false,
   testRunId: "test:run-1:test-node-1",
@@ -44,13 +45,32 @@ const fixtureRoute = {
           input: { commandId: "fixture-test-run-create" },
           inputHash: "b".repeat(64),
         },
+        {
+          id: "cleanup-operation",
+          kind: "cleanup" as const,
+          adapterId: "scripted-execution",
+          input: {
+            fixtureId: "fixture-1",
+            rootFingerprint: "3".repeat(64),
+          },
+          inputHash: "4".repeat(64),
+        },
       ],
       evidencePolicy: {
         retentionClass: "durable" as const,
         redactionProfile: "fixture-redacted",
         requiredKinds: ["ui", "runtime", "cleanup"],
       },
-      cleanup: { policy: "always", required: true },
+      cleanup: {
+        policy: "always",
+        required: true,
+        operationId: "cleanup-operation",
+        rootFingerprint: "3".repeat(64),
+        targets: [
+          { kind: "repository" as const, pathFingerprint: "5".repeat(64) },
+          { kind: "worktree" as const, pathFingerprint: "6".repeat(64) },
+        ],
+      },
     },
   },
   runCommandId: "fixture-test-run-create",
@@ -89,10 +109,43 @@ const fixtureRoute = {
           input: { commandId: "fixture-test-run-create" },
           inputHash: "b".repeat(64),
         },
+        {
+          id: "cleanup-operation",
+          kind: "cleanup" as const,
+          adapterId: "scripted-execution",
+          input: {
+            fixtureId: "fixture-1",
+            rootFingerprint: "3".repeat(64),
+          },
+          inputHash: "4".repeat(64),
+        },
       ],
       clock: { instant: "2026-07-29T00:00:00.000Z", seed: "fixture-seed" },
       environment: { platform: "darwin", architecture: "arm64" },
       capabilities: ["electron", "runtime-query"],
+      risk: {
+        schemaVersion: 1 as const,
+        policy: {
+          revisionId: "fixture-risk-r1",
+          rules: [
+            {
+              factorId: "electron-runtime",
+              minimumTier: "high" as const,
+            },
+          ],
+          hash: "7".repeat(64),
+        },
+        factors: [
+          {
+            id: "electron-runtime",
+            present: true,
+            evidenceRefs: ["test-case:fixture-case-1-r1"],
+          },
+        ],
+        computedTier: "high" as const,
+        evidenceRefs: ["test-case:fixture-case-1-r1"],
+        inputHash: "8".repeat(64),
+      },
     },
   },
 };
@@ -112,7 +165,7 @@ describe("Electron Test fixture renderer page", () => {
     const bridge = {
       query: async () => {
         queryCount += 1;
-        const passed = queryCount >= 2;
+        const passed = queryCount >= 3;
         return {
           view: {
             id: fixtureRoute.testRunId,
@@ -198,6 +251,10 @@ describe("Electron Test fixture renderer page", () => {
     assert.equal(dom.window.document.title, "Sandcastle T17 Fixture — ready");
 
     await act(async () => button.click());
+    assert.equal(button.textContent, "Complete Test Run");
+    assert.equal(dom.window.document.title, "Sandcastle T17 Fixture — ready");
+
+    await act(async () => button.click());
     assert.equal(button.textContent, "PASS");
     assert.equal(button.disabled, true);
     assert.equal(dom.window.document.title, "Sandcastle T17 Fixture — pass");
@@ -205,6 +262,8 @@ describe("Electron Test fixture renderer page", () => {
       executions.map((entry) => entry.type),
       [
         "test.case-revision.register",
+        "test.run.create",
+        "ack-runtime-events",
         "test.run.create",
         "ack-runtime-events",
         "test.run.create",

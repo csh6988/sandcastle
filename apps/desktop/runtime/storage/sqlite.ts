@@ -302,10 +302,15 @@ export const openCompanyDatabase = (
     };
     readonly testRuntime?: {
       readonly executionAdapters?: readonly TestExecutionAdapter[];
+      readonly fixtureAuthority?: Parameters<
+        typeof openTestRuntime
+      >[1]["fixtureAuthority"];
+      readonly nextId?: () => string;
       readonly executionAdapterFactory?: (input: {
         readonly database: DatabaseSync;
         readonly tests: TestRuntime;
         readonly artifacts: ArtifactRegistry;
+        readonly commandRegistry: CompanyCommandRegistry;
       }) => readonly TestExecutionAdapter[];
     };
     readonly productReviewRuntime?: {
@@ -488,16 +493,14 @@ export const openCompanyDatabase = (
     integrationAuthority: integrations,
     artifacts: artifactRegistry,
     events,
+    ...(options.testRuntime?.fixtureAuthority
+      ? { fixtureAuthority: options.testRuntime.fixtureAuthority }
+      : {}),
+    ...(options.testRuntime?.nextId
+      ? { nextId: options.testRuntime.nextId }
+      : {}),
     ...(options.clock ? { clock: options.clock } : {}),
   });
-  const testExecutionAdapters = [
-    ...(options.testRuntime?.executionAdapters ?? []),
-    ...(options.testRuntime?.executionAdapterFactory?.({
-      database,
-      tests: testRuns,
-      artifacts: artifactRegistry,
-    }) ?? []),
-  ];
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -528,6 +531,15 @@ export const openCompanyDatabase = (
     integrations,
     testRuns,
   );
+  const testExecutionAdapters = [
+    ...(options.testRuntime?.executionAdapters ?? []),
+    ...(options.testRuntime?.executionAdapterFactory?.({
+      database,
+      tests: testRuns,
+      artifacts: artifactRegistry,
+      commandRegistry,
+    }) ?? []),
+  ];
   const codeReviewNodeHandler = openCodeReviewNodeHandler(database, {
     events,
     commandRegistry,
@@ -587,6 +599,7 @@ export const openCompanyDatabase = (
   pipelineRuntime.registerTestCancellationDispatcher(async (input) => {
     await testNodeHandler.cancelPending(
       `test:${input.runId}:${input.nodeRunId}`,
+      input.action,
     );
   });
   workspaces.reconcile();

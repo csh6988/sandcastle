@@ -2181,9 +2181,13 @@ export const openArtifactRegistry = (
       .prepare(
         `SELECT id FROM artifact_versions
           WHERE producing_run_id = ?
+             OR (
+               producing_run_id IS NULL
+               AND json_extract(producer_context_json, '$.runId') = ?
+             )
           ORDER BY version, id`,
       )
-      .all(runId) as Array<{ readonly id: string }>;
+      .all(runId, runId) as Array<{ readonly id: string }>;
     return rows.map((row) => readVersion(row.id));
   };
 

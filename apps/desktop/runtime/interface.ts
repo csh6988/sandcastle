@@ -1079,14 +1079,56 @@ export type IntegrationGenerationView = z.infer<
   typeof IntegrationGenerationViewSchema
 >;
 
-const JsonPayloadSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
-  z.null(),
-  z.array(z.unknown()),
-  z.record(z.unknown()),
-]);
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
+export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number().finite(),
+    z.boolean(),
+    z.null(),
+    z.array(JsonValueSchema),
+    z.record(JsonValueSchema),
+  ]),
+);
+
+const TestScopeRiskInputSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    policy: z
+      .object({
+        revisionId: z.string().trim().min(1),
+        rules: z.array(
+          z
+            .object({
+              factorId: z.string().trim().min(1),
+              minimumTier: z.enum(["low", "medium", "high", "critical"]),
+            })
+            .strict(),
+        ),
+        hash: Sha256Schema,
+      })
+      .strict(),
+    factors: z.array(
+      z
+        .object({
+          id: z.string().trim().min(1),
+          present: z.boolean(),
+          evidenceRefs: z.array(z.string().trim().min(1)),
+        })
+        .strict(),
+    ),
+    computedTier: z.enum(["low", "medium", "high", "critical"]),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+    inputHash: Sha256Schema,
+  })
+  .strict();
 
 const TestCaseRevisionManifestInputSchema = z
   .object({
@@ -1109,7 +1151,7 @@ const TestCaseRevisionManifestInputSchema = z
           id: z.string().trim().min(1),
           kind: z.string().trim().min(1),
           target: z.string().trim().min(1),
-          input: JsonPayloadSchema.optional(),
+          input: JsonValueSchema.optional(),
         })
         .strict(),
     ),
@@ -1121,13 +1163,13 @@ const TestCaseRevisionManifestInputSchema = z
           ui: z
             .object({
               kind: z.string().trim().min(1),
-              expected: JsonPayloadSchema,
+              expected: JsonValueSchema,
             })
             .strict(),
           runtime: z
             .object({
               kind: z.string().trim().min(1),
-              expected: JsonPayloadSchema,
+              expected: JsonValueSchema,
             })
             .strict(),
         })
@@ -1144,9 +1186,15 @@ const TestCaseRevisionManifestInputSchema = z
         z
           .object({
             id: z.string().trim().min(1),
-            kind: z.enum(["runtime", "contract", "build", "electron"]),
+            kind: z.enum([
+              "runtime",
+              "contract",
+              "build",
+              "electron",
+              "cleanup",
+            ]),
             adapterId: z.string().trim().min(1),
-            input: JsonPayloadSchema,
+            input: JsonValueSchema,
             inputHash: Sha256Schema,
           })
           .strict(),
@@ -1160,7 +1208,20 @@ const TestCaseRevisionManifestInputSchema = z
       })
       .strict(),
     cleanup: z
-      .object({ policy: z.string().trim().min(1), required: z.boolean() })
+      .object({
+        policy: z.string().trim().min(1),
+        required: z.boolean(),
+        operationId: z.string().trim().min(1),
+        rootFingerprint: Sha256Schema,
+        targets: z.array(
+          z
+            .object({
+              kind: z.enum(["repository", "worktree"]),
+              pathFingerprint: Sha256Schema,
+            })
+            .strict(),
+        ),
+      })
       .strict(),
   })
   .strict();
@@ -1216,9 +1277,15 @@ const TestRunManifestInputSchema = z
         z
           .object({
             id: z.string().trim().min(1),
-            kind: z.enum(["runtime", "contract", "build", "electron"]),
+            kind: z.enum([
+              "runtime",
+              "contract",
+              "build",
+              "electron",
+              "cleanup",
+            ]),
             adapterId: z.string().trim().min(1),
-            input: JsonPayloadSchema,
+            input: JsonValueSchema,
             inputHash: Sha256Schema,
           })
           .strict(),
@@ -1232,6 +1299,7 @@ const TestRunManifestInputSchema = z
       .strict(),
     environment: z.record(z.string()),
     capabilities: z.array(z.string().trim().min(1)),
+    risk: TestScopeRiskInputSchema,
   })
   .strict();
 
@@ -1290,6 +1358,55 @@ const TestDefectResponsibilitySchema = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
+
+const TestDefectEvidenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      kind: z.literal("assertion"),
+      assertion: z
+        .object({
+          testCaseRevisionId: z.string().trim().min(1),
+          assertionId: z.string().trim().min(1),
+          resultHash: Sha256Schema,
+        })
+        .strict(),
+      evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+    })
+    .strict(),
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      kind: z.literal("execution"),
+      operationId: z.string().trim().min(1),
+      operationKey: z.string().trim().min(1),
+      requestHash: Sha256Schema,
+      factHash: Sha256Schema,
+      evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+      providerReceiptHash: Sha256Schema.nullable(),
+    })
+    .strict(),
+]);
+
+const TestDefectResolutionSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    resolvedByTestRunId: z.string().trim().min(1),
+    passAuthorityHash: Sha256Schema,
+    assertions: z
+      .array(
+        z
+          .object({
+            testCaseRevisionId: z.string().trim().min(1),
+            assertionId: z.string().trim().min(1),
+            resultHash: Sha256Schema,
+            evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
 
 export const TestCaseRevisionViewSchema = z
   .object({
@@ -1362,6 +1479,7 @@ export const TestRunViewSchema = z
             "intent",
             "running",
             "reconciling",
+            "not-started",
             "unknown",
             "succeeded",
             "failed",
@@ -1425,7 +1543,7 @@ export const TestRunViewSchema = z
           assertionId: z.string().trim().min(1).nullable(),
           integrationGenerationId: z.string().trim().min(1),
           responsibility: TestDefectResponsibilitySchema,
-          evidence: z.unknown(),
+          evidence: TestDefectEvidenceSchema,
           status: z.enum(["open", "closed"]),
           createdAt: z.string().datetime(),
           closedAt: z.string().datetime().nullable(),
@@ -1464,6 +1582,7 @@ export const TestPassAuthorityViewSchema = z
     fixture: TestRunManifestInputSchema.shape.fixture,
     environment: TestRunManifestInputSchema.shape.environment,
     capabilities: TestRunManifestInputSchema.shape.capabilities,
+    risk: TestRunManifestInputSchema.shape.risk,
     assertionResultHashes: z.array(Sha256Schema),
     evidence: z.array(
       z
@@ -4352,7 +4471,7 @@ export const TestDefectRecordEnvelopeCommandSchema = z
     testCaseRevisionId: z.string().trim().min(1),
     assertionId: z.string().trim().min(1).optional(),
     responsibility: TestDefectResponsibilitySchema,
-    evidence: z.unknown(),
+    evidence: TestDefectEvidenceSchema,
   })
   .strict();
 
@@ -4361,11 +4480,7 @@ export const TestDefectCloseEnvelopeCommandSchema = z
     type: z.literal("test.defect.close"),
     defectId: z.string().trim().min(1),
     resolutionId: z.string().trim().min(1),
-    resolution: z
-      .object({
-        evidenceRefs: z.array(z.string().trim().min(1)).min(1),
-      })
-      .strict(),
+    resolution: TestDefectResolutionSchema,
   })
   .strict();
 

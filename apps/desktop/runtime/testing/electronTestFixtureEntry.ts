@@ -1,13 +1,31 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { startCompanyRuntimeServer } from "../server.js";
-import { createScriptedExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "../adapters/interactionExecutionAdapter.js";
 import type { AdapterExecutionFact } from "../execution/contract.js";
-import { loadElectronTestFixtureConfig } from "./electronTestFixture.js";
+import type { ArtifactVersionView } from "../artifactRegistry.js";
+import type { CompanyCommandRegistry } from "../commandRegistry.js";
+import {
+  loadElectronTestFixtureConfig,
+  normalizeTestEvidenceLocator,
+  verifyTestEvidenceFile,
+} from "./electronTestFixture.js";
 import {
   createElectronTestExecutionAdapter,
   readAcknowledgedElectronTestView,
 } from "./electronTestExecutionAdapter.js";
+import {
+  createIntegrationAuthorityFixture,
+  createIntegrationAuthorityFixtureRuntimeOptions,
+  type IntegrationAuthorityFixtureResult,
+} from "./integrationAuthorityFixture.js";
 import type {
   TestExecutionRequest,
   TestExecutionResult,
@@ -17,6 +35,48 @@ const requiredEnvironment = (name: string): string => {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required environment variable ${name}.`);
   return value;
+};
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(canonicalize(value));
+
+const sha256 = (value: string | Buffer): string =>
+  createHash("sha256").update(value).digest("hex");
+
+const repeatableIdFactory = (seed: string): (() => string) => {
+  let sequence = 0;
+  return () => {
+    sequence += 1;
+    const value = sha256(`${seed}:${sequence}`).slice(0, 32).split("");
+    value[12] = "4";
+    value[16] = ((Number.parseInt(value[16]!, 16) & 0x3) | 0x8).toString(16);
+    return `${value.slice(0, 8).join("")}-${value.slice(8, 12).join("")}-${value.slice(12, 16).join("")}-${value.slice(16, 20).join("")}-${value.slice(20).join("")}`;
+  };
+};
+
+const requireSucceeded = <Value>(
+  result:
+    | { readonly status: "succeeded"; readonly value: Value }
+    | {
+        readonly status: "rejected";
+        readonly error: { readonly code: string; readonly message: string };
+      },
+): Value => {
+  if (result.status === "rejected") {
+    throw new Error(`${result.error.code}: ${result.error.message}`);
+  }
+  return result.value;
 };
 
 const scriptedInteractionAdapter = (
@@ -79,14 +139,37 @@ const scriptedInteractionAdapter = (
   reconcile: async () => ({ status: "unknown", evidenceRefs: [] }),
 });
 
+type FixtureEvidenceDescriptor = {
+  readonly id: string;
+  readonly testCaseRevisionId: string;
+  readonly assertionId: string | null;
+  readonly kind: TestExecutionResult["evidence"][number]["kind"];
+  readonly artifactType: string;
+  readonly mediaType: string;
+  readonly logicalName: string;
+  readonly locator: string;
+  readonly contentHash: string;
+  readonly byteSize: number;
+  readonly redactionProfile: string;
+  readonly retentionClass: "transient" | "standard" | "durable";
+  readonly metadata: unknown;
+};
+
 type FixtureExecutionInput = {
   readonly schemaVersion: 1;
   readonly fixtureId: string;
+  readonly action: "electron-assertion" | "cleanup";
   readonly testCaseRevisionId: string;
-  readonly assertionId: string;
-  readonly correlationCommandId: string;
-  readonly evidence: TestExecutionResult["evidence"];
-  readonly cleanupEvidence: TestExecutionResult["evidence"][number];
+  readonly assertionId: string | null;
+  readonly correlationCommandId?: string;
+  readonly evidence: readonly FixtureEvidenceDescriptor[];
+  readonly cleanup?: {
+    readonly rootFingerprint: string;
+    readonly targets: readonly {
+      readonly kind: "repository" | "worktree";
+      readonly pathFingerprint: string;
+    }[];
+  };
 };
 
 const fixtureExecutionInput = (
@@ -99,20 +182,117 @@ const fixtureExecutionInput = (
     typeof value !== "object" ||
     value.schemaVersion !== 1 ||
     value.fixtureId !== fixtureId ||
+    !["electron-assertion", "cleanup"].includes(String(value.action)) ||
     typeof value.testCaseRevisionId !== "string" ||
-    typeof value.assertionId !== "string" ||
-    typeof value.correlationCommandId !== "string" ||
-    !Array.isArray(value.evidence) ||
-    !value.cleanupEvidence
+    !Array.isArray(value.evidence)
   ) {
     throw new Error("Electron Test operation input is invalid.");
   }
   return value as FixtureExecutionInput;
 };
 
+const registerEvidence = (input: {
+  readonly descriptor: FixtureEvidenceDescriptor;
+  readonly evidenceDirectory: string;
+  readonly operationKey: string;
+  readonly seeded: IntegrationAuthorityFixtureResult;
+  readonly commandRegistry: CompanyCommandRegistry;
+}): TestExecutionResult["evidence"][number] => {
+  const locator = normalizeTestEvidenceLocator(input.descriptor.locator);
+  if (locator !== input.descriptor.locator) {
+    throw new Error("Electron Test evidence locator is not canonical.");
+  }
+  verifyTestEvidenceFile({
+    evidenceDirectory: input.evidenceDirectory,
+    locator,
+    contentHash: input.descriptor.contentHash,
+    byteSize: input.descriptor.byteSize,
+  });
+  const bytes = readFileSync(join(input.evidenceDirectory, locator));
+  const registration = requireSucceeded(
+    input.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: `${input.operationKey}:artifact:${input.descriptor.id}:register`,
+      actor: {
+        type: "runtime-worker",
+        id: "electron-test-fixture",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "electron-test-fixture-execution",
+      expectedRevision: 0,
+      command: {
+        type: "artifact.version.register",
+        projectId: input.seeded.projectId,
+        artifactType: input.descriptor.artifactType,
+        artifactSchemaVersion: "1",
+        logicalName: input.descriptor.logicalName,
+        content: {
+          kind: "managed-file",
+          encoding: "base64",
+          data: bytes.toString("base64"),
+          mediaType: input.descriptor.mediaType,
+        },
+        producer: {
+          projectId: input.seeded.projectId,
+          runId: input.seeded.runId,
+          nodeRunId: input.seeded.testNodeRunId,
+          nodeAttemptId: input.seeded.testNodeAttemptId,
+          snapshotRevisionId: input.seeded.snapshotRevisionId,
+          aiMemberId: input.seeded.testOwnerAiMemberId,
+          positionId: input.seeded.testOwnerPositionId,
+          sessionId: input.seeded.testSessionId,
+        },
+        inputVersionIds: [],
+      },
+    }),
+  );
+  const artifact = requireSucceeded(
+    input.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: `${input.operationKey}:artifact:${input.descriptor.id}:finalize`,
+      actor: {
+        type: "runtime-worker",
+        id: "electron-test-fixture",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "electron-test-fixture-execution",
+      expectedRevision: 0,
+      command: {
+        type: "artifact.version.finalize",
+        registrationId: registration.registrationId,
+      },
+    }),
+  ) as ArtifactVersionView;
+  if (
+    artifact.contentHash !== input.descriptor.contentHash ||
+    artifact.byteSize !== input.descriptor.byteSize
+  ) {
+    throw new Error(
+      "Runtime-managed Artifact does not match the frozen evidence descriptor.",
+    );
+  }
+  return {
+    id: input.descriptor.id,
+    testCaseRevisionId: input.descriptor.testCaseRevisionId,
+    assertionId: input.descriptor.assertionId,
+    kind: input.descriptor.kind,
+    mediaType: input.descriptor.mediaType,
+    contentHash: artifact.contentHash,
+    byteSize: artifact.byteSize,
+    artifactVersionId: artifact.id,
+    redactionProfile: input.descriptor.redactionProfile,
+    retentionClass: input.descriptor.retentionClass,
+    locator: artifact.contentRef,
+    metadata: input.descriptor.metadata,
+  };
+};
+
 const main = async (): Promise<void> => {
   const config = loadElectronTestFixtureConfig({
     configPath: requiredEnvironment("SANDCASTLE_ELECTRON_TEST_FIXTURE_CONFIG"),
+    authorizationClaimPath: requiredEnvironment(
+      "SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION_CLAIM",
+    ),
     authorization: requiredEnvironment(
       "SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION",
     ),
@@ -120,13 +300,6 @@ const main = async (): Promise<void> => {
       requiredEnvironment("SANDCASTLE_ELECTRON_TEST_FIXTURE_PACKAGED") === "1",
     entrypoint: "electron-test-fixture",
   });
-  const executionScript = JSON.parse(
-    readFileSync(
-      config.adapters.find((adapter) => adapter.id === "scripted-execution")!
-        .scriptPath,
-      "utf8",
-    ),
-  ) as { readonly structuredResult?: unknown };
   const interactionScript = JSON.parse(
     readFileSync(
       config.adapters.find((adapter) => adapter.id === "scripted-interaction")!
@@ -134,6 +307,30 @@ const main = async (): Promise<void> => {
       "utf8",
     ),
   ) as { readonly response?: string };
+  const fixtureInput = {
+    companyDirectory: config.companyDirectory,
+    companyDirectoryFingerprint: config.companyDirectoryFingerprint,
+    fixtureId: config.fixtureId,
+    repositoryDirectory: config.repositoryDirectory,
+    worktreeDirectory: config.worktreeDirectory,
+    fakeClock: config.fakeClock,
+    repeatableIdSeed: config.repeatableIdSeed,
+  };
+  const fixtureRuntimeOptions =
+    createIntegrationAuthorityFixtureRuntimeOptions(fixtureInput);
+  const setupReceiptPath = join(
+    config.evidenceDirectory,
+    "runtime",
+    "setup-authority.json",
+  );
+  let seeded: IntegrationAuthorityFixtureResult | undefined;
+  const cleanupReceipts = new Map<string, unknown>();
+  const requireSeeded = (): IntegrationAuthorityFixtureResult => {
+    if (!seeded) {
+      throw new Error("Electron Test Runtime setup authority is unavailable.");
+    }
+    return seeded;
+  };
   const runtime = await startCompanyRuntimeServer({
     address: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_ADDRESS"),
     companyDir: config.companyDirectory,
@@ -144,22 +341,188 @@ const main = async (): Promise<void> => {
       id: "electron-test-fixture",
       authenticatedBy: "local-session",
     },
-    executionAdapter: createScriptedExecutionAdapter({
-      defaultFact: {
-        kind: "succeeded",
-        structuredResult: executionScript.structuredResult ?? {
-          fixtureId: config.fixtureId,
-        },
-      },
-    }),
+    executionAdapter: fixtureRuntimeOptions.executionAdapter,
+    reviewerExecutionAdapter: fixtureRuntimeOptions.reviewerExecutionAdapter,
+    integrationValidationProvider:
+      fixtureRuntimeOptions.integrationValidationProvider,
     interactionExecutionAdapter: scriptedInteractionAdapter(
       interactionScript.response ?? "fixture interaction completed",
     ),
-    testExecutionAdapterFactory: ({ database, tests }) => [
+    testBuildFixture: {
+      clock: fixtureRuntimeOptions.clock,
+      nextId: repeatableIdFactory(config.repeatableIdSeed),
+      fixtureAuthority: {
+        read: (fixtureId) => {
+          if (fixtureId !== config.fixtureId) {
+            throw new Error(
+              "Electron Test fixture identity is not allowlisted.",
+            );
+          }
+          return {
+            fixtureId: config.fixtureId,
+            companyDirectoryFingerprint: config.companyDirectoryFingerprint,
+            scriptHashes: Object.values(config.scriptHashes).sort(),
+            adapterIds: ["scripted-execution"],
+          };
+        },
+      },
+      setup: async (database) => {
+        if (existsSync(setupReceiptPath)) {
+          const receipt = JSON.parse(
+            readFileSync(setupReceiptPath, "utf8"),
+          ) as {
+            readonly schemaVersion: number;
+            readonly fixtureId: string;
+            readonly rootFingerprint: string;
+            readonly companyDirectoryFingerprint: string;
+            readonly seeded: IntegrationAuthorityFixtureResult;
+          };
+          if (
+            receipt.schemaVersion !== 1 ||
+            receipt.fixtureId !== config.fixtureId ||
+            receipt.rootFingerprint !== config.rootFingerprint ||
+            receipt.companyDirectoryFingerprint !==
+              config.companyDirectoryFingerprint
+          ) {
+            throw new Error("Electron Test setup receipt identity is invalid.");
+          }
+          const authority = database.integrations.readPassAuthority(
+            receipt.seeded.integrationAuthority.id,
+          );
+          if (
+            canonicalJson(authority) !==
+            canonicalJson(receipt.seeded.integrationAuthority)
+          ) {
+            throw new Error(
+              "Electron Test setup receipt does not match Runtime authority.",
+            );
+          }
+          seeded = receipt.seeded;
+          return;
+        }
+        seeded = await createIntegrationAuthorityFixture({
+          ...fixtureInput,
+          database,
+        });
+        mkdirSync(join(config.evidenceDirectory, "runtime"), {
+          recursive: true,
+          mode: 0o700,
+        });
+        writeFileSync(
+          setupReceiptPath,
+          JSON.stringify({
+            schemaVersion: 1,
+            fixtureId: config.fixtureId,
+            rootFingerprint: config.rootFingerprint,
+            companyDirectoryFingerprint: config.companyDirectoryFingerprint,
+            seeded,
+          }),
+          { flag: "wx", mode: 0o600 },
+        );
+        if ((statSync(setupReceiptPath).mode & 0o777) !== 0o600) {
+          throw new Error("Electron Test setup receipt must be mode 0600.");
+        }
+      },
+    },
+    testExecutionAdapterFactory: ({ database, tests, commandRegistry }) => [
       createElectronTestExecutionAdapter({
         fixtureId: config.fixtureId,
         terminalResult: (request) => {
           const operation = fixtureExecutionInput(request, config.fixtureId);
+          const currentSeed = requireSeeded();
+          if (operation.action === "cleanup") {
+            if (
+              operation.assertionId !== null ||
+              !operation.cleanup ||
+              operation.cleanup.rootFingerprint !== config.rootFingerprint ||
+              canonicalJson(operation.cleanup.targets) !==
+                canonicalJson(
+                  config.cleanupTargets.map((target) => ({
+                    kind: target.kind,
+                    pathFingerprint: target.pathFingerprint,
+                  })),
+                ) ||
+              config.cleanupTargets.some((target) => existsSync(target.path)) ||
+              operation.evidence.length !== 1 ||
+              operation.evidence[0]?.kind !== "cleanup"
+            ) {
+              throw new Error(
+                "Electron Test cleanup operation lacks exact post-delete authority.",
+              );
+            }
+            const descriptor = operation.evidence[0];
+            verifyTestEvidenceFile({
+              evidenceDirectory: config.evidenceDirectory,
+              locator: descriptor.locator,
+              contentHash: descriptor.contentHash,
+              byteSize: descriptor.byteSize,
+            });
+            const cleanupSource = JSON.parse(
+              readFileSync(
+                join(config.evidenceDirectory, descriptor.locator),
+                "utf8",
+              ),
+            );
+            const expectedCleanupSource = {
+              schemaVersion: 1,
+              fixtureId: config.fixtureId,
+              rootFingerprint: config.rootFingerprint,
+              targets: config.cleanupTargets.map((target) => ({
+                kind: target.kind,
+                pathFingerprint: target.pathFingerprint,
+                state: "absent" as const,
+              })),
+            };
+            if (
+              canonicalJson(cleanupSource) !==
+              canonicalJson(expectedCleanupSource)
+            ) {
+              throw new Error(
+                "Electron Test cleanup evidence does not match the frozen post-delete receipt.",
+              );
+            }
+            const evidence = registerEvidence({
+              descriptor,
+              evidenceDirectory: config.evidenceDirectory,
+              operationKey: request.operationKey,
+              seeded: currentSeed,
+              commandRegistry,
+            });
+            const receipt = {
+              schemaVersion: 1 as const,
+              kind: "cleanup" as const,
+              receiptId: `${request.operationKey}:cleanup-receipt`,
+              fixtureId: config.fixtureId,
+              operationKey: request.operationKey,
+              rootFingerprint: config.rootFingerprint,
+              targets: expectedCleanupSource.targets,
+              artifactVersionId: evidence.artifactVersionId!,
+              contentHash: evidence.contentHash,
+            };
+            cleanupReceipts.set(request.operationKey, receipt);
+            return {
+              schemaVersion: 1 as const,
+              assertions: [],
+              evidence: [evidence],
+            };
+          }
+          if (
+            typeof operation.assertionId !== "string" ||
+            typeof operation.correlationCommandId !== "string"
+          ) {
+            throw new Error(
+              "Electron Test assertion operation is missing correlation identity.",
+            );
+          }
+          const evidence = operation.evidence.map((descriptor) =>
+            registerEvidence({
+              descriptor,
+              evidenceDirectory: config.evidenceDirectory,
+              operationKey: request.operationKey,
+              seeded: currentSeed,
+              commandRegistry,
+            }),
+          );
           const run = tests.inspect(request.testRunId);
           const event = (
             database
@@ -207,15 +570,22 @@ const main = async (): Promise<void> => {
                   nodeRunId: run.manifest.nodeRunId,
                   nodeAttemptId: run.manifest.nodeAttemptId,
                   sessionId: run.manifest.sessionId,
-                  artifactVersionIds: operation.evidence
+                  artifactVersionIds: evidence
                     .map((entry) => entry.artifactVersionId)
                     .filter((id): id is string => id !== null),
                 },
               },
             ],
-            evidence: [...operation.evidence, operation.cleanupEvidence],
+            evidence,
           };
         },
+        terminalReceipt: (request) =>
+          cleanupReceipts.get(request.operationKey) ?? {
+            schemaVersion: 1,
+            fixtureId: config.fixtureId,
+            operationKey: request.operationKey,
+            status: "succeeded",
+          },
       }),
     ],
   });
