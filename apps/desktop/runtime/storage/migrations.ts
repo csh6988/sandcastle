@@ -4879,7 +4879,7 @@ const migrations: readonly CompanyMigration[] = [
             request_json TEXT NOT NULL,
             request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
             state TEXT NOT NULL CHECK (
-              state IN ('intent', 'running', 'reconciling', 'unknown', 'succeeded', 'failed', 'cancelled')
+              state IN ('intent', 'running', 'reconciling', 'not-started', 'unknown', 'succeeded', 'failed', 'cancelled')
             ),
             fact_json TEXT,
             fact_hash TEXT CHECK (fact_hash IS NULL OR length(fact_hash) = 64),
@@ -4899,6 +4899,24 @@ const migrations: readonly CompanyMigration[] = [
             evidence_ref TEXT,
             created_at TEXT NOT NULL,
             UNIQUE (operation_id, fact_hash)
+          ) STRICT;
+
+          CREATE TABLE test_execution_control_operations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES test_execution_operations(id),
+            kind TEXT NOT NULL CHECK (kind IN ('pause', 'cancel')),
+            operation_key TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            state TEXT NOT NULL CHECK (
+              state IN ('intent', 'reconciling', 'not-started', 'unknown', 'cancelled')
+            ),
+            fact_json TEXT,
+            fact_hash TEXT CHECK (fact_hash IS NULL OR length(fact_hash) = 64),
+            receipt_json TEXT,
+            receipt_hash TEXT CHECK (receipt_hash IS NULL OR length(receipt_hash) = 64),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
           ) STRICT;
 
           CREATE TABLE test_assertion_results (
@@ -4969,12 +4987,15 @@ const migrations: readonly CompanyMigration[] = [
           CREATE INDEX test_runs_run_idx ON test_runs(run_id, created_at, id);
           CREATE INDEX test_runs_state_idx ON test_runs(state, updated_at, id);
           CREATE INDEX test_execution_operations_state_idx ON test_execution_operations(state, updated_at, operation_key);
+          CREATE INDEX test_execution_control_operations_state_idx ON test_execution_control_operations(state, updated_at, operation_key);
           CREATE INDEX test_evidence_run_idx ON test_evidence(test_run_id, test_case_revision_id, assertion_id, id);
           CREATE INDEX test_defects_run_idx ON test_defects(test_run_id, status, created_at, id);
           CREATE INDEX test_run_obligations_run_idx ON test_run_obligations(test_run_id, status, created_at, id);
 
           CREATE TRIGGER test_case_revisions_immutable_update BEFORE UPDATE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
           CREATE TRIGGER test_case_revisions_immutable_delete BEFORE DELETE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
+          CREATE TRIGGER test_cases_immutable_update BEFORE UPDATE ON test_cases BEGIN SELECT RAISE(ABORT, 'Test Case identity is immutable'); END;
+          CREATE TRIGGER test_cases_immutable_delete BEFORE DELETE ON test_cases BEGIN SELECT RAISE(ABORT, 'Test Case identity is immutable'); END;
           CREATE TRIGGER test_runs_identity_update BEFORE UPDATE ON test_runs
           WHEN NEW.id <> OLD.id OR NEW.request_id <> OLD.request_id OR NEW.project_id <> OLD.project_id
             OR NEW.run_id <> OLD.run_id OR NEW.snapshot_revision_id <> OLD.snapshot_revision_id
@@ -5007,6 +5028,18 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TRIGGER test_execution_operations_immutable_delete BEFORE DELETE ON test_execution_operations BEGIN SELECT RAISE(ABORT, 'Test execution evidence is immutable'); END;
           CREATE TRIGGER test_execution_facts_immutable_update BEFORE UPDATE ON test_execution_facts BEGIN SELECT RAISE(ABORT, 'Test execution fact is immutable'); END;
           CREATE TRIGGER test_execution_facts_immutable_delete BEFORE DELETE ON test_execution_facts BEGIN SELECT RAISE(ABORT, 'Test execution fact is immutable'); END;
+          CREATE TRIGGER test_execution_control_operations_identity_update BEFORE UPDATE ON test_execution_control_operations
+          WHEN NEW.id <> OLD.id OR NEW.operation_id <> OLD.operation_id OR NEW.kind <> OLD.kind
+            OR NEW.operation_key <> OLD.operation_key OR NEW.request_json <> OLD.request_json
+            OR NEW.request_hash <> OLD.request_hash OR NEW.created_at <> OLD.created_at
+          BEGIN SELECT RAISE(ABORT, 'Test execution control intent is immutable'); END;
+          CREATE TRIGGER test_execution_control_operations_terminal_update BEFORE UPDATE ON test_execution_control_operations
+          WHEN OLD.state = 'cancelled' AND (
+            NEW.state IS NOT OLD.state OR NEW.fact_json IS NOT OLD.fact_json OR NEW.fact_hash IS NOT OLD.fact_hash
+            OR NEW.receipt_json IS NOT OLD.receipt_json OR NEW.receipt_hash IS NOT OLD.receipt_hash
+            OR NEW.updated_at IS NOT OLD.updated_at
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test execution control operation is immutable'); END;
+          CREATE TRIGGER test_execution_control_operations_immutable_delete BEFORE DELETE ON test_execution_control_operations BEGIN SELECT RAISE(ABORT, 'Test execution control evidence is immutable'); END;
           CREATE TRIGGER test_assertion_results_immutable_update BEFORE UPDATE ON test_assertion_results BEGIN SELECT RAISE(ABORT, 'Test assertion result is immutable'); END;
           CREATE TRIGGER test_assertion_results_immutable_delete BEFORE DELETE ON test_assertion_results BEGIN SELECT RAISE(ABORT, 'Test assertion result is immutable'); END;
           CREATE TRIGGER test_evidence_immutable_update BEFORE UPDATE ON test_evidence BEGIN SELECT RAISE(ABORT, 'Test evidence is immutable'); END;

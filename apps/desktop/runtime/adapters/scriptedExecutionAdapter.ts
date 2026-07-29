@@ -107,7 +107,10 @@ export interface ScriptedExecutionAdapterOptions {
   readonly script?: Readonly<Record<string, readonly ExecutionFact[]>>;
   readonly facts?: Readonly<Record<string, readonly AdapterExecutionFact[]>>;
   readonly defaultFact?: ExecutionFact;
-  readonly onExecute?: (input: ExecutionAdapterInput) => void;
+  readonly onExecute?: (
+    input: ExecutionAdapterInput,
+    sink?: ExecutionEventSink,
+  ) => unknown | Promise<unknown>;
 }
 
 export const createScriptedExecutionAdapter = (
@@ -136,7 +139,24 @@ export const createScriptedExecutionAdapter = (
       enforceNoSideEffects: false,
     },
     execute: async (input, sink) => {
-      options.onExecute?.(input);
+      const derived = await options.onExecute?.(input, sink);
+      const derivedCompletion =
+        derived !== null &&
+        typeof derived === "object" &&
+        "operationKey" in derived &&
+        "terminalExecutionFactId" in derived &&
+        "status" in derived &&
+        ["succeeded", "failed", "cancelled"].includes(String(derived.status))
+          ? (derived as ExecutionCompletion)
+          : undefined;
+      const derivedFact =
+        derived !== null &&
+        typeof derived === "object" &&
+        "kind" in derived &&
+        ["succeeded", "failed"].includes(String(derived.kind))
+          ? (derived as ExecutionFact)
+          : undefined;
+      if (derivedCompletion) return derivedCompletion;
       const facts = factScript.get(input.node.id);
       if (facts && input.request) {
         if (!input.request || !input.request.operationKey) {
@@ -180,7 +200,7 @@ export const createScriptedExecutionAdapter = (
           evidenceRefs: terminal.fact.evidenceRefs,
         } satisfies ExecutionCompletion;
       }
-      return script.get(input.node.id)?.shift() ?? defaultFact;
+      return derivedFact ?? script.get(input.node.id)?.shift() ?? defaultFact;
     },
     cancel: async () => "not-found",
     fence: async () => ({ status: "fenced", evidenceRef: "scripted-fence" }),

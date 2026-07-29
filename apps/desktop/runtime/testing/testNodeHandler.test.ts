@@ -67,7 +67,7 @@ describe("Test Node Handler", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
     const calls: string[] = [];
-    let view = {
+    let view: TestRunView = {
       ...runView("scheduled"),
       manifest: {
         ...runView("scheduled").manifest,
@@ -165,6 +165,74 @@ describe("Test Node Handler", () => {
     database.close();
   });
 
+  it("governs an unexpected adapter failure as reconciliation-required", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    let view: TestRunView = {
+      ...runView("scheduled"),
+      manifest: {
+        ...runView("scheduled").manifest,
+        executionOperations: [
+          {
+            id: "operation-1",
+            kind: "electron" as const,
+            adapterId: "scripted-test",
+            input: { fixture: true },
+            inputHash: "a".repeat(64),
+          },
+        ],
+      },
+    };
+    const failures: Array<{ readonly code: string }> = [];
+    const handler = openTestNodeHandler({
+      database,
+      pipelineRuntime: {
+        startTestInTransaction: () => ({ nodeAttemptId: "attempt-1" }),
+        blockTestInTransaction: (input) => failures.push(input.failure),
+        resumeTestInTransaction: () => undefined,
+        failTestInTransaction: () => undefined,
+        completeTestInTransaction: () => undefined,
+      },
+      tests: {
+        inspect: () => view,
+        execute: async () => {
+          view = {
+            ...view,
+            state: "running",
+            executions: [
+              {
+                id: "operation-1",
+                state: "running",
+                requestHash: "b".repeat(64),
+                receiptHash: null,
+              },
+            ],
+          };
+          throw new Error("adapter transport crashed");
+        },
+      } as unknown as Pick<
+        TestRuntime,
+        "inspect" | "execute" | "reconcile" | "cancel" | "complete"
+      >,
+      executionAdapters: [
+        {
+          id: "scripted-test",
+          execute: () => ({ state: "unknown" }),
+          reconcile: () => ({ state: "unknown" }),
+          cancel: () => ({ state: "unknown" }),
+        },
+      ],
+    });
+
+    await handler.executeReady({ runId: "run-1", nodeRunId: "node-1" });
+
+    assert.deepEqual(
+      failures.map((failure) => failure.code),
+      ["TEST_EXECUTION_RECONCILIATION_REQUIRED"],
+    );
+    database.close();
+  });
+
   it("does not claim cancellation when no Test Run owns an external effect", async () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
@@ -192,6 +260,142 @@ describe("Test Node Handler", () => {
 
     await handler.cancelPending("test:run-1:node-1");
 
+    database.close();
+  });
+
+  it("rolls back a Pipeline Test transition when its trusted worker receipt cannot commit", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("CREATE TABLE transition_probe(id TEXT PRIMARY KEY) STRICT");
+    const handler = openTestNodeHandler({
+      database,
+      pipelineRuntime: {
+        startTestInTransaction: () => {
+          database
+            .prepare("INSERT INTO transition_probe(id) VALUES ('start')")
+            .run();
+          return { nodeAttemptId: "attempt-1" };
+        },
+        blockTestInTransaction: () => undefined,
+        resumeTestInTransaction: () => undefined,
+        failTestInTransaction: () => undefined,
+        completeTestInTransaction: () => undefined,
+      },
+      tests: {
+        inspect: () => runView("scheduled"),
+      } as unknown as Pick<
+        TestRuntime,
+        "inspect" | "execute" | "reconcile" | "cancel" | "complete"
+      >,
+      transitionFailureInjection: (point) => {
+        if (point === "after-transition") throw new Error("receipt-crash");
+      },
+    });
+
+    await assert.rejects(
+      handler.executeReady({ runId: "run-1", nodeRunId: "node-1" }),
+      /receipt-crash/,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM transition_probe").get()
+        ?.count,
+      0,
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM command_deduplication WHERE consumer_id = 'test-node-handler'",
+        )
+        .get()?.count,
+      0,
+    );
+    assert.equal(
+      database.prepare("SELECT 1 FROM runtime_unit_of_work_context").get(),
+      undefined,
+    );
+    database.close();
+  });
+
+  it("executes exactly once after reconciliation proves an operation was not started", async () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    let view: TestRunView = {
+      ...runView("reconciling"),
+      manifest: {
+        ...runView("reconciling").manifest,
+        executionOperations: [
+          {
+            id: "operation-1",
+            kind: "electron" as const,
+            adapterId: "scripted-test",
+            input: { fixture: true },
+            inputHash: "a".repeat(64),
+          },
+        ],
+      },
+      executions: [
+        {
+          id: "operation-1",
+          state: "reconciling" as const,
+          requestHash: "b".repeat(64),
+          receiptHash: null,
+        },
+      ],
+    };
+    let executions = 0;
+    let reconciliations = 0;
+    const handler = openTestNodeHandler({
+      database,
+      pipelineRuntime: {
+        startTestInTransaction: () => ({ nodeAttemptId: "attempt-1" }),
+        blockTestInTransaction: () => undefined,
+        resumeTestInTransaction: () => undefined,
+        failTestInTransaction: () => undefined,
+        completeTestInTransaction: () => undefined,
+      },
+      tests: {
+        inspect: () => view,
+        reconcile: async () => {
+          reconciliations += 1;
+          view = {
+            ...view,
+            executions: [{ ...view.executions[0]!, state: "not-started" }],
+          };
+          return view;
+        },
+        execute: async () => {
+          executions += 1;
+          view = {
+            ...view,
+            state: "running" as const,
+            executions: [
+              {
+                ...view.executions[0]!,
+                state: "succeeded" as const,
+                receiptHash: "c".repeat(64),
+              },
+            ],
+          };
+          return view;
+        },
+        complete: () => view,
+      } as unknown as Pick<
+        TestRuntime,
+        "inspect" | "execute" | "reconcile" | "cancel" | "complete"
+      >,
+      executionAdapters: [
+        {
+          id: "scripted-test",
+          execute: () => ({ state: "unknown" }),
+          reconcile: () => ({ state: "unknown" }),
+        },
+      ],
+    });
+
+    await handler.executeReady({ runId: "run-1", nodeRunId: "node-1" });
+
+    assert.equal(reconciliations, 1);
+    assert.equal(executions, 1);
     database.close();
   });
 });

@@ -31,6 +31,21 @@ const actor = {
   authenticatedBy: "ipc-token" as const,
 };
 
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+
+const canonicalHash = (value: unknown): string =>
+  createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex");
+
 describe("Company Runtime command registry", () => {
   it("persists Test Case revision, audit, outbox, trigger context, and replay receipt in one unit of work", () => {
     const database = openCompanyDatabase(tempCompanyDir());
@@ -39,6 +54,11 @@ describe("Company Runtime command registry", () => {
         name: "Checkout",
         goal: "Test checkout",
       });
+      const electronInput = { kind: "electron" };
+      const cleanupInput = {
+        fixtureId: "fixture-1",
+        rootFingerprint: "c".repeat(64),
+      };
       const envelope = {
         schemaVersion: 1 as const,
         commandId: "test-case-revision-command-1",
@@ -70,8 +90,15 @@ describe("Company Runtime command registry", () => {
                 id: "operation-1",
                 kind: "electron" as const,
                 adapterId: "scripted-test",
-                input: { kind: "electron" },
-                inputHash: "b".repeat(64),
+                input: electronInput,
+                inputHash: canonicalHash(electronInput),
+              },
+              {
+                id: "cleanup-operation-1",
+                kind: "cleanup" as const,
+                adapterId: "scripted-test",
+                input: cleanupInput,
+                inputHash: canonicalHash(cleanupInput),
               },
             ],
             evidencePolicy: {
@@ -79,7 +106,19 @@ describe("Company Runtime command registry", () => {
               redactionProfile: "default",
               requiredKinds: ["ui", "runtime"],
             },
-            cleanup: { policy: "always", required: true },
+            cleanup: {
+              policy: "always",
+              required: true,
+              operationId: "cleanup-operation-1",
+              rootFingerprint: "c".repeat(64),
+              targets: [
+                {
+                  kind: "repository" as const,
+                  pathFingerprint: "d".repeat(64),
+                },
+                { kind: "worktree" as const, pathFingerprint: "e".repeat(64) },
+              ],
+            },
           },
         },
       };
@@ -143,7 +182,7 @@ describe("Company Runtime command registry", () => {
     }
   });
 
-  it("persists Test defect record and close commands with replay-safe trigger context", () => {
+  it("persists Test defect record context and replay-safe close routing", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
@@ -236,8 +275,21 @@ describe("Company Runtime command registry", () => {
       passAuthorityHash: "d".repeat(64),
     } as IntegrationGenerationView;
     const events = openRuntimeEvents(database, { clock });
+    const electronInput = { kind: "electron" };
+    const cleanupInput = {
+      fixtureId: "fixture-test-command",
+      rootFingerprint: "2".repeat(64),
+    };
     const testRuntime = openTestRuntime(database, {
       integrationAuthority: { readPassAuthority: () => generation },
+      fixtureAuthority: {
+        read: () => ({
+          fixtureId: "fixture-test-command",
+          companyDirectoryFingerprint: "2".repeat(64),
+          scriptHashes: ["e".repeat(64)],
+          adapterIds: ["scripted-test"],
+        }),
+      },
       events,
       clock,
     });
@@ -266,8 +318,15 @@ describe("Company Runtime command registry", () => {
             id: "operation-1",
             kind: "electron",
             adapterId: "scripted-test",
-            input: { kind: "electron" },
-            inputHash: "f".repeat(64),
+            input: electronInput,
+            inputHash: canonicalHash(electronInput),
+          },
+          {
+            id: "cleanup-operation-command",
+            kind: "cleanup",
+            adapterId: "scripted-test",
+            input: cleanupInput,
+            inputHash: canonicalHash(cleanupInput),
           },
         ],
         evidencePolicy: {
@@ -275,7 +334,16 @@ describe("Company Runtime command registry", () => {
           redactionProfile: "default",
           requiredKinds: ["ui", "runtime"],
         },
-        cleanup: { policy: "always", required: true },
+        cleanup: {
+          policy: "always",
+          required: true,
+          operationId: "cleanup-operation-command",
+          rootFingerprint: "2".repeat(64),
+          targets: [
+            { kind: "repository", pathFingerprint: "3".repeat(64) },
+            { kind: "worktree", pathFingerprint: "4".repeat(64) },
+          ],
+        },
       },
     });
     testRuntime.createRun({
@@ -311,14 +379,126 @@ describe("Company Runtime command registry", () => {
           id: "operation-1",
           kind: "electron",
           adapterId: "scripted-test",
-          input: { kind: "electron" },
-          inputHash: "f".repeat(64),
+          input: electronInput,
+          inputHash: canonicalHash(electronInput),
+        },
+        {
+          id: "cleanup-operation-command",
+          kind: "cleanup",
+          adapterId: "scripted-test",
+          input: cleanupInput,
+          inputHash: canonicalHash(cleanupInput),
         },
       ],
       clock: { instant: clock().toISOString(), seed: "seed-test-command" },
       environment: { platform: "darwin", architecture: "arm64" },
       capabilities: ["electron", "runtime-query"],
+      risk: (() => {
+        const rules = [
+          { factorId: "command-test", minimumTier: "medium" as const },
+        ];
+        const policyHash = canonicalHash({
+          schemaVersion: 1,
+          revisionId: "command-test-risk-r1",
+          rules,
+        });
+        const factors = [
+          {
+            id: "command-test",
+            present: true,
+            evidenceRefs: ["test-case:case-test-command-r1"],
+          },
+        ];
+        const evidenceRefs = ["test-case:case-test-command-r1"];
+        return {
+          schemaVersion: 1 as const,
+          policy: {
+            revisionId: "command-test-risk-r1",
+            rules,
+            hash: policyHash,
+          },
+          factors,
+          computedTier: "medium" as const,
+          evidenceRefs,
+          inputHash: canonicalHash({
+            schemaVersion: 1,
+            policyRevisionId: "command-test-risk-r1",
+            policyHash,
+            factors,
+            evidenceRefs,
+          }),
+        };
+      })(),
     });
+    const assertionCorrelation = {
+      commandId: "test-run-command",
+      eventSequence: 1,
+      runtimeEventType: "test.run.started",
+      queryAsOfSequence: 1,
+      queryViewHash: "9".repeat(64),
+      viewSyncTokenHash: "a".repeat(64),
+      snapshotRevisionId: "snapshot-test-command",
+      runId: "run-test-command",
+      nodeRunId: "test-node-command",
+      nodeAttemptId: "test-attempt-command",
+      sessionId: "test-session-command",
+      artifactVersionIds: ["resolution-evidence-command"],
+    };
+    const assertionResult = {
+      testRunId: "test-run-command",
+      operationId: "operation-1",
+      testCaseRevisionId: revision.id,
+      assertionId: "assertion-1",
+      required: true,
+      uiStatus: "failed",
+      runtimeStatus: "passed",
+      correlation: assertionCorrelation,
+    };
+    const assertionResultHash = canonicalHash(assertionResult);
+    const operationStorageId = `test-execution:${canonicalHash({
+      testRunId: "test-run-command",
+      operationId: "operation-1",
+    })}`;
+    database
+      .prepare(
+        `INSERT INTO test_execution_operations(
+           id, test_run_id, operation_key, request_json, request_hash, state,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'intent', ?, ?)`,
+      )
+      .run(
+        operationStorageId,
+        "test-run-command",
+        "test:test-run-command:operation-1:fixture",
+        JSON.stringify({
+          operationId: "operation-1",
+          operationKey: "test:test-run-command:operation-1:fixture",
+          testRunId: "test-run-command",
+          requestHash: "8".repeat(64),
+          input: electronInput,
+        }),
+        "8".repeat(64),
+        clock().toISOString(),
+        clock().toISOString(),
+      );
+    database
+      .prepare(
+        `INSERT INTO test_assertion_results(
+           id, test_run_id, operation_id, test_case_revision_id, assertion_id,
+           required, ui_status, runtime_status, correlation_json, result_hash,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, 1, 'failed', 'passed', ?, ?, ?)`,
+      )
+      .run(
+        "assertion-result-command",
+        "test-run-command",
+        operationStorageId,
+        revision.id,
+        "assertion-1",
+        JSON.stringify(assertionCorrelation),
+        assertionResultHash,
+        clock().toISOString(),
+      );
     database
       .prepare(
         `INSERT INTO test_evidence(
@@ -330,7 +510,7 @@ describe("Company Runtime command registry", () => {
       .run(
         "resolution-evidence-command",
         "test-run-command",
-        "operation-1",
+        operationStorageId,
         revision.id,
         "assertion-1",
         "runtime",
@@ -344,6 +524,22 @@ describe("Company Runtime command registry", () => {
         "{}",
         clock().toISOString(),
       );
+    const commandTestRuntime = {
+      ...testRuntime,
+      closeDefect: () => ({
+        ...testRuntime.inspect("test-run-command"),
+        defects: testRuntime
+          .inspect("test-run-command")
+          .defects.map((defect) => ({
+            ...defect,
+            status: "closed" as const,
+            closedAt: clock().toISOString(),
+          })),
+      }),
+    } as unknown as typeof testRuntime;
+    const preparedRun = testRuntime.inspect("test-run-command");
+    assert.equal(preparedRun.assertions[0]?.resultHash, assertionResultHash);
+    assert.equal(preparedRun.evidence[0]?.id, "resolution-evidence-command");
     const registry = openCompanyCommandRegistry(
       database,
       openProjectConfiguration(database),
@@ -365,7 +561,7 @@ describe("Company Runtime command registry", () => {
       undefined,
       undefined,
       undefined,
-      testRuntime,
+      commandTestRuntime,
     );
     const record = {
       schemaVersion: 1 as const,
@@ -382,23 +578,40 @@ describe("Company Runtime command registry", () => {
           kind: "ui-runtime-contract" as const,
           owner: "shared" as const,
         },
-        evidence: { refs: ["artifact-version:test-command"] },
+        evidence: {
+          schemaVersion: 1 as const,
+          kind: "assertion" as const,
+          assertion: {
+            testCaseRevisionId: revision.id,
+            assertionId: "assertion-1",
+            resultHash: assertionResultHash,
+          },
+          evidenceRefs: ["resolution-evidence-command"],
+        },
       },
     };
     const recorded = registry.execute(record);
     assert.deepEqual(registry.execute(record), recorded);
-    assert.equal(recorded.status, "succeeded");
+    assert.equal(recorded.status, "succeeded", JSON.stringify(recorded));
     if (recorded.status !== "succeeded") assert.fail("record command failed");
     assert.equal(
-      (recorded.value.defects[0] as { readonly status: string } | undefined)
-        ?.status,
+      (
+        (
+          recorded.value as {
+            readonly defects: readonly { readonly status: string }[];
+          }
+        ).defects[0] as { readonly status: string } | undefined
+      )?.status,
       "open",
     );
     const conflictingRecord = registry.execute({
       ...record,
       command: {
         ...record.command,
-        evidence: { refs: ["artifact-version:changed"] },
+        evidence: {
+          ...record.command.evidence,
+          evidenceRefs: ["artifact-version:changed"],
+        },
       },
     });
     assert.equal(conflictingRecord.status, "rejected");
@@ -416,7 +629,17 @@ describe("Company Runtime command registry", () => {
         defectId: "test-defect-command",
         resolutionId: "test-defect-resolution-command",
         resolution: {
-          evidenceRefs: ["resolution-evidence-command"],
+          schemaVersion: 1 as const,
+          resolvedByTestRunId: "fresh-pass-test-run-command",
+          passAuthorityHash: "5".repeat(64),
+          assertions: [
+            {
+              testCaseRevisionId: revision.id,
+              assertionId: "assertion-1",
+              resultHash: "6".repeat(64),
+              evidenceRefs: ["fresh-pass-evidence-command"],
+            },
+          ],
         },
       },
     };
@@ -425,15 +648,23 @@ describe("Company Runtime command registry", () => {
     assert.equal(closed.status, "succeeded");
     if (closed.status !== "succeeded") assert.fail("close command failed");
     assert.equal(
-      (closed.value.defects[0] as { readonly status: string } | undefined)
-        ?.status,
+      (
+        (
+          closed.value as {
+            readonly defects: readonly { readonly status: string }[];
+          }
+        ).defects[0] as { readonly status: string } | undefined
+      )?.status,
       "closed",
     );
     const conflictingClose = registry.execute({
       ...close,
       command: {
         ...close.command,
-        resolution: { evidenceRefs: ["artifact-version:changed-resolution"] },
+        resolution: {
+          ...close.command.resolution,
+          passAuthorityHash: "7".repeat(64),
+        },
       },
     });
     assert.equal(conflictingClose.status, "rejected");
@@ -441,21 +672,21 @@ describe("Company Runtime command registry", () => {
       assert.equal(conflictingClose.error.code, "COMMAND_ID_REUSE");
     }
 
+    assert.equal(
+      Number(
+        (
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ? AND actor_id = ? AND consumer_id = ?",
+            )
+            .get(record.commandId, actor.id, "desktop-test-engineer") as {
+            readonly count: unknown;
+          }
+        ).count,
+      ),
+      1,
+    );
     for (const commandId of [record.commandId, close.commandId]) {
-      assert.equal(
-        Number(
-          (
-            database
-              .prepare(
-                "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ? AND actor_id = ? AND consumer_id = ?",
-              )
-              .get(commandId, actor.id, "desktop-test-engineer") as {
-              readonly count: unknown;
-            }
-          ).count,
-        ),
-        1,
-      );
       assert.equal(
         Number(
           (
@@ -473,7 +704,7 @@ describe("Company Runtime command registry", () => {
       events
         .readAfter(0, 100)
         .filter((event) => event.type.startsWith("test.defect.")).length,
-      2,
+      1,
     );
     assert.equal(
       Number(

@@ -6,13 +6,16 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  applyElectronTestFixtureExitCode,
   createElectronTestFixture,
   ElectronTestFixtureError,
   loadElectronTestFixtureConfig,
@@ -44,7 +47,14 @@ const scripts = () => {
 };
 
 describe("Electron Test fixture", () => {
-  it("atomically consumes a separate 0600 authorization claim and never stores the reusable token in config", () => {
+  it("preserves a failed Electron fixture as a non-zero process exit", () => {
+    const exits: number[] = [];
+    applyElectronTestFixtureExitCode({ exit: (code) => exits.push(code) }, 1);
+    applyElectronTestFixtureExitCode({ exit: (code) => exits.push(code) }, 0);
+    assert.deepEqual(exits, [1, 0]);
+  });
+
+  it("binds immutable config to a fresh one-time authorization claim on every launch", () => {
     const fixture = createElectronTestFixture({
       fixtureId: "fixture-1",
       testRunId: "test-run-1",
@@ -69,9 +79,12 @@ describe("Electron Test fixture", () => {
       fixture.config.companyDirectory.startsWith(fixture.root),
       true,
     );
+    const firstAuthorization = fixture.authorization;
+    const firstClaimPath = fixture.authorizationClaimPath;
     assert.deepEqual(
       loadElectronTestFixtureConfig({
         configPath: fixture.configPath,
+        authorizationClaimPath: fixture.authorizationClaimPath,
         authorization: fixture.authorization,
         packaged: false,
         entrypoint: "electron-test-fixture",
@@ -82,6 +95,7 @@ describe("Electron Test fixture", () => {
       () =>
         loadElectronTestFixtureConfig({
           configPath: fixture.configPath,
+          authorizationClaimPath: fixture.authorizationClaimPath,
           authorization: fixture.authorization,
           packaged: false,
           entrypoint: "electron-test-fixture",
@@ -89,6 +103,21 @@ describe("Electron Test fixture", () => {
       (error: unknown) =>
         error instanceof ElectronTestFixtureError &&
         error.code === "FIXTURE_AUTHORIZATION_ALREADY_CONSUMED",
+    );
+    const immutableConfigHash = fixture.config.configHash;
+    const restartClaim = fixture.issueAuthorizationClaim();
+    assert.notEqual(restartClaim.authorization, firstAuthorization);
+    assert.notEqual(restartClaim.authorizationClaimPath, firstClaimPath);
+    assert.equal(fixture.config.configHash, immutableConfigHash);
+    assert.equal(
+      loadElectronTestFixtureConfig({
+        configPath: fixture.configPath,
+        authorizationClaimPath: restartClaim.authorizationClaimPath,
+        authorization: restartClaim.authorization,
+        packaged: false,
+        entrypoint: "electron-test-fixture",
+      }).configHash,
+      immutableConfigHash,
     );
     const receipt = fixture.cleanup();
     assert.equal(receipt.removed, true);
@@ -130,6 +159,74 @@ describe("Electron Test fixture", () => {
       fixture.config.worktreeDirectory,
     );
     fixture.cleanup();
+  });
+
+  it("removes frozen Repository and Worktree targets before PASS and verifies their post-delete absence idempotently", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-cleanup",
+      testRunId: "test-run-cleanup",
+      testRunManifestHash: "8".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-cleanup",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+
+    writeFileSync(
+      join(fixture.config.repositoryDirectory, "runtime-created.txt"),
+      "temporary Runtime output\n",
+    );
+    writeFileSync(
+      join(fixture.config.worktreeDirectory, "agent-created.txt"),
+      "temporary Agent output\n",
+    );
+    const receipt = fixture.cleanupExecutionResources();
+    assert.deepEqual(
+      receipt.targets.map((target) => [target.kind, target.state]),
+      [
+        ["repository", "absent"],
+        ["worktree", "absent"],
+      ],
+    );
+    assert.equal(existsSync(fixture.config.repositoryDirectory), false);
+    assert.equal(existsSync(fixture.config.worktreeDirectory), false);
+    assert.deepEqual(fixture.cleanupExecutionResources(), receipt);
+    fixture.cleanup();
+  });
+
+  it("refuses replaced or symbolic-link cleanup targets", () => {
+    for (const replacement of ["directory", "symlink"] as const) {
+      const fixture = createElectronTestFixture({
+        fixtureId: `fixture-cleanup-${replacement}`,
+        testRunId: `test-run-cleanup-${replacement}`,
+        testRunManifestHash: "7".repeat(64),
+        adapters: scripts(),
+        allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+        fakeClock: "2026-07-29T00:00:00.000Z",
+        repeatableIdSeed: `seed-cleanup-${replacement}`,
+        packaged: false,
+        entrypoint: "electron-test-fixture",
+      });
+      rmSync(fixture.config.worktreeDirectory, { recursive: true });
+      if (replacement === "directory") {
+        mkdirSync(fixture.config.worktreeDirectory);
+      } else {
+        symlinkSync(
+          fixture.config.repositoryDirectory,
+          fixture.config.worktreeDirectory,
+        );
+      }
+      assert.throws(
+        () => fixture.cleanupExecutionResources(),
+        (error: unknown) =>
+          error instanceof ElectronTestFixtureError &&
+          error.code === "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+        replacement,
+      );
+      fixture.cleanup();
+    }
   });
 
   it("resolves evidence locators to exact fixture bytes and rejects hash or size mismatches", () => {
@@ -227,6 +324,7 @@ describe("Electron Test fixture", () => {
       () =>
         loadElectronTestFixtureConfig({
           configPath: fixture.configPath,
+          authorizationClaimPath: fixture.authorizationClaimPath,
           authorization: fixture.authorization,
           packaged: true,
           entrypoint: "electron-test-fixture",

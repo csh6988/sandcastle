@@ -236,10 +236,35 @@ const testRunView = {
         input: { check: "runtime" },
         inputHash: "a".repeat(64),
       },
+      {
+        id: "cleanup-operation-1",
+        kind: "cleanup" as const,
+        adapterId: "scripted-test",
+        input: { cleanup: { repository: true, worktree: true } },
+        inputHash: "b".repeat(64),
+      },
     ],
     clock: { instant: "2026-07-29T00:00:00.000Z", seed: "seed-1" },
     environment: {},
     capabilities: [],
+    risk: {
+      schemaVersion: 1 as const,
+      policy: {
+        revisionId: "risk-policy-r1",
+        rules: [{ factorId: "runtime-change", minimumTier: "high" as const }],
+        hash: "1".repeat(64),
+      },
+      factors: [
+        {
+          id: "runtime-change",
+          present: true,
+          evidenceRefs: ["test-case:test-case-revision-1"],
+        },
+      ],
+      computedTier: "high" as const,
+      evidenceRefs: ["test-case:test-case-revision-1"],
+      inputHash: "2".repeat(64),
+    },
     coverageHash: "b".repeat(64),
     integrationCoverage: {
       coverageId: "coverage-1",

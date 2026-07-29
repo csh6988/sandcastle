@@ -232,6 +232,7 @@ export interface PipelineRuntime {
     dispatcher: (input: {
       readonly runId: string;
       readonly nodeRunId: string;
+      readonly action: "pause" | "cancel";
     }) => Promise<void>,
   ) => void;
   readonly executeCodeReviewStage: (input: {
@@ -746,6 +747,7 @@ export const openPipelineRuntime = (
     | ((input: {
         readonly runId: string;
         readonly nodeRunId: string;
+        readonly action: "pause" | "cancel";
       }) => Promise<void>)
     | undefined;
   const registerTestCancellationDispatcher: PipelineRuntime["registerTestCancellationDispatcher"] =
@@ -5997,6 +5999,7 @@ export const openPipelineRuntime = (
               testCancellationDispatcher({
                 runId: candidate.runId,
                 nodeRunId: candidate.nodeRunId,
+                action: "cancel",
               }),
             ]
           : []),
@@ -6399,6 +6402,7 @@ export const openPipelineRuntime = (
       }
     }
     if (input.action === "pause" || input.action === "cancel") {
+      const cancellationAction = input.action;
       const cancellation = Promise.all([
         ...(input.action === "cancel"
           ? cancellationCandidates.map(async (candidate) => {
@@ -6429,6 +6433,7 @@ export const openPipelineRuntime = (
               testCancellationDispatcher!({
                 runId: input.runId,
                 nodeRunId: candidate.nodeRunId,
+                action: cancellationAction,
               }),
             )
           : []),

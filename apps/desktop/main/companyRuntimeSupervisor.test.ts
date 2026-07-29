@@ -13,7 +13,12 @@ import { assertSoftwareRndDepartmentContract } from "../runtime/testing/departme
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-supervisor-"));
 
-const createTestSupervisor = () =>
+const createTestSupervisor = (options?: {
+  readonly environmentForLaunch?: (input: {
+    readonly companyDir: string;
+    readonly restartCount: number;
+  }) => Readonly<Record<string, string | undefined>>;
+}) =>
   createCompanyRuntimeSupervisor({
     executable: process.execPath,
     execArgs: ["--import", "tsx"],
@@ -23,6 +28,9 @@ const createTestSupervisor = () =>
     environment: {
       SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER: "scripted",
     },
+    ...(options?.environmentForLaunch
+      ? { environmentForLaunch: options.environmentForLaunch }
+      : {}),
     shutdownTimeoutMs: 5_000,
     startupTimeoutMs: 10_000,
   });
@@ -550,7 +558,13 @@ describe("Company Runtime Supervisor", () => {
 
   it("restarts once after an unexpected exit, then exposes a diagnosable failure", async () => {
     const companyDir = tempCompanyDir();
-    const supervisor = createTestSupervisor();
+    const launches: number[] = [];
+    const supervisor = createTestSupervisor({
+      environmentForLaunch: ({ restartCount }) => {
+        launches.push(restartCount);
+        return { SANDCASTLE_TEST_LAUNCH_CLAIM: `claim-${restartCount}` };
+      },
+    });
 
     try {
       const first = await supervisor.start(companyDir);
@@ -567,6 +581,7 @@ describe("Company Runtime Supervisor", () => {
       assert.equal(supervisor.diagnostics().status, "running");
       assert.equal(supervisor.diagnostics().restartCount, 1);
       assert.notEqual(second.pid, first.pid);
+      assert.deepEqual(launches, [0, 1]);
 
       process.kill(second.pid, "SIGKILL");
       const failed = await waitFor(() => {

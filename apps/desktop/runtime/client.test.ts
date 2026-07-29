@@ -10,7 +10,11 @@ import {
   createCompanyRuntimeClientFromTransport,
   createLocalRuntimeTransport,
 } from "./client.js";
-import { RuntimeRequestSchema, type RuntimeResponse } from "./interface.js";
+import {
+  RuntimeRequestSchema,
+  TestRunViewSchema,
+  type RuntimeResponse,
+} from "./interface.js";
 import { scriptedDepartmentRun } from "./testing/runContract.js";
 
 const actor = {
@@ -106,10 +110,35 @@ const testRunView = {
         input: { check: "runtime" },
         inputHash: "a".repeat(64),
       },
+      {
+        id: "cleanup-operation-1",
+        kind: "cleanup" as const,
+        adapterId: "scripted-test",
+        input: { cleanup: { repository: true, worktree: true } },
+        inputHash: "b".repeat(64),
+      },
     ],
     clock: { instant: "2026-07-29T00:00:00.000Z", seed: "seed-1" },
     environment: {},
     capabilities: [],
+    risk: {
+      schemaVersion: 1 as const,
+      policy: {
+        revisionId: "risk-policy-r1",
+        rules: [{ factorId: "runtime-change", minimumTier: "high" as const }],
+        hash: "1".repeat(64),
+      },
+      factors: [
+        {
+          id: "runtime-change",
+          present: true,
+          evidenceRefs: ["test-case:test-case-revision-1"],
+        },
+      ],
+      computedTier: "high" as const,
+      evidenceRefs: ["test-case:test-case-revision-1"],
+      inputHash: "2".repeat(64),
+    },
     coverageHash: "b".repeat(64),
     integrationCoverage: {
       coverageId: "coverage-1",
@@ -162,6 +191,31 @@ const testRunView = {
 };
 
 describe("Company Runtime client", () => {
+  it("parses recursive JSON Test inputs and exact Test scope risk", () => {
+    const parsed = TestRunViewSchema.parse(testRunView);
+    assert.equal(parsed.manifest.risk.computedTier, "high");
+    assert.deepEqual(parsed.manifest.executionOperations[1]?.input, {
+      cleanup: { repository: true, worktree: true },
+    });
+    for (const invalid of [undefined, Number.NaN, new Date()]) {
+      assert.equal(
+        TestRunViewSchema.safeParse({
+          ...testRunView,
+          manifest: {
+            ...testRunView.manifest,
+            executionOperations: [
+              {
+                ...testRunView.manifest.executionOperations[0],
+                input: { nested: [invalid] },
+              },
+            ],
+          },
+        }).success,
+        false,
+      );
+    }
+  });
+
   it("parses an authoritative Run Supervision Query View", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
     const view = {
@@ -664,6 +718,7 @@ describe("Company Runtime client", () => {
       fixture: testRunView.manifest.fixture,
       environment: testRunView.manifest.environment,
       capabilities: testRunView.manifest.capabilities,
+      risk: testRunView.manifest.risk,
       assertionResultHashes: ["2".repeat(64)],
       evidence: [
         {

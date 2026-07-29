@@ -30,8 +30,16 @@ export class ElectronTestFixtureError extends Error {
   }
 }
 
+export const applyElectronTestFixtureExitCode = (
+  processControl: { readonly exit: (code: number) => unknown },
+  exitCode: number,
+): void => {
+  processControl.exit(exitCode);
+};
+
 export type ElectronTestFixtureConfig = {
   readonly schemaVersion: 1;
+  readonly configHash: string;
   readonly fixtureId: string;
   readonly testRunId: string;
   readonly testRunManifestHash: string;
@@ -45,11 +53,15 @@ export type ElectronTestFixtureConfig = {
     readonly scriptPath: string;
     readonly scriptHash: string;
   }[];
-  readonly authorizationClaimPath: string;
-  readonly authorizationHash: string;
   readonly repositoryDirectory: string;
   readonly worktreeDirectory: string;
   readonly repositoryCommit: string;
+  readonly rootFingerprint: string;
+  readonly cleanupTargets: readonly {
+    readonly kind: "repository" | "worktree";
+    readonly path: string;
+    readonly pathFingerprint: string;
+  }[];
   readonly fakeClock: string;
   readonly repeatableIdSeed: string;
 };
@@ -60,7 +72,22 @@ export interface ElectronTestFixture {
   readonly config: ElectronTestFixtureConfig;
   readonly authorization: string;
   readonly authorizationClaimPath: string;
+  readonly issueAuthorizationClaim: () => {
+    readonly claimId: string;
+    readonly authorization: string;
+    readonly authorizationClaimPath: string;
+  };
   readonly bindTestRunManifestHash: (manifestHash: string) => void;
+  readonly cleanupExecutionResources: () => {
+    readonly schemaVersion: 1;
+    readonly fixtureId: string;
+    readonly rootFingerprint: string;
+    readonly targets: readonly {
+      readonly kind: "repository" | "worktree";
+      readonly pathFingerprint: string;
+      readonly state: "absent";
+    }[];
+  };
   readonly cleanup: () => {
     readonly fixtureId: string;
     readonly rootFingerprint: string;
@@ -70,6 +97,20 @@ export interface ElectronTestFixture {
 
 const sha256 = (value: string | Buffer): string =>
   createHash("sha256").update(value).digest("hex");
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+
+const configHashFor = (
+  config: Omit<ElectronTestFixtureConfig, "configHash">,
+): string => sha256(JSON.stringify(canonicalize(config)));
 
 const secureEqual = (left: string, right: string): boolean => {
   const leftDigest = createHash("sha256").update(left).digest();
@@ -146,18 +187,33 @@ const makeWritableForCleanup = (path: string): void => {
   chmodSync(path, 0o600);
 };
 
+const cleanupPathFingerprint = (path: string): string => {
+  if (lstatSync(path).isSymbolicLink()) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+      "Electron Test cleanup targets cannot be symbolic links.",
+    );
+  }
+  const resolved = realpathSync(path);
+  const stat = statSync(resolved, { bigint: true });
+  return sha256(`${resolved}\n${stat.dev}:${stat.ino}:${stat.birthtimeNs}`);
+};
+
+const pathEntryExists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const claimAuthorization = (
   config: ElectronTestFixtureConfig,
+  claimPath: string,
   authorization: string,
   root: string,
 ): void => {
-  if (!secureEqual(sha256(authorization), config.authorizationHash)) {
-    throw new ElectronTestFixtureError(
-      "FIXTURE_CONFIG_INVALID",
-      "Electron Test fixture config identity or authorization is invalid.",
-    );
-  }
-  const claimPath = config.authorizationClaimPath;
   assertInside(root, claimPath);
   if (!existsSync(claimPath)) {
     throw new ElectronTestFixtureError(
@@ -185,10 +241,19 @@ const claimAuthorization = (
     );
   }
   try {
-    const claimedAuthorization = readFileSync(claimedPath, "utf8");
+    const claim = JSON.parse(readFileSync(claimedPath, "utf8")) as {
+      readonly schemaVersion?: unknown;
+      readonly claimId?: unknown;
+      readonly configHash?: unknown;
+      readonly authorizationHash?: unknown;
+    };
     if (
-      !secureEqual(claimedAuthorization, authorization) ||
-      !secureEqual(sha256(claimedAuthorization), config.authorizationHash)
+      claim.schemaVersion !== 1 ||
+      typeof claim.claimId !== "string" ||
+      typeof claim.configHash !== "string" ||
+      typeof claim.authorizationHash !== "string" ||
+      !secureEqual(claim.configHash, config.configHash) ||
+      !secureEqual(claim.authorizationHash, sha256(authorization))
     ) {
       throw new ElectronTestFixtureError(
         "FIXTURE_CONFIG_INVALID",
@@ -202,6 +267,7 @@ const claimAuthorization = (
 
 export const loadElectronTestFixtureConfig = (input: {
   readonly configPath: string;
+  readonly authorizationClaimPath: string;
   readonly authorization: string;
   readonly packaged: boolean;
   readonly entrypoint: "electron-test-fixture";
@@ -249,8 +315,7 @@ export const loadElectronTestFixtureConfig = (input: {
     typeof config.evidenceDirectory !== "string" ||
     !Array.isArray(config.adapters) ||
     config.adapters.length !== 2 ||
-    typeof config.authorizationClaimPath !== "string" ||
-    typeof config.authorizationHash !== "string" ||
+    typeof config.configHash !== "string" ||
     typeof config.repositoryDirectory !== "string" ||
     typeof config.worktreeDirectory !== "string" ||
     typeof config.repositoryCommit !== "string"
@@ -274,7 +339,14 @@ export const loadElectronTestFixtureConfig = (input: {
   assertInside(root, evidenceDirectory);
   assertInside(root, repositoryDirectory);
   assertInside(root, worktreeDirectory);
-  assertHash(config.authorizationHash, "fixture authorization hash");
+  assertHash(config.configHash, "fixture config hash");
+  const { configHash, ...configInput } = config;
+  if (configHashFor(configInput) !== configHash) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CONFIG_INVALID",
+      "Electron Test fixture config does not match its immutable hash.",
+    );
+  }
   if (!/^[a-f0-9]{40}$/.test(config.repositoryCommit)) {
     throw new ElectronTestFixtureError(
       "FIXTURE_CONFIG_INVALID",
@@ -323,7 +395,12 @@ export const loadElectronTestFixtureConfig = (input: {
       "Electron Test fixture Repository and Worktree do not match the frozen commit.",
     );
   }
-  claimAuthorization(config, input.authorization, root);
+  claimAuthorization(
+    config,
+    input.authorizationClaimPath,
+    input.authorization,
+    root,
+  );
   return config;
 };
 
@@ -458,14 +535,20 @@ export const createElectronTestFixture = (input: {
     }
     scriptHashes[adapter.id] = actualHash;
   }
-  const authorization = randomBytes(32).toString("hex");
-  const authorizationClaimPath = join(root, "authorization.claim");
-  writeFileSync(authorizationClaimPath, authorization, {
-    flag: "wx",
-    mode: 0o600,
-  });
-  chmodSync(authorizationClaimPath, 0o600);
-  let config: ElectronTestFixtureConfig = {
+  const rootFingerprint = sha256(`${root}\n${marker}`);
+  const cleanupTargets = [
+    {
+      kind: "repository" as const,
+      path: repositoryDirectory,
+      pathFingerprint: cleanupPathFingerprint(repositoryDirectory),
+    },
+    {
+      kind: "worktree" as const,
+      path: worktreeDirectory,
+      pathFingerprint: cleanupPathFingerprint(worktreeDirectory),
+    },
+  ];
+  const initialConfig: Omit<ElectronTestFixtureConfig, "configHash"> = {
     schemaVersion: 1,
     fixtureId: input.fixtureId,
     testRunId: input.testRunId,
@@ -482,13 +565,17 @@ export const createElectronTestFixture = (input: {
         scriptHash: adapter.expectedScriptHash,
       }))
       .sort((left, right) => left.id.localeCompare(right.id)),
-    authorizationClaimPath,
-    authorizationHash: sha256(authorization),
     repositoryDirectory,
     worktreeDirectory,
     repositoryCommit,
+    rootFingerprint,
+    cleanupTargets,
     fakeClock: input.fakeClock,
     repeatableIdSeed: input.repeatableIdSeed,
+  };
+  let config: ElectronTestFixtureConfig = {
+    ...initialConfig,
+    configHash: configHashFor(initialConfig),
   };
   const configPath = join(root, "fixture.json");
   const descriptor = openSync(configPath, "wx", 0o600);
@@ -504,41 +591,110 @@ export const createElectronTestFixture = (input: {
       "Electron Test fixture config must be mode 0600.",
     );
   }
-  const rootFingerprint = sha256(`${root}\n${marker}`);
+  let currentClaim: {
+    readonly claimId: string;
+    readonly authorization: string;
+    readonly authorizationClaimPath: string;
+  };
+  const issueAuthorizationClaim = () => {
+    if (currentClaim && existsSync(currentClaim.authorizationClaimPath)) {
+      unlinkSync(currentClaim.authorizationClaimPath);
+    }
+    const claimId = randomBytes(16).toString("hex");
+    const authorization = randomBytes(32).toString("hex");
+    const authorizationClaimPath = join(root, `authorization-${claimId}.claim`);
+    writeFileSync(
+      authorizationClaimPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        claimId,
+        configHash: config.configHash,
+        authorizationHash: sha256(authorization),
+      }),
+      { flag: "wx", mode: 0o600 },
+    );
+    chmodSync(authorizationClaimPath, 0o600);
+    currentClaim = { claimId, authorization, authorizationClaimPath };
+    return currentClaim;
+  };
+  currentClaim = issueAuthorizationClaim();
+  const verifyRoot = (): void => {
+    const currentRoot = realpathSync(root);
+    assertInside(canonicalTempRoot, currentRoot);
+    const currentMarker = readFileSync(markerPath, "utf8");
+    if (
+      sha256(`${currentRoot}\n${currentMarker}`) !== rootFingerprint ||
+      sha256(currentMarker) !== companyDirectoryFingerprint
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+        "Electron Test fixture cleanup refused an unrecognized directory.",
+      );
+    }
+  };
   return {
     root,
     configPath,
-    authorization,
-    authorizationClaimPath,
+    get authorization() {
+      return currentClaim.authorization;
+    },
+    get authorizationClaimPath() {
+      return currentClaim.authorizationClaimPath;
+    },
+    issueAuthorizationClaim,
     get config() {
       return config;
     },
     bindTestRunManifestHash: (manifestHash) => {
-      if (!existsSync(authorizationClaimPath)) {
+      if (!existsSync(currentClaim.authorizationClaimPath)) {
         throw new ElectronTestFixtureError(
           "FIXTURE_CONFIG_ALREADY_CONSUMED",
           "Electron Test fixture config cannot change after its authorization is consumed.",
         );
       }
       assertHash(manifestHash, "Test Run manifest hash");
-      config = { ...config, testRunManifestHash: manifestHash };
+      const { configHash: _priorConfigHash, ...priorConfig } = config;
+      const nextConfig = { ...priorConfig, testRunManifestHash: manifestHash };
+      config = { ...nextConfig, configHash: configHashFor(nextConfig) };
       writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+      issueAuthorizationClaim();
+    },
+    cleanupExecutionResources: () => {
+      verifyRoot();
+      for (const target of cleanupTargets) {
+        if (!pathEntryExists(target.path)) continue;
+        const currentFingerprint = cleanupPathFingerprint(target.path);
+        assertInside(root, realpathSync(target.path));
+        if (currentFingerprint !== target.pathFingerprint) {
+          throw new ElectronTestFixtureError(
+            "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+            `Electron Test cleanup refused replaced ${target.kind} resources.`,
+          );
+        }
+        makeWritableForCleanup(target.path);
+        rmSync(target.path, { recursive: true, force: false });
+        if (existsSync(target.path)) {
+          throw new ElectronTestFixtureError(
+            "FIXTURE_CLEANUP_INCOMPLETE",
+            `Electron Test cleanup did not remove the ${target.kind}.`,
+          );
+        }
+      }
+      return {
+        schemaVersion: 1,
+        fixtureId: input.fixtureId,
+        rootFingerprint,
+        targets: cleanupTargets.map((target) => ({
+          kind: target.kind,
+          pathFingerprint: target.pathFingerprint,
+          state: "absent" as const,
+        })),
+      };
     },
     cleanup: () => {
-      const currentRoot = realpathSync(root);
-      assertInside(canonicalTempRoot, currentRoot);
-      const currentMarker = readFileSync(markerPath, "utf8");
-      if (
-        sha256(`${currentRoot}\n${currentMarker}`) !== rootFingerprint ||
-        sha256(currentMarker) !== companyDirectoryFingerprint
-      ) {
-        throw new ElectronTestFixtureError(
-          "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
-          "Electron Test fixture cleanup refused an unrecognized directory.",
-        );
-      }
-      makeWritableForCleanup(currentRoot);
-      rmSync(currentRoot, { recursive: true, force: false });
+      verifyRoot();
+      makeWritableForCleanup(root);
+      rmSync(root, { recursive: true, force: false });
       return { fixtureId: input.fixtureId, rootFingerprint, removed: true };
     },
   };

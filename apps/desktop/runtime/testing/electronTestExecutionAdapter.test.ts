@@ -48,6 +48,41 @@ describe("Electron Test execution adapter", () => {
     });
   });
 
+  it("returns a Runtime-owned cleanup receipt from the terminal callback", async () => {
+    const cleanupReceipt = {
+      schemaVersion: 1 as const,
+      kind: "cleanup" as const,
+      receiptId: "cleanup-receipt-1",
+      fixtureId: "fixture-v1",
+      operationKey: "test:test-run:cleanup-operation:request-hash",
+      rootFingerprint: "1".repeat(64),
+      targets: [],
+      artifactVersionId: "artifact-version-1",
+      contentHash: "2".repeat(64),
+    };
+    const adapter = createElectronTestExecutionAdapter({
+      fixtureId: "fixture-v1",
+      terminalResult: () => ({
+        schemaVersion: 1,
+        assertions: [],
+        evidence: [],
+      }),
+      terminalReceipt: () => cleanupReceipt,
+    });
+    const request = {
+      operationId: "cleanup-operation",
+      operationKey: cleanupReceipt.operationKey,
+      testRunId: "test-run",
+      requestHash: "a".repeat(64),
+      input: { schemaVersion: 1, fixtureId: "fixture-v1" },
+    };
+
+    assert.deepEqual(
+      (await adapter.reconcile(request)).providerReceipt,
+      cleanupReceipt,
+    );
+  });
+
   it("correlates only an acknowledged hash of the complete authoritative Query View", () => {
     const database = new DatabaseSync(":memory:");
     database.exec(`

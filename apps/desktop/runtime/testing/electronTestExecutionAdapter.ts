@@ -52,6 +52,10 @@ export const createElectronTestExecutionAdapter = (input: {
   readonly terminalResult: (
     request: TestExecutionRequest,
   ) => TestExecutionResult | Promise<TestExecutionResult>;
+  readonly terminalReceipt?: (
+    request: TestExecutionRequest,
+    result: TestExecutionResult,
+  ) => unknown | Promise<unknown>;
 }): TestExecutionAdapter => ({
   id: "scripted-execution",
   execute: (request) => {
@@ -68,15 +72,18 @@ export const createElectronTestExecutionAdapter = (input: {
   },
   reconcile: async (request) => {
     assertFixtureRequest(request, input.fixtureId);
+    const result = await input.terminalResult(request);
     return {
       state: "succeeded",
-      providerReceipt: {
-        schemaVersion: 1,
-        fixtureId: input.fixtureId,
-        operationKey: request.operationKey,
-        status: "succeeded",
-      },
-      result: await input.terminalResult(request),
+      providerReceipt: input.terminalReceipt
+        ? await input.terminalReceipt(request, result)
+        : {
+            schemaVersion: 1,
+            fixtureId: input.fixtureId,
+            operationKey: request.operationKey,
+            status: "succeeded",
+          },
+      result,
     };
   },
   cancel: (request) => {
