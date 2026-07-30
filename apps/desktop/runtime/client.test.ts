@@ -779,6 +779,107 @@ describe("Company Runtime client", () => {
     assert.equal(result.view.passAuthorityHash, "1".repeat(64));
   });
 
+  it("parses Delivery Candidate Input and Quality Gate Query Views plus formal Commands", async () => {
+    const candidateInput = {
+      id: "candidate-input-1",
+      requestId: "candidate-request-1",
+      manifest: { schemaVersion: 1, risk: { tier: "high" } },
+      manifestHash: "a".repeat(64),
+      state: "frozen-for-final-gates" as const,
+      createdAt: "2026-07-30T00:00:00.000Z",
+    };
+    const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
+    const client = createCompanyRuntimeClientFromTransport(
+      {
+        request: async (input: unknown): Promise<RuntimeResponse> => {
+          const request = RuntimeRequestSchema.parse(input);
+          requests.push(request);
+          if (request.kind === "command") {
+            return {
+              id: request.id,
+              ok: true,
+              result: {
+                status: "rejected",
+                error: {
+                  code: "QUALITY_GATE_EXECUTION_NOT_FOUND",
+                  message: "Gate execution is absent.",
+                },
+                effectIds: [],
+              },
+            };
+          }
+          const query =
+            request.kind === "query" && "envelope" in request
+              ? request.envelope.query
+              : null;
+          return {
+            id: request.id,
+            ok: true,
+            result: {
+              view:
+                query?.type === "quality-gates.inspect"
+                  ? {
+                      candidateInput,
+                      gateInputs: [],
+                      gateResults: [],
+                      authority: null,
+                    }
+                  : candidateInput,
+              asOfSequence: 49,
+            },
+          };
+        },
+      },
+      "token",
+    );
+
+    const candidate = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "candidate-query-1",
+      principal: actor,
+      consumerId: "delivery-coordinator",
+      query: {
+        type: "delivery-candidate-input.inspect",
+        candidateInputId: candidateInput.id,
+      },
+    });
+    const gates = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "quality-query-1",
+      principal: actor,
+      consumerId: "delivery-coordinator",
+      query: {
+        type: "quality-gates.inspect",
+        candidateInputId: candidateInput.id,
+      },
+    });
+    const reconciled = await client.executeEnvelope({
+      schemaVersion: 1,
+      commandId: "quality-reconcile-1",
+      actor,
+      consumerId: "quality-worker",
+      command: {
+        type: "quality-gate.execution.reconcile",
+        executionId: "missing-execution",
+        observation: { state: "unknown" },
+      },
+    });
+
+    assert.equal(candidate.view.id, candidateInput.id);
+    assert.equal(
+      gates.view.candidateInput.manifestHash,
+      candidateInput.manifestHash,
+    );
+    assert.equal(reconciled.status, "rejected");
+    if (reconciled.status === "rejected") {
+      assert.equal(reconciled.error.code, "QUALITY_GATE_EXECUTION_NOT_FOUND");
+    }
+    assert.deepEqual(
+      requests.map((request) => request.kind),
+      ["query", "query", "command"],
+    );
+  });
+
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
     const transport = {

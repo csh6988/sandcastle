@@ -649,6 +649,10 @@ export interface TestRuntime {
     readonly manifest: TestCaseRevisionManifestInput;
   }) => TestCaseRevisionView;
   readonly inspectCase: (testCaseId: string) => readonly TestCaseRevisionView[];
+  readonly readCaseRevision: (
+    revisionId: string,
+    expectedManifestHash: string,
+  ) => TestCaseRevisionView;
   readonly createRun: (input: TestRunManifestInput) => TestRunView;
   readonly inspect: (testRunId: string) => TestRunView;
   readonly execute: (input: {
@@ -5506,6 +5510,16 @@ export const openTestRuntime = (
   return {
     registerCaseRevision,
     inspectCase,
+    readCaseRevision: (revisionId, expectedManifestHash) => {
+      const revision = readCaseRevision(revisionId);
+      if (revision.manifestHash !== expectedManifestHash) {
+        throw new TestRuntimeError(
+          "TEST_CASE_REVISION_AUTHORITY_MISMATCH",
+          `Test Case revision ${revisionId} does not match its exact immutable manifest hash.`,
+        );
+      }
+      return revision;
+    },
     createRun,
     inspect: readRun,
     execute,

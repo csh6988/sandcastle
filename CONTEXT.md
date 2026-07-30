@@ -679,15 +679,15 @@ A pre-execution check that confirms every repository and application named by a 
 _Avoid_: "clone check" (readiness is broader than fetching code), silently repairing a repository before recording its starting state
 
 **Security review**:
-An independent, evidence-backed review of a product proposal, technical design, Work Package, or **Delivery Candidate Input** for unauthorized access, secret exposure, unsafe tool or sandbox permissions, dependency and supply-chain risk, data handling, and relevant compliance constraints. The review depth is selected by risk; every final candidate includes a PASS result bound to its exact input manifest.
+An independent, evidence-backed review of a product proposal, technical design, Work Package, or **Delivery Candidate Input** for unauthorized access, secret exposure, unsafe tool or sandbox permissions, dependency and supply-chain risk, data handling, and relevant compliance constraints. For a Delivery Candidate Input, Runtime selects the depth from frozen risk, binds the result to the exact input hash, and requires a fresh independent re-review after any non-PASS result.
 _Avoid_: "security scan" (the review also evaluates design and permissions), treating a clean scanner result as complete security evidence
 
 **Operability review**:
-An independent review of whether an exact **Delivery Candidate Input** can be built, observed, recovered, upgraded, and operated within its declared environment. It covers logging and telemetry, failure and retry behavior, resource and timeout limits, deployment or rollback evidence, and cross-application operational contracts; depth is risk-based and every final candidate includes its PASS result.
+An independent review of whether an exact **Delivery Candidate Input** can be built, observed, recovered, upgraded, and operated within its declared environment. Runtime selects the depth from frozen risk and requires exact startup, telemetry, Runtime Event, timeout, retry/reconcile, recovery, resource, migration, rollback, and cross-application evidence before its hash-bound result can be PASS.
 _Avoid_: "SRE sign-off" (the review is evidence and a gate, not a personal approval), checking only production deployment syntax
 
 **Delivery Candidate Input**:
-An immutable pre-candidate manifest that freezes one Integration Generation, exact per-Repository commits, approved Artifacts and contracts, Test evidence, Snapshot, and risk summary before final Security and Operability gates run. Those Gate Results bind this input ID/hash; only after every required result is PASS can Runtime assemble a Delivery candidate, avoiding a gate that refers to a not-yet-created candidate.
+An immutable pre-candidate manifest assembled only from an exact complete set of PASS **Test run** authorities and their frozen Product, Technical, Work Package, Code Review, Integration, per-Repository commit, Artifact, Contract, Snapshot, environment, risk, and evidence lineage. Security and Operability Gate Results bind this input ID/hash; changed lineage requires a new input, and only exact dual PASS with no open Finding, Defect, or obligation exposes downstream authority for a later Delivery candidate.
 _Avoid_: **Delivery candidate** (which additionally contains the final PASS Gate Results), a mutable staging list, a review scope inferred from a moving Integration branch
 
 **Delivery candidate**:

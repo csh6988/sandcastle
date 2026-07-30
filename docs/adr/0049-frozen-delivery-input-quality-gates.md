@@ -1,0 +1,7 @@
+# Freeze delivery input before final quality gates
+
+Delivery Candidate Input is an immutable canonical manifest assembled only from exact T15 Code Review, T16 PASS Integration Generation, and T17 PASS Test Run authorities. It freezes the accepted Product and Technical baselines, Snapshot, Work Package Versions, per-Repository commits, Artifact and Contract versions, complete Test coverage/evidence, environment, evidence policy, and Runtime-derived risk; any changed authority creates a new input rather than mutating or extending an old hash.
+
+Security and Operability reviews bind independent Review Topics, reviewers, check catalogs, evidence requirements, execution facts/receipts, and immutable Gate Results to that exact input ID/hash. `CONDITIONAL_PASS` and `FAIL` create durable obligations or Defects and require a fresh independent re-review over the unchanged input; only exact dual `PASS` with no open item creates the downstream authority that a later Delivery candidate may consume.
+
+Pipeline Runtime remains the sole Run, Node Run, and Node Attempt writer. Final-gate handlers use narrow Pipeline transitions and formal Runtime Commands, external reviewer effects run outside SQLite transactions behind durable intent/fact/receipt/reconcile, and Renderer state is rebuilt from authoritative Query Views with Runtime Events used only for invalidation. This avoids a second review or Pipeline state machine while deliberately leaving Delivery candidate creation and human release decisions to later work.

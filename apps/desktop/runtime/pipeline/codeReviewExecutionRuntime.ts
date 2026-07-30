@@ -35,8 +35,15 @@ export interface CodeReviewStageExecutionInput {
   readonly timeoutSeconds: number;
   readonly request: ReviewerExecutionInput;
   readonly adapter: ReviewerExecutionAdapter;
-  readonly handlerKindId: "code-review@1" | "integration@1";
-  readonly workerId: "code-review-node-handler" | "integration-node-handler";
+  readonly handlerKindId:
+    | "code-review@1"
+    | "integration@1"
+    | "security-review@1"
+    | "operability-review@1";
+  readonly workerId:
+    | "code-review-node-handler"
+    | "integration-node-handler"
+    | "delivery-quality-node-handler";
 }
 
 interface RuntimeMutationInput {
@@ -538,7 +545,9 @@ export const openCodeReviewExecutionRuntime = (options: {
       const commandPrefix =
         input.workerId === "code-review-node-handler"
           ? "code-review"
-          : "integration-review";
+          : input.workerId === "integration-node-handler"
+            ? "integration-review"
+            : "delivery-quality-review";
       const commandId = `${commandPrefix}:terminal-reconciliation:${details.terminalExecutionFactId}`;
       const request = {
         operationKey: input.operationKey,
@@ -839,7 +848,9 @@ export const openCodeReviewExecutionRuntime = (options: {
       const commandPrefix =
         input.workerId === "code-review-node-handler"
           ? "code-review"
-          : "integration-review";
+          : input.workerId === "integration-node-handler"
+            ? "integration-review"
+            : "delivery-quality-review";
       const commandId = `${commandPrefix}:execution-reattach:${reconciliationLeaseId}`;
       const request = {
         operationKey: input.operationKey,

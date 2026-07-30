@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import type { SandcastleBridge } from "../preload/bridge.js";
 import {
   EnvelopeCommandSchema,
+  type CandidateQualityGateView,
   type EnvelopeCommand,
   type TestRunView,
 } from "../runtime/interface.js";
+import { connectCandidateQualityGates } from "./candidateQualityGateView.js";
+import { CandidateQualityGatePanel } from "./companyPages.js";
 
 type TestCaseRevisionCommand = Extract<
   EnvelopeCommand,
@@ -19,6 +22,7 @@ export type ElectronTestFixtureRoute = {
   readonly schemaVersion: 1;
   readonly restoreOnLoad: boolean;
   readonly testRunId: string;
+  readonly candidateInputId?: string;
   readonly caseCommandId: string;
   readonly caseCommand: TestCaseRevisionCommand;
   readonly runCommandId: string;
@@ -32,7 +36,8 @@ export type ElectronTestFixtureRoute = {
   };
 };
 
-type FixtureBridge = Pick<SandcastleBridge, "query" | "execute">;
+type FixtureBridge = Pick<SandcastleBridge, "query" | "execute"> &
+  Partial<Pick<SandcastleBridge, "openEventStream" | "closeEventStream">>;
 type FixtureStatus =
   | "idle"
   | "working"
@@ -70,6 +75,9 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     typeof input.restoreOnLoad !== "boolean" ||
     typeof input.testRunId !== "string" ||
     input.testRunId.trim() === "" ||
+    (input.candidateInputId !== undefined &&
+      (typeof input.candidateInputId !== "string" ||
+        input.candidateInputId.trim() === "")) ||
     typeof input.caseCommandId !== "string" ||
     input.caseCommandId.trim() === "" ||
     typeof input.runCommandId !== "string" ||
@@ -87,6 +95,9 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     schemaVersion: 1,
     restoreOnLoad: input.restoreOnLoad,
     testRunId: input.testRunId,
+    ...(typeof input.candidateInputId === "string"
+      ? { candidateInputId: input.candidateInputId }
+      : {}),
     caseCommandId: input.caseCommandId,
     caseCommand: caseCommand.data,
     runCommandId: input.runCommandId,
@@ -143,6 +154,11 @@ export function ElectronTestFixturePage(props: {
   const bridge = props.bridge ?? window.sandcastle;
   const [status, setStatus] = useState<FixtureStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [candidateView, setCandidateView] =
+    useState<CandidateQualityGateView | null>(null);
+  const [candidateDiagnostic, setCandidateDiagnostic] = useState<string | null>(
+    null,
+  );
 
   const inspectAndAcknowledge = async (): Promise<TestRunView> => {
     const result = await bridge.query({
@@ -248,6 +264,52 @@ export function ElectronTestFixturePage(props: {
     };
   }, []);
 
+  useEffect(() => {
+    const candidateInputId = props.route.candidateInputId;
+    if (!candidateInputId) return;
+    if (!bridge.openEventStream || !bridge.closeEventStream) {
+      setCandidateDiagnostic(
+        "Candidate Quality Gates unavailable; Runtime Event stream is missing.",
+      );
+      return;
+    }
+    let active = true;
+    let close: (() => Promise<void>) | undefined;
+    setCandidateDiagnostic("Synchronizing Candidate Quality Gates…");
+    void connectCandidateQualityGates({
+      bridge: {
+        query: bridge.query,
+        execute: bridge.execute,
+        openEventStream: bridge.openEventStream,
+        closeEventStream: bridge.closeEventStream,
+      },
+      candidateInputId,
+      onView: (view) => {
+        if (active) setCandidateView(view);
+      },
+      onDiagnostic: (diagnostic) => {
+        if (active) setCandidateDiagnostic(diagnostic);
+      },
+    })
+      .then((connection) => {
+        close = connection.close;
+        if (!active) void connection.close();
+      })
+      .catch((cause) => {
+        if (active) {
+          setCandidateDiagnostic(
+            `Candidate Quality Gates unavailable; resync required: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          );
+        }
+      });
+    return () => {
+      active = false;
+      if (close) void close();
+    };
+  }, [bridge, props.route.candidateInputId]);
+
   const advance = async (): Promise<void> => {
     if (status === "working" || status === "observed" || status === "pass")
       return;
@@ -319,6 +381,10 @@ export function ElectronTestFixturePage(props: {
           {error ?? (status === "pass" ? "PASS" : status)}
         </output>
       </section>
+      <CandidateQualityGatePanel
+        diagnostic={candidateDiagnostic}
+        view={candidateView}
+      />
     </main>
   );
 }

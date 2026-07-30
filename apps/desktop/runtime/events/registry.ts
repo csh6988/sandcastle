@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 16;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 17;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -36,6 +36,8 @@ export interface RuntimeEventScope {
   readonly integrationOperationId?: string;
   readonly testCaseRevisionId?: string;
   readonly testRunId?: string;
+  readonly deliveryCandidateInputId?: string;
+  readonly candidateGateInputId?: string;
   readonly defectId?: string;
   readonly permissionRequestId?: string;
   readonly memoryCandidateId?: string;
@@ -596,6 +598,46 @@ const reviewEventPayloadSchema = z
     findingId: z.string().trim().min(1).optional(),
     qualityGateResultId: z.string().trim().min(1).optional(),
     result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]).optional(),
+  })
+  .passthrough();
+
+const deliveryCandidateInputEventPayloadSchema = z
+  .object({
+    deliveryCandidateInputId: z.string().trim().min(1),
+    manifestHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    authorityId: z.string().trim().min(1).optional(),
+    authorityHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    riskTier: z.enum(["low", "medium", "high", "critical"]).optional(),
+    state: z.string().trim().min(1).optional(),
+  })
+  .passthrough();
+
+const candidateGateEventPayloadSchema = z
+  .object({
+    candidateGateInputId: z.string().trim().min(1),
+    candidateGateResultId: z.string().trim().min(1).optional(),
+    executionId: z.string().trim().min(1).optional(),
+    kind: z.enum(["security", "operability"]).optional(),
+    result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]).optional(),
+    manifestHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    resultHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    requestHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    state: z.string().trim().min(1).optional(),
   })
   .passthrough();
 
@@ -1204,6 +1246,57 @@ const definitions = [
         acpMapping: "custom",
       }) satisfies RuntimeEventDefinition,
   ),
+  {
+    type: "delivery.candidate-input.frozen",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "deliveryCandidateInputId",
+    ],
+    payloadSchema: deliveryCandidateInputEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  ...[
+    "quality-gate.input.prepared",
+    "quality-gate.execution.accepted",
+    "quality-gate.execution.reconciled",
+    "quality-gate.result.recorded",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "deliveryCandidateInputId",
+          "candidateGateInputId",
+        ],
+        payloadSchema: candidateGateEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  {
+    type: "delivery.candidate-input.authorized",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "deliveryCandidateInputId",
+    ],
+    payloadSchema: deliveryCandidateInputEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
   ...[
     "interaction.turn.started",
     "interaction.turn.reconciling",

@@ -20,6 +20,8 @@ import {
   ProjectDetailWorkPackages,
   CodeReviewAuthorityPanel,
   IntegrationGenerationPanel,
+  CandidateQualityGatePanel,
+  deliveryCandidateInputIdFromRun,
   CompanyInteractionPage,
   InteractionRunPanel,
   RUN_PROGRESS_POLL_INTERVAL_MS,
@@ -52,6 +54,7 @@ import type {
   ReviewTopicView,
   CodeReviewView,
   IntegrationGenerationView,
+  CandidateQualityGateView,
 } from "../runtime/interface.js";
 import type {
   AgentCatalogView,
@@ -59,6 +62,54 @@ import type {
 } from "../runtime/interface.js";
 import { scriptedSkillConfiguration } from "../runtime/testing/skillConfigurationContract.js";
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
+
+describe("Delivery Candidate quality", () => {
+  it("renders only authoritative Candidate/Gate identity and finds the frozen Run result", () => {
+    const view = {
+      candidateInput: {
+        id: "candidate-input-1",
+        requestId: "candidate-request-1",
+        manifest: { schemaVersion: 1, risk: { tier: "high" } },
+        manifestHash: "a".repeat(64),
+        state: "frozen-for-final-gates",
+        createdAt: "2026-07-30T00:00:00.000Z",
+      },
+      gateInputs: [],
+      gateResults: [
+        {
+          id: "security-result-1",
+          gateInputId: "security-input-1",
+          qualityGateResultId: "generic-result-1",
+          result: "PASS",
+          manifest: {},
+          resultHash: "b".repeat(64),
+          defects: [],
+          obligations: [],
+          createdAt: "2026-07-30T00:01:00.000Z",
+        },
+      ],
+      authority: null,
+    } as CandidateQualityGateView;
+    const markup = renderToStaticMarkup(
+      <CandidateQualityGatePanel diagnostic={null} view={view} />,
+    );
+    const run = {
+      nodes: [
+        {
+          handler: { handlerKindId: "delivery-candidate-input@1" },
+          status: "succeeded",
+          result: { deliveryCandidateInputId: "candidate-input-1" },
+        },
+      ],
+    } as unknown as DepartmentRunView;
+
+    assert.match(markup, /candidate-input-1/);
+    assert.match(markup, /high/);
+    assert.match(markup, /security-result-1/);
+    assert.match(markup, /blocked/);
+    assert.equal(deliveryCandidateInputIdFromRun(run), "candidate-input-1");
+  });
+});
 
 describe("Review Topics", () => {
   it("renders exact manifest, individual findings, quorum, and PASS-only gate state", () => {

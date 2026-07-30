@@ -29,6 +29,8 @@ import {
   TestCaseRevisionViewSchema,
   TestPassAuthorityViewSchema,
   TestRunViewSchema,
+  type DeliveryCandidateInputView,
+  type CandidateQualityGateView,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
@@ -415,6 +417,12 @@ export interface SandcastleBridge {
       readonly runId?: string;
     }) => Promise<readonly ReviewTopicView[]>;
     readonly inspectReviewTopic: (topicId: string) => Promise<ReviewTopicView>;
+    readonly inspectDeliveryCandidateInput: (
+      candidateInputId: string,
+    ) => Promise<DeliveryCandidateInputView>;
+    readonly inspectQualityGates: (
+      candidateInputId: string,
+    ) => Promise<CandidateQualityGateView>;
     readonly executeReviewCommand: (input: {
       readonly commandId: string;
       readonly expectedRevision: number;
@@ -1179,6 +1187,15 @@ export const createSandcastleBridge = (
         (await query({ type: "review.topics.list", ...input })).view,
       inspectReviewTopic: async (topicId) =>
         (await query({ type: "review.topic.inspect", topicId })).view,
+      inspectDeliveryCandidateInput: async (candidateInputId) =>
+        (
+          await query({
+            type: "delivery-candidate-input.inspect",
+            candidateInputId,
+          })
+        ).view,
+      inspectQualityGates: async (candidateInputId) =>
+        (await query({ type: "quality-gates.inspect", candidateInputId })).view,
       executeReviewCommand: async (input) => {
         const result = await execute(input);
         if (result.status === "rejected") {

@@ -59,6 +59,19 @@ export interface IntegrationAuthorityFixtureResult {
   readonly interactionHumanParticipantId: string;
   readonly testOwnerPositionId: string;
   readonly testOwnerAiMemberId: string;
+  readonly gateReview: {
+    readonly moderator: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+    };
+    readonly reviewer: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+      readonly freshSessionId: string;
+    };
+  };
   readonly workPackageCoverage: readonly {
     readonly workPackageId: string;
     readonly workPackageVersionId: string;
@@ -1382,6 +1395,14 @@ export const createIntegrationAuthorityFixture = async (
     participantRef: tester.aiMember.id,
     role: "test-engineer",
   });
+  const gateReviewerSession = createConsultation(
+    reviewer,
+    "security-operability-reviewer",
+  );
+  const gateReviewerFreshSession = createConsultation(
+    reviewer,
+    "security-operability-recheck",
+  );
   const interactionSession = database.interaction.createSession({
     projectId: project.id,
     mode: "consultation",
@@ -1424,6 +1445,19 @@ export const createIntegrationAuthorityFixture = async (
     interactionHumanParticipantId: interactionHuman.id,
     testOwnerPositionId: tester.id,
     testOwnerAiMemberId: tester.aiMember.id,
+    gateReview: {
+      moderator: {
+        aiMemberId: productManager.aiMember.id,
+        positionId: productManager.id,
+        sessionId: productSession.id,
+      },
+      reviewer: {
+        aiMemberId: reviewer.aiMember.id,
+        positionId: reviewer.id,
+        sessionId: gateReviewerSession,
+        freshSessionId: gateReviewerFreshSession,
+      },
+    },
     workPackageCoverage: [
       {
         workPackageId,
