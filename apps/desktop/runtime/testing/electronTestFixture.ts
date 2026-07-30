@@ -3,9 +3,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -181,78 +179,59 @@ const entryIdentity = (metadata: {
 }): string =>
   `${metadata.dev}:${metadata.ino}:${metadata.birthtimeMs}:${metadata.mode}`;
 
-const snapshotPathWithin = (
-  root: string,
-  target: string,
-): {
-  readonly path: string;
-  readonly entries: readonly {
-    readonly path: string;
-    readonly identity: string;
-  }[];
-} => {
-  const lexicalRoot = resolve(root);
-  const rootMetadata = lstatSync(lexicalRoot);
-  const canonicalRoot = realpathSync(lexicalRoot);
-  if (rootMetadata.isSymbolicLink() || canonicalRoot !== lexicalRoot) {
-    throw new ElectronTestFixtureError(
-      "FIXTURE_SYMLINK_FORBIDDEN",
-      `Fixture root ${root} must be a canonical non-symbolic-link directory.`,
-    );
-  }
-  const absoluteTarget = resolve(target);
-  assertInside(canonicalRoot, absoluteTarget);
-  const relativeTarget = relative(canonicalRoot, absoluteTarget);
-  const componentPaths = [
-    canonicalRoot,
-    ...relativeTarget
-      .split(sep)
-      .filter(Boolean)
-      .map((_, index, components) =>
-        join(canonicalRoot, ...components.slice(0, index + 1)),
-      ),
-  ];
-  const entries = componentPaths.map((componentPath, index) => {
-    const metadata = lstatSync(componentPath);
-    if (metadata.isSymbolicLink()) {
-      throw new ElectronTestFixtureError(
-        "FIXTURE_SYMLINK_FORBIDDEN",
-        `Fixture path ${target} contains a symbolic-link component.`,
-      );
-    }
-    if (index < componentPaths.length - 1 && !metadata.isDirectory()) {
-      throw new ElectronTestFixtureError(
-        "FIXTURE_PATH_ESCAPE",
-        `Fixture path ${target} contains a non-directory ancestor.`,
-      );
-    }
-    return { path: componentPath, identity: entryIdentity(metadata) };
-  });
-  return { path: absoluteTarget, entries };
-};
+const descriptorRelativeReadHelper = String.raw`
+import errno
+import json
+import os
+import stat
+import sys
 
-const assertPathSnapshotUnchanged = (input: {
-  readonly target: string;
-  readonly entries: readonly {
-    readonly path: string;
-    readonly identity: string;
-  }[];
-  readonly errorCode: string;
-  readonly errorMessage: string;
-}): void => {
-  for (const entry of input.entries) {
-    const metadata = lstatSync(entry.path);
-    if (metadata.isSymbolicLink()) {
-      throw new ElectronTestFixtureError(
-        "FIXTURE_SYMLINK_FORBIDDEN",
-        `Fixture path ${input.target} contains a symbolic-link component.`,
-      );
-    }
-    if (entryIdentity(metadata) !== entry.identity) {
-      throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
-    }
-  }
-};
+root, relative_path, expected_mode, attack_json = sys.argv[1:]
+components = relative_path.split("/")
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+descriptors = []
+attack = json.loads(attack_json) if attack_json else None
+attacked = False
+try:
+    descriptors.append(os.open(root, directory_flags))
+    for component in components[:-1]:
+        descriptors.append(
+            os.open(component, directory_flags, dir_fd=descriptors[-1])
+        )
+    if attack:
+        os.rename(attack["target"], attack["parked"])
+        os.symlink(attack["outside"], attack["target"])
+        attacked = True
+    leaf = os.open(components[-1], flags, dir_fd=descriptors[-1])
+    descriptors.append(leaf)
+    metadata = os.fstat(leaf)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError(errno.EINVAL, "leaf is not a regular file")
+    if expected_mode and stat.S_IMODE(metadata.st_mode) != int(expected_mode, 8):
+        raise OSError(errno.EPERM, "leaf mode does not match")
+    while True:
+        chunk = os.read(leaf, 1024 * 1024)
+        if not chunk:
+            break
+        os.write(sys.stdout.fileno(), chunk)
+except OSError as error:
+    if error.errno in (errno.ELOOP, errno.ENOTDIR):
+        sys.stderr.write("SYMLINK_OR_NON_DIRECTORY")
+        sys.exit(40)
+    raise
+finally:
+    if attacked:
+        try:
+            os.unlink(attack["target"])
+        finally:
+            os.rename(attack["parked"], attack["target"])
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+`;
 
 const secureReadRegularFile = (input: {
   readonly root: string;
@@ -260,46 +239,71 @@ const secureReadRegularFile = (input: {
   readonly expectedMode?: number;
   readonly errorCode: string;
   readonly errorMessage: string;
+  readonly testOnlyAncestorSwap?: {
+    readonly target: string;
+    readonly parked: string;
+    readonly outside: string;
+  };
 }): { readonly path: string; readonly bytes: Buffer } => {
   if (!isAbsolute(input.path)) {
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
   }
-  let snapshot: ReturnType<typeof snapshotPathWithin>;
-  try {
-    snapshot = snapshotPathWithin(input.root, input.path);
-  } catch (error) {
-    if (error instanceof ElectronTestFixtureError) throw error;
-    throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
-  }
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(
-      snapshot.path,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  if (process.platform === "win32") {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_DESCRIPTOR_RELATIVE_UNAVAILABLE",
+      "Electron Test fixture file verification requires descriptor-relative no-follow opens on this platform.",
     );
-    const metadata = fstatSync(descriptor);
-    const leafSnapshot = snapshot.entries.at(-1)!;
-    if (
-      !metadata.isFile() ||
-      entryIdentity(metadata) !== leafSnapshot.identity ||
-      (input.expectedMode !== undefined &&
-        (metadata.mode & 0o777) !== input.expectedMode)
-    ) {
-      throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
-    }
-    const bytes = readFileSync(descriptor);
-    assertPathSnapshotUnchanged({
-      target: input.path,
-      entries: snapshot.entries,
-      errorCode: input.errorCode,
-      errorMessage: input.errorMessage,
-    });
-    return { path: snapshot.path, bytes };
+  }
+  const root = resolve(input.root);
+  const target = resolve(input.path);
+  assertInside(root, target);
+  const relativeTarget = relative(root, target).split(sep).join("/");
+  try {
+    const bytes = execFileSync(
+      "python3",
+      [
+        "-c",
+        descriptorRelativeReadHelper,
+        root,
+        relativeTarget,
+        input.expectedMode?.toString(8) ?? "",
+        input.testOnlyAncestorSwap
+          ? JSON.stringify(input.testOnlyAncestorSwap)
+          : "",
+      ],
+      {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    return { path: target, bytes };
   } catch (error) {
     if (error instanceof ElectronTestFixtureError) throw error;
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "stderr" in error &&
+      Buffer.isBuffer(error.stderr) &&
+      error.stderr.toString("utf8") === "SYMLINK_OR_NON_DIRECTORY"
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_SYMLINK_FORBIDDEN",
+        `Fixture path ${input.path} contains a symbolic-link or non-directory component.`,
+      );
+    }
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_DESCRIPTOR_RELATIVE_UNAVAILABLE",
+        "Electron Test fixture file verification requires the local descriptor-relative helper.",
+      );
+    }
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
   }
 };
 
@@ -603,6 +607,11 @@ export const verifyTestEvidenceFile = (input: {
   readonly locator: string;
   readonly contentHash: string;
   readonly byteSize: number;
+  readonly testOnlyAncestorSwap?: {
+    readonly target: string;
+    readonly parked: string;
+    readonly outside: string;
+  };
 }): { readonly path: string; readonly bytes: Buffer } => {
   assertHash(input.contentHash, "Test evidence content hash");
   const evidenceDirectory = resolve(input.evidenceDirectory);
@@ -613,6 +622,7 @@ export const verifyTestEvidenceFile = (input: {
     errorCode: "FIXTURE_EVIDENCE_MISMATCH",
     errorMessage:
       "Test evidence locator does not resolve to frozen regular non-symlink bytes.",
+    testOnlyAncestorSwap: input.testOnlyAncestorSwap,
   });
   if (
     verified.bytes.byteLength !== input.byteSize ||
@@ -814,6 +824,9 @@ export const createElectronTestFixture = (input: {
     return currentClaim;
   };
   currentClaim = issueAuthorizationClaim();
+  let cleanupExecutionReceipt: ReturnType<
+    ElectronTestFixture["cleanupExecutionResources"]
+  > | null = null;
   const verifyRoot = (): void => {
     const rootMetadata = lstatSync(root);
     if (
@@ -872,11 +885,17 @@ export const createElectronTestFixture = (input: {
       issueAuthorizationClaim();
     },
     cleanupExecutionResources: () => {
+      if (cleanupExecutionReceipt) return cleanupExecutionReceipt;
       verifyRoot();
+      if (cleanupTargets.some((target) => !pathEntryExists(target.path))) {
+        throw new ElectronTestFixtureError(
+          "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+          "Electron Test cleanup requires every frozen target to exist before its first verified quarantine move.",
+        );
+      }
       const quarantineRoot = mkdtempSync(join(root, ".cleanup-quarantine-"));
       chmodSync(quarantineRoot, 0o700);
       for (const target of cleanupTargets) {
-        if (!pathEntryExists(target.path)) continue;
         const movedPath = join(
           quarantineRoot,
           `${target.kind}-${randomBytes(8).toString("hex")}`,
@@ -902,7 +921,7 @@ export const createElectronTestFixture = (input: {
         }
       }
       rmdirSync(quarantineRoot);
-      return {
+      cleanupExecutionReceipt = {
         schemaVersion: 1,
         fixtureId: input.fixtureId,
         rootFingerprint,
@@ -912,6 +931,7 @@ export const createElectronTestFixture = (input: {
           state: "absent" as const,
         })),
       };
+      return cleanupExecutionReceipt;
     },
     cleanup: () => {
       verifyRoot();

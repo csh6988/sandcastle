@@ -92,7 +92,10 @@ describe("Electron Test execution adapter", () => {
         query_hash TEXT NOT NULL,
         view_hash TEXT NOT NULL,
         sequence INTEGER NOT NULL,
-        consumed_at TEXT NOT NULL
+        consumed_at TEXT NOT NULL,
+        consumer_id TEXT NOT NULL,
+        principal_hash TEXT NOT NULL,
+        command_id TEXT
       );
     `);
     const run = {
@@ -103,15 +106,21 @@ describe("Electron Test execution adapter", () => {
     } as unknown as TestRunView;
     database
       .prepare(
-        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at) VALUES (?, 'wrong-query', ?, ?, ?)",
+        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at, consumer_id, principal_hash, command_id) VALUES (?, 'wrong-query', ?, ?, ?, 'consumer-1', ?, 'ack-1')",
       )
-      .run("b".repeat(64), run.viewHash, 4, "2026-07-29T00:00:00.000Z");
+      .run(
+        "b".repeat(64),
+        run.viewHash,
+        4,
+        "2026-07-29T00:00:00.000Z",
+        "d".repeat(64),
+      );
 
     assert.equal(readAcknowledgedElectronTestView(database, run), undefined);
 
     database
       .prepare(
-        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at, consumer_id, principal_hash, command_id) VALUES (?, ?, ?, ?, ?, 'consumer-1', ?, 'ack-1')",
       )
       .run(
         "c".repeat(64),
@@ -123,6 +132,7 @@ describe("Electron Test execution adapter", () => {
         runtimeQueryViewHash(run),
         5,
         "2026-07-29T00:00:01.000Z",
+        "d".repeat(64),
       );
     const acknowledged = readAcknowledgedElectronTestView(database, run);
     assert.ok(acknowledged);
@@ -130,8 +140,16 @@ describe("Electron Test execution adapter", () => {
       { ...acknowledged },
       {
         tokenHash: "c".repeat(64),
+        queryHash: createHash("sha256")
+          .update(
+            JSON.stringify({ type: "test-runs.inspect", testRunId: run.id }),
+          )
+          .digest("hex"),
         viewHash: runtimeQueryViewHash(run),
         sequence: 5,
+        consumerId: "consumer-1",
+        principalHash: "d".repeat(64),
+        acknowledgementCommandId: "ack-1",
       },
     );
     database.close();

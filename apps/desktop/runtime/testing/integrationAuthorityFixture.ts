@@ -63,6 +63,7 @@ export interface IntegrationAuthorityFixtureResult {
     readonly workPackageId: string;
     readonly workPackageVersionId: string;
     readonly manifestHash: string;
+    readonly riskTier: "low" | "medium" | "high" | "critical";
   }[];
   readonly testExecutionProfile: {
     readonly id: string;
@@ -1428,6 +1429,7 @@ export const createIntegrationAuthorityFixture = async (
         workPackageId,
         workPackageVersionId,
         manifestHash: frozenWorkPackageVersion.manifestHash,
+        riskTier: manifest.riskTier,
       },
     ],
     testExecutionProfile: {

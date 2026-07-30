@@ -1426,6 +1426,40 @@ export const TestCaseRevisionViewSchema = z
   })
   .strict();
 
+const TestReworkRouteSchema = z.discriminatedUnion("destination", [
+  z
+    .object({
+      destination: z.literal("work-package"),
+      workPackageId: z.string().trim().min(1),
+      workPackageVersionId: z.string().trim().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      destination: z.literal("contract"),
+      contractId: z.string().trim().min(1),
+      version: z.string().trim().min(1),
+      producerApplicationId: z.string().trim().min(1),
+      consumerApplicationId: z.string().trim().min(1),
+      candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
+    })
+    .strict(),
+  z
+    .object({
+      destination: z.literal("triage"),
+      responsibility: z.enum(["aggregate", "unknown"]),
+      candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
+      reason: z.string().trim().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      destination: z.literal("ui-runtime-contract"),
+      owner: z.enum(["ui", "runtime", "shared"]),
+    })
+    .strict(),
+]);
+
 export const TestRunViewSchema = z
   .object({
     id: z.string().trim().min(1),
@@ -1575,39 +1609,7 @@ export const TestRunViewSchema = z
         id: z.string().trim().min(1),
         defectId: z.string().trim().min(1),
         priorTestRunId: z.string().trim().min(1),
-        route: z.discriminatedUnion("destination", [
-          z
-            .object({
-              destination: z.literal("work-package"),
-              workPackageId: z.string().trim().min(1),
-              workPackageVersionId: z.string().trim().min(1),
-            })
-            .strict(),
-          z
-            .object({
-              destination: z.literal("contract"),
-              contractId: z.string().trim().min(1),
-              version: z.string().trim().min(1),
-              producerApplicationId: z.string().trim().min(1),
-              consumerApplicationId: z.string().trim().min(1),
-              candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
-            })
-            .strict(),
-          z
-            .object({
-              destination: z.literal("triage"),
-              responsibility: z.enum(["aggregate", "unknown"]),
-              candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
-              reason: z.string().trim().min(1).optional(),
-            })
-            .strict(),
-          z
-            .object({
-              destination: z.literal("ui-runtime-contract"),
-              owner: z.enum(["ui", "runtime", "shared"]),
-            })
-            .strict(),
-        ]),
+        route: TestReworkRouteSchema,
         lineage: z
           .object({
             priorTestRunId: z.string().trim().min(1),
@@ -1622,9 +1624,12 @@ export const TestRunViewSchema = z
               z
                 .object({
                   defectId: z.string().trim().min(1),
+                  priorTestRunId: z.string().trim().min(1),
+                  priorIntegrationGenerationId: z.string().trim().min(1),
                   priorTestCaseRevisionId: z.string().trim().min(1),
                   priorAssertionId: z.string().trim().min(1),
                   priorResultHash: Sha256Schema,
+                  responsibilityRoute: TestReworkRouteSchema,
                   nextTestCaseRevisionId: z.string().trim().min(1),
                   nextAssertionId: z.string().trim().min(1),
                 })

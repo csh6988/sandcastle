@@ -15,6 +15,7 @@ import { app, BrowserWindow, MessageChannelMain, ipcMain } from "electron";
 import { createCompanyRuntimeSupervisor } from "../dist-electron/main/companyRuntimeSupervisor.js";
 import { registerRuntimeIpc } from "../dist-electron/main/runtimeIpc.js";
 import { startShellServer } from "../dist-electron/server/shellServer.js";
+import { EnvelopeCommandSchema } from "../dist-electron/runtime/interface.js";
 import {
   applyElectronTestFixtureExitCode,
   createElectronTestFixture,
@@ -196,9 +197,15 @@ const caseManifestFor = (seeded, operations) => ({
       ),
     ),
   ].sort(),
-  workPackageVersions: [...seeded.workPackageCoverage].sort((left, right) =>
-    left.workPackageVersionId.localeCompare(right.workPackageVersionId),
-  ),
+  workPackageVersions: seeded.workPackageCoverage
+    .map((workPackage) => ({
+      workPackageId: workPackage.workPackageId,
+      workPackageVersionId: workPackage.workPackageVersionId,
+      manifestHash: workPackage.manifestHash,
+    }))
+    .sort((left, right) =>
+      left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+    ),
   preconditions: ["exact PASS Integration Generation is available"],
   uiActions: [
     { id: "fixture-run", kind: "click", target: "#run-test" },
@@ -237,6 +244,14 @@ const caseManifestFor = (seeded, operations) => ({
 
 const testScopeRiskFor = (seeded, operations) => {
   const revisionId = `technical-baseline:${seeded.technicalBaselineId}:${seeded.technicalBaselineHash}`;
+  const tierRank = { low: 0, medium: 1, high: 2, critical: 3 };
+  const highestWorkPackageRiskTier = seeded.workPackageCoverage.reduce(
+    (tier, workPackage) =>
+      tierRank[workPackage.riskTier] > tierRank[tier]
+        ? workPackage.riskTier
+        : tier,
+    "low",
+  );
   const rules = [
     { factorId: "auth-permission", minimumTier: "high" },
     { factorId: "credential-materialization", minimumTier: "critical" },
@@ -255,6 +270,10 @@ const testScopeRiskFor = (seeded, operations) => {
     { factorId: "sandbox-boundary", minimumTier: "critical" },
     { factorId: "secret-environment-boundary", minimumTier: "high" },
     { factorId: "user-visible-runtime", minimumTier: "high" },
+    {
+      factorId: "work-package-risk-tier",
+      minimumTier: highestWorkPackageRiskTier,
+    },
   ];
   const permissionEvidence = seeded.workPackageCoverage.map(
     (workPackage) =>
@@ -320,16 +339,34 @@ const testScopeRiskFor = (seeded, operations) => {
       present: true,
       evidenceRefs: ["test-case-revision:fixture-case-1-r1"],
     },
+    {
+      id: "work-package-risk-tier",
+      present: seeded.workPackageCoverage.length > 0,
+      evidenceRefs: seeded.workPackageCoverage
+        .map(
+          (workPackage) =>
+            `work-package-version:${workPackage.workPackageVersionId}:risk-tier:${workPackage.riskTier}`,
+        )
+        .sort(),
+    },
   ];
   const evidenceRefs = [
     ...new Set(factors.flatMap((factor) => factor.evidenceRefs)),
   ].sort();
   const policyHash = hashValue({ schemaVersion: 1, revisionId, rules });
+  const computedTier = factors
+    .filter((factor) => factor.present)
+    .reduce((tier, factor) => {
+      const rule = rules.find((candidate) => candidate.factorId === factor.id);
+      return rule && tierRank[rule.minimumTier] > tierRank[tier]
+        ? rule.minimumTier
+        : tier;
+    }, "low");
   return {
     schemaVersion: 1,
     policy: { revisionId, rules, hash: policyHash },
     factors,
-    computedTier: "high",
+    computedTier,
     evidenceRefs,
     inputHash: hashValue({
       schemaVersion: 1,
@@ -614,6 +651,22 @@ const run = async () => {
       expectedResponse: interactionResponse,
     },
   };
+  const caseCommand = EnvelopeCommandSchema.safeParse(
+    preparationRoute.caseCommand,
+  );
+  const runCommand = EnvelopeCommandSchema.safeParse(
+    preparationRoute.runCommand,
+  );
+  assert.equal(
+    caseCommand.success,
+    true,
+    caseCommand.success ? undefined : caseCommand.error.message,
+  );
+  assert.equal(
+    runCommand.success,
+    true,
+    runCommand.success ? undefined : runCommand.error.message,
+  );
   await supervisor.start(fixture.config.companyDirectory);
   await window.loadURL(fixtureUrl(shell.url, preparationRoute));
   await waitForTitle("idle");
@@ -881,6 +934,7 @@ const run = async () => {
   let terminalView;
   for (let gesture = 1; gesture <= 8; gesture += 1) {
     await clickFixtureButton();
+    await waitForTitle("working");
     await waitForTitle(["ready", "pass"]);
     let view = await inspectTestRun(`gesture-${gesture}`);
     if (view.executions.some((entry) => entry.state === "reconciling")) {

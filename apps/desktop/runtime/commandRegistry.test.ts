@@ -470,6 +470,10 @@ describe("Company Runtime command registry", () => {
             minimumTier: "high" as const,
           },
           { factorId: "user-visible-runtime", minimumTier: "high" as const },
+          {
+            factorId: "work-package-risk-tier",
+            minimumTier: "low" as const,
+          },
         ];
         const revisionId = `technical-baseline:baseline-test-command:${"5".repeat(64)}`;
         const policyHash = canonicalHash({
@@ -520,6 +524,11 @@ describe("Company Runtime command registry", () => {
             id: "user-visible-runtime",
             present: true,
             evidenceRefs: ["test-case-revision:case-test-command-r1"],
+          },
+          {
+            id: "work-package-risk-tier",
+            present: false,
+            evidenceRefs: [],
           },
         ];
         const evidenceRefs = [
