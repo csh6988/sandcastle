@@ -181,15 +181,30 @@ const entryIdentity = (metadata: {
 
 const descriptorRelativeReadHelper = String.raw`
 import errno
+import inspect
 import json
 import os
 import stat
 import sys
 
-root, relative_path, expected_mode, attack_json = sys.argv[1:]
+root, relative_path, expected_mode, attack_json, simulated_missing = sys.argv[1:]
 components = relative_path.split("/")
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+try:
+    open_parameters = inspect.signature(os.open).parameters
+except (TypeError, ValueError):
+    open_parameters = {}
+missing_capability = (
+    simulated_missing in ("O_NOFOLLOW", "O_DIRECTORY", "dir_fd")
+    or not hasattr(os, "O_NOFOLLOW")
+    or not hasattr(os, "O_DIRECTORY")
+    or "dir_fd" not in open_parameters
+    or os.open not in getattr(os, "supports_dir_fd", set())
+)
+if missing_capability:
+    sys.stderr.write("DESCRIPTOR_RELATIVE_UNAVAILABLE")
+    sys.exit(41)
+flags = os.O_RDONLY | os.O_NOFOLLOW
+directory_flags = flags | os.O_DIRECTORY
 descriptors = []
 attack = json.loads(attack_json) if attack_json else None
 attacked = False
@@ -244,6 +259,10 @@ const secureReadRegularFile = (input: {
     readonly parked: string;
     readonly outside: string;
   };
+  readonly testOnlyMissingDescriptorRelativeCapability?:
+    | "O_NOFOLLOW"
+    | "O_DIRECTORY"
+    | "dir_fd";
 }): { readonly path: string; readonly bytes: Buffer } => {
   if (!isAbsolute(input.path)) {
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
@@ -270,6 +289,7 @@ const secureReadRegularFile = (input: {
         input.testOnlyAncestorSwap
           ? JSON.stringify(input.testOnlyAncestorSwap)
           : "",
+        input.testOnlyMissingDescriptorRelativeCapability ?? "",
       ],
       {
         encoding: "buffer",
@@ -280,6 +300,18 @@ const secureReadRegularFile = (input: {
     return { path: target, bytes };
   } catch (error) {
     if (error instanceof ElectronTestFixtureError) throw error;
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "stderr" in error &&
+      Buffer.isBuffer(error.stderr) &&
+      error.stderr.toString("utf8") === "DESCRIPTOR_RELATIVE_UNAVAILABLE"
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_DESCRIPTOR_RELATIVE_UNAVAILABLE",
+        "Electron Test fixture file verification requires descriptor-relative no-follow opens from the local helper.",
+      );
+    }
     if (
       error !== null &&
       typeof error === "object" &&
@@ -612,6 +644,10 @@ export const verifyTestEvidenceFile = (input: {
     readonly parked: string;
     readonly outside: string;
   };
+  readonly testOnlyMissingDescriptorRelativeCapability?:
+    | "O_NOFOLLOW"
+    | "O_DIRECTORY"
+    | "dir_fd";
 }): { readonly path: string; readonly bytes: Buffer } => {
   assertHash(input.contentHash, "Test evidence content hash");
   const evidenceDirectory = resolve(input.evidenceDirectory);
@@ -623,6 +659,8 @@ export const verifyTestEvidenceFile = (input: {
     errorMessage:
       "Test evidence locator does not resolve to frozen regular non-symlink bytes.",
     testOnlyAncestorSwap: input.testOnlyAncestorSwap,
+    testOnlyMissingDescriptorRelativeCapability:
+      input.testOnlyMissingDescriptorRelativeCapability,
   });
   if (
     verified.bytes.byteLength !== input.byteSize ||
