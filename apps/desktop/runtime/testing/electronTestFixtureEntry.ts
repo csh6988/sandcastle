@@ -631,6 +631,8 @@ const main = async (): Promise<void> => {
                 {
                   testCaseRevisionId: operation.testCaseRevisionId,
                   assertionId: operation.assertionId,
+                  uiObserved: "Interaction Observed",
+                  runtimeObserved: "completed",
                   uiStatus: "passed",
                   runtimeStatus: "passed",
                   correlation: {

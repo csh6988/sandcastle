@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { runtimeQueryViewHash } from "../events/cursor.js";
 import type {
@@ -16,16 +17,22 @@ export type AcknowledgedElectronTestView = {
 export const readAcknowledgedElectronTestView = (
   database: DatabaseSync,
   run: TestRunView,
-): AcknowledgedElectronTestView | undefined =>
-  database
+): AcknowledgedElectronTestView | undefined => {
+  const queryHash = createHash("sha256")
+    .update(JSON.stringify({ type: "test-runs.inspect", testRunId: run.id }))
+    .digest("hex");
+  return database
     .prepare(
       `SELECT token_hash AS tokenHash, view_hash AS viewHash, sequence
          FROM consumed_view_sync_tokens
-        WHERE view_hash = ?
+        WHERE view_hash = ? AND query_hash = ?
         ORDER BY consumed_at DESC, token_hash DESC
         LIMIT 1`,
     )
-    .get(runtimeQueryViewHash(run)) as AcknowledgedElectronTestView | undefined;
+    .get(runtimeQueryViewHash(run), queryHash) as
+    | AcknowledgedElectronTestView
+    | undefined;
+};
 
 const assertFixtureRequest = (
   request: TestExecutionRequest,

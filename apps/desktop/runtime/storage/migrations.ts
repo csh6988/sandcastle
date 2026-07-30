@@ -5,7 +5,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 47;
+export const CURRENT_SCHEMA_VERSION = 48;
 
 interface CompanyMigration {
   readonly version: number;
@@ -4818,6 +4818,38 @@ const migrations: readonly CompanyMigration[] = [
     version: 47,
     name: "versioned_test_cases_and_runs",
     migrate: (database) => {
+      const v48Signals = database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE name IN (
+              'test_defect_resolutions_defect_idx',
+              'test_run_obligation_resolutions',
+              'test_rework_runs',
+              'test_rework_runs_defect_idx',
+              'test_run_obligation_resolutions_immutable_update',
+              'test_run_obligation_resolutions_immutable_delete',
+              'test_rework_runs_immutable_update',
+              'test_rework_runs_immutable_delete'
+            )`,
+        )
+        .all() as Array<{ readonly name: string }>;
+      const obligationColumns = database
+        .prepare("PRAGMA table_info(test_run_obligations)")
+        .all() as Array<{ readonly name: string }>;
+      const assertionResultColumns = database
+        .prepare("PRAGMA table_info(test_assertion_results)")
+        .all() as Array<{ readonly name: string }>;
+      if (
+        v48Signals.length > 0 ||
+        obligationColumns.some((column) => column.name === "defect_id") ||
+        assertionResultColumns.some(
+          (column) =>
+            column.name === "ui_observation_json" ||
+            column.name === "runtime_observation_json",
+        )
+      ) {
+        return;
+      }
       const createTestSchema = (target: DatabaseSync): void =>
         target.exec(`
           CREATE TABLE test_cases (
@@ -4967,7 +4999,7 @@ const migrations: readonly CompanyMigration[] = [
 
           CREATE TABLE test_defect_resolutions (
             id TEXT PRIMARY KEY,
-            defect_id TEXT NOT NULL UNIQUE REFERENCES test_defects(id),
+            defect_id TEXT NOT NULL REFERENCES test_defects(id),
             resolution_json TEXT NOT NULL,
             resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
             created_at TEXT NOT NULL
@@ -4976,31 +5008,11 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TABLE test_run_obligations (
             id TEXT PRIMARY KEY,
             test_run_id TEXT NOT NULL REFERENCES test_runs(id),
-            defect_id TEXT REFERENCES test_defects(id),
             description TEXT NOT NULL,
             evidence_json TEXT NOT NULL,
             status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
             created_at TEXT NOT NULL,
             closed_at TEXT
-          ) STRICT;
-
-          CREATE TABLE test_run_obligation_resolutions (
-            id TEXT PRIMARY KEY,
-            obligation_id TEXT NOT NULL UNIQUE REFERENCES test_run_obligations(id),
-            defect_resolution_id TEXT NOT NULL REFERENCES test_defect_resolutions(id),
-            created_at TEXT NOT NULL
-          ) STRICT;
-
-          CREATE TABLE test_rework_runs (
-            id TEXT PRIMARY KEY,
-            defect_id TEXT NOT NULL REFERENCES test_defects(id),
-            prior_test_run_id TEXT NOT NULL REFERENCES test_runs(id),
-            fresh_test_run_id TEXT NOT NULL UNIQUE REFERENCES test_runs(id),
-            route_json TEXT NOT NULL,
-            lineage_json TEXT NOT NULL,
-            lineage_hash TEXT NOT NULL CHECK (length(lineage_hash) = 64),
-            created_at TEXT NOT NULL,
-            UNIQUE (defect_id, fresh_test_run_id)
           ) STRICT;
 
           CREATE INDEX test_case_revisions_case_idx ON test_case_revisions(test_case_id, revision, id);
@@ -5011,7 +5023,6 @@ const migrations: readonly CompanyMigration[] = [
           CREATE INDEX test_evidence_run_idx ON test_evidence(test_run_id, test_case_revision_id, assertion_id, id);
           CREATE INDEX test_defects_run_idx ON test_defects(test_run_id, status, created_at, id);
           CREATE INDEX test_run_obligations_run_idx ON test_run_obligations(test_run_id, status, created_at, id);
-          CREATE INDEX test_rework_runs_defect_idx ON test_rework_runs(defect_id, created_at, id);
 
           CREATE TRIGGER test_case_revisions_immutable_update BEFORE UPDATE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
           CREATE TRIGGER test_case_revisions_immutable_delete BEFORE DELETE ON test_case_revisions BEGIN SELECT RAISE(ABORT, 'Test Case revision is immutable'); END;
@@ -5074,10 +5085,6 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TRIGGER test_defects_immutable_delete BEFORE DELETE ON test_defects BEGIN SELECT RAISE(ABORT, 'Test defect evidence is immutable'); END;
           CREATE TRIGGER test_defect_resolutions_immutable_update BEFORE UPDATE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
           CREATE TRIGGER test_defect_resolutions_immutable_delete BEFORE DELETE ON test_defect_resolutions BEGIN SELECT RAISE(ABORT, 'Test defect resolution is immutable'); END;
-          CREATE TRIGGER test_run_obligation_resolutions_immutable_update BEFORE UPDATE ON test_run_obligation_resolutions BEGIN SELECT RAISE(ABORT, 'Test obligation resolution is immutable'); END;
-          CREATE TRIGGER test_run_obligation_resolutions_immutable_delete BEFORE DELETE ON test_run_obligation_resolutions BEGIN SELECT RAISE(ABORT, 'Test obligation resolution is immutable'); END;
-          CREATE TRIGGER test_rework_runs_immutable_update BEFORE UPDATE ON test_rework_runs BEGIN SELECT RAISE(ABORT, 'Test rework lineage is immutable'); END;
-          CREATE TRIGGER test_rework_runs_immutable_delete BEFORE DELETE ON test_rework_runs BEGIN SELECT RAISE(ABORT, 'Test rework lineage is immutable'); END;
           CREATE TRIGGER test_run_case_revisions_terminal_insert BEFORE INSERT ON test_run_case_revisions
           WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
           BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
@@ -5102,13 +5109,25 @@ const migrations: readonly CompanyMigration[] = [
           CREATE TRIGGER test_defects_terminal_run_insert BEFORE INSERT ON test_defects
           WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
           BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_defects_terminal_run_update BEFORE UPDATE ON test_defects
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = OLD.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_defect_resolutions_terminal_run_insert BEFORE INSERT ON test_defect_resolutions
+          WHEN EXISTS (
+            SELECT 1 FROM test_defects
+            JOIN test_runs ON test_runs.id = test_defects.test_run_id
+            WHERE test_defects.id = NEW.defect_id AND test_runs.state IN ('passed', 'failed', 'blocked', 'cancelled')
+          ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
           CREATE TRIGGER test_run_obligations_immutable_delete BEFORE DELETE ON test_run_obligations BEGIN SELECT RAISE(ABORT, 'Test Run obligation is immutable'); END;
           CREATE TRIGGER test_run_obligations_identity_update BEFORE UPDATE ON test_run_obligations
-          WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id OR NEW.defect_id IS NOT OLD.defect_id OR NEW.description <> OLD.description
+          WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id OR NEW.description <> OLD.description
             OR NEW.evidence_json <> OLD.evidence_json OR NEW.created_at <> OLD.created_at
           BEGIN SELECT RAISE(ABORT, 'Test Run obligation identity is immutable'); END;
           CREATE TRIGGER test_run_obligations_terminal_run_insert BEFORE INSERT ON test_run_obligations
           WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = NEW.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
+          BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+          CREATE TRIGGER test_run_obligations_terminal_run_update BEFORE UPDATE ON test_run_obligations
+          WHEN EXISTS (SELECT 1 FROM test_runs WHERE id = OLD.test_run_id AND state IN ('passed', 'failed', 'blocked', 'cancelled'))
           BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
         `);
       const normalizeSql = (sql: string): string =>
@@ -5167,6 +5186,227 @@ const migrations: readonly CompanyMigration[] = [
               `Existing Test schema is incompatible: ${incompatible.join(", ")}`,
             );
           }
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
+  {
+    version: 48,
+    name: "test_rework_resolution_authority",
+    migrate: (database) => {
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const createV48Objects = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE UNIQUE INDEX test_defect_resolutions_defect_idx
+            ON test_defect_resolutions(defect_id);
+
+          CREATE TABLE test_run_obligation_resolutions (
+            id TEXT PRIMARY KEY,
+            obligation_id TEXT NOT NULL UNIQUE REFERENCES test_run_obligations(id),
+            defect_resolution_id TEXT NOT NULL REFERENCES test_defect_resolutions(id),
+            created_at TEXT NOT NULL
+          ) STRICT;
+
+          CREATE TABLE test_rework_runs (
+            id TEXT PRIMARY KEY,
+            defect_id TEXT NOT NULL REFERENCES test_defects(id),
+            prior_test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            fresh_test_run_id TEXT NOT NULL UNIQUE REFERENCES test_runs(id),
+            route_json TEXT NOT NULL,
+            lineage_json TEXT NOT NULL,
+            lineage_hash TEXT NOT NULL CHECK (length(lineage_hash) = 64),
+            created_at TEXT NOT NULL,
+            UNIQUE (defect_id, fresh_test_run_id)
+          ) STRICT;
+
+          CREATE INDEX test_rework_runs_defect_idx
+            ON test_rework_runs(defect_id, created_at, id);
+
+          CREATE TRIGGER test_run_obligation_resolutions_immutable_update
+            BEFORE UPDATE ON test_run_obligation_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Test obligation resolution is immutable'); END;
+          CREATE TRIGGER test_run_obligation_resolutions_immutable_delete
+            BEFORE DELETE ON test_run_obligation_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Test obligation resolution is immutable'); END;
+          CREATE TRIGGER test_rework_runs_immutable_update
+            BEFORE UPDATE ON test_rework_runs
+            BEGIN SELECT RAISE(ABORT, 'Test rework lineage is immutable'); END;
+          CREATE TRIGGER test_rework_runs_immutable_delete
+            BEFORE DELETE ON test_rework_runs
+            BEGIN SELECT RAISE(ABORT, 'Test rework lineage is immutable'); END;
+        `);
+      const obligationColumns = database
+        .prepare("PRAGMA table_info(test_run_obligations)")
+        .all() as Array<{ readonly name: string }>;
+      const assertionResultColumns = database
+        .prepare("PRAGMA table_info(test_assertion_results)")
+        .all() as Array<{ readonly name: string }>;
+      const v48Markers = database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE name IN (
+              'test_defect_resolutions_defect_idx',
+              'test_run_obligation_resolutions',
+              'test_rework_runs',
+              'test_rework_runs_defect_idx',
+              'test_run_obligation_resolutions_immutable_update',
+              'test_run_obligation_resolutions_immutable_delete',
+              'test_rework_runs_immutable_update',
+              'test_rework_runs_immutable_delete'
+            )`,
+        )
+        .all() as Array<{ readonly name: string }>;
+      const hasDefectId = obligationColumns.some(
+        (column) => column.name === "defect_id",
+      );
+      const hasUiObservation = assertionResultColumns.some(
+        (column) => column.name === "ui_observation_json",
+      );
+      const hasRuntimeObservation = assertionResultColumns.some(
+        (column) => column.name === "runtime_observation_json",
+      );
+      if (
+        !hasDefectId &&
+        !hasUiObservation &&
+        !hasRuntimeObservation &&
+        v48Markers.length === 0
+      ) {
+        database.exec(`
+          DROP TRIGGER test_defects_terminal_run_update;
+          DROP TRIGGER test_defect_resolutions_terminal_run_insert;
+          DROP TRIGGER test_run_obligations_terminal_run_update;
+          DROP TRIGGER test_run_obligations_identity_update;
+          ALTER TABLE test_run_obligations
+            ADD COLUMN defect_id TEXT REFERENCES test_defects(id);
+          ALTER TABLE test_assertion_results
+            ADD COLUMN ui_observation_json TEXT NOT NULL DEFAULT 'null';
+          ALTER TABLE test_assertion_results
+            ADD COLUMN runtime_observation_json TEXT NOT NULL DEFAULT 'null';
+          CREATE TRIGGER test_run_obligations_identity_update
+            BEFORE UPDATE ON test_run_obligations
+            WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id
+              OR NEW.defect_id IS NOT OLD.defect_id
+              OR NEW.description <> OLD.description
+              OR NEW.evidence_json <> OLD.evidence_json
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Test Run obligation identity is immutable'); END;
+        `);
+        createV48Objects(database);
+        return;
+      }
+      const expectedNames = [
+        "test_defect_resolutions_defect_idx",
+        "test_rework_runs",
+        "test_rework_runs_defect_idx",
+        "test_rework_runs_immutable_delete",
+        "test_rework_runs_immutable_update",
+        "test_run_obligation_resolutions",
+        "test_run_obligation_resolutions_immutable_delete",
+        "test_run_obligation_resolutions_immutable_update",
+      ];
+      const actualObjects = database
+        .prepare(
+          `SELECT name, sql FROM sqlite_schema
+            WHERE name IN (${expectedNames.map(() => "?").join(", ")})
+            ORDER BY name`,
+        )
+        .all(...expectedNames) as Array<{
+        readonly name: string;
+        readonly sql: string;
+      }>;
+      const reference = new DatabaseSync(":memory:");
+      try {
+        reference.exec(`
+          CREATE TABLE test_defects(id TEXT PRIMARY KEY) STRICT;
+          CREATE TABLE test_runs(id TEXT PRIMARY KEY) STRICT;
+          CREATE TABLE test_defect_resolutions (
+            id TEXT PRIMARY KEY,
+            defect_id TEXT NOT NULL REFERENCES test_defects(id),
+            resolution_json TEXT NOT NULL,
+            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TABLE test_run_obligations (
+            id TEXT PRIMARY KEY,
+            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+            description TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL,
+            closed_at TEXT,
+            defect_id TEXT REFERENCES test_defects(id)
+          ) STRICT;
+        `);
+        createV48Objects(reference);
+        const expectedObjects = reference
+          .prepare(
+            `SELECT name, sql FROM sqlite_schema
+              WHERE name IN (${expectedNames.map(() => "?").join(", ")})
+              ORDER BY name`,
+          )
+          .all(...expectedNames) as Array<{
+          readonly name: string;
+          readonly sql: string;
+        }>;
+        const actualByName = new Map(
+          actualObjects.map((entry) => [entry.name, normalizeSql(entry.sql)]),
+        );
+        const incompatible = expectedObjects
+          .filter(
+            (entry) => actualByName.get(entry.name) !== normalizeSql(entry.sql),
+          )
+          .map((entry) => entry.name);
+        const identityTrigger = database
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'test_run_obligations_identity_update'",
+          )
+          .get() as { readonly sql: string } | undefined;
+        const forbiddenHistoricalTriggers = database
+          .prepare(
+            `SELECT name FROM sqlite_schema
+              WHERE type = 'trigger'
+                AND name IN (
+                  'test_defects_terminal_run_update',
+                  'test_defect_resolutions_terminal_run_insert',
+                  'test_run_obligations_terminal_run_update'
+                )`,
+          )
+          .all() as Array<{ readonly name: string }>;
+        if (
+          !hasDefectId ||
+          !hasUiObservation ||
+          !hasRuntimeObservation ||
+          incompatible.length > 0 ||
+          !identityTrigger?.sql.includes(
+            "NEW.defect_id IS NOT OLD.defect_id",
+          ) ||
+          forbiddenHistoricalTriggers.length > 0
+        ) {
+          throw new Error(
+            `Existing Test v48 schema is incompatible: ${[
+              ...incompatible,
+              ...(!hasDefectId ? ["test_run_obligations.defect_id"] : []),
+              ...(!hasUiObservation
+                ? ["test_assertion_results.ui_observation_json"]
+                : []),
+              ...(!hasRuntimeObservation
+                ? ["test_assertion_results.runtime_observation_json"]
+                : []),
+              ...(!identityTrigger?.sql.includes(
+                "NEW.defect_id IS NOT OLD.defect_id",
+              )
+                ? ["test_run_obligations_identity_update"]
+                : []),
+              ...forbiddenHistoricalTriggers.map((entry) => entry.name),
+            ].join(", ")}`,
+          );
         }
       } finally {
         reference.close();

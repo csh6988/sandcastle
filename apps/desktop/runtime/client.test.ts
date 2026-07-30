@@ -175,6 +175,8 @@ const testRunView = {
       testCaseRevisionId: "test-case-revision-1",
       assertionId: "assertion-1",
       required: true,
+      uiObserved: "passed",
+      runtimeObserved: "passed",
       uiStatus: "passed" as const,
       runtimeStatus: "passed" as const,
       correlation: {

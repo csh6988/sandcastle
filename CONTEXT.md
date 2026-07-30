@@ -655,11 +655,11 @@ An immutable revision of a **Test case** that freezes its requirement and Work P
 _Avoid_: editing a Test case in place, treating a fixture change as the same revision, deleting an assertion to hide a failure
 
 **Test run**:
-One recorded execution of one or more **Test cases** against a declared **Build Artifact**, Company Directory, **Execution Profile**, and Runtime fixture. Its immutable manifest binds the Build Artifact to the exact PASS **Integration Generation** and Repository commits, and preserves the Runtime-owned risk policy derived from the Snapshot's promoted **Technical Baseline**, deterministic factors and result, environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status. Explicit failed assertions make the Test run fail; missing or unknown assertions block it. Execution intent, terminal facts, reconciliation evidence, and receipts remain durable so a result can be replayed or compared without relying on memory or a manually refreshed page.
+One recorded execution of one or more **Test cases** against a declared **Build Artifact**, Company Directory, **Execution Profile**, and Runtime fixture. Its immutable manifest binds the Build Artifact to the exact PASS **Integration Generation** and Repository commits, and preserves the Runtime-owned risk policy derived from the Snapshot's promoted **Technical Baseline**, deterministic factors and result, environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status. Each assertion stores the exact UI and Runtime observations and derives pass/fail by canonical comparison with the frozen expected values. Runtime closes over the complete failed, unknown, and missing required-assertion union before terminalization: explicit failures make the Test run fail, while any unknown or missing member blocks it, and every non-passing member creates deterministic rework authority. Execution intent, terminal facts, reconciliation evidence, and receipts remain durable so a result can be replayed or compared without relying on memory or a manually refreshed page.
 _Avoid_: "QA session" (too informal), "smoke test" (only one possible suite), treating a green UI assertion as the authoritative Runtime result
 
 **Test evidence**:
-Immutable, retention-classified evidence from a **Test run** that correlates an exact Test Case revision and assertion with UI actions, command identity, Runtime event sequence, authoritative Query View hash, and inspectable Artifact or payload references. A screenshot, label, or Agent statement alone is not sufficient evidence of authoritative Runtime behavior.
+Immutable, retention-classified evidence from a **Test run** that correlates an exact Test Case revision and assertion with UI actions, command identity, Runtime event sequence, exact `test-runs.inspect` query, authenticated consumer/principal, completed acknowledgement receipt and audit/effect chain, authoritative Query View hash and sequence, immutable observed values, and inspectable Artifact or payload references. A screenshot, label, stale token, or Agent statement alone is not sufficient evidence of authoritative Runtime behavior.
 _Avoid_: mutable test logs, uncorrelated screenshots, Agent self-attestation, Renderer state as workflow truth
 
 **Test defect**:
@@ -667,11 +667,11 @@ A traceable failure raised by a **Test run** against a requirement, Work Package
 _Avoid_: "bug note" (lacks reproducible evidence), caller-selected blame without persisted evidence, silently changing a Test case to hide a failure
 
 **Test obligation**:
-An append-only requirement created with a failed or unknown Test assertion that prevents downstream PASS authority until an exact fresh **Test rework** run supplies paired passing assertions and immutable evidence through the Defect's unique resolution.
+An append-only requirement created with a failed, unknown, or missing required Test assertion that prevents downstream PASS authority until an exact fresh **Test rework** run supplies the explicitly mapped paired passing successor assertion and immutable evidence through the Defect's unique resolution.
 _Avoid_: mutable retry checklist, closing an obligation from a caller assertion, deleting the failed Test evidence
 
 **Test rework**:
-A fresh **Test run** created only through the formal rework Command from a failed, blocked, or cancelled prior run. Its hash-bound lineage freezes the prior manifest, **Test defect**, responsibility route, and whether it reuses the exact unchanged PASS **Integration Generation** or consumes a new PASS Generation after changed code or Integration inputs.
+A fresh **Test run** created only through the formal rework Command from a failed, blocked, or cancelled prior run. Its hash-bound lineage freezes the prior manifest and Integration authority, the complete related open **Test defect** and obligation scope, every original revision/assertion/result hash, every explicit successor revision/assertion mapping (including deliberate renames within the same Test Case ancestry), each responsibility route, and whether it reuses the exact unchanged PASS **Integration Generation** or consumes a new PASS Generation after changed code or Integration inputs. One exact fresh PASS resolves the whole frozen scope atomically; partial mappings or closure leave no downstream authority.
 _Avoid_: direct rerun that bypasses an open Defect, mutating the earlier Test run, reusing stale Integration authority after code changes
 
 **Repository readiness check**:

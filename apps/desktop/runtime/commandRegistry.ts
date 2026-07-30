@@ -1009,6 +1009,7 @@ const executeTestCommand = (
             return testRuntime.createReworkRun({
               defectId: command.defectId,
               input: command.input,
+              successorAssertions: command.successorAssertions,
             }).run;
           case "test.defect.record":
             return testRuntime.recordDefect({
