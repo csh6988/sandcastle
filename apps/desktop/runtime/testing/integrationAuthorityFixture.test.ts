@@ -115,6 +115,19 @@ describe("Integration authority fixture", () => {
         created.integrationAuthority.id,
       );
       assert.deepEqual(authority, created.integrationAuthority);
+      assert.deepEqual(
+        database.artifactRegistry.inspect(created.build.artifactVersionId)
+          .version.producer.integrationAuthority,
+        {
+          generationId: authority.id,
+          manifestHash: authority.manifestHash,
+          passAuthorityHash: authority.passAuthorityHash,
+          repositoryCommits: authority.repositoryResults.map((entry) => ({
+            repositoryReference: entry.repositoryReference,
+            commit: entry.integratedCommit!,
+          })),
+        },
+      );
       assert.equal(
         database.codeReviews.inspect(created.runId)[0]?.integrationEligible,
         true,

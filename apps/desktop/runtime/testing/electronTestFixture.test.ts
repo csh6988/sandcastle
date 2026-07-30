@@ -249,15 +249,17 @@ describe("Electron Test fixture", () => {
       { mode: 0o600 },
     );
 
+    const verified = verifyTestEvidenceFile({
+      evidenceDirectory: fixture.config.evidenceDirectory,
+      locator: "screenshots/test-run.png",
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+      byteSize: bytes.byteLength,
+    });
     assert.equal(
-      verifyTestEvidenceFile({
-        evidenceDirectory: fixture.config.evidenceDirectory,
-        locator: "screenshots/test-run.png",
-        contentHash: createHash("sha256").update(bytes).digest("hex"),
-        byteSize: bytes.byteLength,
-      }),
+      verified.path,
       join(fixture.config.evidenceDirectory, "screenshots", "test-run.png"),
     );
+    assert.deepEqual(verified.bytes, bytes);
     assert.throws(
       () =>
         verifyTestEvidenceFile({
@@ -270,6 +272,76 @@ describe("Electron Test fixture", () => {
         error instanceof ElectronTestFixtureError &&
         error.code === "FIXTURE_EVIDENCE_MISMATCH",
     );
+    fixture.cleanup();
+  });
+
+  it("rejects symbolic links in every unresolved evidence path component", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-evidence-symlink",
+      testRunId: "test-run-evidence-symlink",
+      testRunManifestHash: "6".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-evidence-symlink",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    const outside = mkdtempSync(join(tmpdir(), "sandcastle-evidence-outside-"));
+    const outsideFile = join(outside, "capture.png");
+    const bytes = Buffer.from("outside evidence", "utf8");
+    writeFileSync(outsideFile, bytes, { mode: 0o600 });
+    symlinkSync(
+      outsideFile,
+      join(fixture.config.evidenceDirectory, "final.png"),
+    );
+    symlinkSync(outside, join(fixture.config.evidenceDirectory, "linked"));
+    for (const locator of ["final.png", "linked/capture.png"]) {
+      assert.throws(
+        () =>
+          verifyTestEvidenceFile({
+            evidenceDirectory: fixture.config.evidenceDirectory,
+            locator,
+            contentHash: createHash("sha256").update(bytes).digest("hex"),
+            byteSize: bytes.byteLength,
+          }),
+        (error: unknown) =>
+          error instanceof ElectronTestFixtureError &&
+          error.code === "FIXTURE_SYMLINK_FORBIDDEN",
+      );
+    }
+    fixture.cleanup();
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("rejects a symbolic-link fixture config before consuming authorization", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-config-symlink",
+      testRunId: "test-run-config-symlink",
+      testRunManifestHash: "5".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-config-symlink",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    const linkedConfig = join(fixture.root, "linked-fixture.json");
+    symlinkSync(fixture.configPath, linkedConfig);
+    assert.throws(
+      () =>
+        loadElectronTestFixtureConfig({
+          configPath: linkedConfig,
+          authorizationClaimPath: fixture.authorizationClaimPath,
+          authorization: fixture.authorization,
+          packaged: false,
+          entrypoint: "electron-test-fixture",
+        }),
+      (error: unknown) =>
+        error instanceof ElectronTestFixtureError &&
+        error.code === "FIXTURE_SYMLINK_FORBIDDEN",
+    );
+    assert.equal(existsSync(fixture.authorizationClaimPath), true);
     fixture.cleanup();
   });
 

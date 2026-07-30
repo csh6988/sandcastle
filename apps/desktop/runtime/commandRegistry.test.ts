@@ -187,7 +187,11 @@ describe("Company Runtime command registry", () => {
     migrateCompanyDatabase(database);
     database.exec("PRAGMA foreign_keys = OFF");
     const clock = () => new Date("2026-07-29T00:00:00.000Z");
-    const frozenProfile = { id: "profile-test-command" };
+    const frozenProfile = {
+      id: "profile-test-command",
+      sandboxRef: "docker",
+      secretReferenceIds: [],
+    };
     const frozenProfileHash = createHash("sha256")
       .update(JSON.stringify(frozenProfile))
       .digest("hex");
@@ -200,7 +204,13 @@ describe("Company Runtime command registry", () => {
       .run(
         "snapshot-test-command",
         "run-test-command",
-        JSON.stringify({ executionProfiles: [frozenProfile] }),
+        JSON.stringify({
+          executionProfiles: [frozenProfile],
+          technicalGatePromotion: {
+            acceptedTechnicalBaselineId: "baseline-test-command",
+            acceptedTechnicalBaselineHash: "5".repeat(64),
+          },
+        }),
         "0".repeat(64),
         clock().toISOString(),
       );
@@ -215,6 +225,27 @@ describe("Company Runtime command registry", () => {
       VALUES ('build-artifact-command', 'project-test-command', 'build', 'Test build', 'accepted', '${clock().toISOString()}');
       INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
       VALUES ('build-test-command', 'build-artifact-command', 1, 'artifacts/build.tar', '${"f".repeat(64)}', 42, 'accepted', 'run-test-command', 'snapshot-test-command', '${clock().toISOString()}');
+      UPDATE artifact_versions SET producer_context_json = '${JSON.stringify({
+        projectId: "project-test-command",
+        runId: "run-test-command",
+        snapshotRevisionId: "snapshot-test-command",
+        nodeRunId: "integration-node-test-command",
+        nodeAttemptId: "integration-attempt-test-command",
+        aiMemberId: "builder-ai",
+        integrationAuthority: {
+          generationId: "generation-test-command",
+          manifestHash: "b".repeat(64),
+          passAuthorityHash: "d".repeat(64),
+          repositoryCommits: [
+            {
+              repositoryReference: "repo-test-command",
+              commit: "2".repeat(40),
+            },
+          ],
+        },
+      }).replaceAll("'", "''")} ' WHERE id = 'build-test-command';
+      INSERT INTO technical_baselines(id, project_id, run_id, proposal_revision_id, manifest_json, manifest_hash, created_at)
+      VALUES ('baseline-test-command', 'project-test-command', 'run-test-command', 'proposal-test-command', '{}', '${"5".repeat(64)}', '${clock().toISOString()}');
       INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
       VALUES ('resolution-artifact-command', 'project-test-command', 'test-evidence', 'Resolution evidence', 'accepted', '${clock().toISOString()}');
       INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
@@ -395,34 +426,71 @@ describe("Company Runtime command registry", () => {
       capabilities: ["electron", "runtime-query"],
       risk: (() => {
         const rules = [
-          { factorId: "command-test", minimumTier: "medium" as const },
+          {
+            factorId: "cross-application-contract",
+            minimumTier: "high" as const,
+          },
+          { factorId: "no-sandbox", minimumTier: "high" as const },
+          {
+            factorId: "recovery-complexity",
+            minimumTier: "medium" as const,
+          },
+          {
+            factorId: "secret-environment-boundary",
+            minimumTier: "high" as const,
+          },
+          { factorId: "user-visible-runtime", minimumTier: "high" as const },
         ];
+        const revisionId = `technical-baseline:baseline-test-command:${"5".repeat(64)}`;
         const policyHash = canonicalHash({
           schemaVersion: 1,
-          revisionId: "command-test-risk-r1",
+          revisionId,
           rules,
         });
         const factors = [
           {
-            id: "command-test",
+            id: "cross-application-contract",
+            present: false,
+            evidenceRefs: [],
+          },
+          { id: "no-sandbox", present: false, evidenceRefs: [] },
+          {
+            id: "recovery-complexity",
             present: true,
-            evidenceRefs: ["test-case:case-test-command-r1"],
+            evidenceRefs: [
+              "test-operation:operation-1",
+              "test-operation:cleanup-operation-command",
+            ].sort(),
+          },
+          {
+            id: "secret-environment-boundary",
+            present: false,
+            evidenceRefs: [],
+          },
+          {
+            id: "user-visible-runtime",
+            present: true,
+            evidenceRefs: ["test-case-revision:case-test-command-r1"],
           },
         ];
-        const evidenceRefs = ["test-case:case-test-command-r1"];
+        const evidenceRefs = [
+          "test-operation:cleanup-operation-command",
+          "test-operation:operation-1",
+          "test-case-revision:case-test-command-r1",
+        ].sort();
         return {
           schemaVersion: 1 as const,
           policy: {
-            revisionId: "command-test-risk-r1",
+            revisionId,
             rules,
             hash: policyHash,
           },
           factors,
-          computedTier: "medium" as const,
+          computedTier: "high" as const,
           evidenceRefs,
           inputHash: canonicalHash({
             schemaVersion: 1,
-            policyRevisionId: "command-test-risk-r1",
+            policyRevisionId: revisionId,
             policyHash,
             factors,
             evidenceRefs,

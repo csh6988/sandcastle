@@ -1005,6 +1005,11 @@ const executeTestCommand = (
             });
           case "test.run.create":
             return testRuntime.createRun(command.input);
+          case "test.rework.create":
+            return testRuntime.createReworkRun({
+              defectId: command.defectId,
+              input: command.input,
+            }).run;
           case "test.defect.record":
             return testRuntime.recordDefect({
               id: command.id,

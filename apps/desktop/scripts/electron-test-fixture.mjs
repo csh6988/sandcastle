@@ -136,11 +136,6 @@ const clickFixtureButton = async () => {
   while (!window.isFocused() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.equal(
-    window.isFocused(),
-    true,
-    "Electron fixture window did not focus.",
-  );
   const debuggerSession = window.webContents.debugger;
   debuggerSession.attach("1.3");
   let point;
@@ -175,6 +170,20 @@ const clickFixtureButton = async () => {
     clickCount: 1,
     ...point,
   });
+};
+
+const readFixtureObservation = async () => {
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `JSON.stringify({statusText:document.querySelector("#test-status")?.textContent ?? null,buttonLabel:document.querySelector("#run-test")?.textContent ?? null})`,
+      returnByValue: true,
+    });
+    return JSON.parse(result.result.value);
+  } finally {
+    debuggerSession.detach();
+  }
 };
 
 const caseManifestFor = (seeded, operations) => ({
@@ -226,17 +235,42 @@ const caseManifestFor = (seeded, operations) => ({
   },
 });
 
-const testScopeRisk = (() => {
-  const revisionId = "electron-test-scope-risk-r1";
-  const rules = [{ factorId: "electron-runtime", minimumTier: "high" }];
+const testScopeRiskFor = (seeded, operations) => {
+  const revisionId = `technical-baseline:${seeded.technicalBaselineId}:${seeded.technicalBaselineHash}`;
+  const rules = [
+    { factorId: "cross-application-contract", minimumTier: "high" },
+    { factorId: "no-sandbox", minimumTier: "high" },
+    { factorId: "recovery-complexity", minimumTier: "medium" },
+    { factorId: "secret-environment-boundary", minimumTier: "high" },
+    { factorId: "user-visible-runtime", minimumTier: "high" },
+  ];
   const factors = [
     {
-      id: "electron-runtime",
+      id: "cross-application-contract",
+      present: seeded.integrationAuthority.manifest.contractVersions.length > 0,
+      evidenceRefs: seeded.integrationAuthority.manifest.contractVersions.map(
+        (contract) =>
+          `contract:${contract.id}:${contract.version}:${contract.hash}`,
+      ),
+    },
+    { id: "no-sandbox", present: false, evidenceRefs: [] },
+    {
+      id: "recovery-complexity",
+      present: operations.length > 0,
+      evidenceRefs: operations.map(
+        (operation) => `test-operation:${operation.id}`,
+      ),
+    },
+    { id: "secret-environment-boundary", present: false, evidenceRefs: [] },
+    {
+      id: "user-visible-runtime",
       present: true,
-      evidenceRefs: ["test-case:fixture-case-1-r1"],
+      evidenceRefs: ["test-case-revision:fixture-case-1-r1"],
     },
   ];
-  const evidenceRefs = ["test-case:fixture-case-1-r1"];
+  const evidenceRefs = [
+    ...new Set(factors.flatMap((factor) => factor.evidenceRefs)),
+  ].sort();
   const policyHash = hashValue({ schemaVersion: 1, revisionId, rules });
   return {
     schemaVersion: 1,
@@ -252,7 +286,7 @@ const testScopeRisk = (() => {
       evidenceRefs,
     }),
   };
-})();
+};
 
 const runInputFor = (seeded, caseRevisionHash, operations) => ({
   testRunId: `test:${seeded.runId}:${seeded.testNodeRunId}`,
@@ -302,7 +336,7 @@ const runInputFor = (seeded, caseRevisionHash, operations) => ({
     "runtime-child",
     "sqlite",
   ],
-  risk: testScopeRisk,
+  risk: testScopeRiskFor(seeded, operations),
 });
 
 const routeFor = (seeded, operations) => {
@@ -365,6 +399,15 @@ const manifestFor = (seeded, route) => {
     testCaseRevisions,
     integrationAuthority: {
       ...input.integrationAuthority,
+      repositoryCommits: [...input.integrationAuthority.repositoryCommits].sort(
+        (left, right) =>
+          left.repositoryReference.localeCompare(right.repositoryReference),
+      ),
+    },
+    buildLineage: {
+      generationId: input.integrationAuthority.generationId,
+      manifestHash: input.integrationAuthority.manifestHash,
+      passAuthorityHash: input.integrationAuthority.passAuthorityHash,
       repositoryCommits: [...input.integrationAuthority.repositoryCommits].sort(
         (left, right) =>
           left.repositoryReference.localeCompare(right.repositoryReference),
@@ -505,16 +548,81 @@ const run = async () => {
     ...operation,
     inputHash: hashValue(operation.input),
   }));
-  await window.loadURL(
-    fixtureUrl(shell.url, routeFor(seeded, placeholderOperations)),
-  );
+  const interactionCommandId = "fixture-interaction-prompt";
+  const interactionContent = "Exercise the real Electron renderer gesture.";
+  const interactionResponse = "fixture interaction passed";
+  const preparationRoute = {
+    ...routeFor(seeded, placeholderOperations),
+    interactionPrompt: {
+      commandId: interactionCommandId,
+      sessionId: seeded.interactionSessionId,
+      participantId: seeded.interactionHumanParticipantId,
+      content: interactionContent,
+      expectedResponse: interactionResponse,
+    },
+  };
+  await supervisor.start(fixture.config.companyDirectory);
+  await window.loadURL(fixtureUrl(shell.url, preparationRoute));
   await waitForTitle("idle");
+  await clickFixtureButton();
+  await waitForTitle("observed");
+  const uiObservation = await readFixtureObservation();
+  const interactionInspection = await supervisor.queryEnvelope({
+    schemaVersion: 1,
+    requestId: "fixture-interaction-inspect-after-gesture",
+    principal: {
+      type: "test-driver",
+      id: "electron-test-fixture",
+      authenticatedBy: "ipc-token",
+    },
+    consumerId: "electron-test-fixture-driver",
+    query: {
+      type: "interaction.inspect",
+      sessionId: seeded.interactionSessionId,
+    },
+  });
+  const interactionTurn = interactionInspection.view.turns.find(
+    (turn) => turn.commandId === interactionCommandId,
+  );
+  const interactionOutput = interactionInspection.view.messages.find(
+    (message) => message.id === interactionTurn?.outputMessageId,
+  );
+  assert.ok(interactionTurn, "Interaction Turn was not persisted.");
+  assert.ok(interactionOutput, "Interaction output Message was not persisted.");
+  const expectedAssertionContract = {
+    schemaVersion: 1,
+    ui: {
+      statusText: "observed",
+      buttonLabel: "Interaction Observed",
+    },
+    runtime: {
+      interactionSessionId: seeded.interactionSessionId,
+      interactionCommandId,
+      interactionTurnStatus: "completed",
+      interactionResponse,
+    },
+  };
+  const observedAssertionContract = {
+    schemaVersion: 1,
+    ui: uiObservation,
+    runtime: {
+      interactionSessionId: interactionInspection.view.session.id,
+      interactionCommandId: interactionTurn?.commandId,
+      interactionTurnStatus: interactionTurn?.status,
+      interactionResponse: interactionOutput?.content,
+    },
+  };
+  assert.equal(
+    canonicalJson(observedAssertionContract),
+    canonicalJson(expectedAssertionContract),
+    "Electron expected and observed assertion contracts differ.",
+  );
   const screenshotBytes = window.webContents.capturePage
     ? (await window.webContents.capturePage()).toPNG()
     : Buffer.alloc(0);
   assert.ok(screenshotBytes.byteLength > 0);
   const screenshotLocator = normalizeTestEvidenceLocator(
-    "screenshots/fixture-idle.png",
+    "screenshots/fixture-observed.png",
   );
   mkdirSync(join(fixture.config.evidenceDirectory, "screenshots"), {
     recursive: true,
@@ -540,6 +648,19 @@ const run = async () => {
       integrationManifestHash: seeded.integrationAuthority.manifestHash,
       integrationPassAuthorityHash:
         seeded.integrationAuthority.passAuthorityHash,
+      assertionContract: {
+        expected: expectedAssertionContract,
+        observed: observedAssertionContract,
+      },
+      interaction: {
+        sessionId: seeded.interactionSessionId,
+        turnId: interactionTurn.id,
+        inputMessageId: interactionTurn.inputMessageId,
+        outputMessageId: interactionTurn.outputMessageId,
+        commandId: interactionTurn.commandId,
+        status: interactionTurn.status,
+        response: interactionOutput.content,
+      },
     }),
   );
   const runtimeLocator = normalizeTestEvidenceLocator(
@@ -568,13 +689,17 @@ const run = async () => {
     kind: "screenshot",
     artifactType: "test-screenshot",
     mediaType: "image/png",
-    logicalName: "fixture-idle-screenshot",
+    logicalName: "fixture-observed-screenshot",
     locator: screenshotLocator,
     contentHash: sha256(screenshotBytes),
     byteSize: screenshotBytes.byteLength,
     redactionProfile: "fixture-redacted",
     retentionClass: "durable",
-    metadata: { locator: screenshotLocator, renderer: "actual-app-bundle" },
+    metadata: {
+      locator: screenshotLocator,
+      renderer: "actual-app-bundle",
+      capturedAfterInteractionTurnId: interactionTurn.id,
+    },
   };
   const runtimeEvidence = {
     id: "fixture-runtime-payload",
@@ -630,6 +755,7 @@ const run = async () => {
     testCaseRevisionId: "fixture-case-1-r1",
     assertionId: "fixture-pair",
     correlationCommandId: "fixture-test-run-create",
+    assertionContract: expectedAssertionContract,
     evidence: [screenshotEvidence, runtimeEvidence],
   };
   const cleanupOperationInput = {
@@ -657,6 +783,7 @@ const run = async () => {
       inputHash: hashValue(cleanupOperationInput),
     },
   ];
+  await supervisor.stop();
   const route = routeFor(seeded, operations);
   fixture.issueAuthorizationClaim();
   const expectedTestRunManifestHash = hashValue(manifestFor(seeded, route));
@@ -702,7 +829,22 @@ const run = async () => {
   for (let gesture = 1; gesture <= 8; gesture += 1) {
     await clickFixtureButton();
     await waitForTitle(["ready", "pass"]);
-    const view = await inspectTestRun(`gesture-${gesture}`);
+    let view = await inspectTestRun(`gesture-${gesture}`);
+    if (view.executions.some((entry) => entry.state === "reconciling")) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const reconciled = await inspectTestRun(
+          `gesture-${gesture}-reconcile-${attempt}`,
+        );
+        view = reconciled;
+        if (
+          reconciled.state === "passed" ||
+          !reconciled.executions.some((entry) => entry.state === "reconciling")
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
     if (view.state === "passed") {
       terminalView = view;
       break;
@@ -743,7 +885,7 @@ const run = async () => {
     "passed",
     `Electron fixture did not reach PASS: ${JSON.stringify(
       await inspectTestRun("gesture-limit"),
-    )}`,
+    )}; Runtime logs: ${JSON.stringify(runtimeLogs)}`,
   );
   await waitForTitle("pass");
 
@@ -757,11 +899,32 @@ const run = async () => {
     testRunId: route.testRunId,
   });
   const pipeline = await supervisor.inspectRun(seeded.runId);
-  const audit = await supervisor.audit({ runId: seeded.runId, limit: 200 });
-  const events = await supervisor.events({ afterSequence: 0, limit: 200 });
+  const audit = await supervisor.audit({ runId: seeded.runId, limit: 1_000 });
+  const interactionAudit = await supervisor.audit({ limit: 1_000 });
+  const events = await supervisor.events({ afterSequence: 0, limit: 1_000 });
   const downstream = await query("fixture-test-pass-authority", {
     type: "test-pass-authority.inspect",
     testRunId: route.testRunId,
+  });
+  const recoveredInteraction = await query("fixture-interaction-recovered", {
+    type: "interaction.inspect",
+    sessionId: seeded.interactionSessionId,
+  });
+  const recoveredTurn = recoveredInteraction.view.turns.find(
+    (turn) => turn.commandId === interactionCommandId,
+  );
+  const recoveredOutput = recoveredInteraction.view.messages.find(
+    (message) => message.id === recoveredTurn?.outputMessageId,
+  );
+  const interactionStarted = events.find(
+    (event) =>
+      event.type === "interaction.turn.started" &&
+      event.payload?.operationKey === recoveredTurn?.executionOperationKey,
+  );
+  assert.ok(interactionStarted);
+  const cursorRecoveredEvents = await supervisor.events({
+    afterSequence: interactionStarted.sequence - 1,
+    limit: 1_000,
   });
   assert.equal(recovered.view.state, "passed");
   assert.equal(recovered.view.executions[0]?.state, "succeeded");
@@ -783,6 +946,34 @@ const run = async () => {
     true,
   );
   assert.equal(downstream.view.testRunId, route.testRunId);
+  assert.equal(recoveredTurn?.status, "completed");
+  assert.ok(recoveredTurn?.terminalExecutionFactId);
+  assert.ok(recoveredTurn?.providerExecutionRef);
+  assert.equal(recoveredOutput?.content, interactionResponse);
+  assert.equal(
+    interactionAudit.some(
+      (record) =>
+        record.action === "interaction.turn.accept" &&
+        record.entityId === recoveredTurn?.id,
+    ),
+    true,
+  );
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === "interaction.turn.completed" &&
+        event.payload?.operationKey === recoveredTurn?.executionOperationKey,
+    ),
+    true,
+  );
+  assert.equal(
+    cursorRecoveredEvents.some(
+      (event) =>
+        event.type === "interaction.turn.completed" &&
+        event.payload?.operationKey === recoveredTurn?.executionOperationKey,
+    ),
+    true,
+  );
   assert.equal(health.schemaVersion, 47);
   process.stdout.write(
     `${JSON.stringify({

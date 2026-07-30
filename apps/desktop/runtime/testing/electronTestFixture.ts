@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -18,7 +20,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export class ElectronTestFixtureError extends Error {
   constructor(
@@ -134,6 +136,79 @@ const assertInside = (root: string, target: string): void => {
       "FIXTURE_PATH_ESCAPE",
       `Fixture path ${target} is outside ${root}.`,
     );
+  }
+};
+
+const pathWithin = (root: string, target: string): string => {
+  const lexicalRoot = resolve(root);
+  const canonicalRoot = realpathSync(lexicalRoot);
+  const absoluteTarget = resolve(target);
+  const relativeTarget = [
+    relative(lexicalRoot, absoluteTarget),
+    relative(canonicalRoot, absoluteTarget),
+  ].find(
+    (candidate) =>
+      candidate === "" ||
+      (candidate !== ".." && !candidate.startsWith(`..${sep}`)),
+  );
+  if (relativeTarget === undefined) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_PATH_ESCAPE",
+      `Fixture path ${target} is outside ${canonicalRoot}.`,
+    );
+  }
+  const canonicalTarget = join(canonicalRoot, relativeTarget);
+  assertInside(canonicalRoot, canonicalTarget);
+  let current = canonicalRoot;
+  for (const component of relativeTarget.split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (lstatSync(current).isSymbolicLink()) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_SYMLINK_FORBIDDEN",
+        `Fixture path ${target} contains a symbolic-link component.`,
+      );
+    }
+  }
+  return canonicalTarget;
+};
+
+const secureReadRegularFile = (input: {
+  readonly root: string;
+  readonly path: string;
+  readonly expectedMode?: number;
+  readonly errorCode: string;
+  readonly errorMessage: string;
+}): { readonly path: string; readonly bytes: Buffer } => {
+  if (!isAbsolute(input.path)) {
+    throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
+  }
+  let path: string;
+  try {
+    path = pathWithin(input.root, input.path);
+  } catch (error) {
+    if (error instanceof ElectronTestFixtureError) throw error;
+    throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
+  }
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      path,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isFile() ||
+      (input.expectedMode !== undefined &&
+        (metadata.mode & 0o777) !== input.expectedMode)
+    ) {
+      throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
+    }
+    return { path, bytes: readFileSync(descriptor) };
+  } catch (error) {
+    if (error instanceof ElectronTestFixtureError) throw error;
+    throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 };
 
@@ -279,27 +354,19 @@ export const loadElectronTestFixtureConfig = (input: {
     );
   }
   const canonicalTempRoot = realpathSync(tmpdir());
-  const configPath = realpathSync(input.configPath);
-  assertInside(canonicalTempRoot, configPath);
-  if (
-    lstatSync(input.configPath).isSymbolicLink() ||
-    !statSync(configPath).isFile()
-  ) {
-    throw new ElectronTestFixtureError(
-      "FIXTURE_CONFIG_INVALID",
-      "Electron Test fixture config must be a regular non-symlink file.",
-    );
-  }
-  if ((statSync(configPath).mode & 0o777) !== 0o600) {
-    throw new ElectronTestFixtureError(
-      "FIXTURE_CONFIG_PERMISSIONS_INVALID",
-      "Electron Test fixture config must be mode 0600.",
-    );
-  }
+  const configFile = secureReadRegularFile({
+    root: canonicalTempRoot,
+    path: input.configPath,
+    expectedMode: 0o600,
+    errorCode: "FIXTURE_CONFIG_INVALID",
+    errorMessage:
+      "Electron Test fixture config must be a 0600 regular non-symlink file.",
+  });
+  const configPath = configFile.path;
   let config: ElectronTestFixtureConfig;
   try {
     config = JSON.parse(
-      readFileSync(configPath, "utf8"),
+      configFile.bytes.toString("utf8"),
     ) as ElectronTestFixtureConfig;
   } catch {
     throw new ElectronTestFixtureError(
@@ -331,10 +398,10 @@ export const loadElectronTestFixtureConfig = (input: {
     "Company Directory fingerprint",
   );
   const root = realpathSync(dirname(configPath));
-  const companyDirectory = realpathSync(config.companyDirectory);
-  const evidenceDirectory = realpathSync(config.evidenceDirectory);
-  const repositoryDirectory = realpathSync(config.repositoryDirectory);
-  const worktreeDirectory = realpathSync(config.worktreeDirectory);
+  const companyDirectory = pathWithin(root, config.companyDirectory);
+  const evidenceDirectory = pathWithin(root, config.evidenceDirectory);
+  const repositoryDirectory = pathWithin(root, config.repositoryDirectory);
+  const worktreeDirectory = pathWithin(root, config.worktreeDirectory);
   assertInside(root, companyDirectory);
   assertInside(root, evidenceDirectory);
   assertInside(root, repositoryDirectory);
@@ -353,10 +420,13 @@ export const loadElectronTestFixtureConfig = (input: {
       "Electron Test fixture repository commit is invalid.",
     );
   }
-  const marker = readFileSync(
-    join(companyDirectory, ".sandcastle-test-company"),
-    "utf8",
-  );
+  const marker = secureReadRegularFile({
+    root: companyDirectory,
+    path: join(companyDirectory, ".sandcastle-test-company"),
+    errorCode: "FIXTURE_COMPANY_IDENTITY_MISMATCH",
+    errorMessage:
+      "Electron Test fixture Company Directory marker is not a regular non-symlink file.",
+  }).bytes.toString("utf8");
   if (sha256(marker) !== config.companyDirectoryFingerprint) {
     throw new ElectronTestFixtureError(
       "FIXTURE_COMPANY_IDENTITY_MISMATCH",
@@ -372,11 +442,14 @@ export const loadElectronTestFixtureConfig = (input: {
       );
     }
     assertHash(adapter.scriptHash, `${adapter.id} script hash`);
-    const scriptPath = realpathSync(adapter.scriptPath);
+    const script = secureReadRegularFile({
+      root: canonicalTempRoot,
+      path: adapter.scriptPath,
+      errorCode: "FIXTURE_SCRIPT_HASH_MISMATCH",
+      errorMessage: `Script ${adapter.id} must be a regular non-symlink file.`,
+    });
     if (
-      lstatSync(adapter.scriptPath).isSymbolicLink() ||
-      !statSync(scriptPath).isFile() ||
-      sha256(readFileSync(scriptPath)) !== adapter.scriptHash ||
+      sha256(script.bytes) !== adapter.scriptHash ||
       config.scriptHashes[adapter.id] !== adapter.scriptHash
     ) {
       throw new ElectronTestFixtureError(
@@ -404,31 +477,58 @@ export const loadElectronTestFixtureConfig = (input: {
   return config;
 };
 
+export const readElectronTestFixtureAdapterScript = (
+  config: ElectronTestFixtureConfig,
+  adapterId: string,
+): Buffer => {
+  const adapter = config.adapters.find((entry) => entry.id === adapterId);
+  if (!adapter || config.scriptHashes[adapterId] !== adapter.scriptHash) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_SCRIPT_HASH_MISMATCH",
+      `Script ${adapterId} is not frozen by the Electron Test fixture.`,
+    );
+  }
+  const script = secureReadRegularFile({
+    root: realpathSync(tmpdir()),
+    path: adapter.scriptPath,
+    errorCode: "FIXTURE_SCRIPT_HASH_MISMATCH",
+    errorMessage: `Script ${adapterId} must be a regular non-symlink file.`,
+  });
+  if (sha256(script.bytes) !== adapter.scriptHash) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_SCRIPT_HASH_MISMATCH",
+      `Script ${adapterId} does not match its frozen hash.`,
+    );
+  }
+  return script.bytes;
+};
+
 export const verifyTestEvidenceFile = (input: {
   readonly evidenceDirectory: string;
   readonly locator: string;
   readonly contentHash: string;
   readonly byteSize: number;
-}): string => {
+}): { readonly path: string; readonly bytes: Buffer } => {
   assertHash(input.contentHash, "Test evidence content hash");
   const evidenceDirectory = realpathSync(input.evidenceDirectory);
   const locator = normalizeTestEvidenceLocator(input.locator);
-  const evidencePath = realpathSync(join(evidenceDirectory, locator));
-  assertInside(evidenceDirectory, evidencePath);
-  const metadata = lstatSync(evidencePath);
-  const bytes = readFileSync(evidencePath);
+  const verified = secureReadRegularFile({
+    root: evidenceDirectory,
+    path: join(evidenceDirectory, locator),
+    errorCode: "FIXTURE_EVIDENCE_MISMATCH",
+    errorMessage:
+      "Test evidence locator does not resolve to frozen regular non-symlink bytes.",
+  });
   if (
-    metadata.isSymbolicLink() ||
-    !metadata.isFile() ||
-    metadata.size !== input.byteSize ||
-    sha256(bytes) !== input.contentHash
+    verified.bytes.byteLength !== input.byteSize ||
+    sha256(verified.bytes) !== input.contentHash
   ) {
     throw new ElectronTestFixtureError(
       "FIXTURE_EVIDENCE_MISMATCH",
       "Test evidence locator does not resolve to the frozen bytes, hash, and size.",
     );
   }
-  return evidencePath;
+  return verified;
 };
 
 export const createElectronTestFixture = (input: {

@@ -53,6 +53,15 @@ export interface ArtifactProducerContext {
   readonly sessionId?: string;
   readonly workPackageId?: string;
   readonly interactionTurnId?: string;
+  readonly integrationAuthority?: {
+    readonly generationId: string;
+    readonly manifestHash: string;
+    readonly passAuthorityHash: string;
+    readonly repositoryCommits: readonly {
+      readonly repositoryReference: string;
+      readonly commit: string;
+    }[];
+  };
 }
 
 export type ArtifactRegistrationContent =
@@ -586,6 +595,13 @@ export const openArtifactRegistry = (
         ...(typeof producerContext.interactionTurnId === "string"
           ? { interactionTurnId: producerContext.interactionTurnId }
           : {}),
+        ...(producerContext.integrationAuthority &&
+        typeof producerContext.integrationAuthority === "object"
+          ? {
+              integrationAuthority:
+                producerContext.integrationAuthority as ArtifactProducerContext["integrationAuthority"],
+            }
+          : {}),
       },
       createdAt: row.createdAt,
     };
@@ -738,6 +754,16 @@ export const openArtifactRegistry = (
       sessionId: producer.sessionId,
       workPackageId: producer.workPackageId,
       interactionTurnId: producer.interactionTurnId,
+      integrationAuthority: producer.integrationAuthority
+        ? {
+            ...producer.integrationAuthority,
+            repositoryCommits: [
+              ...producer.integrationAuthority.repositoryCommits,
+            ].sort((left, right) =>
+              left.repositoryReference.localeCompare(right.repositoryReference),
+            ),
+          }
+        : undefined,
     });
 
   const validateProducer = (
@@ -755,6 +781,24 @@ export const openArtifactRegistry = (
       throw new ArtifactRegistryError(
         "ARTIFACT_PRODUCER_INVALID",
         "Artifact producer context is incomplete or belongs to another Project.",
+      );
+    }
+    if (
+      producer.integrationAuthority &&
+      (!producer.integrationAuthority.generationId.trim() ||
+        !/^[a-f0-9]{64}$/.test(producer.integrationAuthority.manifestHash) ||
+        !/^[a-f0-9]{64}$/.test(
+          producer.integrationAuthority.passAuthorityHash,
+        ) ||
+        producer.integrationAuthority.repositoryCommits.some(
+          (entry) =>
+            !entry.repositoryReference.trim() ||
+            !/^[a-f0-9]{40}$/.test(entry.commit),
+        ))
+    ) {
+      throw new ArtifactRegistryError(
+        "ARTIFACT_PRODUCER_INVALID",
+        "Artifact Integration authority lineage is incomplete or invalid.",
       );
     }
   };

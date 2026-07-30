@@ -166,6 +166,15 @@ export type TestRunManifestInput = {
 
 export type TestRunManifest = TestRunManifestInput & {
   readonly schemaVersion: 1;
+  readonly buildLineage: {
+    readonly generationId: string;
+    readonly manifestHash: string;
+    readonly passAuthorityHash: string;
+    readonly repositoryCommits: readonly {
+      readonly repositoryReference: string;
+      readonly commit: string;
+    }[];
+  };
   readonly coverageHash: string;
   readonly integrationCoverage: {
     readonly coverageId: string;
@@ -249,6 +258,23 @@ export type TestRunView = {
     readonly id: string;
     readonly status: "open" | "closed";
   }[];
+  readonly reworkLineage: {
+    readonly id: string;
+    readonly defectId: string;
+    readonly priorTestRunId: string;
+    readonly route: TestReworkRoute;
+    readonly lineage: {
+      readonly priorTestRunId: string;
+      readonly priorManifestHash: string;
+      readonly integrationAuthority:
+        | "reuse-exact-pass"
+        | "fresh-pass-authority";
+      readonly priorIntegrationGenerationId: string;
+      readonly nextIntegrationGenerationId: string;
+    };
+    readonly lineageHash: string;
+    readonly createdAt: string;
+  } | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 };
@@ -645,6 +671,7 @@ export interface TestRuntime {
     readonly testCaseRevisions: TestRunManifest["testCaseRevisions"];
     readonly coverageHash: string;
     readonly build: TestRunManifest["build"];
+    readonly buildLineage: TestRunManifest["buildLineage"];
     readonly snapshotRevisionId: string;
     readonly executionProfile: TestRunManifest["executionProfile"];
     readonly companyDirectoryFingerprint: string;
@@ -652,6 +679,7 @@ export interface TestRuntime {
     readonly environment: TestRunManifest["environment"];
     readonly capabilities: TestRunManifest["capabilities"];
     readonly risk: TestRunManifest["risk"];
+    readonly reworkLineage: TestRunView["reworkLineage"];
     readonly assertionResultHashes: readonly string[];
     readonly evidence: readonly {
       readonly id: string;
@@ -1167,17 +1195,52 @@ export const openTestRuntime = (
       .all(testRunId) as Array<Record<string, unknown>>;
     const defectRows = database
       .prepare(
-        "SELECT id, test_case_revision_id AS testCaseRevisionId, assertion_id AS assertionId, integration_generation_id AS integrationGenerationId, responsibility_json AS responsibilityJson, evidence_json AS evidenceJson, status, created_at AS createdAt, closed_at AS closedAt FROM test_defects WHERE test_run_id = ? ORDER BY created_at, id",
+        `SELECT defects.id, defects.test_case_revision_id AS testCaseRevisionId,
+                defects.assertion_id AS assertionId,
+                defects.integration_generation_id AS integrationGenerationId,
+                defects.responsibility_json AS responsibilityJson,
+                defects.evidence_json AS evidenceJson,
+                CASE WHEN resolutions.id IS NULL THEN 'open' ELSE 'closed' END AS status,
+                defects.created_at AS createdAt,
+                resolutions.created_at AS closedAt
+           FROM test_defects AS defects
+           LEFT JOIN test_defect_resolutions AS resolutions
+             ON resolutions.defect_id = defects.id
+          WHERE defects.test_run_id = ?
+          ORDER BY defects.created_at, defects.id`,
       )
       .all(testRunId) as Array<Record<string, unknown>>;
     const obligationRows = database
       .prepare(
-        "SELECT id, status FROM test_run_obligations WHERE test_run_id = ? ORDER BY id",
+        `SELECT obligations.id,
+                CASE WHEN resolutions.id IS NULL THEN 'open' ELSE 'closed' END AS status
+           FROM test_run_obligations AS obligations
+           LEFT JOIN test_run_obligation_resolutions AS resolutions
+             ON resolutions.obligation_id = obligations.id
+          WHERE obligations.test_run_id = ? ORDER BY obligations.id`,
       )
       .all(testRunId) as Array<{
       readonly id: string;
       readonly status: "open" | "closed";
     }>;
+    const reworkRow = database
+      .prepare(
+        `SELECT id, defect_id AS defectId, prior_test_run_id AS priorTestRunId,
+                route_json AS routeJson, lineage_json AS lineageJson,
+                lineage_hash AS lineageHash, created_at AS createdAt
+           FROM test_rework_runs WHERE fresh_test_run_id = ?`,
+      )
+      .get(testRunId) as
+      | {
+          readonly id: string;
+          readonly defectId: string;
+          readonly priorTestRunId: string;
+          readonly routeJson: string;
+          readonly lineageJson: string;
+          readonly lineageHash: string;
+          readonly createdAt: string;
+        }
+      | undefined;
     const view = {
       id: testRunId,
       requestId: String(row.requestId),
@@ -1255,6 +1318,19 @@ export const openTestRuntime = (
         closedAt: entry.closedAt ? String(entry.closedAt) : null,
       })),
       obligations: obligationRows,
+      reworkLineage: reworkRow
+        ? {
+            id: reworkRow.id,
+            defectId: reworkRow.defectId,
+            priorTestRunId: reworkRow.priorTestRunId,
+            route: parseJson<TestReworkRoute>(reworkRow.routeJson),
+            lineage: parseJson<
+              NonNullable<TestRunView["reworkLineage"]>["lineage"]
+            >(reworkRow.lineageJson),
+            lineageHash: reworkRow.lineageHash,
+            createdAt: reworkRow.createdAt,
+          }
+        : null,
       createdAt: String(row.createdAt),
       updatedAt: String(row.updatedAt),
     };
@@ -1318,8 +1394,35 @@ export const openTestRuntime = (
     return authority;
   };
 
-  const createRun: TestRuntime["createRun"] = (input) => {
+  const createRunInternal = (
+    input: TestRunManifestInput,
+    reworkDefectId?: string,
+    transactionAlreadyOpen = false,
+  ): TestRunView => {
     const authority = validateAuthority(input);
+    const unresolvedRelatedDefect = reworkDefectId
+      ? undefined
+      : (database
+          .prepare(
+            `SELECT defects.id
+               FROM test_defects AS defects
+               JOIN test_runs AS prior_runs ON prior_runs.id = defects.test_run_id
+               LEFT JOIN test_defect_resolutions AS resolutions
+                 ON resolutions.defect_id = defects.id
+              WHERE prior_runs.project_id = ?
+                AND defects.integration_generation_id = ?
+                AND resolutions.id IS NULL
+              ORDER BY defects.created_at, defects.id LIMIT 1`,
+          )
+          .get(input.projectId, input.integrationAuthority.generationId) as
+          | { readonly id: string }
+          | undefined);
+    if (unresolvedRelatedDefect) {
+      throw new TestRuntimeError(
+        "TEST_REWORK_COMMAND_REQUIRED",
+        `Open Test defect ${unresolvedRelatedDefect.id} requires a formal related rework Command; direct Test Run creation cannot bypass it.`,
+      );
+    }
     const pipelineRun = database
       .prepare(
         "SELECT snapshot_revision_id AS snapshotRevisionId FROM department_runs WHERE id = ?",
@@ -1515,6 +1618,10 @@ export const openTestRuntime = (
     }
     const snapshotPayload = parseJson<{
       readonly executionProfiles?: readonly unknown[];
+      readonly technicalGatePromotion?: {
+        readonly acceptedTechnicalBaselineId: string;
+        readonly acceptedTechnicalBaselineHash: string;
+      };
     }>(snapshot.canonicalJson);
     const frozenProfile = snapshotPayload.executionProfiles?.find(
       (profile) =>
@@ -1532,11 +1639,142 @@ export const openTestRuntime = (
         "The Test Run Execution Profile must be derived from the exact frozen Snapshot Revision.",
       );
     }
+    const technicalBaseline = snapshotPayload.technicalGatePromotion
+      ? (database
+          .prepare(
+            `SELECT manifest_hash AS manifestHash
+               FROM technical_baselines
+              WHERE id = ? AND run_id = ?`,
+          )
+          .get(
+            snapshotPayload.technicalGatePromotion.acceptedTechnicalBaselineId,
+            input.runId,
+          ) as { readonly manifestHash: string } | undefined)
+      : undefined;
+    if (
+      !technicalBaseline ||
+      technicalBaseline.manifestHash !==
+        snapshotPayload.technicalGatePromotion?.acceptedTechnicalBaselineHash
+    ) {
+      throw new TestRuntimeError(
+        "TEST_SCOPE_RISK_AUTHORITY_INVALID",
+        "The Test scope risk policy must resolve from the exact Technical Baseline frozen by the Snapshot Revision.",
+      );
+    }
+    const authoritativeRiskRules = [
+      { factorId: "cross-application-contract", minimumTier: "high" as const },
+      { factorId: "no-sandbox", minimumTier: "high" as const },
+      {
+        factorId: "recovery-complexity",
+        minimumTier: "medium" as const,
+      },
+      {
+        factorId: "secret-environment-boundary",
+        minimumTier: "high" as const,
+      },
+      { factorId: "user-visible-runtime", minimumTier: "high" as const },
+    ];
+    const profile = frozenProfile as {
+      readonly sandboxRef?: unknown;
+      readonly secretReferenceIds?: unknown;
+    };
+    const authoritativeFactors = [
+      {
+        id: "cross-application-contract",
+        present: authority.manifest.contractVersions.length > 0,
+        evidenceRefs: authority.manifest.contractVersions.map(
+          (contract) =>
+            `contract:${contract.id}:${contract.version}:${contract.hash}`,
+        ),
+      },
+      {
+        id: "no-sandbox",
+        present: profile.sandboxRef === "no-sandbox",
+        evidenceRefs:
+          profile.sandboxRef === "no-sandbox"
+            ? [`execution-profile:${input.executionProfile.id}`]
+            : [],
+      },
+      {
+        id: "recovery-complexity",
+        present: input.executionOperations.length > 0,
+        evidenceRefs: input.executionOperations.map(
+          (operation) => `test-operation:${operation.id}`,
+        ),
+      },
+      {
+        id: "secret-environment-boundary",
+        present:
+          Array.isArray(profile.secretReferenceIds) &&
+          profile.secretReferenceIds.length > 0,
+        evidenceRefs: Array.isArray(profile.secretReferenceIds)
+          ? profile.secretReferenceIds.map(
+              (id) => `secret-reference:${String(id)}`,
+            )
+          : [],
+      },
+      {
+        id: "user-visible-runtime",
+        present: coveredRevisions.some(
+          (revision) =>
+            revision.manifest.uiActions.length > 0 ||
+            revision.manifest.assertions.length > 0,
+        ),
+        evidenceRefs: coveredRevisions.map(
+          (revision) => `test-case-revision:${revision.id}`,
+        ),
+      },
+    ].map((factor) => ({
+      ...factor,
+      evidenceRefs: sortedUnique(factor.evidenceRefs),
+    }));
+    const riskRevisionId = `technical-baseline:${snapshotPayload.technicalGatePromotion.acceptedTechnicalBaselineId}:${technicalBaseline.manifestHash}`;
+    const authoritativePolicyHash = sha256({
+      schemaVersion: 1,
+      revisionId: riskRevisionId,
+      rules: authoritativeRiskRules,
+    });
+    const authoritativeEvidenceRefs = sortedUnique(
+      authoritativeFactors.flatMap((factor) => factor.evidenceRefs),
+    );
+    const authoritativeTier = authoritativeFactors
+      .filter((factor) => factor.present)
+      .reduce<TestScopeRiskInput["computedTier"]>((tier, factor) => {
+        const rule = authoritativeRiskRules.find(
+          (candidate) => candidate.factorId === factor.id,
+        )!;
+        return tierRank[rule.minimumTier] > tierRank[tier]
+          ? rule.minimumTier
+          : tier;
+      }, "low");
+    const authoritativeRiskInputHash = sha256({
+      schemaVersion: 1,
+      policyRevisionId: riskRevisionId,
+      policyHash: authoritativePolicyHash,
+      factors: authoritativeFactors,
+      evidenceRefs: authoritativeEvidenceRefs,
+    });
+    if (
+      input.risk.policy.revisionId !== riskRevisionId ||
+      input.risk.policy.hash !== authoritativePolicyHash ||
+      canonicalJson(rules) !== canonicalJson(authoritativeRiskRules) ||
+      canonicalJson(factors) !== canonicalJson(authoritativeFactors) ||
+      canonicalJson(sortedUnique(input.risk.evidenceRefs)) !==
+        canonicalJson(authoritativeEvidenceRefs) ||
+      input.risk.computedTier !== authoritativeTier ||
+      input.risk.inputHash !== authoritativeRiskInputHash
+    ) {
+      throw new TestRuntimeError(
+        "TEST_SCOPE_RISK_AUTHORITY_INVALID",
+        "The Test scope risk policy, complete factor closure, and tier must match Runtime authority frozen by the Snapshot and Technical Baseline.",
+      );
+    }
     const build = database
       .prepare(
         `SELECT versions.content_hash AS contentHash, versions.status,
                 versions.producing_run_id AS producingRunId,
                 versions.snapshot_revision_id AS snapshotRevisionId,
+                versions.producer_context_json AS producerContextJson,
                 artifacts.project_id AS projectId, artifacts.type
            FROM artifact_versions AS versions
            JOIN artifacts ON artifacts.id = versions.artifact_id
@@ -1548,6 +1786,7 @@ export const openTestRuntime = (
           readonly status: string;
           readonly producingRunId: string | null;
           readonly snapshotRevisionId: string | null;
+          readonly producerContextJson: string | null;
           readonly projectId: string;
           readonly type: string;
         }
@@ -1560,20 +1799,44 @@ export const openTestRuntime = (
         return null;
       }
     })();
+    const buildProducer =
+      authoritativeBuild?.producer ??
+      (build?.producerContextJson
+        ? parseJson<{
+            readonly runId?: string;
+            readonly snapshotRevisionId?: string;
+            readonly integrationAuthority?: TestRunManifest["buildLineage"];
+          }>(build.producerContextJson)
+        : undefined);
+    const buildLineage = buildProducer?.integrationAuthority;
     if (
       !build ||
       build.projectId !== input.projectId ||
       build.type !== "build" ||
       !["produced", "accepted"].includes(build.status) ||
       build.contentHash !== input.build.digest ||
-      (authoritativeBuild?.producer.runId ?? build.producingRunId) !==
-        input.runId ||
-      (authoritativeBuild?.producer.snapshotRevisionId ??
-        build.snapshotRevisionId) !== input.snapshotRevisionId
+      (buildProducer?.runId ?? build.producingRunId) !== input.runId ||
+      (buildProducer?.snapshotRevisionId ?? build.snapshotRevisionId) !==
+        input.snapshotRevisionId ||
+      !buildLineage ||
+      canonicalJson({
+        generationId: buildLineage.generationId,
+        manifestHash: buildLineage.manifestHash,
+        passAuthorityHash: buildLineage.passAuthorityHash,
+        repositoryCommits: [...buildLineage.repositoryCommits].sort((a, b) =>
+          a.repositoryReference.localeCompare(b.repositoryReference),
+        ),
+      }) !==
+        canonicalJson({
+          generationId: authority.id,
+          manifestHash: authority.manifestHash,
+          passAuthorityHash: authority.passAuthorityHash,
+          repositoryCommits: input.integrationAuthority.repositoryCommits,
+        })
     ) {
       throw new TestRuntimeError(
         "TEST_BUILD_AUTHORITY_INVALID",
-        "The Test Run build identity must resolve to an exact produced Artifact Version for the same Run and Snapshot Revision.",
+        "The Test Run build identity must resolve to an exact produced Artifact Version for the same Run, Snapshot Revision, and PASS Integration Generation lineage.",
       );
     }
     const tester = database
@@ -1703,6 +1966,12 @@ export const openTestRuntime = (
     const manifest: TestRunManifest = {
       ...input,
       schemaVersion: 1,
+      buildLineage: {
+        ...buildLineage,
+        repositoryCommits: [...buildLineage.repositoryCommits].sort((a, b) =>
+          a.repositoryReference.localeCompare(b.repositoryReference),
+        ),
+      },
       testCaseRevisions,
       integrationAuthority: {
         ...input.integrationAuthority,
@@ -1771,7 +2040,7 @@ export const openTestRuntime = (
       return readRun(existing.id);
     }
     const now = clock().toISOString();
-    inTransaction(() => {
+    const persistRun = () => {
       database
         .prepare(
           `INSERT INTO test_runs(id, request_id, project_id, run_id, snapshot_revision_id, node_run_id, node_attempt_id, session_id, integration_generation_id, integration_manifest_hash, integration_pass_authority_hash, manifest_json, manifest_hash, request_hash, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`,
@@ -1813,9 +2082,14 @@ export const openTestRuntime = (
         },
         timestamp: now,
       });
-    });
+    };
+    if (transactionAlreadyOpen) persistRun();
+    else inTransaction(persistRun);
     return readRun(input.testRunId);
   };
+
+  const createRun: TestRuntime["createRun"] = (input) =>
+    createRunInternal(input);
 
   const operationRequest = (
     run: TestRunView,
@@ -2039,12 +2313,13 @@ export const openTestRuntime = (
           database
             .prepare(
               `INSERT OR IGNORE INTO test_run_obligations(
-               id, test_run_id, description, evidence_json, status, created_at
-             ) VALUES (?, ?, ?, ?, 'open', ?)`,
+               id, test_run_id, defect_id, description, evidence_json, status, created_at
+             ) VALUES (?, ?, ?, ?, ?, 'open', ?)`,
             )
             .run(
               obligationId,
               request.testRunId,
+              defectId,
               "Resolve the terminal Test execution failure with fresh evidence and rerun the affected Test Case revision.",
               canonicalJson(evidence),
               now,
@@ -2271,14 +2546,50 @@ export const openTestRuntime = (
       request.input,
       input.adapter.id,
     );
-    database
-      .prepare(
-        "UPDATE test_execution_operations SET state = 'reconciling', updated_at = ? WHERE id = ?",
-      )
-      .run(
-        clock().toISOString(),
-        executionStorageId(input.testRunId, input.operationId),
-      );
+    const reconcileNow = clock().toISOString();
+    workerUnitOfWork({
+      commandId: `${request.operationKey}:reconcile-intent`,
+      request: {
+        testRunId: input.testRunId,
+        operationId: input.operationId,
+        requestHash: request.requestHash,
+      },
+      result: () => ({ operationId: input.operationId, state: "reconciling" }),
+      operation: () => {
+        database
+          .prepare(
+            `UPDATE test_execution_operations
+                SET state = 'reconciling', updated_at = ?
+              WHERE id = ? AND request_hash = ?
+                AND state IN ('intent', 'running', 'reconciling', 'unknown')`,
+          )
+          .run(
+            reconcileNow,
+            executionStorageId(input.testRunId, input.operationId),
+            request.requestHash,
+          );
+        database
+          .prepare(
+            `UPDATE test_runs SET state = 'reconciling', updated_at = ?
+              WHERE id = ? AND state IN ('scheduled', 'running', 'reconciling', 'unknown')`,
+          )
+          .run(reconcileNow, input.testRunId);
+        const reconcilingRun = readRun(input.testRunId);
+        appendEvent({
+          type: "test.run.reconciling",
+          projectId: reconcilingRun.manifest.projectId,
+          runId: reconcilingRun.manifest.runId,
+          nodeRunId: reconcilingRun.manifest.nodeRunId,
+          testRunId: reconcilingRun.id,
+          payload: {
+            testRunId: reconcilingRun.id,
+            state: "reconciling",
+            operationId: input.operationId,
+          },
+          timestamp: reconcileNow,
+        });
+      },
+    });
     const fact = await input.adapter.reconcile(request);
     persistFact(request, fact);
     return readRun(input.testRunId);
@@ -2693,7 +3004,7 @@ export const openTestRuntime = (
         "INSERT INTO test_assertion_results(id, test_run_id, operation_id, test_case_revision_id, assertion_id, required, ui_status, runtime_status, correlation_json, result_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
-        randomUUID(),
+        nextId(),
         input.testRunId,
         executionStorageId(input.testRunId, input.operationId),
         input.testCaseRevisionId,
@@ -3164,10 +3475,17 @@ export const openTestRuntime = (
   const closeDefect: TestRuntime["closeDefect"] = (input) => {
     const row = database
       .prepare(
-        "SELECT test_run_id AS testRunId, status FROM test_defects WHERE id = ?",
+        `SELECT test_run_id AS testRunId,
+                test_case_revision_id AS testCaseRevisionId,
+                assertion_id AS assertionId
+           FROM test_defects WHERE id = ?`,
       )
       .get(input.defectId) as
-      | { readonly testRunId: string; readonly status: string }
+      | {
+          readonly testRunId: string;
+          readonly testCaseRevisionId: string;
+          readonly assertionId: string | null;
+        }
       | undefined;
     if (!row)
       throw new TestRuntimeError(
@@ -3196,7 +3514,24 @@ export const openTestRuntime = (
       rerun.manifest.projectId !== original.manifest.projectId ||
       rerun.state !== "passed" ||
       rerun.passAuthorityHash !== resolution.passAuthorityHash ||
-      authorityHashFor(rerun) !== resolution.passAuthorityHash;
+      authorityHashFor(rerun) !== resolution.passAuthorityHash ||
+      rerun.reworkLineage?.defectId !== input.defectId ||
+      rerun.reworkLineage?.priorTestRunId !== original.id;
+    const supersedes = (candidateId: string, priorId: string): boolean => {
+      let candidate: string | null = candidateId;
+      const visited = new Set<string>();
+      while (candidate && !visited.has(candidate)) {
+        if (candidate === priorId) return true;
+        visited.add(candidate);
+        candidate = readCaseRevision(candidate).supersedesRevisionId;
+      }
+      return false;
+    };
+    const coversOriginalDefect = resolution.assertions.some(
+      (entry) =>
+        supersedes(entry.testCaseRevisionId, row.testCaseRevisionId) &&
+        (row.assertionId === null || entry.assertionId === row.assertionId),
+    );
     const invalidAssertion = resolution.assertions.some((entry) => {
       const assertion = rerun.assertions.find(
         (candidate) =>
@@ -3220,7 +3555,7 @@ export const openTestRuntime = (
         )
       );
     });
-    if (invalidRerun || invalidAssertion) {
+    if (invalidRerun || invalidAssertion || !coversOriginalDefect) {
       throw new TestRuntimeError(
         "TEST_DEFECT_RESOLUTION_EVIDENCE_INVALID",
         "Test defect resolution must match paired passing assertions and immutable evidence from the exact fresh PASS Test Run authority.",
@@ -3246,6 +3581,15 @@ export const openTestRuntime = (
         );
       return readRun(row.testRunId);
     }
+    const existingDefectResolution = database
+      .prepare("SELECT id FROM test_defect_resolutions WHERE defect_id = ?")
+      .get(input.defectId) as { readonly id: string } | undefined;
+    if (existingDefectResolution) {
+      throw new TestRuntimeError(
+        "TEST_DEFECT_RESOLUTION_CONFLICT",
+        `Test defect ${input.defectId} already has immutable resolution ${existingDefectResolution.id}.`,
+      );
+    }
     inTransaction(() => {
       database
         .prepare(
@@ -3258,11 +3602,24 @@ export const openTestRuntime = (
           resolutionHash,
           now,
         );
-      database
+      const obligations = database
         .prepare(
-          "UPDATE test_defects SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'open'",
+          "SELECT id FROM test_run_obligations WHERE defect_id = ? ORDER BY id",
         )
-        .run(now, input.defectId);
+        .all(input.defectId) as Array<{ readonly id: string }>;
+      const insertObligationResolution = database.prepare(
+        `INSERT INTO test_run_obligation_resolutions(
+           id, obligation_id, defect_resolution_id, created_at
+         ) VALUES (?, ?, ?, ?)`,
+      );
+      for (const obligation of obligations) {
+        insertObligationResolution.run(
+          `${input.resolutionId}:${obligation.id}`,
+          obligation.id,
+          input.resolutionId,
+          now,
+        );
+      }
       const run = readRun(row.testRunId);
       appendEvent({
         type: "test.defect.closed",
@@ -3344,6 +3701,12 @@ export const openTestRuntime = (
       );
     const prior = readRun(row.testRunId);
     const defect = prior.defects.find((entry) => entry.id === input.defectId)!;
+    if (defect.status !== "open") {
+      throw new TestRuntimeError(
+        "TEST_REWORK_DEFECT_CLOSED",
+        `Test defect ${input.defectId} is already closed.`,
+      );
+    }
     if (!["failed", "blocked", "cancelled"].includes(prior.state)) {
       throw new TestRuntimeError(
         "TEST_REWORK_SOURCE_NOT_TERMINAL",
@@ -3376,22 +3739,40 @@ export const openTestRuntime = (
         "Changed code or Integration input requires fresh Code Review coverage, a fresh PASS Integration Generation, and a fresh Test Run.",
       );
     }
-    const run = createRun(input.input);
-    return {
-      run,
-      route: reworkRoute(defect.responsibility),
-      lineage: {
-        priorTestRunId: prior.id,
-        priorManifestHash: prior.manifestHash,
-        integrationAuthority: sameGeneration
-          ? "reuse-exact-pass"
-          : "fresh-pass-authority",
-        priorIntegrationGenerationId:
-          prior.manifest.integrationAuthority.generationId,
-        nextIntegrationGenerationId:
-          run.manifest.integrationAuthority.generationId,
-      },
+    const route = reworkRoute(defect.responsibility);
+    const lineage = {
+      priorTestRunId: prior.id,
+      priorManifestHash: prior.manifestHash,
+      integrationAuthority: sameGeneration
+        ? ("reuse-exact-pass" as const)
+        : ("fresh-pass-authority" as const),
+      priorIntegrationGenerationId:
+        prior.manifest.integrationAuthority.generationId,
+      nextIntegrationGenerationId:
+        input.input.integrationAuthority.generationId,
     };
+    return inTransaction(() => {
+      const run = createRunInternal(input.input, input.defectId, true);
+      const lineageHash = sha256({ route, lineage });
+      database
+        .prepare(
+          `INSERT INTO test_rework_runs(
+             id, defect_id, prior_test_run_id, fresh_test_run_id, route_json,
+             lineage_json, lineage_hash, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `test-rework:${input.defectId}:${run.id}`,
+          input.defectId,
+          prior.id,
+          run.id,
+          canonicalJson(route),
+          canonicalJson(lineage),
+          lineageHash,
+          clock().toISOString(),
+        );
+      return { run: readRun(run.id), route, lineage };
+    });
   };
 
   const authorityHashFor = (run: TestRunView): string => {
@@ -3438,6 +3819,7 @@ export const openTestRuntime = (
         .map((entry) => ({ id: entry.id, status: entry.status }))
         .sort((left, right) => left.id.localeCompare(right.id)),
       defectResolutions,
+      reworkLineage: run.reworkLineage,
       obligations: run.obligations,
     });
   };
@@ -3464,6 +3846,17 @@ export const openTestRuntime = (
       (entry) =>
         entry.required &&
         (entry.uiStatus !== "passed" || entry.runtimeStatus !== "passed"),
+    );
+    const explicitFailure = failing.filter(
+      (entry) =>
+        entry.uiStatus === "failed" || entry.runtimeStatus === "failed",
+    );
+    const explicitUnknown = failing.filter(
+      (entry) =>
+        entry.uiStatus === "unknown" ||
+        entry.runtimeStatus === "unknown" ||
+        entry.uiStatus === "missing" ||
+        entry.runtimeStatus === "missing",
     );
     const evidenceKindsFor = (
       testCaseRevisionId: string,
@@ -3565,6 +3958,142 @@ export const openTestRuntime = (
       },
     );
     if (
+      missing.length === 0 &&
+      incompleteOperations.length === 0 &&
+      (explicitFailure.length > 0 || explicitUnknown.length > 0)
+    ) {
+      const terminalState =
+        explicitFailure.length > 0 ? ("failed" as const) : ("blocked" as const);
+      const terminalAssertions =
+        explicitFailure.length > 0 ? explicitFailure : explicitUnknown;
+      const now = clock().toISOString();
+      return workerUnitOfWork({
+        commandId: `test-runtime:${testRunId}:terminal:${sha256(
+          terminalAssertions.map((entry) => entry.resultHash),
+        )}`,
+        request: {
+          testRunId,
+          state: terminalState,
+          assertionResultHashes: terminalAssertions.map(
+            (entry) => entry.resultHash,
+          ),
+        },
+        result: () => ({ testRunId, state: terminalState }),
+        operation: () => {
+          for (const assertion of terminalAssertions) {
+            const defectId = `test-defect:assertion:${testRunId}:${assertion.testCaseRevisionId}:${assertion.assertionId}`;
+            const evidenceRefs = run.evidence
+              .filter(
+                (evidence) =>
+                  evidence.testCaseRevisionId ===
+                    assertion.testCaseRevisionId &&
+                  evidence.assertionId === assertion.assertionId,
+              )
+              .flatMap((evidence) => [
+                evidence.id,
+                ...(evidence.artifactVersionId
+                  ? [evidence.artifactVersionId]
+                  : []),
+              ]);
+            const responsibility: TestDefectResponsibility = {
+              kind: "ui-runtime-contract",
+              owner:
+                assertion.uiStatus === "passed" &&
+                assertion.runtimeStatus !== "passed"
+                  ? "runtime"
+                  : assertion.runtimeStatus === "passed" &&
+                      assertion.uiStatus !== "passed"
+                    ? "ui"
+                    : "shared",
+            };
+            const evidence: TestDefectEvidence = {
+              schemaVersion: 1,
+              kind: "assertion",
+              assertion: {
+                testCaseRevisionId: assertion.testCaseRevisionId,
+                assertionId: assertion.assertionId,
+                resultHash: assertion.resultHash,
+              },
+              evidenceRefs:
+                evidenceRefs.length > 0
+                  ? sortedUnique(evidenceRefs)
+                  : [`assertion-result:${assertion.resultHash}`],
+            };
+            database
+              .prepare(
+                `INSERT OR IGNORE INTO test_defects(
+                   id, test_run_id, test_case_revision_id, assertion_id,
+                   integration_generation_id, responsibility_json,
+                   evidence_json, status, created_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+              )
+              .run(
+                defectId,
+                testRunId,
+                assertion.testCaseRevisionId,
+                assertion.assertionId,
+                run.manifest.integrationAuthority.generationId,
+                canonicalJson(responsibility),
+                canonicalJson(evidence),
+                now,
+              );
+            database
+              .prepare(
+                `INSERT OR IGNORE INTO test_run_obligations(
+                   id, test_run_id, defect_id, description, evidence_json,
+                   status, created_at
+                 ) VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+              )
+              .run(
+                `test-obligation:assertion:${testRunId}:${assertion.testCaseRevisionId}:${assertion.assertionId}`,
+                testRunId,
+                defectId,
+                "Resolve the explicit Test assertion failure or unknown result with a fresh related Test Run.",
+                canonicalJson(evidence),
+                now,
+              );
+          }
+          database
+            .prepare(
+              `UPDATE test_runs
+                  SET state = ?, failure_code = ?, failure_message = ?,
+                      updated_at = ?
+                WHERE id = ?
+                  AND state NOT IN ('passed', 'failed', 'blocked', 'cancelled')`,
+            )
+            .run(
+              terminalState,
+              terminalState === "failed"
+                ? "TEST_ASSERTION_FAILED"
+                : "TEST_ASSERTION_UNKNOWN",
+              `Required Test assertions reached explicit ${terminalState} evidence.`,
+              now,
+              testRunId,
+            );
+          appendEvent({
+            type:
+              terminalState === "failed"
+                ? "test.run.failed"
+                : "test.run.blocked",
+            projectId: run.manifest.projectId,
+            runId: run.manifest.runId,
+            nodeRunId: run.manifest.nodeRunId,
+            testRunId,
+            payload:
+              terminalState === "failed"
+                ? {
+                    testRunId,
+                    state: terminalState,
+                    operationId: terminalAssertions[0]!.operationId,
+                  }
+                : { testRunId, state: terminalState },
+            timestamp: now,
+          });
+          return readRun(testRunId);
+        },
+      });
+    }
+    if (
       missing.length > 0 ||
       failing.length > 0 ||
       incompleteEvidence ||
@@ -3629,6 +4158,38 @@ export const openTestRuntime = (
         `Test Run ${testRunId} no longer matches its immutable PASS authority hash.`,
       );
     }
+    const relatedResolution = run.reworkLineage
+      ? (database
+          .prepare(
+            `SELECT resolutions.id AS resolutionId,
+                    resolutions.resolution_hash AS resolutionHash,
+                    resolutions.resolution_json AS resolutionJson
+               FROM test_defect_resolutions AS resolutions
+              WHERE resolutions.defect_id = ?`,
+          )
+          .get(run.reworkLineage.defectId) as
+          | {
+              readonly resolutionId: string;
+              readonly resolutionHash: string;
+              readonly resolutionJson: string;
+            }
+          | undefined)
+      : undefined;
+    if (run.reworkLineage) {
+      const resolution = relatedResolution
+        ? parseJson<TestDefectResolution>(relatedResolution.resolutionJson)
+        : undefined;
+      if (
+        !relatedResolution ||
+        resolution?.resolvedByTestRunId !== run.id ||
+        resolution.passAuthorityHash !== run.passAuthorityHash
+      ) {
+        throw new TestRuntimeError(
+          "TEST_RUN_REWORK_AUTHORITY_INCOMPLETE",
+          `Test Run ${testRunId} cannot be consumed until its related Test defect is closed by this exact fresh PASS authority.`,
+        );
+      }
+    }
     const defectResolutions = database
       .prepare(
         `SELECT resolutions.id AS resolutionId, resolutions.defect_id AS defectId,
@@ -3636,9 +4197,10 @@ export const openTestRuntime = (
            FROM test_defect_resolutions AS resolutions
            JOIN test_defects AS defects ON defects.id = resolutions.defect_id
           WHERE defects.test_run_id = ?
+             OR resolutions.defect_id = ?
           ORDER BY resolutions.defect_id, resolutions.id`,
       )
-      .all(testRunId) as Array<{
+      .all(testRunId, run.reworkLineage?.defectId ?? "") as Array<{
       readonly resolutionId: string;
       readonly defectId: string;
       readonly resolutionHash: string;
@@ -3652,6 +4214,7 @@ export const openTestRuntime = (
       testCaseRevisions: run.manifest.testCaseRevisions,
       coverageHash: run.manifest.coverageHash,
       build: run.manifest.build,
+      buildLineage: run.manifest.buildLineage,
       snapshotRevisionId: run.manifest.snapshotRevisionId,
       executionProfile: run.manifest.executionProfile,
       companyDirectoryFingerprint: run.manifest.companyDirectoryFingerprint,
@@ -3659,6 +4222,7 @@ export const openTestRuntime = (
       environment: run.manifest.environment,
       capabilities: run.manifest.capabilities,
       risk: run.manifest.risk,
+      reworkLineage: run.reworkLineage,
       assertionResultHashes: run.assertions
         .map((entry) => entry.resultHash)
         .sort(),

@@ -156,6 +156,116 @@ describe("Electron Test fixture renderer page", () => {
     assert.deepEqual(readElectronTestFixtureRoute(url), fixtureRoute);
   });
 
+  it("routes a real fixture gesture through an exact Interaction Prompt", async (context) => {
+    const interactionRoute: ElectronTestFixtureRoute = {
+      ...fixtureRoute,
+      interactionPrompt: {
+        commandId: "fixture-interaction-prompt",
+        sessionId: "interaction-session-1",
+        participantId: "interaction-human-1",
+        content: "Exercise the renderer gesture.",
+        expectedResponse: "fixture interaction passed",
+      },
+    };
+    const commands: unknown[] = [];
+    const bridge = {
+      execute: async (input: { readonly command: unknown }) => {
+        commands.push(input.command);
+        return {
+          status: "succeeded" as const,
+          value: { id: "interaction-turn-1" },
+          effectIds: [],
+        };
+      },
+      query: async () => ({
+        view: {
+          turns: [
+            {
+              id: "interaction-turn-1",
+              status: "completed",
+              outputMessageId: "interaction-output-1",
+            },
+          ],
+          messages: [
+            {
+              id: "interaction-output-1",
+              content: "fixture interaction passed",
+            },
+          ],
+        },
+        asOfSequence: 1,
+        viewSyncToken: null,
+      }),
+    } as unknown as Pick<SandcastleBridge, "query" | "execute">;
+    const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+      url: "http://127.0.0.1/",
+    });
+    const previousWindow = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "window",
+    );
+    const previousDocument = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "document",
+    );
+    const previousHTMLElement = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "HTMLElement",
+    );
+    const previousNode = Object.getOwnPropertyDescriptor(globalThis, "Node");
+    const previousAct = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "IS_REACT_ACT_ENVIRONMENT",
+    );
+    Object.defineProperties(globalThis, {
+      window: { configurable: true, value: dom.window },
+      document: { configurable: true, value: dom.window.document },
+      HTMLElement: { configurable: true, value: dom.window.HTMLElement },
+      Node: { configurable: true, value: dom.window.Node },
+      IS_REACT_ACT_ENVIRONMENT: { configurable: true, value: true },
+    });
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of [
+        ["window", previousWindow],
+        ["document", previousDocument],
+        ["HTMLElement", previousHTMLElement],
+        ["Node", previousNode],
+        ["IS_REACT_ACT_ENVIRONMENT", previousAct],
+      ] as const) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    });
+
+    await act(async () => {
+      root.render(
+        <ElectronTestFixturePage route={interactionRoute} bridge={bridge} />,
+      );
+    });
+    const button = container.querySelector("button");
+    assert.ok(button);
+    await act(async () => button.click());
+    assert.equal(button.textContent, "Interaction Observed");
+    assert.equal(button.disabled, true);
+    assert.equal(
+      dom.window.document.title,
+      "Sandcastle T17 Fixture — observed",
+    );
+    assert.deepEqual(commands, [
+      {
+        type: "interaction.prompt",
+        sessionId: "interaction-session-1",
+        participantId: "interaction-human-1",
+        content: "Exercise the renderer gesture.",
+      },
+    ]);
+  });
+
   it("uses accessible real button actions to create, acknowledge, reconcile, and reload authoritative Test state", async (context) => {
     const executions: Array<{
       readonly commandId: string;

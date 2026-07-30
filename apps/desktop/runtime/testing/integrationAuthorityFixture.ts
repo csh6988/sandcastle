@@ -50,9 +50,13 @@ export interface IntegrationAuthorityFixtureResult {
   readonly projectId: string;
   readonly runId: string;
   readonly snapshotRevisionId: string;
+  readonly technicalBaselineId: string;
+  readonly technicalBaselineHash: string;
   readonly testNodeRunId: string;
   readonly testNodeAttemptId: string;
   readonly testSessionId: string;
+  readonly interactionSessionId: string;
+  readonly interactionHumanParticipantId: string;
   readonly testOwnerPositionId: string;
   readonly testOwnerAiMemberId: string;
   readonly workPackageCoverage: readonly {
@@ -1227,6 +1231,15 @@ export const createIntegrationAuthorityFixture = async (
     readonly artifactType: string;
     readonly logicalName: string;
     readonly content: Buffer;
+    readonly integrationAuthority?: {
+      readonly generationId: string;
+      readonly manifestHash: string;
+      readonly passAuthorityHash: string;
+      readonly repositoryCommits: {
+        repositoryReference: string;
+        commit: string;
+      }[];
+    };
   }) => {
     const registration = requireSucceeded(
       database.commandRegistry.execute({
@@ -1255,6 +1268,9 @@ export const createIntegrationAuthorityFixture = async (
             positionId: developer.id,
             sessionId: producerSession.session.id,
             workPackageId,
+            ...(artifact.integrationAuthority
+              ? { integrationAuthority: artifact.integrationAuthority }
+              : {}),
           },
           inputVersionIds: [],
         },
@@ -1280,12 +1296,6 @@ export const createIntegrationAuthorityFixture = async (
     content: diffBytes,
   });
   const buildBytes = Buffer.from(`fixture-build:${importedCommit}\n`);
-  const build = registerArtifactVersion({
-    commandPrefix: "build",
-    artifactType: "build",
-    logicalName: `${input.fixtureId}:build`,
-    content: buildBytes,
-  });
 
   const reviewed = await database.pipelineRuntime.executeReady({
     runId: awaitingReview.run.id,
@@ -1331,6 +1341,25 @@ export const createIntegrationAuthorityFixture = async (
   const integrationAuthority = database.integrations.readPassAuthority(
     generation.id,
   );
+  const build = registerArtifactVersion({
+    commandPrefix: "build",
+    artifactType: "build",
+    logicalName: `${input.fixtureId}:build`,
+    content: buildBytes,
+    integrationAuthority: {
+      generationId: integrationAuthority.id,
+      manifestHash: integrationAuthority.manifestHash,
+      passAuthorityHash: integrationAuthority.passAuthorityHash!,
+      repositoryCommits: integrationAuthority.repositoryResults
+        .map((entry) => ({
+          repositoryReference: entry.repositoryReference,
+          commit: entry.integratedCommit!,
+        }))
+        .sort((left, right) =>
+          left.repositoryReference.localeCompare(right.repositoryReference),
+        ),
+    },
+  });
   const testing = await database.pipelineRuntime.executeReady({
     runId: integrated.run.id,
     expectedRevision: integrated.run.revision,
@@ -1352,6 +1381,22 @@ export const createIntegrationAuthorityFixture = async (
     participantRef: tester.aiMember.id,
     role: "test-engineer",
   });
+  const interactionSession = database.interaction.createSession({
+    projectId: project.id,
+    mode: "consultation",
+  });
+  const interactionHuman = database.interaction.addParticipant({
+    sessionId: interactionSession.id,
+    participantType: "human",
+    participantRef: "electron-test-fixture",
+    role: "requester",
+  });
+  database.interaction.addParticipant({
+    sessionId: interactionSession.id,
+    participantType: "ai-member",
+    participantRef: tester.aiMember.id,
+    role: "consulted-member",
+  });
   const frozenProfile = testing.snapshot.payload.executionProfiles.find(
     (candidate) => candidate.id === profile.id,
   );
@@ -1369,9 +1414,13 @@ export const createIntegrationAuthorityFixture = async (
     projectId: project.id,
     runId: testing.run.id,
     snapshotRevisionId: testing.snapshot.id,
+    technicalBaselineId: formalTechnicalBaseline.id,
+    technicalBaselineHash: formalTechnicalBaseline.hash,
     testNodeRunId: testNode.id,
     testNodeAttemptId: testAttempt.id,
     testSessionId: testSession.id,
+    interactionSessionId: interactionSession.id,
+    interactionHumanParticipantId: interactionHuman.id,
     testOwnerPositionId: tester.id,
     testOwnerAiMemberId: tester.aiMember.id,
     workPackageCoverage: [
