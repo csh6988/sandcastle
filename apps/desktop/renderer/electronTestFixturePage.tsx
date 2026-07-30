@@ -23,10 +23,23 @@ export type ElectronTestFixtureRoute = {
   readonly caseCommand: TestCaseRevisionCommand;
   readonly runCommandId: string;
   readonly runCommand: TestRunCreateCommand;
+  readonly interactionPrompt?: {
+    readonly commandId: string;
+    readonly sessionId: string;
+    readonly participantId: string;
+    readonly content: string;
+    readonly expectedResponse: string;
+  };
 };
 
 type FixtureBridge = Pick<SandcastleBridge, "query" | "execute">;
-type FixtureStatus = "idle" | "working" | "ready" | "pass" | "error";
+type FixtureStatus =
+  | "idle"
+  | "working"
+  | "observed"
+  | "ready"
+  | "pass"
+  | "error";
 
 const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -34,6 +47,24 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
   const input = value as Record<string, unknown>;
   const caseCommand = EnvelopeCommandSchema.safeParse(input.caseCommand);
   const runCommand = EnvelopeCommandSchema.safeParse(input.runCommand);
+  const interactionPrompt = input.interactionPrompt as
+    | Record<string, unknown>
+    | undefined;
+  const interactionPromptValid =
+    interactionPrompt === undefined ||
+    (
+      [
+        "commandId",
+        "sessionId",
+        "participantId",
+        "content",
+        "expectedResponse",
+      ] as const
+    ).every(
+      (key) =>
+        typeof interactionPrompt[key] === "string" &&
+        interactionPrompt[key].trim() !== "",
+    );
   if (
     input.schemaVersion !== 1 ||
     typeof input.restoreOnLoad !== "boolean" ||
@@ -47,7 +78,8 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     caseCommand.data.type !== "test.case-revision.register" ||
     !runCommand.success ||
     runCommand.data.type !== "test.run.create" ||
-    runCommand.data.input.testRunId !== input.testRunId
+    runCommand.data.input.testRunId !== input.testRunId ||
+    !interactionPromptValid
   ) {
     return null;
   }
@@ -59,6 +91,13 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     caseCommand: caseCommand.data,
     runCommandId: input.runCommandId,
     runCommand: runCommand.data,
+    ...(interactionPrompt
+      ? {
+          interactionPrompt: interactionPrompt as NonNullable<
+            ElectronTestFixtureRoute["interactionPrompt"]
+          >,
+        }
+      : {}),
   };
 };
 
@@ -138,6 +177,57 @@ export function ElectronTestFixturePage(props: {
     throw new Error("Timed out waiting for authoritative Test Run state.");
   };
 
+  const runInteractionPrompt = async (): Promise<void> => {
+    const prompt = props.route.interactionPrompt;
+    if (!prompt) return;
+    const turn = unwrap(
+      await bridge.execute({
+        commandId: prompt.commandId,
+        command: {
+          type: "interaction.prompt",
+          sessionId: prompt.sessionId,
+          participantId: prompt.participantId,
+          content: prompt.content,
+        },
+      }),
+    ) as { readonly id: string };
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const result = await bridge.query({
+        type: "interaction.inspect",
+        sessionId: prompt.sessionId,
+      });
+      const interaction = result.view as {
+        readonly turns: readonly {
+          readonly id: string;
+          readonly status: string;
+          readonly outputMessageId: string | null;
+        }[];
+        readonly messages: readonly {
+          readonly id: string;
+          readonly content: string;
+        }[];
+      };
+      const current = interaction.turns.find((entry) => entry.id === turn.id);
+      if (current?.status === "completed") {
+        const output = interaction.messages.find(
+          (entry) => entry.id === current.outputMessageId,
+        );
+        if (output?.content !== prompt.expectedResponse) {
+          throw new Error("Interaction Turn response did not match exactly.");
+        }
+        return;
+      }
+      if (
+        current &&
+        ["failed", "cancelled", "interrupted"].includes(current.status)
+      ) {
+        throw new Error(`Interaction Turn reached ${current.status}.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("Timed out waiting for the Interaction Turn.");
+  };
+
   useEffect(() => {
     document.title = `Sandcastle T17 Fixture — ${status}`;
   }, [status]);
@@ -159,10 +249,16 @@ export function ElectronTestFixturePage(props: {
   }, []);
 
   const advance = async (): Promise<void> => {
-    if (status === "working" || status === "pass") return;
+    if (status === "working" || status === "observed" || status === "pass")
+      return;
     setStatus("working");
     setError(null);
     try {
+      if (status === "idle" && props.route.interactionPrompt) {
+        await runInteractionPrompt();
+        setStatus("observed");
+        return;
+      }
       if (status === "idle") {
         unwrap(
           await bridge.execute({
@@ -188,11 +284,13 @@ export function ElectronTestFixturePage(props: {
   const label =
     status === "pass"
       ? "PASS"
-      : status === "ready"
-        ? "Complete Test Run"
-        : status === "working"
-          ? "Working…"
-          : "Run Test";
+      : status === "observed"
+        ? "Interaction Observed"
+        : status === "ready"
+          ? "Complete Test Run"
+          : status === "working"
+            ? "Working…"
+            : "Run Test";
 
   return (
     <main
@@ -210,7 +308,9 @@ export function ElectronTestFixturePage(props: {
           autoFocus
           id="run-test"
           type="button"
-          disabled={status === "working" || status === "pass"}
+          disabled={
+            status === "working" || status === "observed" || status === "pass"
+          }
           onClick={() => void advance()}
         >
           {label}

@@ -457,6 +457,7 @@ export const startCompanyRuntimeServer = async (
                   );
                 } else if (
                   request.envelope.command.type === "test.run.create" ||
+                  request.envelope.command.type === "test.rework.create" ||
                   request.envelope.command.type === "test.run.complete"
                 ) {
                   const testRun = result.value as unknown as TestRunView;

@@ -655,7 +655,7 @@ An immutable revision of a **Test case** that freezes its requirement and Work P
 _Avoid_: editing a Test case in place, treating a fixture change as the same revision, deleting an assertion to hide a failure
 
 **Test run**:
-One recorded execution of one or more **Test cases** against a declared build, Company Directory, **Execution Profile**, and Runtime fixture. It preserves the deterministic risk policy and result, environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status so a result can be replayed or compared without relying on memory or a manually refreshed page.
+One recorded execution of one or more **Test cases** against a declared **Build Artifact**, Company Directory, **Execution Profile**, and Runtime fixture. Its immutable manifest binds the Build Artifact to the exact PASS **Integration Generation** and Repository commits, and preserves the Runtime-owned risk policy derived from the Snapshot's promoted **Technical Baseline**, deterministic factors and result, environment, inputs, UI actions, Runtime payloads, screenshots, logs, timing, and final status. Explicit failed assertions make the Test run fail; missing or unknown assertions block it. Execution intent, terminal facts, reconciliation evidence, and receipts remain durable so a result can be replayed or compared without relying on memory or a manually refreshed page.
 _Avoid_: "QA session" (too informal), "smoke test" (only one possible suite), treating a green UI assertion as the authoritative Runtime result
 
 **Test evidence**:
@@ -663,8 +663,16 @@ Immutable, retention-classified evidence from a **Test run** that correlates an 
 _Avoid_: mutable test logs, uncorrelated screenshots, Agent self-attestation, Renderer state as workflow truth
 
 **Test defect**:
-A traceable failure raised by a **Test run** against a requirement, Work Package, producer/consumer Contract, Artifact, Runtime contract, or interaction expectation. It links the failing Test case, exact evidence, affected revision and Node run when applicable, and either one evidenced responsibility or explicit aggregate/unknown candidates; resolving it creates a fresh Test run and never rewrites the failed history.
+A traceable failure raised by a **Test run** against a requirement, Work Package, producer/consumer Contract, Artifact, Runtime contract, or interaction expectation. It links the failing Test case, exact evidence, affected revision and Node run when applicable, and either one evidenced responsibility or explicit aggregate/unknown candidates. The Defect is append-only and may have only one immutable evidence-backed resolution from the exact fresh passing **Test rework** run; resolution never rewrites the failed history.
 _Avoid_: "bug note" (lacks reproducible evidence), caller-selected blame without persisted evidence, silently changing a Test case to hide a failure
+
+**Test obligation**:
+An append-only requirement created with a failed or unknown Test assertion that prevents downstream PASS authority until an exact fresh **Test rework** run supplies paired passing assertions and immutable evidence through the Defect's unique resolution.
+_Avoid_: mutable retry checklist, closing an obligation from a caller assertion, deleting the failed Test evidence
+
+**Test rework**:
+A fresh **Test run** created only through the formal rework Command from a failed, blocked, or cancelled prior run. Its hash-bound lineage freezes the prior manifest, **Test defect**, responsibility route, and whether it reuses the exact unchanged PASS **Integration Generation** or consumes a new PASS Generation after changed code or Integration inputs.
+_Avoid_: direct rerun that bypasses an open Defect, mutating the earlier Test run, reusing stale Integration authority after code changes
 
 **Repository readiness check**:
 A pre-execution check that confirms every repository and application named by a Project or **Work Package** can participate safely in the declared pipeline. It records repository identity and revision, clean/dirty state policy, branch and Worktree capability, build and test entry points, required local services or secrets by reference, cross-application contracts, and any blocking readiness defect before development starts.
@@ -729,6 +737,10 @@ _Avoid_: "task terminal" (too broad), "agent run" (reserved for **board run** / 
 **Artifact**:
 A typed, versioned deliverable produced or registered by a **department run** with one content kind: Runtime-managed file bytes, immutable Repository object, or provider-versioned external reference. Commits and versioned PR/build objects can be Artifacts; a branch, preview URL, or “latest” object is only a locator until resolved to an immutable object ID/version/digest. Each version records producer lineage and a kind-specific integrity descriptor and must be verified before satisfying a Gate.
 _Avoid_: "output" (too broad), "result" (ambiguous with `RunResult`), treating a mutable URL/branch as immutable evidence, applying local-file hash rules to every external object
+
+**Build Artifact**:
+An **Artifact** whose producer lineage binds its immutable digest to one exact PASS **Integration Generation**, that Generation's manifest and authority hashes, and the exact per-Repository integrated commits. A Test run cannot substitute a build from another Generation even when its label or mutable locator matches.
+_Avoid_: "latest build", a digest without Integration lineage, rebuilding from a mutable branch tip during Test execution
 
 **Review**:
 A human decision on a **board task** or **artifact** that marks the work as accepted, rejected, or needing changes before the next execution step.

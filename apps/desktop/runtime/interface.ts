@@ -1432,6 +1432,16 @@ export const TestRunViewSchema = z
     requestId: z.string().trim().min(1),
     manifest: TestRunManifestInputSchema.extend({
       schemaVersion: z.literal(1),
+      buildLineage: z
+        .object({
+          generationId: z.string().trim().min(1),
+          manifestHash: Sha256Schema,
+          passAuthorityHash: Sha256Schema,
+          repositoryCommits:
+            TestRunManifestInputSchema.shape.integrationAuthority.shape
+              .repositoryCommits,
+        })
+        .strict(),
       coverageHash: Sha256Schema,
       integrationCoverage: z
         .object({
@@ -1558,6 +1568,61 @@ export const TestRunViewSchema = z
         })
         .strict(),
     ),
+    reworkLineage: z
+      .object({
+        id: z.string().trim().min(1),
+        defectId: z.string().trim().min(1),
+        priorTestRunId: z.string().trim().min(1),
+        route: z.discriminatedUnion("destination", [
+          z
+            .object({
+              destination: z.literal("work-package"),
+              workPackageId: z.string().trim().min(1),
+              workPackageVersionId: z.string().trim().min(1),
+            })
+            .strict(),
+          z
+            .object({
+              destination: z.literal("contract"),
+              contractId: z.string().trim().min(1),
+              version: z.string().trim().min(1),
+              producerApplicationId: z.string().trim().min(1),
+              consumerApplicationId: z.string().trim().min(1),
+              candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
+            })
+            .strict(),
+          z
+            .object({
+              destination: z.literal("triage"),
+              responsibility: z.enum(["aggregate", "unknown"]),
+              candidateWorkPackageVersionIds: z.array(z.string().trim().min(1)),
+              reason: z.string().trim().min(1).optional(),
+            })
+            .strict(),
+          z
+            .object({
+              destination: z.literal("ui-runtime-contract"),
+              owner: z.enum(["ui", "runtime", "shared"]),
+            })
+            .strict(),
+        ]),
+        lineage: z
+          .object({
+            priorTestRunId: z.string().trim().min(1),
+            priorManifestHash: Sha256Schema,
+            integrationAuthority: z.enum([
+              "reuse-exact-pass",
+              "fresh-pass-authority",
+            ]),
+            priorIntegrationGenerationId: z.string().trim().min(1),
+            nextIntegrationGenerationId: z.string().trim().min(1),
+          })
+          .strict(),
+        lineageHash: Sha256Schema,
+        createdAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -1576,6 +1641,7 @@ export const TestPassAuthorityViewSchema = z
     testCaseRevisions: TestRunManifestInputSchema.shape.testCaseRevisions,
     coverageHash: Sha256Schema,
     build: TestRunManifestInputSchema.shape.build,
+    buildLineage: TestRunViewSchema.shape.manifest.shape.buildLineage,
     snapshotRevisionId: z.string().trim().min(1),
     executionProfile: TestRunManifestInputSchema.shape.executionProfile,
     companyDirectoryFingerprint: Sha256Schema,
@@ -1583,6 +1649,7 @@ export const TestPassAuthorityViewSchema = z
     environment: TestRunManifestInputSchema.shape.environment,
     capabilities: TestRunManifestInputSchema.shape.capabilities,
     risk: TestRunManifestInputSchema.shape.risk,
+    reworkLineage: TestRunViewSchema.shape.reworkLineage,
     assertionResultHashes: z.array(Sha256Schema),
     evidence: z.array(
       z
@@ -1799,6 +1866,22 @@ export const ArtifactProducerContextSchema = z.object({
   sessionId: z.string().trim().min(1).optional(),
   workPackageId: z.string().trim().min(1).optional(),
   interactionTurnId: z.string().trim().min(1).optional(),
+  integrationAuthority: z
+    .object({
+      generationId: z.string().trim().min(1),
+      manifestHash: Sha256Schema,
+      passAuthorityHash: Sha256Schema,
+      repositoryCommits: z.array(
+        z
+          .object({
+            repositoryReference: z.string().trim().min(1),
+            commit: z.string().regex(/^[a-f0-9]{40}$/),
+          })
+          .strict(),
+      ),
+    })
+    .strict()
+    .optional(),
 });
 
 export const ArtifactRegistrationContentSchema = z.discriminatedUnion("kind", [
@@ -4463,6 +4546,14 @@ export const TestRunCompleteEnvelopeCommandSchema = z
   })
   .strict();
 
+export const TestReworkCreateEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("test.rework.create"),
+    defectId: z.string().trim().min(1),
+    input: TestRunManifestInputSchema,
+  })
+  .strict();
+
 export const TestDefectRecordEnvelopeCommandSchema = z
   .object({
     type: z.literal("test.defect.record"),
@@ -4489,6 +4580,7 @@ export type TestEnvelopeCommand =
   | z.infer<typeof TestRunCreateEnvelopeCommandSchema>
   | z.infer<typeof TestDefectRecordEnvelopeCommandSchema>
   | z.infer<typeof TestDefectCloseEnvelopeCommandSchema>
+  | z.infer<typeof TestReworkCreateEnvelopeCommandSchema>
   | z.infer<typeof TestRunCompleteEnvelopeCommandSchema>;
 
 export const ReviewFindingSubmitEnvelopeCommandSchema = z
@@ -4645,6 +4737,7 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   IntegrationAggregateReviewRecordEnvelopeCommandSchema,
   TestCaseRevisionRegisterEnvelopeCommandSchema,
   TestRunCreateEnvelopeCommandSchema,
+  TestReworkCreateEnvelopeCommandSchema,
   TestDefectRecordEnvelopeCommandSchema,
   TestDefectCloseEnvelopeCommandSchema,
   TestRunCompleteEnvelopeCommandSchema,

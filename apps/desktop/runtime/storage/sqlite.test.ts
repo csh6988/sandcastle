@@ -2373,6 +2373,8 @@ describe("Test authority schema migration", () => {
       "test_defects",
       "test_defect_resolutions",
       "test_run_obligations",
+      "test_run_obligation_resolutions",
+      "test_rework_runs",
     ];
     assert.deepEqual(
       database
@@ -2406,8 +2408,12 @@ describe("Test authority schema migration", () => {
         "test_execution_facts_immutable_delete",
         "test_execution_facts_immutable_update",
         "test_execution_operations_immutable_delete",
+        "test_rework_runs_immutable_delete",
+        "test_rework_runs_immutable_update",
         "test_run_case_revisions_immutable_delete",
         "test_run_case_revisions_immutable_update",
+        "test_run_obligation_resolutions_immutable_delete",
+        "test_run_obligation_resolutions_immutable_update",
         "test_run_obligations_immutable_delete",
         "test_runs_immutable_delete",
       ],

@@ -99,6 +99,17 @@ const testRunView = {
       artifactVersionId: "artifact-version-1",
       digest: "6".repeat(64),
     },
+    buildLineage: {
+      generationId: "generation-1",
+      manifestHash: "3".repeat(64),
+      passAuthorityHash: "4".repeat(64),
+      repositoryCommits: [
+        {
+          repositoryReference: "/repositories/api",
+          commit: "5".repeat(40),
+        },
+      ],
+    },
     executionProfile: { id: "profile-1", hash: "7".repeat(64) },
     companyDirectoryFingerprint: "8".repeat(64),
     fixture: { id: "fixture-1", scriptHashes: ["9".repeat(64)] },
@@ -186,6 +197,7 @@ const testRunView = {
   evidence: [],
   defects: [],
   obligations: [],
+  reworkLineage: null,
   createdAt: "2026-07-29T00:00:00.000Z",
   updatedAt: "2026-07-29T00:00:00.000Z",
 };
@@ -711,6 +723,7 @@ describe("Company Runtime client", () => {
       testCaseRevisions: testRunView.manifest.testCaseRevisions,
       coverageHash: testRunView.manifest.coverageHash,
       build: testRunView.manifest.build,
+      buildLineage: testRunView.manifest.buildLineage,
       snapshotRevisionId: testRunView.manifest.snapshotRevisionId,
       executionProfile: testRunView.manifest.executionProfile,
       companyDirectoryFingerprint:
@@ -719,6 +732,7 @@ describe("Company Runtime client", () => {
       environment: testRunView.manifest.environment,
       capabilities: testRunView.manifest.capabilities,
       risk: testRunView.manifest.risk,
+      reworkLineage: testRunView.reworkLineage,
       assertionResultHashes: ["2".repeat(64)],
       evidence: [
         {

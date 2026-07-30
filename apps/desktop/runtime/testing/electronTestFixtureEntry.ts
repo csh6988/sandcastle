@@ -10,11 +10,14 @@ import { join } from "node:path";
 import { startCompanyRuntimeServer } from "../server.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "../adapters/interactionExecutionAdapter.js";
 import type { AdapterExecutionFact } from "../execution/contract.js";
+import { MODEL_ONLY_CONTEXT_SCHEMA_HASH } from "../execution/contract.js";
 import type { ArtifactVersionView } from "../artifactRegistry.js";
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
+import type { RuntimeInteraction } from "../interaction.js";
 import {
   loadElectronTestFixtureConfig,
   normalizeTestEvidenceLocator,
+  readElectronTestFixtureAdapterScript,
   verifyTestEvidenceFile,
 } from "./electronTestFixture.js";
 import {
@@ -88,7 +91,7 @@ const scriptedInteractionAdapter = (
     enforceNoSideEffects: {
       mechanism: "model-only",
       mechanismVersion: "electron-test-fixture-1",
-      policySchemaHash: "a".repeat(64),
+      policySchemaHash: MODEL_ONLY_CONTEXT_SCHEMA_HASH,
     },
   },
   execute: async (request, sink) => {
@@ -163,6 +166,19 @@ type FixtureExecutionInput = {
   readonly assertionId: string | null;
   readonly correlationCommandId?: string;
   readonly evidence: readonly FixtureEvidenceDescriptor[];
+  readonly assertionContract?: {
+    readonly schemaVersion: 1;
+    readonly ui: {
+      readonly statusText: string;
+      readonly buttonLabel: string;
+    };
+    readonly runtime: {
+      readonly interactionSessionId: string;
+      readonly interactionCommandId: string;
+      readonly interactionTurnStatus: "completed";
+      readonly interactionResponse: string;
+    };
+  };
   readonly cleanup?: {
     readonly rootFingerprint: string;
     readonly targets: readonly {
@@ -197,18 +213,20 @@ const registerEvidence = (input: {
   readonly operationKey: string;
   readonly seeded: IntegrationAuthorityFixtureResult;
   readonly commandRegistry: CompanyCommandRegistry;
+  readonly validateBytes?: (bytes: Buffer) => void;
 }): TestExecutionResult["evidence"][number] => {
   const locator = normalizeTestEvidenceLocator(input.descriptor.locator);
   if (locator !== input.descriptor.locator) {
     throw new Error("Electron Test evidence locator is not canonical.");
   }
-  verifyTestEvidenceFile({
+  const verified = verifyTestEvidenceFile({
     evidenceDirectory: input.evidenceDirectory,
     locator,
     contentHash: input.descriptor.contentHash,
     byteSize: input.descriptor.byteSize,
   });
-  const bytes = readFileSync(join(input.evidenceDirectory, locator));
+  const bytes = verified.bytes;
+  input.validateBytes?.(bytes);
   const registration = requireSucceeded(
     input.commandRegistry.execute({
       schemaVersion: 1,
@@ -301,11 +319,10 @@ const main = async (): Promise<void> => {
     entrypoint: "electron-test-fixture",
   });
   const interactionScript = JSON.parse(
-    readFileSync(
-      config.adapters.find((adapter) => adapter.id === "scripted-interaction")!
-        .scriptPath,
-      "utf8",
-    ),
+    readElectronTestFixtureAdapterScript(
+      config,
+      "scripted-interaction",
+    ).toString("utf8"),
   ) as { readonly response?: string };
   const fixtureInput = {
     companyDirectory: config.companyDirectory,
@@ -324,6 +341,7 @@ const main = async (): Promise<void> => {
     "setup-authority.json",
   );
   let seeded: IntegrationAuthorityFixtureResult | undefined;
+  let interactionRuntime: RuntimeInteraction | undefined;
   const cleanupReceipts = new Map<string, unknown>();
   const requireSeeded = (): IntegrationAuthorityFixtureResult => {
     if (!seeded) {
@@ -367,6 +385,7 @@ const main = async (): Promise<void> => {
         },
       },
       setup: async (database) => {
+        interactionRuntime = database.interaction;
         if (existsSync(setupReceiptPath)) {
           const receipt = JSON.parse(
             readFileSync(setupReceiptPath, "utf8"),
@@ -428,156 +447,218 @@ const main = async (): Promise<void> => {
       createElectronTestExecutionAdapter({
         fixtureId: config.fixtureId,
         terminalResult: (request) => {
-          const operation = fixtureExecutionInput(request, config.fixtureId);
-          const currentSeed = requireSeeded();
-          if (operation.action === "cleanup") {
-            if (
-              operation.assertionId !== null ||
-              !operation.cleanup ||
-              operation.cleanup.rootFingerprint !== config.rootFingerprint ||
-              canonicalJson(operation.cleanup.targets) !==
-                canonicalJson(
-                  config.cleanupTargets.map((target) => ({
-                    kind: target.kind,
-                    pathFingerprint: target.pathFingerprint,
-                  })),
+          try {
+            const operation = fixtureExecutionInput(request, config.fixtureId);
+            const currentSeed = requireSeeded();
+            if (operation.action === "cleanup") {
+              if (
+                operation.assertionId !== null ||
+                !operation.cleanup ||
+                operation.cleanup.rootFingerprint !== config.rootFingerprint ||
+                canonicalJson(operation.cleanup.targets) !==
+                  canonicalJson(
+                    config.cleanupTargets.map((target) => ({
+                      kind: target.kind,
+                      pathFingerprint: target.pathFingerprint,
+                    })),
+                  ) ||
+                config.cleanupTargets.some((target) =>
+                  existsSync(target.path),
                 ) ||
-              config.cleanupTargets.some((target) => existsSync(target.path)) ||
-              operation.evidence.length !== 1 ||
-              operation.evidence[0]?.kind !== "cleanup"
+                operation.evidence.length !== 1 ||
+                operation.evidence[0]?.kind !== "cleanup"
+              ) {
+                throw new Error(
+                  "Electron Test cleanup operation lacks exact post-delete authority.",
+                );
+              }
+              const descriptor = operation.evidence[0];
+              const expectedCleanupSource = {
+                schemaVersion: 1,
+                fixtureId: config.fixtureId,
+                rootFingerprint: config.rootFingerprint,
+                targets: config.cleanupTargets.map((target) => ({
+                  kind: target.kind,
+                  pathFingerprint: target.pathFingerprint,
+                  state: "absent" as const,
+                })),
+              };
+              const evidence = registerEvidence({
+                descriptor,
+                evidenceDirectory: config.evidenceDirectory,
+                operationKey: request.operationKey,
+                seeded: currentSeed,
+                commandRegistry,
+                validateBytes: (bytes) => {
+                  const cleanupSource = JSON.parse(bytes.toString("utf8"));
+                  if (
+                    canonicalJson(cleanupSource) !==
+                    canonicalJson(expectedCleanupSource)
+                  ) {
+                    throw new Error(
+                      "Electron Test cleanup evidence does not match the frozen post-delete receipt.",
+                    );
+                  }
+                },
+              });
+              const receipt = {
+                schemaVersion: 1 as const,
+                kind: "cleanup" as const,
+                receiptId: `${request.operationKey}:cleanup-receipt`,
+                fixtureId: config.fixtureId,
+                operationKey: request.operationKey,
+                rootFingerprint: config.rootFingerprint,
+                targets: expectedCleanupSource.targets,
+                artifactVersionId: evidence.artifactVersionId!,
+                contentHash: evidence.contentHash,
+              };
+              cleanupReceipts.set(request.operationKey, receipt);
+              return {
+                schemaVersion: 1 as const,
+                assertions: [],
+                evidence: [evidence],
+              };
+            }
+            if (
+              typeof operation.assertionId !== "string" ||
+              typeof operation.correlationCommandId !== "string" ||
+              operation.assertionContract?.schemaVersion !== 1
             ) {
               throw new Error(
-                "Electron Test cleanup operation lacks exact post-delete authority.",
+                "Electron Test assertion operation is missing correlation identity.",
               );
             }
-            const descriptor = operation.evidence[0];
-            verifyTestEvidenceFile({
-              evidenceDirectory: config.evidenceDirectory,
-              locator: descriptor.locator,
-              contentHash: descriptor.contentHash,
-              byteSize: descriptor.byteSize,
-            });
-            const cleanupSource = JSON.parse(
-              readFileSync(
-                join(config.evidenceDirectory, descriptor.locator),
-                "utf8",
-              ),
+            if (!interactionRuntime) {
+              throw new Error(
+                "Electron Test Interaction Runtime is unavailable.",
+              );
+            }
+            const interaction = interactionRuntime.inspectSession(
+              currentSeed.interactionSessionId,
             );
-            const expectedCleanupSource = {
-              schemaVersion: 1,
-              fixtureId: config.fixtureId,
-              rootFingerprint: config.rootFingerprint,
-              targets: config.cleanupTargets.map((target) => ({
-                kind: target.kind,
-                pathFingerprint: target.pathFingerprint,
-                state: "absent" as const,
-              })),
+            const interactionTurn = interaction.turns.find(
+              (turn) =>
+                turn.commandId ===
+                operation.assertionContract!.runtime.interactionCommandId,
+            );
+            const interactionOutput = interaction.messages.find(
+              (message) => message.id === interactionTurn?.outputMessageId,
+            );
+            const authoritativeContract = {
+              schemaVersion: 1 as const,
+              ui: operation.assertionContract.ui,
+              runtime: {
+                interactionSessionId: interaction.session.id,
+                interactionCommandId: interactionTurn?.commandId,
+                interactionTurnStatus: interactionTurn?.status,
+                interactionResponse: interactionOutput?.content,
+              },
             };
             if (
-              canonicalJson(cleanupSource) !==
-              canonicalJson(expectedCleanupSource)
+              interaction.session.id !== currentSeed.interactionSessionId ||
+              interactionTurn?.status !== "completed" ||
+              canonicalJson(authoritativeContract) !==
+                canonicalJson(operation.assertionContract)
             ) {
               throw new Error(
-                "Electron Test cleanup evidence does not match the frozen post-delete receipt.",
+                "Electron Test assertion contract does not match the authoritative Interaction Turn.",
               );
             }
-            const evidence = registerEvidence({
-              descriptor,
-              evidenceDirectory: config.evidenceDirectory,
-              operationKey: request.operationKey,
-              seeded: currentSeed,
-              commandRegistry,
-            });
-            const receipt = {
-              schemaVersion: 1 as const,
-              kind: "cleanup" as const,
-              receiptId: `${request.operationKey}:cleanup-receipt`,
-              fixtureId: config.fixtureId,
-              operationKey: request.operationKey,
-              rootFingerprint: config.rootFingerprint,
-              targets: expectedCleanupSource.targets,
-              artifactVersionId: evidence.artifactVersionId!,
-              contentHash: evidence.contentHash,
-            };
-            cleanupReceipts.set(request.operationKey, receipt);
-            return {
-              schemaVersion: 1 as const,
-              assertions: [],
-              evidence: [evidence],
-            };
-          }
-          if (
-            typeof operation.assertionId !== "string" ||
-            typeof operation.correlationCommandId !== "string"
-          ) {
-            throw new Error(
-              "Electron Test assertion operation is missing correlation identity.",
+            const evidence = operation.evidence.map((descriptor) =>
+              registerEvidence({
+                descriptor,
+                evidenceDirectory: config.evidenceDirectory,
+                operationKey: request.operationKey,
+                seeded: currentSeed,
+                commandRegistry,
+                ...(descriptor.kind === "runtime"
+                  ? {
+                      validateBytes: (bytes: Buffer) => {
+                        const payload = JSON.parse(bytes.toString("utf8")) as {
+                          readonly assertionContract?: {
+                            readonly expected?: unknown;
+                            readonly observed?: unknown;
+                          };
+                        };
+                        if (
+                          canonicalJson(payload.assertionContract?.expected) !==
+                            canonicalJson(operation.assertionContract) ||
+                          canonicalJson(payload.assertionContract?.observed) !==
+                            canonicalJson(operation.assertionContract)
+                        ) {
+                          throw new Error(
+                            "Electron Test expected and observed assertion contracts do not match exactly.",
+                          );
+                        }
+                      },
+                    }
+                  : {}),
+              }),
             );
-          }
-          const evidence = operation.evidence.map((descriptor) =>
-            registerEvidence({
-              descriptor,
-              evidenceDirectory: config.evidenceDirectory,
-              operationKey: request.operationKey,
-              seeded: currentSeed,
-              commandRegistry,
-            }),
-          );
-          const run = tests.inspect(request.testRunId);
-          const event = (
-            database
-              .prepare(
-                `SELECT sequence, type, scope_json AS scopeJson
+            const run = tests.inspect(request.testRunId);
+            const event = (
+              database
+                .prepare(
+                  `SELECT sequence, type, scope_json AS scopeJson
                    FROM runtime_event_outbox
                   WHERE run_id = ? AND node_run_id = ?
                     AND type IN ('test.run.reconciling', 'test.run.started')
                   ORDER BY sequence DESC`,
-              )
-              .all(run.manifest.runId, run.manifest.nodeRunId) as Array<{
-              readonly sequence: number;
-              readonly type: string;
-              readonly scopeJson: string;
-            }>
-          ).find((candidate) => {
-            const scope = JSON.parse(candidate.scopeJson) as {
-              readonly testRunId?: string;
-            };
-            return scope.testRunId === run.id;
-          });
-          const consumedToken = readAcknowledgedElectronTestView(database, run);
-          if (!event || !consumedToken) {
-            throw new Error(
-              "Electron Test execution requires an acknowledged authoritative Query View and Runtime event.",
+                )
+                .all(run.manifest.runId, run.manifest.nodeRunId) as Array<{
+                readonly sequence: number;
+                readonly type: string;
+                readonly scopeJson: string;
+              }>
+            ).find((candidate) => {
+              const scope = JSON.parse(candidate.scopeJson) as {
+                readonly testRunId?: string;
+              };
+              return scope.testRunId === run.id;
+            });
+            const consumedToken = readAcknowledgedElectronTestView(
+              database,
+              run,
             );
-          }
-          return {
-            schemaVersion: 1,
-            assertions: [
-              {
-                testCaseRevisionId: operation.testCaseRevisionId,
-                assertionId: operation.assertionId,
-                uiStatus: "passed",
-                runtimeStatus: "passed",
-                correlation: {
-                  commandId: operation.correlationCommandId,
-                  eventSequence: event.sequence,
-                  runtimeEventType: event.type,
-                  queryAsOfSequence: consumedToken.sequence,
-                  queryViewHash: consumedToken.viewHash,
-                  viewSyncTokenHash: consumedToken.tokenHash,
-                  snapshotRevisionId: run.manifest.snapshotRevisionId,
-                  runId: run.manifest.runId,
-                  nodeRunId: run.manifest.nodeRunId,
-                  nodeAttemptId: run.manifest.nodeAttemptId,
-                  sessionId: run.manifest.sessionId,
-                  artifactVersionIds: evidence
-                    .map((entry) => entry.artifactVersionId)
-                    .filter((id): id is string => id !== null),
+            if (!event || !consumedToken) {
+              throw new Error(
+                "Electron Test execution requires an acknowledged authoritative Query View and Runtime event.",
+              );
+            }
+            return {
+              schemaVersion: 1,
+              assertions: [
+                {
+                  testCaseRevisionId: operation.testCaseRevisionId,
+                  assertionId: operation.assertionId,
+                  uiStatus: "passed",
+                  runtimeStatus: "passed",
+                  correlation: {
+                    commandId: operation.correlationCommandId,
+                    eventSequence: event.sequence,
+                    runtimeEventType: event.type,
+                    queryAsOfSequence: consumedToken.sequence,
+                    queryViewHash: consumedToken.viewHash,
+                    viewSyncTokenHash: consumedToken.tokenHash,
+                    snapshotRevisionId: run.manifest.snapshotRevisionId,
+                    runId: run.manifest.runId,
+                    nodeRunId: run.manifest.nodeRunId,
+                    nodeAttemptId: run.manifest.nodeAttemptId,
+                    sessionId: run.manifest.sessionId,
+                    artifactVersionIds: evidence
+                      .map((entry) => entry.artifactVersionId)
+                      .filter((id): id is string => id !== null),
+                  },
                 },
-              },
-            ],
-            evidence,
-          };
+              ],
+              evidence,
+            };
+          } catch (error) {
+            process.stderr.write(
+              `[electron-test-fixture-runtime:terminal-result] ${error instanceof Error ? error.stack : String(error)}\n`,
+            );
+            throw error;
+          }
         },
         terminalReceipt: (request) =>
           cleanupReceipts.get(request.operationKey) ?? {
