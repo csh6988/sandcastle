@@ -1544,33 +1544,127 @@ export const openTestRuntime = (
     return authority;
   };
 
+  const unresolvedRelatedReworkScope = (
+    input: TestRunManifestInput,
+    authority: IntegrationGenerationView,
+  ): {
+    readonly defectIds: readonly string[];
+    readonly obligationIds: readonly string[];
+  } => {
+    const currentWorkPackageIds = new Set(
+      authority.manifest.packages.map((entry) => entry.workPackageId),
+    );
+    const currentTestCaseIds = new Set(
+      input.testCaseRevisions.map(
+        (entry) => readCaseRevision(entry.id).testCaseId,
+      ),
+    );
+    const workPackageIdForVersion = (versionId: string): string | undefined =>
+      (
+        database
+          .prepare(
+            "SELECT work_package_id AS workPackageId FROM work_package_versions WHERE id = ?",
+          )
+          .get(versionId) as { readonly workPackageId: string } | undefined
+      )?.workPackageId;
+    const related = (row: {
+      readonly testCaseRevisionId: string;
+      readonly responsibilityJson: string;
+    }): boolean => {
+      const responsibility = parseJson<TestDefectResponsibility>(
+        row.responsibilityJson,
+      );
+      switch (responsibility.kind) {
+        case "work-package":
+          return currentWorkPackageIds.has(responsibility.workPackageId);
+        case "contract":
+          return authority.manifest.contractVersions.some(
+            (contract) =>
+              contract.id === responsibility.contractId &&
+              contract.producerApplicationId ===
+                responsibility.producerApplicationId &&
+              contract.consumerApplicationId ===
+                responsibility.consumerApplicationId,
+          );
+        case "aggregate":
+        case "unknown":
+          return responsibility.candidateWorkPackageVersionIds.some(
+            (versionId) => {
+              const workPackageId = workPackageIdForVersion(versionId);
+              return (
+                workPackageId !== undefined &&
+                currentWorkPackageIds.has(workPackageId)
+              );
+            },
+          );
+        case "ui-runtime-contract":
+          return currentTestCaseIds.has(
+            readCaseRevision(row.testCaseRevisionId).testCaseId,
+          );
+      }
+    };
+    const defects = (
+      database
+        .prepare(
+          `SELECT defects.id,
+                  defects.test_case_revision_id AS testCaseRevisionId,
+                  defects.responsibility_json AS responsibilityJson,
+                  resolutions.id AS resolutionId
+             FROM test_defects AS defects
+             JOIN test_runs AS prior_runs ON prior_runs.id = defects.test_run_id
+             LEFT JOIN test_defect_resolutions AS resolutions
+               ON resolutions.defect_id = defects.id
+            WHERE prior_runs.project_id = ?
+            ORDER BY defects.created_at, defects.id`,
+        )
+        .all(input.projectId) as Array<{
+        readonly id: string;
+        readonly testCaseRevisionId: string;
+        readonly responsibilityJson: string;
+        readonly resolutionId: string | null;
+      }>
+    ).filter(related);
+    const relatedDefectIds = defects.map((defect) => defect.id);
+    const obligationIds =
+      relatedDefectIds.length === 0
+        ? []
+        : (
+            database
+              .prepare(
+                `SELECT obligations.id
+                   FROM test_run_obligations AS obligations
+                   LEFT JOIN test_run_obligation_resolutions AS resolutions
+                     ON resolutions.obligation_id = obligations.id
+                  WHERE obligations.defect_id IN (${relatedDefectIds.map(() => "?").join(", ")})
+                    AND resolutions.id IS NULL
+                  ORDER BY obligations.id`,
+              )
+              .all(...relatedDefectIds) as Array<{ readonly id: string }>
+          ).map((obligation) => obligation.id);
+    return {
+      defectIds: defects
+        .filter((defect) => defect.resolutionId === null)
+        .map((defect) => defect.id),
+      obligationIds,
+    };
+  };
+
   const createRunInternal = (
     input: TestRunManifestInput,
     reworkDefectId?: string,
     transactionAlreadyOpen = false,
   ): TestRunView => {
     const authority = validateAuthority(input);
-    const unresolvedRelatedDefect = reworkDefectId
-      ? undefined
-      : (database
-          .prepare(
-            `SELECT defects.id
-               FROM test_defects AS defects
-               JOIN test_runs AS prior_runs ON prior_runs.id = defects.test_run_id
-               LEFT JOIN test_defect_resolutions AS resolutions
-                 ON resolutions.defect_id = defects.id
-              WHERE prior_runs.project_id = ?
-                AND defects.integration_generation_id = ?
-                AND resolutions.id IS NULL
-              ORDER BY defects.created_at, defects.id LIMIT 1`,
-          )
-          .get(input.projectId, input.integrationAuthority.generationId) as
-          | { readonly id: string }
-          | undefined);
-    if (unresolvedRelatedDefect) {
+    const unresolvedRelatedScope = reworkDefectId
+      ? { defectIds: [], obligationIds: [] }
+      : unresolvedRelatedReworkScope(input, authority);
+    const unresolvedRelatedId =
+      unresolvedRelatedScope.defectIds[0] ??
+      unresolvedRelatedScope.obligationIds[0];
+    if (unresolvedRelatedId) {
       throw new TestRuntimeError(
         "TEST_REWORK_COMMAND_REQUIRED",
-        `Open Test defect ${unresolvedRelatedDefect.id} requires a formal related rework Command; direct Test Run creation cannot bypass it.`,
+        `Open related Test defect or obligation ${unresolvedRelatedId} requires a formal rework Command; direct Test Run creation cannot bypass it.`,
       );
     }
     const pipelineRun = database
@@ -4421,6 +4515,11 @@ export const openTestRuntime = (
         "Changed code or Integration input requires fresh Code Review coverage, a fresh PASS Integration Generation, and a fresh Test Run.",
       );
     }
+    const nextAuthority = validateAuthority(input.input);
+    const relatedScope = unresolvedRelatedReworkScope(
+      input.input,
+      nextAuthority,
+    );
     const inheritedDefectIds = new Set<string>();
     const inheritedObligationIds = new Set<string>();
     let ancestor: TestRunView | null = prior;
@@ -4437,6 +4536,8 @@ export const openTestRuntime = (
     prior.defects
       .filter((candidate) => candidate.status === "open")
       .forEach((candidate) => inheritedDefectIds.add(candidate.id));
+    relatedScope.defectIds.forEach((id) => inheritedDefectIds.add(id));
+    relatedScope.obligationIds.forEach((id) => inheritedObligationIds.add(id));
     const candidateDefectIds = [...inheritedDefectIds].sort();
     const scopeDefects = database
       .prepare(
@@ -4571,6 +4672,12 @@ export const openTestRuntime = (
         nextAssertionId: mapping.nextAssertionId,
       };
     });
+    if (!relatedScope.defectIds.includes(input.defectId)) {
+      throw new TestRuntimeError(
+        "TEST_REWORK_FRESH_INTEGRATION_REQUIRED",
+        "Test rework must consume PASS Integration authority related to the selected frozen Defect responsibility lineage.",
+      );
+    }
     const route = reworkRoute(defect.responsibility);
     const lineage = {
       priorTestRunId: prior.id,
@@ -5259,14 +5366,19 @@ export const openTestRuntime = (
     testRunId,
   ) => {
     const run = readRun(testRunId);
-    validateAuthority(run.manifest);
+    const authority = validateAuthority(run.manifest);
+    const relatedScope = unresolvedRelatedReworkScope(run.manifest, authority);
     const openDefectIds = run.defects
       .filter((entry) => entry.status === "open")
       .map((entry) => entry.id)
+      .concat(relatedScope.defectIds)
+      .filter((id, index, values) => values.indexOf(id) === index)
       .sort();
     const openObligationIds = run.obligations
       .filter((entry) => entry.status === "open")
       .map((entry) => entry.id)
+      .concat(relatedScope.obligationIds)
+      .filter((id, index, values) => values.indexOf(id) === index)
       .sort();
     if (run.state !== "passed" || !run.passAuthorityHash)
       throw new TestRuntimeError(

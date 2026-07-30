@@ -475,6 +475,46 @@ describe("Electron Test fixture", () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
+  it("fails closed when descriptor-relative Python capabilities are unavailable", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-evidence-capability-missing",
+      testRunId: "test-run-evidence-capability-missing",
+      testRunManifestHash: "6".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-evidence-capability-missing",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    const bytes = Buffer.from("frozen fixture evidence", "utf8");
+    writeFileSync(
+      join(fixture.config.evidenceDirectory, "capture.png"),
+      bytes,
+      {
+        mode: 0o600,
+      },
+    );
+
+    for (const capability of ["O_NOFOLLOW", "O_DIRECTORY", "dir_fd"] as const) {
+      assert.throws(
+        () =>
+          verifyTestEvidenceFile({
+            evidenceDirectory: fixture.config.evidenceDirectory,
+            locator: "capture.png",
+            contentHash: createHash("sha256").update(bytes).digest("hex"),
+            byteSize: bytes.byteLength,
+            testOnlyMissingDescriptorRelativeCapability: capability,
+          }),
+        (error: unknown) =>
+          error instanceof ElectronTestFixtureError &&
+          error.code === "FIXTURE_DESCRIPTOR_RELATIVE_UNAVAILABLE",
+        capability,
+      );
+    }
+    fixture.cleanup();
+  });
+
   it("holds ancestor descriptors across a coordinated rename, symlink, and restore attack", () => {
     if (process.platform === "win32") return;
     const fixture = createElectronTestFixture({

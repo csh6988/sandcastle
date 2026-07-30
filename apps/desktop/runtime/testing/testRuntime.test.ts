@@ -378,6 +378,7 @@ const openFixture = (
       "2026-07-29T00:00:00.000Z",
     );
   const generation = passedGeneration();
+  const generations = new Map([[generation.id, generation]]);
   const runtimeEvents = openRuntimeEvents(database);
   const events = withEvents ? runtimeEvents : undefined;
   const artifactBytes = new Map<string, Buffer>();
@@ -394,7 +395,10 @@ const openFixture = (
     ],
   ]);
   const runtime = openTestRuntime(database, {
-    integrationAuthority: { readPassAuthority: () => generation },
+    integrationAuthority: {
+      readPassAuthority: (generationId) =>
+        generations.get(generationId) ?? generation,
+    },
     fixtureAuthority: {
       read: (fixtureId) => {
         const authority = fixtureAuthorities.get(fixtureId);
@@ -561,6 +565,7 @@ const openFixture = (
     database,
     events,
     generation,
+    generations,
     runtime,
     revision,
     revisionInput,
@@ -4132,6 +4137,226 @@ describe("Test Runtime", () => {
     fixture.database.close();
   });
 
+  it("preserves related Test defect lineage across fresh Integration Generations", async () => {
+    const fixture = openFixture();
+    const failed = await prepareFailedAssertion(fixture, "cross-generation");
+    fixture.runtime.recordDefect({
+      id: "cross-generation-defect",
+      testRunId: fixture.runInput.testRunId,
+      testCaseRevisionId: fixture.revision.id,
+      assertionId: "assertion-1",
+      responsibility: {
+        kind: "work-package",
+        workPackageId: "package-1",
+        workPackageVersionId: "package-1-v1",
+      },
+      evidence: {
+        schemaVersion: 1,
+        kind: "assertion",
+        assertion: {
+          testCaseRevisionId: fixture.revision.id,
+          assertionId: "assertion-1",
+          resultHash: failed.assertion.resultHash,
+        },
+        evidenceRefs: failed.evidenceRefs,
+      },
+    });
+    const prior = fixture.runtime.complete(fixture.runInput.testRunId);
+    const priorDefectIds = prior.defects.map((defect) => defect.id).sort();
+
+    const freshGeneration = {
+      ...fixture.generation,
+      id: "generation-2",
+      manifest: {
+        ...fixture.generation.manifest,
+        generationId: "generation-2",
+        generation: 2,
+        repositories: fixture.generation.manifest.repositories.map(
+          (repository) => ({
+            ...repository,
+            integrationBranch: "integration/run-1/g2",
+          }),
+        ),
+        packages: fixture.generation.manifest.packages.map((entry) => ({
+          ...entry,
+          sourceCommit: commit("3"),
+          authorityId: "code-authority-2",
+          qualityGateResultId: "code-gate-2",
+        })),
+      },
+      manifestHash: hash("1"),
+      repositoryResults: fixture.generation.repositoryResults.map((entry) => ({
+        ...entry,
+        id: "repository-result-2",
+        integrationBranch: "integration/run-1/g2",
+        integratedCommit: commit("3"),
+      })),
+      aggregateReview: {
+        ...fixture.generation.aggregateReview!,
+        id: "aggregate-review-2",
+        qualityGateResultId: "gate-2",
+      },
+      passAuthorityHash: hash("2"),
+    } as IntegrationGenerationView;
+    fixture.generations.set(freshGeneration.id, freshGeneration);
+    fixture.database
+      .prepare(
+        `INSERT INTO artifact_versions(
+           id, artifact_id, version, content_ref, content_hash, byte_size,
+           status, producing_run_id, snapshot_revision_id,
+           producer_context_json, created_at
+         ) VALUES ('build-2', 'build-artifact', 2, 'artifacts/build-2.tar', ?,
+                   42, 'accepted', 'run-1', 'snapshot-1', ?, ?)`,
+      )
+      .run(
+        hash("0"),
+        JSON.stringify({
+          projectId: "project-1",
+          runId: "run-1",
+          snapshotRevisionId: "snapshot-1",
+          nodeRunId: "integration-node-2",
+          nodeAttemptId: "integration-attempt-2",
+          aiMemberId: "builder-ai",
+          integrationAuthority: {
+            generationId: freshGeneration.id,
+            manifestHash: freshGeneration.manifestHash,
+            passAuthorityHash: freshGeneration.passAuthorityHash!,
+            repositoryCommits: [
+              { repositoryReference: "repo-a", commit: commit("3") },
+            ],
+          },
+        }),
+        "2026-07-29T00:00:00.000Z",
+      );
+    const revision = fixture.runtime.registerCaseRevision({
+      ...fixture.revisionInput,
+      revisionId: "case-cross-generation-r2",
+      supersedesRevisionId: fixture.revision.id,
+    });
+    seedFreshTestAttempt(fixture, "cross-generation");
+    const freshInput = {
+      ...fixture.runInput,
+      testRunId: "test:run-1:test-node-cross-generation",
+      requestId: "request-cross-generation",
+      nodeRunId: "test-node-cross-generation",
+      nodeAttemptId: "test-attempt-cross-generation",
+      sessionId: "test-session-cross-generation",
+      testCaseRevisions: [{ id: revision.id, hash: revision.manifestHash }],
+      integrationAuthority: {
+        generationId: freshGeneration.id,
+        manifestHash: freshGeneration.manifestHash,
+        passAuthorityHash: freshGeneration.passAuthorityHash!,
+        repositoryCommits: [
+          { repositoryReference: "repo-a", commit: commit("3") },
+        ],
+      },
+      build: { artifactVersionId: "build-2", digest: hash("0") },
+      risk: testRiskInput([revision.id]),
+    };
+
+    assert.throws(
+      () => fixture.runtime.createRun(freshInput),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_REWORK_COMMAND_REQUIRED",
+    );
+    const rework = fixture.runtime.createReworkRun({
+      defectId: "cross-generation-defect",
+      input: freshInput,
+      successorAssertions: [
+        ...priorDefectIds.map((defectId) => ({
+          defectId,
+          nextTestCaseRevisionId: revision.id,
+          nextAssertionId: "assertion-1",
+        })),
+      ],
+    });
+
+    assert.equal(rework.lineage.integrationAuthority, "fresh-pass-authority");
+    assert.equal(
+      rework.lineage.nextIntegrationGenerationId,
+      freshGeneration.id,
+    );
+    assert.deepEqual(rework.lineage.scope.defectIds, priorDefectIds);
+    assert.deepEqual(
+      rework.lineage.scope.obligationIds,
+      prior.obligations.map((obligation) => obligation.id).sort(),
+    );
+    assert.deepEqual(
+      rework.run.manifest.integrationAuthority,
+      freshInput.integrationAuthority,
+    );
+    assert.match(rework.run.reworkLineage!.lineageHash, /^[a-f0-9]{64}$/);
+    await succeedRequiredExecution(fixture, freshInput);
+    for (const [id, kind, mediaType, contentHash] of [
+      ["cross-generation-pass-ui", "screenshot", "image/png", hash("4")],
+      [
+        "cross-generation-pass-runtime",
+        "runtime",
+        "application/json",
+        hash("5"),
+      ],
+    ] as const) {
+      seedEvidenceArtifact(fixture, {
+        id,
+        contentHash,
+        byteSize: 42,
+        locator: `evidence/${id}`,
+      });
+      fixture.runtime.recordEvidence({
+        id,
+        operationId: "operation-1",
+        testRunId: rework.run.id,
+        testCaseRevisionId: revision.id,
+        assertionId: "assertion-1",
+        kind,
+        mediaType,
+        contentHash,
+        byteSize: 42,
+        artifactVersionId: id,
+        redactionProfile: "default",
+        retentionClass: "durable",
+        locator: `evidence/${id}`,
+        metadata: {},
+      });
+    }
+    fixture.runtime.recordAssertion({
+      operationId: "operation-1",
+      testRunId: rework.run.id,
+      testCaseRevisionId: revision.id,
+      assertionId: "assertion-1",
+      uiObserved: "passed",
+      runtimeObserved: "passed",
+      uiStatus: "passed",
+      runtimeStatus: "passed",
+      correlation: trustedCorrelation(
+        fixture,
+        ["cross-generation-pass-ui", "cross-generation-pass-runtime"],
+        freshInput,
+        "-cross-generation-pass",
+      ),
+    });
+
+    const passed = fixture.runtime.complete(rework.run.id);
+
+    const resolvedPrior = fixture.runtime.inspect(prior.id);
+    assert.equal(
+      resolvedPrior.defects.every((defect) => defect.status === "closed"),
+      true,
+    );
+    assert.equal(
+      resolvedPrior.obligations.every(
+        (obligation) => obligation.status === "closed",
+      ),
+      true,
+    );
+    assert.equal(
+      fixture.runtime.downstreamAuthority(passed.id).testRunId,
+      passed.id,
+    );
+    fixture.database.close();
+  });
+
   it("routes persisted Test defect responsibility and enforces fresh rework lineage", async () => {
     const scenarios = [
       {
@@ -4167,6 +4392,13 @@ describe("Test Runtime", () => {
           reason: "Evidence cannot uniquely attribute the mismatch.",
         },
         destination: "triage",
+      },
+      {
+        responsibility: {
+          kind: "ui-runtime-contract" as const,
+          owner: "runtime" as const,
+        },
+        destination: "ui-runtime-contract",
       },
     ];
 
@@ -4225,6 +4457,40 @@ describe("Test Runtime", () => {
         fixture: revision.manifest.fixture,
         risk: testRiskInput([revision.id]),
       };
+      const freshGeneration = {
+        ...fixture.generation,
+        id: `generation-fresh-${suffix}`,
+        manifest: {
+          ...fixture.generation.manifest,
+          generationId: `generation-fresh-${suffix}`,
+          generation: index + 2,
+          packages: fixture.generation.manifest.packages.map((entry) => ({
+            ...entry,
+            workPackageVersionId: `package-1-v${index + 2}`,
+          })),
+          contractVersions: fixture.generation.manifest.contractVersions.map(
+            (contract) => ({ ...contract, version: String(index + 2) }),
+          ),
+        },
+        manifestHash: String(index + 3).repeat(64),
+        passAuthorityHash: String(index + 4).repeat(64),
+      } as IntegrationGenerationView;
+      fixture.generations.set(freshGeneration.id, freshGeneration);
+      assert.throws(
+        () =>
+          fixture.runtime.createRun({
+            ...nextRun,
+            integrationAuthority: {
+              ...nextRun.integrationAuthority,
+              generationId: freshGeneration.id,
+              manifestHash: freshGeneration.manifestHash,
+              passAuthorityHash: freshGeneration.passAuthorityHash!,
+            },
+          }),
+        (error: unknown) =>
+          error instanceof TestRuntimeError &&
+          error.code === "TEST_REWORK_COMMAND_REQUIRED",
+      );
       assert.throws(
         () => fixture.runtime.createRun(nextRun),
         (error: unknown) =>
