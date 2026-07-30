@@ -476,6 +476,10 @@ describe("Company database migrations", () => {
               version: 47,
               name: "versioned_test_cases_and_runs",
             },
+            {
+              version: 48,
+              name: "test_rework_resolution_authority",
+            },
           ],
         );
         assert.deepEqual(
@@ -2351,10 +2355,91 @@ describe("Company database migrations", () => {
 });
 
 describe("Test authority schema migration", () => {
-  it("upgrades v46 to the complete immutable v47 Test schema", () => {
+  const restoreHistoricalV47Contract = (database: DatabaseSync): void => {
+    database.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TRIGGER test_run_obligation_resolutions_immutable_update;
+      DROP TRIGGER test_run_obligation_resolutions_immutable_delete;
+      DROP TRIGGER test_rework_runs_immutable_update;
+      DROP TRIGGER test_rework_runs_immutable_delete;
+      DROP INDEX test_rework_runs_defect_idx;
+      DROP INDEX test_defect_resolutions_defect_idx;
+      DROP TABLE test_run_obligation_resolutions;
+      DROP TABLE test_rework_runs;
+      ALTER TABLE test_assertion_results DROP COLUMN ui_observation_json;
+      ALTER TABLE test_assertion_results DROP COLUMN runtime_observation_json;
+
+      DROP TRIGGER test_run_obligations_identity_update;
+      ALTER TABLE test_run_obligations RENAME TO test_run_obligations_v48;
+      CREATE TABLE test_run_obligations (
+        id TEXT PRIMARY KEY,
+        test_run_id TEXT NOT NULL REFERENCES test_runs(id),
+        description TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+        created_at TEXT NOT NULL,
+        closed_at TEXT
+      ) STRICT;
+      INSERT INTO test_run_obligations(
+        id, test_run_id, description, evidence_json, status, created_at, closed_at
+      )
+      SELECT id, test_run_id, description, evidence_json, status, created_at, closed_at
+        FROM test_run_obligations_v48;
+      DROP TABLE test_run_obligations_v48;
+      CREATE INDEX test_run_obligations_run_idx
+        ON test_run_obligations(test_run_id, status, created_at, id);
+      CREATE TRIGGER test_run_obligations_immutable_delete
+        BEFORE DELETE ON test_run_obligations
+        BEGIN SELECT RAISE(ABORT, 'Test Run obligation is immutable'); END;
+      CREATE TRIGGER test_run_obligations_identity_update
+        BEFORE UPDATE ON test_run_obligations
+        WHEN NEW.id <> OLD.id OR NEW.test_run_id <> OLD.test_run_id
+          OR NEW.description <> OLD.description
+          OR NEW.evidence_json <> OLD.evidence_json
+          OR NEW.created_at <> OLD.created_at
+        BEGIN SELECT RAISE(ABORT, 'Test Run obligation identity is immutable'); END;
+      CREATE TRIGGER test_run_obligations_terminal_run_insert
+        BEFORE INSERT ON test_run_obligations
+        WHEN EXISTS (
+          SELECT 1 FROM test_runs
+           WHERE id = NEW.test_run_id
+             AND state IN ('passed', 'failed', 'blocked', 'cancelled')
+        ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+      CREATE TRIGGER test_run_obligations_terminal_run_update
+        BEFORE UPDATE ON test_run_obligations
+        WHEN EXISTS (
+          SELECT 1 FROM test_runs
+           WHERE id = OLD.test_run_id
+             AND state IN ('passed', 'failed', 'blocked', 'cancelled')
+        ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+
+      CREATE TRIGGER test_defects_terminal_run_update
+        BEFORE UPDATE ON test_defects
+        WHEN EXISTS (
+          SELECT 1 FROM test_runs
+           WHERE id = OLD.test_run_id
+             AND state IN ('passed', 'failed', 'blocked', 'cancelled')
+        ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+      CREATE TRIGGER test_defect_resolutions_terminal_run_insert
+        BEFORE INSERT ON test_defect_resolutions
+        WHEN EXISTS (
+          SELECT 1 FROM test_defects
+          JOIN test_runs ON test_runs.id = test_defects.test_run_id
+          WHERE test_defects.id = NEW.defect_id
+            AND test_runs.state IN ('passed', 'failed', 'blocked', 'cancelled')
+        ) BEGIN SELECT RAISE(ABORT, 'Terminal Test Run children are immutable'); END;
+
+      DELETE FROM schema_migrations WHERE version = 48;
+      UPDATE schema_metadata SET value = '47' WHERE key = 'schema_version';
+      PRAGMA user_version = 47;
+    `);
+  };
+
+  it("upgrades through the historical v47 contract to the complete immutable v48 Test schema", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(opened.schemaVersion(), 47);
+    assert.equal(CURRENT_SCHEMA_VERSION, 48);
+    assert.equal(opened.schemaVersion(), 48);
     opened.close();
 
     const database = new DatabaseSync(
@@ -2441,17 +2526,60 @@ describe("Test authority schema migration", () => {
     database.close();
   });
 
-  it("adopts a complete compatible v47 schema and rejects a partial one transactionally", () => {
+  it("upgrades the exact historical v47 schema through the additive v48 migration", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const path = initialized.path;
+    initialized.close();
+    const historical = new DatabaseSync(path);
+    restoreHistoricalV47Contract(historical);
+
+    assert.equal(migrateCompanyDatabase(historical), 48);
+    assert.deepEqual(
+      historical
+        .prepare(
+          "SELECT version, name FROM schema_migrations WHERE version IN (47, 48) ORDER BY version",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      [
+        { version: 47, name: "versioned_test_cases_and_runs" },
+        { version: 48, name: "test_rework_resolution_authority" },
+      ],
+    );
+    assert.equal(
+      (
+        historical
+          .prepare(
+            "SELECT COUNT(*) AS count FROM pragma_table_info('test_run_obligations') WHERE name = 'defect_id'",
+          )
+          .get() as { readonly count: number }
+      ).count,
+      1,
+    );
+    assert.deepEqual(
+      historical
+        .prepare(
+          "SELECT name FROM pragma_table_info('test_assertion_results') WHERE name LIKE '%_observation_json' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      ["runtime_observation_json", "ui_observation_json"],
+    );
+    historical.close();
+  });
+
+  it("adopts a complete compatible v48 schema and rejects a partial one transactionally", () => {
     const compatibleDir = tempCompanyDir();
     openCompanyDatabase(compatibleDir).close();
     const compatiblePath = join(compatibleDir, ".sandcastle", "company.sqlite");
     const compatible = new DatabaseSync(compatiblePath);
     compatible.exec(`
-      UPDATE schema_metadata SET value = '46' WHERE key = 'schema_version';
-      DELETE FROM schema_migrations WHERE version = 47;
-      PRAGMA user_version = 46;
+      UPDATE schema_metadata SET value = '47' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 48;
+      PRAGMA user_version = 47;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 47);
+    assert.equal(migrateCompanyDatabase(compatible), 48);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2459,14 +2587,14 @@ describe("Test authority schema migration", () => {
     const partialPath = join(partialDir, ".sandcastle", "company.sqlite");
     const partial = new DatabaseSync(partialPath);
     partial.exec(`
-      DROP TRIGGER test_evidence_immutable_delete;
-      UPDATE schema_metadata SET value = '46' WHERE key = 'schema_version';
-      DELETE FROM schema_migrations WHERE version = 47;
-      PRAGMA user_version = 46;
+      DROP TRIGGER test_rework_runs_immutable_delete;
+      UPDATE schema_metadata SET value = '47' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 48;
+      PRAGMA user_version = 47;
     `);
     assert.throws(
       () => migrateCompanyDatabase(partial),
-      /Existing Test schema is incompatible: test_evidence_immutable_delete/,
+      /Existing Test v48 schema is incompatible: test_rework_runs_immutable_delete/,
     );
     assert.equal(
       (
@@ -2476,9 +2604,36 @@ describe("Test authority schema migration", () => {
           )
           .get() as { readonly value: string }
       ).value,
-      "46",
+      "47",
     );
     partial.close();
+  });
+
+  it("rejects a future Test authority schema without rewriting its version", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const path = initialized.path;
+    initialized.close();
+    const future = new DatabaseSync(path);
+    future.exec(`
+      UPDATE schema_metadata SET value = '49' WHERE key = 'schema_version';
+      PRAGMA user_version = 49;
+    `);
+    assert.throws(
+      () => migrateCompanyDatabase(future),
+      /Unsupported company database schema version 49/,
+    );
+    assert.equal(
+      (
+        future
+          .prepare(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+          )
+          .get() as { readonly value: string }
+      ).value,
+      "49",
+    );
+    future.close();
   });
 });
 describe("Company database backups", () => {

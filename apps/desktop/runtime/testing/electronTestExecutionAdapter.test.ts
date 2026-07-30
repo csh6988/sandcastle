@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { runtimeQueryViewHash } from "../events/cursor.js";
@@ -88,6 +89,7 @@ describe("Electron Test execution adapter", () => {
     database.exec(`
       CREATE TABLE consumed_view_sync_tokens (
         token_hash TEXT PRIMARY KEY,
+        query_hash TEXT NOT NULL,
         view_hash TEXT NOT NULL,
         sequence INTEGER NOT NULL,
         consumed_at TEXT NOT NULL
@@ -101,7 +103,7 @@ describe("Electron Test execution adapter", () => {
     } as unknown as TestRunView;
     database
       .prepare(
-        "INSERT INTO consumed_view_sync_tokens(token_hash, view_hash, sequence, consumed_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at) VALUES (?, 'wrong-query', ?, ?, ?)",
       )
       .run("b".repeat(64), run.viewHash, 4, "2026-07-29T00:00:00.000Z");
 
@@ -109,10 +111,15 @@ describe("Electron Test execution adapter", () => {
 
     database
       .prepare(
-        "INSERT INTO consumed_view_sync_tokens(token_hash, view_hash, sequence, consumed_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO consumed_view_sync_tokens(token_hash, query_hash, view_hash, sequence, consumed_at) VALUES (?, ?, ?, ?, ?)",
       )
       .run(
         "c".repeat(64),
+        createHash("sha256")
+          .update(
+            JSON.stringify({ type: "test-runs.inspect", testRunId: run.id }),
+          )
+          .digest("hex"),
         runtimeQueryViewHash(run),
         5,
         "2026-07-29T00:00:01.000Z",

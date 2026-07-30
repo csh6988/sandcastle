@@ -1508,6 +1508,8 @@ export const TestRunViewSchema = z
           testCaseRevisionId: z.string().trim().min(1),
           assertionId: z.string().trim().min(1),
           required: z.boolean(),
+          uiObserved: z.unknown(),
+          runtimeObserved: z.unknown(),
           uiStatus: z.enum(["passed", "failed", "missing", "unknown"]),
           runtimeStatus: z.enum(["passed", "failed", "missing", "unknown"]),
           correlation: TestAssertionCorrelationSchema,
@@ -1616,6 +1618,27 @@ export const TestRunViewSchema = z
             ]),
             priorIntegrationGenerationId: z.string().trim().min(1),
             nextIntegrationGenerationId: z.string().trim().min(1),
+            successorAssertions: z.array(
+              z
+                .object({
+                  defectId: z.string().trim().min(1),
+                  priorTestCaseRevisionId: z.string().trim().min(1),
+                  priorAssertionId: z.string().trim().min(1),
+                  priorResultHash: Sha256Schema,
+                  nextTestCaseRevisionId: z.string().trim().min(1),
+                  nextAssertionId: z.string().trim().min(1),
+                })
+                .strict(),
+            ),
+            scope: z
+              .object({
+                priorTestRunId: z.string().trim().min(1),
+                priorManifestHash: Sha256Schema,
+                integrationGenerationId: z.string().trim().min(1),
+                defectIds: z.array(z.string().trim().min(1)),
+                obligationIds: z.array(z.string().trim().min(1)),
+              })
+              .strict(),
           })
           .strict(),
         lineageHash: Sha256Schema,
@@ -4551,6 +4574,17 @@ export const TestReworkCreateEnvelopeCommandSchema = z
     type: z.literal("test.rework.create"),
     defectId: z.string().trim().min(1),
     input: TestRunManifestInputSchema,
+    successorAssertions: z
+      .array(
+        z
+          .object({
+            defectId: z.string().trim().min(1),
+            nextTestCaseRevisionId: z.string().trim().min(1),
+            nextAssertionId: z.string().trim().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
   })
   .strict();
 

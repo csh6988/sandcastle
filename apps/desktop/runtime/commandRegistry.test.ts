@@ -20,7 +20,7 @@ import type {
 } from "./integration/integrationRuntime.js";
 import { openIntegrationRuntime } from "./integration/integrationRuntime.js";
 import { openRuntimeEvents } from "./events/subscription.js";
-import { openTestRuntime } from "./testing/testRuntime.js";
+import { openTestRuntime, type TestRunView } from "./testing/testRuntime.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -245,7 +245,16 @@ describe("Company Runtime command registry", () => {
         },
       }).replaceAll("'", "''")} ' WHERE id = 'build-test-command';
       INSERT INTO technical_baselines(id, project_id, run_id, proposal_revision_id, manifest_json, manifest_hash, created_at)
-      VALUES ('baseline-test-command', 'project-test-command', 'run-test-command', 'proposal-test-command', '{}', '${"5".repeat(64)}', '${clock().toISOString()}');
+      VALUES ('baseline-test-command', 'project-test-command', 'run-test-command', 'proposal-test-command', '${JSON.stringify(
+        {
+          dependencyGraph: [],
+          riskPolicy: ["Apply the fixed Runtime rubric."],
+          permissionPolicy: ["Deny unspecified permissions."],
+        },
+      ).replaceAll(
+        "'",
+        "''",
+      )}', '${"5".repeat(64)}', '${clock().toISOString()}');
       INSERT INTO artifacts(id, project_id, type, logical_name, status, created_at)
       VALUES ('resolution-artifact-command', 'project-test-command', 'test-evidence', 'Resolution evidence', 'accepted', '${clock().toISOString()}');
       INSERT INTO artifact_versions(id, artifact_id, version, content_ref, content_hash, byte_size, status, producing_run_id, snapshot_revision_id, created_at)
@@ -426,15 +435,36 @@ describe("Company Runtime command registry", () => {
       capabilities: ["electron", "runtime-query"],
       risk: (() => {
         const rules = [
+          { factorId: "auth-permission", minimumTier: "high" as const },
+          {
+            factorId: "credential-materialization",
+            minimumTier: "critical" as const,
+          },
           {
             factorId: "cross-application-contract",
             minimumTier: "high" as const,
           },
-          { factorId: "no-sandbox", minimumTier: "high" as const },
+          { factorId: "data-migration-pii", minimumTier: "high" as const },
           {
-            factorId: "recovery-complexity",
+            factorId: "dependency-supply-chain",
             minimumTier: "medium" as const,
           },
+          { factorId: "destructive-action", minimumTier: "critical" as const },
+          {
+            factorId: "network-filesystem-scope",
+            minimumTier: "high" as const,
+          },
+          { factorId: "no-sandbox", minimumTier: "high" as const },
+          {
+            factorId: "production-deployment",
+            minimumTier: "critical" as const,
+          },
+          { factorId: "public-api", minimumTier: "high" as const },
+          {
+            factorId: "rollback-resource-timeout-recovery",
+            minimumTier: "medium" as const,
+          },
+          { factorId: "sandbox-boundary", minimumTier: "critical" as const },
           {
             factorId: "secret-environment-boundary",
             minimumTier: "high" as const,
@@ -449,19 +479,38 @@ describe("Company Runtime command registry", () => {
         });
         const factors = [
           {
+            id: "auth-permission",
+            present: true,
+            evidenceRefs: [
+              "technical-baseline:baseline-test-command:permission-policy",
+            ],
+          },
+          {
+            id: "credential-materialization",
+            present: false,
+            evidenceRefs: [],
+          },
+          {
             id: "cross-application-contract",
             present: false,
             evidenceRefs: [],
           },
+          { id: "data-migration-pii", present: false, evidenceRefs: [] },
+          { id: "dependency-supply-chain", present: false, evidenceRefs: [] },
+          { id: "destructive-action", present: false, evidenceRefs: [] },
+          { id: "network-filesystem-scope", present: false, evidenceRefs: [] },
           { id: "no-sandbox", present: false, evidenceRefs: [] },
+          { id: "production-deployment", present: false, evidenceRefs: [] },
+          { id: "public-api", present: false, evidenceRefs: [] },
           {
-            id: "recovery-complexity",
+            id: "rollback-resource-timeout-recovery",
             present: true,
             evidenceRefs: [
               "test-operation:operation-1",
               "test-operation:cleanup-operation-command",
             ].sort(),
           },
+          { id: "sandbox-boundary", present: false, evidenceRefs: [] },
           {
             id: "secret-environment-boundary",
             present: false,
@@ -474,6 +523,7 @@ describe("Company Runtime command registry", () => {
           },
         ];
         const evidenceRefs = [
+          "technical-baseline:baseline-test-command:permission-policy",
           "test-operation:cleanup-operation-command",
           "test-operation:operation-1",
           "test-case-revision:case-test-command-r1",
@@ -518,6 +568,8 @@ describe("Company Runtime command registry", () => {
       testCaseRevisionId: revision.id,
       assertionId: "assertion-1",
       required: true,
+      uiObserved: "failed",
+      runtimeObserved: "passed",
       uiStatus: "failed",
       runtimeStatus: "passed",
       correlation: assertionCorrelation,
@@ -553,9 +605,10 @@ describe("Company Runtime command registry", () => {
       .prepare(
         `INSERT INTO test_assertion_results(
            id, test_run_id, operation_id, test_case_revision_id, assertion_id,
-           required, ui_status, runtime_status, correlation_json, result_hash,
-           created_at
-         ) VALUES (?, ?, ?, ?, ?, 1, 'failed', 'passed', ?, ?, ?)`,
+           required, ui_observation_json, runtime_observation_json, ui_status,
+           runtime_status, correlation_json, result_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, 1, '"failed"', '"passed"', 'failed',
+                   'passed', ?, ?, ?)`,
       )
       .run(
         "assertion-result-command",
@@ -686,6 +739,70 @@ describe("Company Runtime command registry", () => {
     if (conflictingRecord.status === "rejected") {
       assert.equal(conflictingRecord.error.code, "COMMAND_ID_REUSE");
     }
+
+    const cleanupOperationStorageId = `test-execution:${canonicalHash({
+      testRunId: "test-run-command",
+      operationId: "cleanup-operation-command",
+    })}`;
+    const cleanupOperationRequest = JSON.stringify({
+      operationId: "cleanup-operation-command",
+      operationKey: "test:test-run-command:cleanup-operation-command:fixture",
+      testRunId: "test-run-command",
+      requestHash: "5".repeat(64),
+      input: cleanupInput,
+    }).replaceAll("'", "''");
+    database.exec(`
+      UPDATE test_execution_operations
+         SET state = 'succeeded', fact_hash = '${"7".repeat(64)}',
+             receipt_json = '{}', receipt_hash = '${"6".repeat(64)}'
+       WHERE id = '${operationStorageId}';
+      INSERT INTO test_execution_facts(
+        id, operation_id, state, fact_json, fact_hash, created_at
+      ) VALUES (
+        'test-fact-command', '${operationStorageId}', 'succeeded', '{}',
+        '${"7".repeat(64)}', '${clock().toISOString()}'
+      );
+      INSERT INTO test_execution_operations(
+        id, test_run_id, operation_key, request_json, request_hash, state,
+        fact_json, fact_hash, receipt_json, receipt_hash, created_at, updated_at
+      ) VALUES (
+        '${cleanupOperationStorageId}', 'test-run-command',
+        'test:test-run-command:cleanup-operation-command:fixture',
+        '${cleanupOperationRequest}',
+        '${"5".repeat(64)}', 'succeeded', '{}', '${"8".repeat(64)}', '{}',
+        '${"9".repeat(64)}', '${clock().toISOString()}', '${clock().toISOString()}'
+      );
+      INSERT INTO test_execution_facts(
+        id, operation_id, state, fact_json, fact_hash, created_at
+      ) VALUES (
+        'test-cleanup-fact-command', '${cleanupOperationStorageId}',
+        'succeeded', '{}', '${"8".repeat(64)}', '${clock().toISOString()}'
+      );
+    `);
+    const complete = {
+      schemaVersion: 1 as const,
+      commandId: "test-run-complete-command",
+      actor,
+      consumerId: "desktop-test-engineer",
+      command: {
+        type: "test.run.complete" as const,
+        testRunId: "test-run-command",
+      },
+    };
+    const completed = registry.execute(complete);
+    assert.deepEqual(registry.execute(complete), completed);
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    if (completed.status !== "succeeded")
+      assert.fail("complete command failed");
+    assert.equal((completed.value as TestRunView).state, "failed");
+    assert.equal(
+      database
+        .prepare(
+          "SELECT 1 FROM command_deduplication WHERE command_id LIKE 'test-runtime:%:terminal:%'",
+        )
+        .get(),
+      undefined,
+    );
 
     const close = {
       schemaVersion: 1 as const,

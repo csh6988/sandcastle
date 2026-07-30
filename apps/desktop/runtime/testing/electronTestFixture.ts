@@ -14,6 +14,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -172,6 +173,87 @@ const pathWithin = (root: string, target: string): string => {
   return canonicalTarget;
 };
 
+const entryIdentity = (metadata: {
+  readonly dev: number;
+  readonly ino: number;
+  readonly birthtimeMs: number;
+  readonly mode: number;
+}): string =>
+  `${metadata.dev}:${metadata.ino}:${metadata.birthtimeMs}:${metadata.mode}`;
+
+const snapshotPathWithin = (
+  root: string,
+  target: string,
+): {
+  readonly path: string;
+  readonly entries: readonly {
+    readonly path: string;
+    readonly identity: string;
+  }[];
+} => {
+  const lexicalRoot = resolve(root);
+  const rootMetadata = lstatSync(lexicalRoot);
+  const canonicalRoot = realpathSync(lexicalRoot);
+  if (rootMetadata.isSymbolicLink() || canonicalRoot !== lexicalRoot) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_SYMLINK_FORBIDDEN",
+      `Fixture root ${root} must be a canonical non-symbolic-link directory.`,
+    );
+  }
+  const absoluteTarget = resolve(target);
+  assertInside(canonicalRoot, absoluteTarget);
+  const relativeTarget = relative(canonicalRoot, absoluteTarget);
+  const componentPaths = [
+    canonicalRoot,
+    ...relativeTarget
+      .split(sep)
+      .filter(Boolean)
+      .map((_, index, components) =>
+        join(canonicalRoot, ...components.slice(0, index + 1)),
+      ),
+  ];
+  const entries = componentPaths.map((componentPath, index) => {
+    const metadata = lstatSync(componentPath);
+    if (metadata.isSymbolicLink()) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_SYMLINK_FORBIDDEN",
+        `Fixture path ${target} contains a symbolic-link component.`,
+      );
+    }
+    if (index < componentPaths.length - 1 && !metadata.isDirectory()) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_PATH_ESCAPE",
+        `Fixture path ${target} contains a non-directory ancestor.`,
+      );
+    }
+    return { path: componentPath, identity: entryIdentity(metadata) };
+  });
+  return { path: absoluteTarget, entries };
+};
+
+const assertPathSnapshotUnchanged = (input: {
+  readonly target: string;
+  readonly entries: readonly {
+    readonly path: string;
+    readonly identity: string;
+  }[];
+  readonly errorCode: string;
+  readonly errorMessage: string;
+}): void => {
+  for (const entry of input.entries) {
+    const metadata = lstatSync(entry.path);
+    if (metadata.isSymbolicLink()) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_SYMLINK_FORBIDDEN",
+        `Fixture path ${input.target} contains a symbolic-link component.`,
+      );
+    }
+    if (entryIdentity(metadata) !== entry.identity) {
+      throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
+    }
+  }
+};
+
 const secureReadRegularFile = (input: {
   readonly root: string;
   readonly path: string;
@@ -182,9 +264,9 @@ const secureReadRegularFile = (input: {
   if (!isAbsolute(input.path)) {
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
   }
-  let path: string;
+  let snapshot: ReturnType<typeof snapshotPathWithin>;
   try {
-    path = pathWithin(input.root, input.path);
+    snapshot = snapshotPathWithin(input.root, input.path);
   } catch (error) {
     if (error instanceof ElectronTestFixtureError) throw error;
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
@@ -192,18 +274,27 @@ const secureReadRegularFile = (input: {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(
-      path,
+      snapshot.path,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
     );
     const metadata = fstatSync(descriptor);
+    const leafSnapshot = snapshot.entries.at(-1)!;
     if (
       !metadata.isFile() ||
+      entryIdentity(metadata) !== leafSnapshot.identity ||
       (input.expectedMode !== undefined &&
         (metadata.mode & 0o777) !== input.expectedMode)
     ) {
       throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
     }
-    return { path, bytes: readFileSync(descriptor) };
+    const bytes = readFileSync(descriptor);
+    assertPathSnapshotUnchanged({
+      target: input.path,
+      entries: snapshot.entries,
+      errorCode: input.errorCode,
+      errorMessage: input.errorMessage,
+    });
+    return { path: snapshot.path, bytes };
   } catch (error) {
     if (error instanceof ElectronTestFixtureError) throw error;
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
@@ -270,9 +361,13 @@ const cleanupPathFingerprint = (path: string): string => {
     );
   }
   const resolved = realpathSync(path);
-  const stat = statSync(resolved, { bigint: true });
-  return sha256(`${resolved}\n${stat.dev}:${stat.ino}:${stat.birthtimeNs}`);
+  return sha256(`${resolved}\n${entryIdentity(lstatSync(resolved))}`);
 };
+
+const movedCleanupPathFingerprint = (
+  originalPath: string,
+  movedPath: string,
+): string => sha256(`${originalPath}\n${entryIdentity(lstatSync(movedPath))}`);
 
 const pathEntryExists = (path: string): boolean => {
   try {
@@ -510,7 +605,7 @@ export const verifyTestEvidenceFile = (input: {
   readonly byteSize: number;
 }): { readonly path: string; readonly bytes: Buffer } => {
   assertHash(input.contentHash, "Test evidence content hash");
-  const evidenceDirectory = realpathSync(input.evidenceDirectory);
+  const evidenceDirectory = resolve(input.evidenceDirectory);
   const locator = normalizeTestEvidenceLocator(input.locator);
   const verified = secureReadRegularFile({
     root: evidenceDirectory,
@@ -636,6 +731,7 @@ export const createElectronTestFixture = (input: {
     scriptHashes[adapter.id] = actualHash;
   }
   const rootFingerprint = sha256(`${root}\n${marker}`);
+  const rootIdentity = entryIdentity(lstatSync(root));
   const cleanupTargets = [
     {
       kind: "repository" as const,
@@ -719,11 +815,27 @@ export const createElectronTestFixture = (input: {
   };
   currentClaim = issueAuthorizationClaim();
   const verifyRoot = (): void => {
-    const currentRoot = realpathSync(root);
-    assertInside(canonicalTempRoot, currentRoot);
-    const currentMarker = readFileSync(markerPath, "utf8");
+    const rootMetadata = lstatSync(root);
     if (
-      sha256(`${currentRoot}\n${currentMarker}`) !== rootFingerprint ||
+      rootMetadata.isSymbolicLink() ||
+      !rootMetadata.isDirectory() ||
+      entryIdentity(rootMetadata) !== rootIdentity
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+        "Electron Test fixture cleanup refused an unrecognized directory.",
+      );
+    }
+    assertInside(canonicalTempRoot, root);
+    const currentMarker = secureReadRegularFile({
+      root,
+      path: markerPath,
+      errorCode: "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+      errorMessage:
+        "Electron Test fixture cleanup refused an unrecognized directory.",
+    }).bytes.toString("utf8");
+    if (
+      sha256(`${root}\n${currentMarker}`) !== rootFingerprint ||
       sha256(currentMarker) !== companyDirectoryFingerprint
     ) {
       throw new ElectronTestFixtureError(
@@ -761,25 +873,35 @@ export const createElectronTestFixture = (input: {
     },
     cleanupExecutionResources: () => {
       verifyRoot();
+      const quarantineRoot = mkdtempSync(join(root, ".cleanup-quarantine-"));
+      chmodSync(quarantineRoot, 0o700);
       for (const target of cleanupTargets) {
         if (!pathEntryExists(target.path)) continue;
-        const currentFingerprint = cleanupPathFingerprint(target.path);
-        assertInside(root, realpathSync(target.path));
-        if (currentFingerprint !== target.pathFingerprint) {
+        const movedPath = join(
+          quarantineRoot,
+          `${target.kind}-${randomBytes(8).toString("hex")}`,
+        );
+        renameSync(target.path, movedPath);
+        if (
+          lstatSync(movedPath).isSymbolicLink() ||
+          movedCleanupPathFingerprint(target.path, movedPath) !==
+            target.pathFingerprint
+        ) {
           throw new ElectronTestFixtureError(
             "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
             `Electron Test cleanup refused replaced ${target.kind} resources.`,
           );
         }
-        makeWritableForCleanup(target.path);
-        rmSync(target.path, { recursive: true, force: false });
-        if (existsSync(target.path)) {
+        makeWritableForCleanup(movedPath);
+        rmSync(movedPath, { recursive: true, force: false });
+        if (pathEntryExists(movedPath)) {
           throw new ElectronTestFixtureError(
             "FIXTURE_CLEANUP_INCOMPLETE",
             `Electron Test cleanup did not remove the ${target.kind}.`,
           );
         }
       }
+      rmdirSync(quarantineRoot);
       return {
         schemaVersion: 1,
         fixtureId: input.fixtureId,
@@ -793,8 +915,35 @@ export const createElectronTestFixture = (input: {
     },
     cleanup: () => {
       verifyRoot();
-      makeWritableForCleanup(root);
-      rmSync(root, { recursive: true, force: false });
+      const quarantineParent = realpathSync(
+        mkdtempSync(
+          join(canonicalTempRoot, "sandcastle-test-fixture-quarantine-"),
+        ),
+      );
+      chmodSync(quarantineParent, 0o700);
+      const movedRoot = join(quarantineParent, "fixture");
+      renameSync(root, movedRoot);
+      const movedMarkerPath = join(movedRoot, relative(root, markerPath));
+      const movedMarker = secureReadRegularFile({
+        root: movedRoot,
+        path: movedMarkerPath,
+        errorCode: "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+        errorMessage:
+          "Electron Test fixture cleanup refused an unrecognized directory.",
+      }).bytes.toString("utf8");
+      if (
+        entryIdentity(lstatSync(movedRoot)) !== rootIdentity ||
+        sha256(`${root}\n${movedMarker}`) !== rootFingerprint ||
+        sha256(movedMarker) !== companyDirectoryFingerprint
+      ) {
+        throw new ElectronTestFixtureError(
+          "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+          "Electron Test fixture cleanup refused an unrecognized directory.",
+        );
+      }
+      makeWritableForCleanup(movedRoot);
+      rmSync(movedRoot, { recursive: true, force: false });
+      rmdirSync(quarantineParent);
       return { fixtureId: input.fixtureId, rootFingerprint, removed: true };
     },
   };

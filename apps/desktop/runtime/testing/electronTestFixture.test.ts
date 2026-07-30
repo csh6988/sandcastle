@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -25,6 +27,73 @@ import {
 
 const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
+
+const waitForChildReady = async (
+  source: string,
+  args: readonly string[],
+): Promise<ReturnType<typeof spawn>> => {
+  const child = spawn(process.execPath, ["-e", source, ...args], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  await once(child.stdout!, "data");
+  return child;
+};
+
+const waitForChildExit = async (
+  child: ReturnType<typeof spawn>,
+): Promise<void> => {
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0);
+};
+
+const startReplacementAfterRename = async (
+  target: string,
+  marker: string,
+): Promise<ReturnType<typeof spawn>> =>
+  waitForChildReady(
+    `
+      const { lstatSync, mkdirSync, writeFileSync } = require("node:fs");
+      const [target, marker] = process.argv.slice(1);
+      process.stdout.write("ready\\n");
+      for (;;) {
+        try {
+          lstatSync(target);
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          mkdirSync(target);
+          writeFileSync(marker, "replacement\\n");
+          break;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+      }
+    `,
+    [target, marker],
+  );
+
+const startRepeatedSymlinkSwap = async (
+  target: string,
+  outside: string,
+): Promise<ReturnType<typeof spawn>> =>
+  waitForChildReady(
+    `
+      const { renameSync, symlinkSync, unlinkSync } = require("node:fs");
+      const [target, outside] = process.argv.slice(1);
+      const parked = target + ".parked";
+      const pause = () => Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1
+      );
+      process.stdout.write("ready\\n");
+      for (let index = 0; index < 200; index += 1) {
+        renameSync(target, parked);
+        symlinkSync(outside, target);
+        pause();
+        unlinkSync(target);
+        renameSync(parked, target);
+        pause();
+      }
+    `,
+    [target, outside],
+  );
 
 const scripts = () => {
   const directory = mkdtempSync(join(tmpdir(), "sandcastle-test-scripts-"));
@@ -229,6 +298,73 @@ describe("Electron Test fixture", () => {
     }
   });
 
+  it("deletes only quarantined execution resources when the original path is replaced after rename", async () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-cleanup-rename-race",
+      testRunId: "test-run-cleanup-rename-race",
+      testRunManifestHash: "7".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-cleanup-rename-race",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    for (let index = 0; index < 2_000; index += 1) {
+      writeFileSync(
+        join(fixture.config.worktreeDirectory, `slow-delete-${index}.txt`),
+        "fixture cleanup race\n",
+      );
+    }
+    const replacementMarker = join(
+      fixture.config.worktreeDirectory,
+      "replacement.txt",
+    );
+    const replacement = await startReplacementAfterRename(
+      fixture.config.worktreeDirectory,
+      replacementMarker,
+    );
+
+    fixture.cleanupExecutionResources();
+
+    assert.equal(existsSync(replacementMarker), true);
+    await waitForChildExit(replacement);
+    assert.equal(readFileSync(replacementMarker, "utf8"), "replacement\n");
+    fixture.cleanup();
+  });
+
+  it("deletes only the quarantined fixture root when its original path is replaced after rename", async () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-root-rename-race",
+      testRunId: "test-run-root-rename-race",
+      testRunManifestHash: "7".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-root-rename-race",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    for (let index = 0; index < 2_000; index += 1) {
+      writeFileSync(
+        join(fixture.config.evidenceDirectory, `slow-delete-${index}.txt`),
+        "fixture root cleanup race\n",
+      );
+    }
+    const replacementMarker = join(fixture.root, "replacement.txt");
+    const replacement = await startReplacementAfterRename(
+      fixture.root,
+      replacementMarker,
+    );
+
+    fixture.cleanup();
+
+    assert.equal(existsSync(replacementMarker), true);
+    await waitForChildExit(replacement);
+    assert.equal(readFileSync(replacementMarker, "utf8"), "replacement\n");
+    rmSync(fixture.root, { recursive: true });
+  });
+
   it("resolves evidence locators to exact fixture bytes and rejects hash or size mismatches", () => {
     const fixture = createElectronTestFixture({
       fixtureId: "fixture-evidence",
@@ -309,6 +445,60 @@ describe("Electron Test fixture", () => {
           error instanceof ElectronTestFixtureError &&
           error.code === "FIXTURE_SYMLINK_FORBIDDEN",
       );
+    }
+    fixture.cleanup();
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("never accepts outside evidence during repeated ancestor or leaf symlink replacement", async () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-evidence-symlink-race",
+      testRunId: "test-run-evidence-symlink-race",
+      testRunManifestHash: "6".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-evidence-symlink-race",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    const outside = mkdtempSync(join(tmpdir(), "sandcastle-evidence-race-"));
+    const outsideBytes = Buffer.from(
+      "outside evidence must never pass",
+      "utf8",
+    );
+    const safeBytes = Buffer.from("frozen fixture evidence", "utf8");
+    const ancestor = join(fixture.config.evidenceDirectory, "screenshots");
+    const outsideAncestor = join(outside, "screenshots");
+    mkdirSync(ancestor);
+    mkdirSync(outsideAncestor);
+    const safeLeaf = join(ancestor, "capture.png");
+    const outsideLeaf = join(outsideAncestor, "capture.png");
+    writeFileSync(safeLeaf, safeBytes, { mode: 0o600 });
+    writeFileSync(outsideLeaf, outsideBytes, { mode: 0o600 });
+
+    for (const [target, replacement] of [
+      [ancestor, outsideAncestor],
+      [safeLeaf, outsideLeaf],
+    ] as const) {
+      const swap = await startRepeatedSymlinkSwap(target, replacement);
+      let acceptedOutside = false;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        try {
+          const verified = verifyTestEvidenceFile({
+            evidenceDirectory: fixture.config.evidenceDirectory,
+            locator: "screenshots/capture.png",
+            contentHash: sha256(outsideBytes.toString("utf8")),
+            byteSize: outsideBytes.byteLength,
+          });
+          acceptedOutside ||= verified.bytes.equals(outsideBytes);
+        } catch (error) {
+          assert.equal(error instanceof ElectronTestFixtureError, true);
+        }
+      }
+      await waitForChildExit(swap);
+      assert.equal(acceptedOutside, false);
+      assert.equal(lstatSync(target).isSymbolicLink(), false);
     }
     fixture.cleanup();
     rmSync(outside, { recursive: true, force: true });

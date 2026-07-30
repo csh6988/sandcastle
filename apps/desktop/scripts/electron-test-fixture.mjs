@@ -209,8 +209,8 @@ const caseManifestFor = (seeded, operations) => ({
     {
       id: "fixture-pair",
       operationId: operations[0].id,
-      ui: { kind: "button", expected: "Run Test" },
-      runtime: { kind: "query", expected: "reconciling" },
+      ui: { kind: "button", expected: "Interaction Observed" },
+      runtime: { kind: "query", expected: "completed" },
     },
   ],
   fixture: {
@@ -238,13 +238,38 @@ const caseManifestFor = (seeded, operations) => ({
 const testScopeRiskFor = (seeded, operations) => {
   const revisionId = `technical-baseline:${seeded.technicalBaselineId}:${seeded.technicalBaselineHash}`;
   const rules = [
+    { factorId: "auth-permission", minimumTier: "high" },
+    { factorId: "credential-materialization", minimumTier: "critical" },
     { factorId: "cross-application-contract", minimumTier: "high" },
+    { factorId: "data-migration-pii", minimumTier: "high" },
+    { factorId: "dependency-supply-chain", minimumTier: "medium" },
+    { factorId: "destructive-action", minimumTier: "critical" },
+    { factorId: "network-filesystem-scope", minimumTier: "high" },
     { factorId: "no-sandbox", minimumTier: "high" },
-    { factorId: "recovery-complexity", minimumTier: "medium" },
+    { factorId: "production-deployment", minimumTier: "critical" },
+    { factorId: "public-api", minimumTier: "high" },
+    {
+      factorId: "rollback-resource-timeout-recovery",
+      minimumTier: "medium",
+    },
+    { factorId: "sandbox-boundary", minimumTier: "critical" },
     { factorId: "secret-environment-boundary", minimumTier: "high" },
     { factorId: "user-visible-runtime", minimumTier: "high" },
   ];
+  const permissionEvidence = seeded.workPackageCoverage.map(
+    (workPackage) =>
+      `work-package-version:${workPackage.workPackageVersionId}:permission:repository.write`,
+  );
   const factors = [
+    {
+      id: "auth-permission",
+      present: true,
+      evidenceRefs: [
+        `technical-baseline:${seeded.technicalBaselineId}:permission-policy`,
+        ...permissionEvidence,
+      ].sort(),
+    },
+    { id: "credential-materialization", present: false, evidenceRefs: [] },
     {
       id: "cross-application-contract",
       present: seeded.integrationAuthority.manifest.contractVersions.length > 0,
@@ -253,14 +278,42 @@ const testScopeRiskFor = (seeded, operations) => {
           `contract:${contract.id}:${contract.version}:${contract.hash}`,
       ),
     },
-    { id: "no-sandbox", present: false, evidenceRefs: [] },
+    { id: "data-migration-pii", present: false, evidenceRefs: [] },
     {
-      id: "recovery-complexity",
-      present: operations.length > 0,
-      evidenceRefs: operations.map(
-        (operation) => `test-operation:${operation.id}`,
+      id: "dependency-supply-chain",
+      present: seeded.integrationAuthority.manifest.packages.some(
+        (workPackage) => workPackage.dependencies.length > 0,
       ),
+      evidenceRefs: seeded.integrationAuthority.manifest.packages
+        .filter((workPackage) => workPackage.dependencies.length > 0)
+        .map(
+          (workPackage) =>
+            `work-package-version:${workPackage.workPackageVersionId}:dependencies`,
+        )
+        .sort(),
     },
+    { id: "destructive-action", present: false, evidenceRefs: [] },
+    {
+      id: "network-filesystem-scope",
+      present: permissionEvidence.length > 0,
+      evidenceRefs: [...permissionEvidence].sort(),
+    },
+    { id: "no-sandbox", present: false, evidenceRefs: [] },
+    { id: "production-deployment", present: false, evidenceRefs: [] },
+    { id: "public-api", present: false, evidenceRefs: [] },
+    {
+      id: "rollback-resource-timeout-recovery",
+      present: operations.length > 0,
+      evidenceRefs: [
+        `execution-profile:${seeded.testExecutionProfile.id}:timeout:30`,
+        ...operations.map((operation) => `test-operation:${operation.id}`),
+        ...seeded.workPackageCoverage.map(
+          (workPackage) =>
+            `work-package-version:${workPackage.workPackageVersionId}:recovery-policy`,
+        ),
+      ].sort(),
+    },
+    { id: "sandbox-boundary", present: false, evidenceRefs: [] },
     { id: "secret-environment-boundary", present: false, evidenceRefs: [] },
     {
       id: "user-visible-runtime",
@@ -974,7 +1027,7 @@ const run = async () => {
     ),
     true,
   );
-  assert.equal(health.schemaVersion, 47);
+  assert.equal(health.schemaVersion, 48);
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
