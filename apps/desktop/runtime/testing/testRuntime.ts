@@ -275,9 +275,12 @@ export type TestRunView = {
       readonly nextIntegrationGenerationId: string;
       readonly successorAssertions: readonly {
         readonly defectId: string;
+        readonly priorTestRunId: string;
+        readonly priorIntegrationGenerationId: string;
         readonly priorTestCaseRevisionId: string;
         readonly priorAssertionId: string;
         readonly priorResultHash: string;
+        readonly responsibilityRoute: TestReworkRoute;
         readonly nextTestCaseRevisionId: string;
         readonly nextAssertionId: string;
       }[];
@@ -429,6 +432,16 @@ export type TestExecutionRequest = {
   readonly input: unknown;
 };
 
+export type TestSelectedQueryView = {
+  readonly tokenHash: string;
+  readonly queryHash: string;
+  readonly viewHash: string;
+  readonly sequence: number;
+  readonly consumerId: string;
+  readonly principalHash: string;
+  readonly acknowledgementCommandId: string;
+};
+
 export type TestExecutionFact = {
   readonly state:
     | "not-started"
@@ -441,7 +454,20 @@ export type TestExecutionFact = {
   readonly providerReceipt?: unknown;
   readonly evidenceRef?: string;
   readonly result?: unknown;
+  readonly selectedQueryView?: TestSelectedQueryView;
 };
+
+const TestSelectedQueryViewSchema = z
+  .object({
+    tokenHash: z.string().regex(/^[a-f0-9]{64}$/),
+    queryHash: z.string().regex(/^[a-f0-9]{64}$/),
+    viewHash: z.string().regex(/^[a-f0-9]{64}$/),
+    sequence: z.number().int().nonnegative(),
+    consumerId: z.string().trim().min(1),
+    principalHash: z.string().regex(/^[a-f0-9]{64}$/),
+    acknowledgementCommandId: z.string().trim().min(1),
+  })
+  .strict();
 
 const TestAssertionCorrelationSchema = z
   .object({
@@ -1793,14 +1819,8 @@ export const openTestRuntime = (
       })
       .passthrough()
       .safeParse(parseJson<unknown>(technicalBaseline.manifestJson));
-    const coveredWorkPackageRefs = [
-      ...new Map(
-        coveredRevisions
-          .flatMap((revision) => revision.manifest.workPackageVersions)
-          .map((entry) => [entry.workPackageVersionId, entry]),
-      ).values(),
-    ].sort((left, right) =>
-      left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+    const frozenWorkPackageVersionIds = sortedUnique(
+      authority.manifest.packages.map((entry) => entry.workPackageVersionId),
     );
     const workPackageRiskSchema = z
       .object({
@@ -1810,35 +1830,48 @@ export const openTestRuntime = (
         recoveryPolicy: z.string().trim().min(1),
       })
       .passthrough();
-    const workPackageRiskSources = coveredWorkPackageRefs.map((entry) => {
-      const row = database
-        .prepare(
-          `SELECT manifest_json AS manifestJson, manifest_hash AS manifestHash
+    const workPackageRiskSources = frozenWorkPackageVersionIds.map(
+      (workPackageVersionId) => {
+        const row = database
+          .prepare(
+            `SELECT manifest_json AS manifestJson, manifest_hash AS manifestHash
              FROM work_package_versions WHERE id = ?`,
-        )
-        .get(entry.workPackageVersionId) as
-        | { readonly manifestJson: string; readonly manifestHash: string }
-        | undefined;
-      const parsed = row
-        ? workPackageRiskSchema.safeParse(parseJson<unknown>(row.manifestJson))
-        : undefined;
-      if (!row || row.manifestHash !== entry.manifestHash || !parsed?.success) {
-        throw new TestRuntimeError(
-          "TEST_SCOPE_RISK_AUTHORITY_INVALID",
-          "The Test scope risk rubric requires every frozen Work Package manifest and Technical Baseline risk source.",
-        );
-      }
-      return {
-        versionId: entry.workPackageVersionId,
-        manifest: parsed.data,
-      };
-    });
+          )
+          .get(workPackageVersionId) as
+          | { readonly manifestJson: string; readonly manifestHash: string }
+          | undefined;
+        const parsed = row
+          ? workPackageRiskSchema.safeParse(
+              parseJson<unknown>(row.manifestJson),
+            )
+          : undefined;
+        if (!row || !parsed?.success) {
+          throw new TestRuntimeError(
+            "TEST_SCOPE_RISK_AUTHORITY_INVALID",
+            "The Test scope risk rubric requires every frozen Work Package manifest and Technical Baseline risk source.",
+          );
+        }
+        return {
+          versionId: workPackageVersionId,
+          manifest: parsed.data,
+        };
+      },
+    );
     if (!technicalRiskSource.success) {
       throw new TestRuntimeError(
         "TEST_SCOPE_RISK_AUTHORITY_INVALID",
         "The Test scope risk rubric requires every frozen Work Package manifest and Technical Baseline risk source.",
       );
     }
+    const highestWorkPackageRiskTier = workPackageRiskSources.reduce<
+      TestScopeRiskInput["computedTier"]
+    >(
+      (tier, source) =>
+        tierRank[source.manifest.riskTier] > tierRank[tier]
+          ? source.manifest.riskTier
+          : tier,
+      "low",
+    );
     const authoritativeRiskRules = [
       { factorId: "auth-permission", minimumTier: "high" as const },
       {
@@ -1872,6 +1905,10 @@ export const openTestRuntime = (
         minimumTier: "high" as const,
       },
       { factorId: "user-visible-runtime", minimumTier: "high" as const },
+      {
+        factorId: "work-package-risk-tier",
+        minimumTier: highestWorkPackageRiskTier,
+      },
     ];
     const profile = frozenProfile as {
       readonly sandboxRef?: unknown;
@@ -2143,6 +2180,14 @@ export const openTestRuntime = (
         ),
         evidenceRefs: coveredRevisions.map(
           (revision) => `test-case-revision:${revision.id}`,
+        ),
+      },
+      {
+        id: "work-package-risk-tier",
+        present: workPackageRiskSources.length > 0,
+        evidenceRefs: workPackageRiskSources.map(
+          (source) =>
+            `work-package-version:${source.versionId}:risk-tier:${source.manifest.riskTier}`,
         ),
       },
     ].map((factor) => ({
@@ -2576,6 +2621,32 @@ export const openTestRuntime = (
       executionResult = parsed.data;
     }
     const run = readRun(request.testRunId);
+    const selectedQueryView =
+      fact.selectedQueryView === undefined
+        ? undefined
+        : TestSelectedQueryViewSchema.safeParse(fact.selectedQueryView);
+    if (
+      (fact.selectedQueryView !== undefined && !selectedQueryView?.success) ||
+      (executionResult !== undefined &&
+        executionResult.assertions.length > 0 &&
+        !selectedQueryView?.success) ||
+      (selectedQueryView?.success &&
+        (selectedQueryView.data.viewHash !== sha256(run) ||
+          executionResult?.assertions.some(
+            (assertion) =>
+              assertion.correlation.viewSyncTokenHash !==
+                selectedQueryView.data.tokenHash ||
+              assertion.correlation.queryViewHash !==
+                selectedQueryView.data.viewHash ||
+              assertion.correlation.queryAsOfSequence !==
+                selectedQueryView.data.sequence,
+          )))
+    ) {
+      throw new TestRuntimeError(
+        "TEST_ASSERTION_CORRELATION_INVALID",
+        "A terminal Test result must freeze and use the exact acknowledged Query token selected by the execution adapter.",
+      );
+    }
     const declaredOperation = run.manifest.executionOperations.find(
       (operation) => operation.id === request.operationId,
     );
@@ -2679,7 +2750,11 @@ export const openTestRuntime = (
             request.requestHash,
           );
         if (executionResult) {
-          materializeExecutionResult(request, executionResult, sha256(run));
+          materializeExecutionResult(
+            request,
+            executionResult,
+            selectedQueryView?.success ? selectedQueryView.data : undefined,
+          );
         }
         if (nextState === "failed") {
           const failedRun = readRun(request.testRunId);
@@ -3282,7 +3357,7 @@ export const openTestRuntime = (
   let materializeExecutionResult = (
     _request: TestExecutionRequest,
     _result: TestExecutionResult,
-    _authoritativeViewHash: string,
+    _selectedQueryView?: TestSelectedQueryView,
   ): void => {
     throw new TestRuntimeError(
       "TEST_EXECUTION_RESULT_UNAVAILABLE",
@@ -3292,7 +3367,7 @@ export const openTestRuntime = (
 
   const recordAssertionWithAuthoritativeView = (
     input: Parameters<TestRuntime["recordAssertion"]>[0],
-    authoritativeViewHash?: string,
+    selectedQueryView?: TestSelectedQueryView,
   ): TestRunView => {
     const run = readRun(input.testRunId);
     if (input.required === false) {
@@ -3506,8 +3581,16 @@ export const openTestRuntime = (
       !token ||
       token.queryHash !== expectedQueryHash ||
       token.viewHash !== input.correlation.queryViewHash ||
-      token.viewHash !== (authoritativeViewHash ?? sha256(run)) ||
+      token.viewHash !== (selectedQueryView?.viewHash ?? sha256(run)) ||
       Number(token.sequence) !== input.correlation.queryAsOfSequence ||
+      (selectedQueryView !== undefined &&
+        (input.correlation.viewSyncTokenHash !== selectedQueryView.tokenHash ||
+          token.queryHash !== selectedQueryView.queryHash ||
+          token.viewHash !== selectedQueryView.viewHash ||
+          Number(token.sequence) !== selectedQueryView.sequence ||
+          token.consumerId !== selectedQueryView.consumerId ||
+          token.principalHash !== selectedQueryView.principalHash ||
+          token.commandId !== selectedQueryView.acknowledgementCommandId)) ||
       !acknowledgementValid ||
       input.correlation.runId !== run.manifest.runId ||
       input.correlation.snapshotRevisionId !==
@@ -3876,7 +3959,7 @@ export const openTestRuntime = (
     return readRun(input.testRunId);
   };
 
-  materializeExecutionResult = (request, result, authoritativeViewHash) => {
+  materializeExecutionResult = (request, result, selectedQueryView) => {
     for (const evidence of result.evidence) {
       recordEvidence({
         ...evidence,
@@ -3898,7 +3981,7 @@ export const openTestRuntime = (
           runtimeStatus: assertion.runtimeStatus,
           correlation: assertion.correlation,
         },
-        authoritativeViewHash,
+        selectedQueryView,
       );
     }
   };
@@ -4113,17 +4196,16 @@ export const openTestRuntime = (
     }
     const rerun = readRun(resolution.resolvedByTestRunId);
     const original = readRun(row.testRunId);
+    const successorMapping =
+      rerun.reworkLineage?.lineage.successorAssertions.find(
+        (mapping) => mapping.defectId === input.defectId,
+      );
     const invalidRerun =
       rerun.manifest.projectId !== original.manifest.projectId ||
       rerun.state !== "passed" ||
       rerun.passAuthorityHash !== resolution.passAuthorityHash ||
       authorityHashFor(rerun) !== resolution.passAuthorityHash ||
-      rerun.reworkLineage?.defectId !== input.defectId ||
-      rerun.reworkLineage?.priorTestRunId !== original.id;
-    const successorMapping =
-      rerun.reworkLineage?.lineage.successorAssertions.find(
-        (mapping) => mapping.defectId === input.defectId,
-      );
+      successorMapping?.priorTestRunId !== original.id;
     const coversOriginalDefect = resolution.assertions.some(
       (entry) =>
         successorMapping !== undefined &&
@@ -4339,22 +4421,73 @@ export const openTestRuntime = (
         "Changed code or Integration input requires fresh Code Review coverage, a fresh PASS Integration Generation, and a fresh Test Run.",
       );
     }
-    const scopeDefects = prior.defects
+    const inheritedDefectIds = new Set<string>();
+    const inheritedObligationIds = new Set<string>();
+    let ancestor: TestRunView | null = prior;
+    const visitedRuns = new Set<string>();
+    while (ancestor?.reworkLineage && !visitedRuns.has(ancestor.id)) {
+      visitedRuns.add(ancestor.id);
+      const inheritedScope = ancestor.reworkLineage.lineage.scope;
+      inheritedScope.defectIds.forEach((id) => inheritedDefectIds.add(id));
+      inheritedScope.obligationIds.forEach((id) =>
+        inheritedObligationIds.add(id),
+      );
+      ancestor = readRun(inheritedScope.priorTestRunId);
+    }
+    prior.defects
       .filter((candidate) => candidate.status === "open")
-      .sort((left, right) => left.id.localeCompare(right.id));
-    const scopeObligations = database
+      .forEach((candidate) => inheritedDefectIds.add(candidate.id));
+    const candidateDefectIds = [...inheritedDefectIds].sort();
+    const scopeDefects = database
       .prepare(
-        `SELECT obligations.id, obligations.defect_id AS defectId
-           FROM test_run_obligations AS obligations
-           LEFT JOIN test_run_obligation_resolutions AS resolutions
-             ON resolutions.obligation_id = obligations.id
-          WHERE obligations.test_run_id = ? AND resolutions.id IS NULL
-          ORDER BY obligations.id`,
+        `SELECT defects.id, defects.test_run_id AS testRunId,
+                defects.test_case_revision_id AS testCaseRevisionId,
+                defects.assertion_id AS assertionId,
+                defects.integration_generation_id AS integrationGenerationId,
+                defects.responsibility_json AS responsibilityJson,
+                defects.evidence_json AS evidenceJson
+           FROM test_defects AS defects
+           LEFT JOIN test_defect_resolutions AS resolutions
+             ON resolutions.defect_id = defects.id
+          WHERE defects.id IN (${candidateDefectIds.map(() => "?").join(", ")})
+            AND resolutions.id IS NULL
+          ORDER BY defects.id`,
       )
-      .all(prior.id) as Array<{
+      .all(...candidateDefectIds) as Array<{
       readonly id: string;
-      readonly defectId: string | null;
+      readonly testRunId: string;
+      readonly testCaseRevisionId: string;
+      readonly assertionId: string | null;
+      readonly integrationGenerationId: string;
+      readonly responsibilityJson: string;
+      readonly evidenceJson: string;
     }>;
+    const currentObligationIds = (
+      database
+        .prepare(
+          "SELECT id FROM test_run_obligations WHERE test_run_id = ? ORDER BY id",
+        )
+        .all(prior.id) as Array<{ readonly id: string }>
+    ).map((entry) => entry.id);
+    currentObligationIds.forEach((id) => inheritedObligationIds.add(id));
+    const candidateObligationIds = [...inheritedObligationIds].sort();
+    const scopeObligations =
+      candidateObligationIds.length === 0
+        ? []
+        : (database
+            .prepare(
+              `SELECT obligations.id, obligations.defect_id AS defectId
+                 FROM test_run_obligations AS obligations
+                 LEFT JOIN test_run_obligation_resolutions AS resolutions
+                   ON resolutions.obligation_id = obligations.id
+                WHERE obligations.id IN (${candidateObligationIds.map(() => "?").join(", ")})
+                  AND resolutions.id IS NULL
+                ORDER BY obligations.id`,
+            )
+            .all(...candidateObligationIds) as Array<{
+            readonly id: string;
+            readonly defectId: string | null;
+          }>);
     const mappingsByDefect = new Map(
       input.successorAssertions.map((mapping) => [mapping.defectId, mapping]),
     );
@@ -4398,9 +4531,12 @@ export const openTestRuntime = (
       const nextAssertion = nextRevision?.manifest.assertions.find(
         (assertion) => assertion.id === mapping.nextAssertionId,
       );
+      const defectEvidence = parseJson<TestDefectEvidence>(
+        scopeDefect.evidenceJson,
+      );
       const priorEvidence =
-        scopeDefect.evidence.kind === "assertion"
-          ? scopeDefect.evidence.assertion
+        defectEvidence.kind === "assertion"
+          ? defectEvidence.assertion
           : undefined;
       if (
         scopeDefect.assertionId === null ||
@@ -4423,9 +4559,14 @@ export const openTestRuntime = (
       }
       return {
         defectId: scopeDefect.id,
+        priorTestRunId: scopeDefect.testRunId,
+        priorIntegrationGenerationId: scopeDefect.integrationGenerationId,
         priorTestCaseRevisionId: scopeDefect.testCaseRevisionId,
         priorAssertionId: scopeDefect.assertionId,
         priorResultHash: priorEvidence.resultHash,
+        responsibilityRoute: reworkRoute(
+          parseJson<TestDefectResponsibility>(scopeDefect.responsibilityJson),
+        ),
         nextTestCaseRevisionId: mapping.nextTestCaseRevisionId,
         nextAssertionId: mapping.nextAssertionId,
       };
@@ -4553,6 +4694,8 @@ export const openTestRuntime = (
         `SELECT defects.id, defects.test_run_id AS testRunId,
                 defects.test_case_revision_id AS testCaseRevisionId,
                 defects.assertion_id AS assertionId,
+                defects.integration_generation_id AS integrationGenerationId,
+                defects.responsibility_json AS responsibilityJson,
                 defects.evidence_json AS evidenceJson,
                 resolutions.id AS resolutionId
            FROM test_defects AS defects
@@ -4566,6 +4709,8 @@ export const openTestRuntime = (
       readonly testRunId: string;
       readonly testCaseRevisionId: string;
       readonly assertionId: string | null;
+      readonly integrationGenerationId: string;
+      readonly responsibilityJson: string;
       readonly evidenceJson: string;
       readonly resolutionId: string | null;
     }>;
@@ -4590,11 +4735,7 @@ export const openTestRuntime = (
     if (
       scopedDefects.length !== lineage.scope.defectIds.length ||
       scopedObligations.length !== lineage.scope.obligationIds.length ||
-      scopedDefects.some(
-        (defect) =>
-          defect.testRunId !== lineage.scope.priorTestRunId ||
-          defect.resolutionId !== null,
-      ) ||
+      scopedDefects.some((defect) => defect.resolutionId !== null) ||
       scopedObligations.some(
         (obligation) =>
           obligation.defectId === null ||
@@ -4643,6 +4784,15 @@ export const openTestRuntime = (
         mapping.priorTestCaseRevisionId !== defect.testCaseRevisionId ||
         mapping.priorAssertionId !== defect.assertionId ||
         mapping.priorResultHash !== priorEvidence.assertion.resultHash ||
+        mapping.priorTestRunId !== defect.testRunId ||
+        mapping.priorIntegrationGenerationId !==
+          defect.integrationGenerationId ||
+        canonicalJson(mapping.responsibilityRoute) !==
+          canonicalJson(
+            reworkRoute(
+              parseJson<TestDefectResponsibility>(defect.responsibilityJson),
+            ),
+          ) ||
         !assertion ||
         assertion.uiStatus !== "passed" ||
         assertion.runtimeStatus !== "passed" ||
@@ -4683,7 +4833,6 @@ export const openTestRuntime = (
          id, obligation_id, defect_resolution_id, created_at
        ) VALUES (?, ?, ?, ?)`,
     );
-    const prior = readRun(lineage.scope.priorTestRunId);
     for (const entry of resolutions) {
       insertResolution.run(
         entry.id,
@@ -4702,14 +4851,15 @@ export const openTestRuntime = (
           now,
         );
       }
+      const origin = readRun(entry.defect.testRunId);
       appendEvent({
         type: "test.defect.closed",
-        projectId: prior.manifest.projectId,
-        runId: prior.manifest.runId,
-        nodeRunId: prior.manifest.nodeRunId,
-        testRunId: prior.id,
+        projectId: origin.manifest.projectId,
+        runId: origin.manifest.runId,
+        nodeRunId: origin.manifest.nodeRunId,
+        testRunId: origin.id,
         defectId: entry.defect.id,
-        payload: { testRunId: prior.id, defectId: entry.defect.id },
+        payload: { testRunId: origin.id, defectId: entry.defect.id },
         timestamp: now,
       });
     }
@@ -4720,18 +4870,27 @@ export const openTestRuntime = (
     if (["passed", "failed", "blocked", "cancelled"].includes(run.state))
       return run;
     const requiredAssertions = run.manifest.testCaseRevisions.flatMap((entry) =>
-      readCaseRevision(entry.id).manifest.assertions.map(
-        (assertion) => `${entry.id}:${assertion.id}`,
-      ),
+      readCaseRevision(entry.id).manifest.assertions.map((assertion) => ({
+        testCaseRevisionId: entry.id,
+        assertionId: assertion.id,
+        operationId: assertion.operationId,
+      })),
     );
-    const assertionByKey = new Map(
-      run.assertions.map((entry) => [
-        `${entry.testCaseRevisionId}:${entry.assertionId}`,
-        entry,
-      ]),
-    );
+    const assertionByRevision = new Map<
+      string,
+      Map<string, TestRunView["assertions"][number]>
+    >();
+    for (const assertion of run.assertions) {
+      const byAssertion =
+        assertionByRevision.get(assertion.testCaseRevisionId) ?? new Map();
+      byAssertion.set(assertion.assertionId, assertion);
+      assertionByRevision.set(assertion.testCaseRevisionId, byAssertion);
+    }
     const missing = requiredAssertions.filter(
-      (key) => !assertionByKey.has(key),
+      (assertion) =>
+        !assertionByRevision
+          .get(assertion.testCaseRevisionId)
+          ?.has(assertion.assertionId),
     );
     const failing = run.assertions.filter(
       (entry) =>
@@ -4855,7 +5014,9 @@ export const openTestRuntime = (
         missing.length > 0)
     ) {
       const terminalState =
-        explicitFailure.length > 0 ? ("failed" as const) : ("blocked" as const);
+        explicitUnknown.length > 0 || missing.length > 0
+          ? ("blocked" as const)
+          : ("failed" as const);
       const terminalAssertions = [
         ...failing.map((assertion) => ({
           assertion,
@@ -4869,33 +5030,26 @@ export const openTestRuntime = (
               ? ("failed" as const)
               : ("unknown" as const),
         })),
-        ...missing.map((key) => {
-          const separator = key.indexOf(":");
-          const testCaseRevisionId = key.slice(0, separator);
-          const assertionId = key.slice(separator + 1);
-          const revision = readCaseRevision(testCaseRevisionId);
-          const declaration = revision.manifest.assertions.find(
-            (assertion) => assertion.id === assertionId,
-          )!;
+        ...missing.map((declaration) => {
           return {
             assertion: null,
             operationId: declaration.operationId,
-            testCaseRevisionId,
-            assertionId,
+            testCaseRevisionId: declaration.testCaseRevisionId,
+            assertionId: declaration.assertionId,
             resultHash: sha256({
               schemaVersion: 1,
               testRunId,
-              testCaseRevisionId,
-              assertionId,
+              testCaseRevisionId: declaration.testCaseRevisionId,
+              assertionId: declaration.assertionId,
               status: "missing",
             }),
             kind: "missing" as const,
           };
         }),
-      ].sort((left, right) =>
-        `${left.testCaseRevisionId}:${left.assertionId}`.localeCompare(
-          `${right.testCaseRevisionId}:${right.assertionId}`,
-        ),
+      ].sort(
+        (left, right) =>
+          left.testCaseRevisionId.localeCompare(right.testCaseRevisionId) ||
+          left.assertionId.localeCompare(right.assertionId),
       );
       const now = clock().toISOString();
       return completionUnitOfWork({
@@ -4920,7 +5074,12 @@ export const openTestRuntime = (
         operation: () => {
           for (const terminalAssertion of terminalAssertions) {
             const assertion = terminalAssertion.assertion;
-            const defectId = `test-defect:assertion:${testRunId}:${terminalAssertion.testCaseRevisionId}:${terminalAssertion.assertionId}`;
+            const assertionIdentityHash = sha256({
+              schemaVersion: 1,
+              testCaseRevisionId: terminalAssertion.testCaseRevisionId,
+              assertionId: terminalAssertion.assertionId,
+            });
+            const defectId = `test-defect:assertion:${testRunId}:${assertionIdentityHash}`;
             const evidenceRefs = run.evidence
               .filter(
                 (evidence) =>
@@ -4988,7 +5147,7 @@ export const openTestRuntime = (
                  ) VALUES (?, ?, ?, ?, ?, 'open', ?)`,
               )
               .run(
-                `test-obligation:assertion:${testRunId}:${terminalAssertion.testCaseRevisionId}:${terminalAssertion.assertionId}`,
+                `test-obligation:assertion:${testRunId}:${assertionIdentityHash}`,
                 testRunId,
                 defectId,
                 "Resolve the failed, unknown, or missing Test assertion with a fresh related Test Run.",

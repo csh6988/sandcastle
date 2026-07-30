@@ -265,6 +265,31 @@ describe("Electron Test fixture", () => {
     fixture.cleanup();
   });
 
+  it("refuses an initially missing cleanup target without caching an absent receipt", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-cleanup-missing",
+      testRunId: "test-run-cleanup-missing",
+      testRunManifestHash: "8".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-cleanup-missing",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    rmSync(fixture.config.worktreeDirectory, { recursive: true });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      assert.throws(
+        () => fixture.cleanupExecutionResources(),
+        (error: unknown) =>
+          error instanceof ElectronTestFixtureError &&
+          error.code === "FIXTURE_CLEANUP_IDENTITY_MISMATCH",
+      );
+    }
+    fixture.cleanup();
+  });
+
   it("refuses replaced or symbolic-link cleanup targets", () => {
     for (const replacement of ["directory", "symlink"] as const) {
       const fixture = createElectronTestFixture({
@@ -448,6 +473,52 @@ describe("Electron Test fixture", () => {
     }
     fixture.cleanup();
     rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("holds ancestor descriptors across a coordinated rename, symlink, and restore attack", () => {
+    if (process.platform === "win32") return;
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-evidence-held-ancestor",
+      testRunId: "test-run-evidence-held-ancestor",
+      testRunManifestHash: "6".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-evidence-held-ancestor",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+    });
+    const outside = mkdtempSync(join(tmpdir(), "sandcastle-evidence-held-"));
+    const safeBytes = Buffer.from("held safe evidence", "utf8");
+    const outsideBytes = Buffer.from("outside replacement evidence", "utf8");
+    const ancestor = join(fixture.config.evidenceDirectory, "screenshots");
+    const parked = `${ancestor}.parked`;
+    const outsideAncestor = join(outside, "screenshots");
+    mkdirSync(ancestor);
+    mkdirSync(outsideAncestor);
+    writeFileSync(join(ancestor, "capture.png"), safeBytes, { mode: 0o600 });
+    writeFileSync(join(outsideAncestor, "capture.png"), outsideBytes, {
+      mode: 0o600,
+    });
+    try {
+      const verified = verifyTestEvidenceFile({
+        evidenceDirectory: fixture.config.evidenceDirectory,
+        locator: "screenshots/capture.png",
+        contentHash: createHash("sha256").update(safeBytes).digest("hex"),
+        byteSize: safeBytes.byteLength,
+        testOnlyAncestorSwap: {
+          target: ancestor,
+          parked,
+          outside: outsideAncestor,
+        },
+      });
+      assert.deepEqual(verified.bytes, safeBytes);
+      assert.equal(lstatSync(ancestor).isSymbolicLink(), false);
+      assert.equal(existsSync(parked), false);
+    } finally {
+      fixture.cleanup();
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("never accepts outside evidence during repeated ancestor or leaf symlink replacement", async () => {

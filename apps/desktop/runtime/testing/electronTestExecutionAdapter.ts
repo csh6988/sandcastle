@@ -10,8 +10,12 @@ import type {
 
 export type AcknowledgedElectronTestView = {
   readonly tokenHash: string;
+  readonly queryHash: string;
   readonly viewHash: string;
   readonly sequence: number;
+  readonly consumerId: string;
+  readonly principalHash: string;
+  readonly acknowledgementCommandId: string;
 };
 
 export const readAcknowledgedElectronTestView = (
@@ -23,9 +27,12 @@ export const readAcknowledgedElectronTestView = (
     .digest("hex");
   return database
     .prepare(
-      `SELECT token_hash AS tokenHash, view_hash AS viewHash, sequence
+      `SELECT token_hash AS tokenHash, query_hash AS queryHash,
+              view_hash AS viewHash, sequence, consumer_id AS consumerId,
+              principal_hash AS principalHash,
+              command_id AS acknowledgementCommandId
          FROM consumed_view_sync_tokens
-        WHERE view_hash = ? AND query_hash = ?
+        WHERE view_hash = ? AND query_hash = ? AND command_id IS NOT NULL
         ORDER BY consumed_at DESC, token_hash DESC
         LIMIT 1`,
     )
@@ -56,8 +63,12 @@ const assertFixtureRequest = (
 
 export const createElectronTestExecutionAdapter = (input: {
   readonly fixtureId: string;
+  readonly selectAcknowledgedView?: (
+    request: TestExecutionRequest,
+  ) => AcknowledgedElectronTestView | undefined;
   readonly terminalResult: (
     request: TestExecutionRequest,
+    selectedQueryView: AcknowledgedElectronTestView | undefined,
   ) => TestExecutionResult | Promise<TestExecutionResult>;
   readonly terminalReceipt?: (
     request: TestExecutionRequest,
@@ -79,7 +90,13 @@ export const createElectronTestExecutionAdapter = (input: {
   },
   reconcile: async (request) => {
     assertFixtureRequest(request, input.fixtureId);
-    const result = await input.terminalResult(request);
+    const selectedQueryView = input.selectAcknowledgedView?.(request);
+    const result = await input.terminalResult(request, selectedQueryView);
+    if (result.assertions.length > 0 && !selectedQueryView) {
+      throw new Error(
+        "Electron Test assertion materialization requires the adapter-selected acknowledged Query token.",
+      );
+    }
     return {
       state: "succeeded",
       providerReceipt: input.terminalReceipt
@@ -91,6 +108,7 @@ export const createElectronTestExecutionAdapter = (input: {
             status: "succeeded",
           },
       result,
+      ...(selectedQueryView ? { selectedQueryView } : {}),
     };
   },
   cancel: (request) => {

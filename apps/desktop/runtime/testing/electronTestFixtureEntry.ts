@@ -446,7 +446,12 @@ const main = async (): Promise<void> => {
     testExecutionAdapterFactory: ({ database, tests, commandRegistry }) => [
       createElectronTestExecutionAdapter({
         fixtureId: config.fixtureId,
-        terminalResult: (request) => {
+        selectAcknowledgedView: (request) =>
+          readAcknowledgedElectronTestView(
+            database,
+            tests.inspect(request.testRunId),
+          ),
+        terminalResult: (request, consumedToken) => {
           try {
             const operation = fixtureExecutionInput(request, config.fixtureId);
             const currentSeed = requireSeeded();
@@ -616,10 +621,6 @@ const main = async (): Promise<void> => {
               };
               return scope.testRunId === run.id;
             });
-            const consumedToken = readAcknowledgedElectronTestView(
-              database,
-              run,
-            );
             if (!event || !consumedToken) {
               throw new Error(
                 "Electron Test execution requires an acknowledged authoritative Query View and Runtime event.",

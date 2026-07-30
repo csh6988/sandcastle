@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
   canonicalPipelineJson,
@@ -12,6 +13,324 @@ interface CompanyMigration {
   readonly name: string;
   readonly migrate: (database: DatabaseSync) => void;
 }
+
+const TEST_V48_SCHEMA_REFERENCE = [
+  [
+    "table",
+    "test_assertion_results",
+    "dec5b0dc6d0e7dda359fb92e9b6851eacbe22170a48e3fd9fee20511433ecc78",
+  ],
+  [
+    "trigger",
+    "test_assertion_results_immutable_delete",
+    "6116d8c870820b8dec3ab7293fd6807155418297729d08a74b507c3ac8cd5111",
+  ],
+  [
+    "trigger",
+    "test_assertion_results_immutable_update",
+    "f7810bcd1e64ec1cbf5b8b8fe97603846741b6ec22be33414ae3c665d955b87f",
+  ],
+  [
+    "trigger",
+    "test_assertion_results_terminal_run_insert",
+    "400a5f3901e45db10a8fa2c64fcb5929e135644ddbd9e69a41c964d1af5865ac",
+  ],
+  [
+    "table",
+    "test_case_revisions",
+    "17c7a1644fe1065fea5d336b13b2d8410dd162060eae453632ff070c0458389c",
+  ],
+  [
+    "index",
+    "test_case_revisions_case_idx",
+    "28aeae05a5923e4fe64bab4bed5c6f19dea4b614eed761f945576385a1ef85fd",
+  ],
+  [
+    "trigger",
+    "test_case_revisions_immutable_delete",
+    "ec7a1009a94f66d63e7bfb957c346a10a2103fc2c51c65387a2b2d3f4c2836d2",
+  ],
+  [
+    "trigger",
+    "test_case_revisions_immutable_update",
+    "904bc7e1e7a7a66c812040a72590a6d885206dce2ef2206c69f384fc9e90c669",
+  ],
+  [
+    "table",
+    "test_cases",
+    "cadfc03e7f09f6e362fb780ee220ddc5687e53eb9ea3e8f5f6958837b6f3951d",
+  ],
+  [
+    "trigger",
+    "test_cases_immutable_delete",
+    "460f225de0a6f4324e4283f3671a14d7e5d0b52287cd057435f9b57300a20a4a",
+  ],
+  [
+    "trigger",
+    "test_cases_immutable_update",
+    "ffb292161f5cc19a5420d04f243d91f9a17e26c209193610cb8abccc4cbb9862",
+  ],
+  [
+    "table",
+    "test_defect_resolutions",
+    "ad99aab5ea852585e611feeefa24bf6891a2f25350b9b637ea8a3a28fdf6d64a",
+  ],
+  [
+    "index",
+    "test_defect_resolutions_defect_idx",
+    "b9077a567ad37a93b40b0839ebe2473dbf2e4f46f07711b8196890b0d5b10e45",
+  ],
+  [
+    "trigger",
+    "test_defect_resolutions_immutable_delete",
+    "6021e6c0701593d5b681392d4bae3b7d3f685af68a637ac30388f6f655fd7543",
+  ],
+  [
+    "trigger",
+    "test_defect_resolutions_immutable_update",
+    "fc3fc708749994231e6c87a1aa05efa11e370df28a627b84dd4c39484cfc1dbb",
+  ],
+  [
+    "table",
+    "test_defects",
+    "d713ab3c2ff45cc638b0b5b3346edd50891f24997788814da0914785215a746f",
+  ],
+  [
+    "trigger",
+    "test_defects_identity_update",
+    "be409a1e0a235e15db80081a9fab9a95dedb9b3dd4632b3f38e6a52be8b50d95",
+  ],
+  [
+    "trigger",
+    "test_defects_immutable_delete",
+    "9cd1eb5fb78f0ef92a2ee096e01972b189a27ad27636922071f56e67756f4239",
+  ],
+  [
+    "index",
+    "test_defects_run_idx",
+    "02adaf22ab74bbe9660b6f44f67bf9120bf543e9e49ed15ec22c37e815b26cf4",
+  ],
+  [
+    "trigger",
+    "test_defects_terminal_run_insert",
+    "d76c178afc90eb0957f066230405492e26adf81783922977b7c49f4d35b8b2f2",
+  ],
+  [
+    "table",
+    "test_evidence",
+    "5278597b5ec60708a56c555c6e6e4c40373acabfd740471e516a2c0c292ec952",
+  ],
+  [
+    "trigger",
+    "test_evidence_immutable_delete",
+    "3b383cbf5ac083f4e9e87d8d14f4b3fe6b926912cf1c5df2af9fd13fc2dc9c45",
+  ],
+  [
+    "trigger",
+    "test_evidence_immutable_update",
+    "58c246709008c39fa12414a3c13b59f75ae91db9d70cbdd1e0cbfc4edc589f99",
+  ],
+  [
+    "index",
+    "test_evidence_run_idx",
+    "6e61fcbee21942bef73a526811705c093edc13a07287e64247c7328b81e92c6a",
+  ],
+  [
+    "trigger",
+    "test_evidence_terminal_run_insert",
+    "b7113d98a0e89f2c9e38a5334a14d8ac4a056ad3987f97a60bf9a7b3bfd1875b",
+  ],
+  [
+    "table",
+    "test_execution_control_operations",
+    "af8375da0407f07ddaaa664c10f2b3469ae081babc497590674cd3546ab4af18",
+  ],
+  [
+    "trigger",
+    "test_execution_control_operations_identity_update",
+    "6fe0b65f79d4a1db46034c081a130464a2bc0b22d1efbc16c0ac7fd358626ef7",
+  ],
+  [
+    "trigger",
+    "test_execution_control_operations_immutable_delete",
+    "65e921db83a0dbdc327a502c569c6977ec48859943e42622d049279775044ae9",
+  ],
+  [
+    "index",
+    "test_execution_control_operations_state_idx",
+    "539ee4e6b909589438f0cfc2c7beeb8d6fc29248b765e8acd801501dad8f2272",
+  ],
+  [
+    "trigger",
+    "test_execution_control_operations_terminal_update",
+    "7e987de0f68446427cb84311adacf7e6089be7e39a927c85aed2dea39ebe3a63",
+  ],
+  [
+    "table",
+    "test_execution_facts",
+    "ee58f23e1764258be4874eacd132430d33e21824dad347c5cbbf037db54a27f7",
+  ],
+  [
+    "trigger",
+    "test_execution_facts_immutable_delete",
+    "b9b534560aa1f586547a670e355ad0a02a49abc6fe1710137a1741173e98a78d",
+  ],
+  [
+    "trigger",
+    "test_execution_facts_immutable_update",
+    "1236053de57663398515994e5b0ad5ba9ea47a4feeea1307318fe718b6a4a630",
+  ],
+  [
+    "trigger",
+    "test_execution_facts_terminal_run_insert",
+    "387fbe3639ed338fe21b53519faf5d4d6b6bbd381ffe3aacbddbd68949e3be3b",
+  ],
+  [
+    "table",
+    "test_execution_operations",
+    "ace2ab90e3fe308bafa745261fd0d5e4da05ad98329ccfcbc44eec575e675e93",
+  ],
+  [
+    "trigger",
+    "test_execution_operations_identity_update",
+    "2f8b403fec7ca17ce1cbba14def0a9eabc10fd1d2f7f62815ae9c6f0975ae086",
+  ],
+  [
+    "trigger",
+    "test_execution_operations_immutable_delete",
+    "6356d6fe245e5464d0f37e3df150cbd9e2c7e61e501985b5bbdea8ac113527c0",
+  ],
+  [
+    "index",
+    "test_execution_operations_state_idx",
+    "7d479d146bbba16637edaf94055baffa3987943deaf7171ec13174cceb21c809",
+  ],
+  [
+    "trigger",
+    "test_execution_operations_terminal_run_insert",
+    "2825aee66108bcc0c8afab98d0a3d672723241363f6ee6836cf213c011e5fe39",
+  ],
+  [
+    "trigger",
+    "test_execution_operations_terminal_run_update",
+    "83ed35e3d23341d446191138791edcc8dd93513e55b7af119ba7d644fbfbf23e",
+  ],
+  [
+    "trigger",
+    "test_execution_operations_terminal_update",
+    "4cf15d0fe95203590a52cdae75e08e104f6396bccddfb47adc379e897dd9040b",
+  ],
+  [
+    "table",
+    "test_rework_runs",
+    "e76c2a83e84d5f5888ae767c62889d8abd0028f02ac06b125b2a35b39bc4c8df",
+  ],
+  [
+    "index",
+    "test_rework_runs_defect_idx",
+    "6c85c3ee49f81bfe78404be8aa5c4d468c766240cd518b57dfadcf5f85ff27ea",
+  ],
+  [
+    "trigger",
+    "test_rework_runs_immutable_delete",
+    "591bc939f8a8131e65965f768ec581dd94347d12a0e4403040d64a65981b215e",
+  ],
+  [
+    "trigger",
+    "test_rework_runs_immutable_update",
+    "4fbf24fd9c7acc879ac0d34e5864ef298d7c3a477c53abf205488712a8f45631",
+  ],
+  [
+    "table",
+    "test_run_case_revisions",
+    "66c28d8d6fcf4c88c4e6b9530931bfe074e5d023c86065cb4ef8378e4ba688cb",
+  ],
+  [
+    "trigger",
+    "test_run_case_revisions_immutable_delete",
+    "1b619c1b92f1339e925eeced3e223fc46ae1eb2baceae0814a943cf583888378",
+  ],
+  [
+    "trigger",
+    "test_run_case_revisions_immutable_update",
+    "ce7c678b19defce2ab0005c744e03e3d0c56b0f53e63b26713e2fa89d7e80606",
+  ],
+  [
+    "trigger",
+    "test_run_case_revisions_terminal_insert",
+    "871b14e3acbe1e3b3e302f0d63c7e08cd115da2c3e3808f5f95a7e30cdfc015d",
+  ],
+  [
+    "table",
+    "test_run_obligation_resolutions",
+    "d4194390b12458fa127d1d42c8714f138ddbbf1ded2518acd6c9facf05642e28",
+  ],
+  [
+    "trigger",
+    "test_run_obligation_resolutions_immutable_delete",
+    "0a67cfffb03b4bb08a584af9889ec4ef248e7678f84442d6ba31f0c647acb7e3",
+  ],
+  [
+    "trigger",
+    "test_run_obligation_resolutions_immutable_update",
+    "8336c84edd0e23720cc218928782a42040a47eb19a88beee251847df7c459a1e",
+  ],
+  [
+    "table",
+    "test_run_obligations",
+    "d78810783757c5e23198e60c92b7cf351a89a61f6168d4347884c5e38d3cce88",
+  ],
+  [
+    "trigger",
+    "test_run_obligations_identity_update",
+    "610e4a51344f9080e936fa43c66c9f4d1b2a6c5a6857bbdfaa4684a230d6057a",
+  ],
+  [
+    "trigger",
+    "test_run_obligations_immutable_delete",
+    "0d255cc80754cdcbfb1538cdf01231ab449462714958918c110b9bf508448ead",
+  ],
+  [
+    "index",
+    "test_run_obligations_run_idx",
+    "12a3689c249eda2944bc5d1782bc815efd9e6432cfb63b786ba446b7953abe3e",
+  ],
+  [
+    "trigger",
+    "test_run_obligations_terminal_run_insert",
+    "e6bb8cad27de4982b8f7164d178ede8b963876dfdd5e93873038246cba0cceb6",
+  ],
+  [
+    "table",
+    "test_runs",
+    "6d363fb153b8270edf40cad33b78d78738d0672c6233838844fcdac894ee15ee",
+  ],
+  [
+    "trigger",
+    "test_runs_identity_update",
+    "054d9b4e9390dbb229f661a7f1be1a27274b6c6eb923cf51923536cafdaa709f",
+  ],
+  [
+    "trigger",
+    "test_runs_immutable_delete",
+    "12f8cbe40f1f8b60001da17ad53814c9567fc218a1661eb18d5a080854514787",
+  ],
+  [
+    "index",
+    "test_runs_run_idx",
+    "52045a225d128f721928bbf9d5770ed6d743be1ab8d73c7148d09a2165ab9548",
+  ],
+  [
+    "index",
+    "test_runs_state_idx",
+    "6cee537405636c9be27588a58fc04eac2874c7ed87ddccff81b14b73875ac146",
+  ],
+  [
+    "trigger",
+    "test_runs_terminal_update",
+    "1ff646e12e0da3c13f75f873941d3c9a929a2857d75e83697f2e6888757421a5",
+  ],
+] as const;
 
 const tableExists = (database: DatabaseSync, table: string): boolean =>
   database
@@ -5299,117 +5618,51 @@ const migrations: readonly CompanyMigration[] = [
             BEGIN SELECT RAISE(ABORT, 'Test Run obligation identity is immutable'); END;
         `);
         createV48Objects(database);
-        return;
       }
-      const expectedNames = [
-        "test_defect_resolutions_defect_idx",
-        "test_rework_runs",
-        "test_rework_runs_defect_idx",
-        "test_rework_runs_immutable_delete",
-        "test_rework_runs_immutable_update",
-        "test_run_obligation_resolutions",
-        "test_run_obligation_resolutions_immutable_delete",
-        "test_run_obligation_resolutions_immutable_update",
-      ];
       const actualObjects = database
         .prepare(
-          `SELECT name, sql FROM sqlite_schema
-            WHERE name IN (${expectedNames.map(() => "?").join(", ")})
-            ORDER BY name`,
+          "SELECT type, name, sql FROM sqlite_schema WHERE name LIKE 'test_%' ORDER BY name",
         )
-        .all(...expectedNames) as Array<{
+        .all() as Array<{
+        readonly type: string;
         readonly name: string;
         readonly sql: string;
       }>;
-      const reference = new DatabaseSync(":memory:");
-      try {
-        reference.exec(`
-          CREATE TABLE test_defects(id TEXT PRIMARY KEY) STRICT;
-          CREATE TABLE test_runs(id TEXT PRIMARY KEY) STRICT;
-          CREATE TABLE test_defect_resolutions (
-            id TEXT PRIMARY KEY,
-            defect_id TEXT NOT NULL REFERENCES test_defects(id),
-            resolution_json TEXT NOT NULL,
-            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
-            created_at TEXT NOT NULL
-          ) STRICT;
-          CREATE TABLE test_run_obligations (
-            id TEXT PRIMARY KEY,
-            test_run_id TEXT NOT NULL REFERENCES test_runs(id),
-            description TEXT NOT NULL,
-            evidence_json TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
-            created_at TEXT NOT NULL,
-            closed_at TEXT,
-            defect_id TEXT REFERENCES test_defects(id)
-          ) STRICT;
-        `);
-        createV48Objects(reference);
-        const expectedObjects = reference
-          .prepare(
-            `SELECT name, sql FROM sqlite_schema
-              WHERE name IN (${expectedNames.map(() => "?").join(", ")})
-              ORDER BY name`,
-          )
-          .all(...expectedNames) as Array<{
-          readonly name: string;
-          readonly sql: string;
-        }>;
-        const actualByName = new Map(
-          actualObjects.map((entry) => [entry.name, normalizeSql(entry.sql)]),
+      const actualByName = new Map(
+        actualObjects.map((entry) => [
+          entry.name,
+          {
+            type: entry.type,
+            sqlHash: createHash("sha256")
+              .update(normalizeSql(entry.sql))
+              .digest("hex"),
+          },
+        ]),
+      );
+      const expectedNames = new Set<string>(
+        TEST_V48_SCHEMA_REFERENCE.map(([, name]) => name),
+      );
+      const incompatible: string[] = TEST_V48_SCHEMA_REFERENCE.flatMap(
+        ([type, name, sqlHash]) => {
+          const actual = actualByName.get(name);
+          return !actual || actual.type !== type || actual.sqlHash !== sqlHash
+            ? [name]
+            : [];
+        },
+      );
+      incompatible.push(
+        ...actualObjects
+          .filter((entry) => !expectedNames.has(entry.name))
+          .map((entry) => entry.name),
+      );
+      if (incompatible.length > 0) {
+        throw new Error(
+          `Existing Test v48 schema is incompatible: ${[
+            ...new Set(incompatible),
+          ]
+            .sort()
+            .join(", ")}`,
         );
-        const incompatible = expectedObjects
-          .filter(
-            (entry) => actualByName.get(entry.name) !== normalizeSql(entry.sql),
-          )
-          .map((entry) => entry.name);
-        const identityTrigger = database
-          .prepare(
-            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'test_run_obligations_identity_update'",
-          )
-          .get() as { readonly sql: string } | undefined;
-        const forbiddenHistoricalTriggers = database
-          .prepare(
-            `SELECT name FROM sqlite_schema
-              WHERE type = 'trigger'
-                AND name IN (
-                  'test_defects_terminal_run_update',
-                  'test_defect_resolutions_terminal_run_insert',
-                  'test_run_obligations_terminal_run_update'
-                )`,
-          )
-          .all() as Array<{ readonly name: string }>;
-        if (
-          !hasDefectId ||
-          !hasUiObservation ||
-          !hasRuntimeObservation ||
-          incompatible.length > 0 ||
-          !identityTrigger?.sql.includes(
-            "NEW.defect_id IS NOT OLD.defect_id",
-          ) ||
-          forbiddenHistoricalTriggers.length > 0
-        ) {
-          throw new Error(
-            `Existing Test v48 schema is incompatible: ${[
-              ...incompatible,
-              ...(!hasDefectId ? ["test_run_obligations.defect_id"] : []),
-              ...(!hasUiObservation
-                ? ["test_assertion_results.ui_observation_json"]
-                : []),
-              ...(!hasRuntimeObservation
-                ? ["test_assertion_results.runtime_observation_json"]
-                : []),
-              ...(!identityTrigger?.sql.includes(
-                "NEW.defect_id IS NOT OLD.defect_id",
-              )
-                ? ["test_run_obligations_identity_update"]
-                : []),
-              ...forbiddenHistoricalTriggers.map((entry) => entry.name),
-            ].join(", ")}`,
-          );
-        }
-      } finally {
-        reference.close();
       }
     },
   },

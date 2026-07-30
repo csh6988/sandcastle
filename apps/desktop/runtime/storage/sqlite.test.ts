@@ -2609,6 +2609,35 @@ describe("Test authority schema migration", () => {
     partial.close();
   });
 
+  it("rejects a downgraded v48 schema missing any historical v47 immutability trigger", () => {
+    const companyDir = tempCompanyDir();
+    openCompanyDatabase(companyDir).close();
+    const path = join(companyDir, ".sandcastle", "company.sqlite");
+    const database = new DatabaseSync(path);
+    database.exec(`
+      DROP TRIGGER test_evidence_immutable_delete;
+      UPDATE schema_metadata SET value = '47' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 48;
+      PRAGMA user_version = 47;
+    `);
+
+    assert.throws(
+      () => migrateCompanyDatabase(database),
+      /Existing Test v48 schema is incompatible: test_evidence_immutable_delete/,
+    );
+    assert.equal(
+      (
+        database
+          .prepare(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+          )
+          .get() as { readonly value: string }
+      ).value,
+      "47",
+    );
+    database.close();
+  });
+
   it("rejects a future Test authority schema without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const initialized = openCompanyDatabase(companyDir);

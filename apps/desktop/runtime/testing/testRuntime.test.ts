@@ -31,6 +31,7 @@ const testRunQueryHash = (testRunId: string): string =>
 const testRiskInput = (
   testCaseRevisionIds: readonly string[] = ["case-1-r1"],
   operationIds: readonly string[] = ["operation-1", "cleanup-operation-1"],
+  workPackageRiskTier: "low" | "medium" | "high" | "critical" = "high",
 ) => {
   const rules = [
     { factorId: "auth-permission", minimumTier: "high" as const },
@@ -56,6 +57,10 @@ const testRiskInput = (
       minimumTier: "high" as const,
     },
     { factorId: "user-visible-runtime", minimumTier: "high" as const },
+    {
+      factorId: "work-package-risk-tier",
+      minimumTier: workPackageRiskTier,
+    },
   ];
   const revisionId = `technical-baseline:technical-baseline-1:${hash("5")}`;
   const policyHash = canonicalHash({
@@ -121,6 +126,13 @@ const testRiskInput = (
         .map((id) => `test-case-revision:${id}`)
         .sort(),
     },
+    {
+      id: "work-package-risk-tier",
+      present: true,
+      evidenceRefs: [
+        `work-package-version:package-1-v1:risk-tier:${workPackageRiskTier}`,
+      ],
+    },
   ];
   const evidenceRefs = [
     ...new Set(factors.flatMap((factor) => factor.evidenceRefs)),
@@ -133,7 +145,7 @@ const testRiskInput = (
       hash: policyHash,
     },
     factors,
-    computedTier: "high" as const,
+    computedTier: workPackageRiskTier,
     evidenceRefs,
     inputHash: canonicalHash({
       schemaVersion: 1,
@@ -244,6 +256,7 @@ const openFixture = (
     commandId: string,
   ) => void,
   nextId?: () => string,
+  workPackageRiskTier: "low" | "medium" | "high" | "critical" = "high",
 ) => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
@@ -298,7 +311,7 @@ const openFixture = (
     selfCheckCommands: ["fixture-test"],
     codeReviewConditions: ["Independent PASS required"],
     integrationConditions: ["fixture-test"],
-    riskTier: "high",
+    riskTier: workPackageRiskTier,
     recoveryPolicy: "Create a fresh Version and Attempt.",
     execution: {
       profileId: "software-rnd-local-isolated-git",
@@ -542,7 +555,7 @@ const openFixture = (
     clock: { instant: "2026-07-29T00:00:00.000Z", seed: "seed-1" },
     environment: { platform: "darwin", architecture: "arm64" },
     capabilities: ["electron", "runtime-query"],
-    risk: testRiskInput(),
+    risk: testRiskInput(undefined, undefined, workPackageRiskTier),
   };
   return {
     database,
@@ -894,6 +907,28 @@ const trustedCorrelation = (
   };
 };
 
+const selectedQueryView = (
+  fixture: ReturnType<typeof openFixture>,
+  correlation: ReturnType<typeof trustedCorrelation>,
+) =>
+  fixture.database
+    .prepare(
+      `SELECT token_hash AS tokenHash, query_hash AS queryHash,
+              view_hash AS viewHash, sequence,
+              consumer_id AS consumerId, principal_hash AS principalHash,
+              command_id AS acknowledgementCommandId
+         FROM consumed_view_sync_tokens WHERE token_hash = ?`,
+    )
+    .get(correlation.viewSyncTokenHash) as {
+    readonly tokenHash: string;
+    readonly queryHash: string;
+    readonly viewHash: string;
+    readonly sequence: number;
+    readonly consumerId: string;
+    readonly principalHash: string;
+    readonly acknowledgementCommandId: string;
+  };
+
 const completeFreshPassingRun = async (
   fixture: ReturnType<typeof openFixture>,
   suffix: string,
@@ -1112,6 +1147,7 @@ describe("Test Runtime", () => {
           return {
             state: "succeeded" as const,
             providerReceipt: { id: "receipt-materialized" },
+            selectedQueryView: selectedQueryView(fixture, correlation),
             result: {
               schemaVersion: 1,
               assertions: [
@@ -1959,6 +1995,25 @@ describe("Test Runtime", () => {
     }
   });
 
+  it("keeps a keyword-free critical frozen Work Package as the Test scope tier floor", () => {
+    const fixture = openFixture(false, false, undefined, undefined, "critical");
+
+    const run = fixture.runtime.createRun(fixture.runInput);
+
+    assert.equal(run.manifest.risk.computedTier, "critical");
+    assert.deepEqual(
+      run.manifest.risk.factors.find(
+        (factor) => factor.id === "work-package-risk-tier",
+      ),
+      {
+        id: "work-package-risk-tier",
+        present: true,
+        evidenceRefs: ["work-package-version:package-1-v1:risk-tier:critical"],
+      },
+    );
+    fixture.database.close();
+  });
+
   it("raises explicit destructive and boundary signals to critical and rejects downgrade", () => {
     const fixture = openFixture();
     const capabilities = [
@@ -2034,46 +2089,7 @@ describe("Test Runtime", () => {
         workPackageVersions: [],
       },
     });
-    const incompleteFactors = testRiskInput([incomplete.id]).factors.map(
-      (factor) => {
-        if (factor.id === "auth-permission") {
-          return {
-            ...factor,
-            evidenceRefs: factor.evidenceRefs.filter(
-              (reference) => !reference.includes(":permission:"),
-            ),
-          };
-        }
-        if (factor.id === "network-filesystem-scope") {
-          return { ...factor, present: false, evidenceRefs: [] };
-        }
-        if (factor.id === "rollback-resource-timeout-recovery") {
-          return {
-            ...factor,
-            evidenceRefs: factor.evidenceRefs.filter(
-              (reference) => !reference.endsWith(":recovery-policy"),
-            ),
-          };
-        }
-        return factor;
-      },
-    );
-    const incompleteEvidenceRefs = [
-      ...new Set(incompleteFactors.flatMap((factor) => factor.evidenceRefs)),
-    ].sort();
-    const baseIncompleteRisk = testRiskInput([incomplete.id]);
-    const incompleteRisk = {
-      ...baseIncompleteRisk,
-      factors: incompleteFactors,
-      evidenceRefs: incompleteEvidenceRefs,
-      inputHash: canonicalHash({
-        schemaVersion: 1,
-        policyRevisionId: baseIncompleteRisk.policy.revisionId,
-        policyHash: baseIncompleteRisk.policy.hash,
-        factors: incompleteFactors,
-        evidenceRefs: incompleteEvidenceRefs,
-      }),
-    };
+    const incompleteRisk = testRiskInput([incomplete.id]);
     assert.throws(
       () =>
         fixture.runtime.createRun({
@@ -2393,7 +2409,7 @@ describe("Test Runtime", () => {
     fixture.database.close();
   });
 
-  it("creates deterministic Defects and obligations for the failed, unknown, and missing assertion union", async () => {
+  it("blocks the complete failed, unknown, and missing assertion union", async () => {
     const fixture = openFixture();
     const revision = fixture.runtime.registerCaseRevision({
       ...fixture.revisionInput,
@@ -2455,7 +2471,7 @@ describe("Test Runtime", () => {
 
     const completed = fixture.runtime.complete(runInput.testRunId);
 
-    assert.equal(completed.state, "failed");
+    assert.equal(completed.state, "blocked");
     assert.deepEqual(
       completed.defects.map((defect) => defect.assertionId).sort(),
       ["assertion-failed", "assertion-missing", "assertion-unknown"],
@@ -2464,6 +2480,49 @@ describe("Test Runtime", () => {
     assert.equal(
       completed.defects.every((defect) => defect.status === "open"),
       true,
+    );
+    fixture.database.close();
+  });
+
+  it("keeps missing assertion identity unambiguous when revision and assertion IDs contain colons", async () => {
+    const fixture = openFixture();
+    const revision = fixture.runtime.registerCaseRevision({
+      ...fixture.revisionInput,
+      revisionId: "case:colon:r1",
+      manifest: {
+        ...fixture.revisionInput.manifest,
+        assertions: [
+          {
+            id: "assertion:missing:only",
+            operationId: "operation-1",
+            ui: { kind: "text", expected: "passed" },
+            runtime: { kind: "state", expected: "passed" },
+          },
+        ],
+      },
+    });
+    const runInput = {
+      ...fixture.runInput,
+      testCaseRevisions: [{ id: revision.id, hash: revision.manifestHash }],
+      risk: testRiskInput([revision.id]),
+    };
+    fixture.runtime.createRun(runInput);
+    await succeedRequiredExecution(fixture, runInput);
+
+    const completed = fixture.runtime.complete(runInput.testRunId);
+
+    assert.equal(completed.state, "blocked");
+    assert.deepEqual(
+      completed.defects.map((defect) => ({
+        testCaseRevisionId: defect.testCaseRevisionId,
+        assertionId: defect.assertionId,
+      })),
+      [
+        {
+          testCaseRevisionId: "case:colon:r1",
+          assertionId: "assertion:missing:only",
+        },
+      ],
     );
     fixture.database.close();
   });
@@ -3117,6 +3176,7 @@ describe("Test Runtime", () => {
         return {
           state: "succeeded" as const,
           providerReceipt: { id: "terminal-receipt" },
+          selectedQueryView: selectedQueryView(fixture, correlation),
           result: {
             schemaVersion: 1 as const,
             assertions: [
@@ -3151,6 +3211,77 @@ describe("Test Runtime", () => {
     assert.equal(reconciled.executions[0]?.state, "succeeded");
     assert.equal(reconciled.assertions[0]?.uiStatus, "passed");
     assert.equal(reconciled.assertions[0]?.runtimeStatus, "passed");
+    fixture.database.close();
+  });
+
+  it("rejects an older same-View token when the adapter selected a different acknowledged token", async () => {
+    const fixture = openFixture(true);
+    fixture.runtime.createRun(fixture.runInput);
+    seedEvidenceArtifact(fixture, {
+      id: "same-view-artifact",
+      contentHash: hash("4"),
+      byteSize: 42,
+      locator: "evidence/same-view.json",
+    });
+    const adapter = {
+      id: "scripted-test",
+      execute: () => ({
+        state: "accepted" as const,
+        providerReceipt: { id: "accepted-receipt" },
+      }),
+      reconcile: () => {
+        const older = trustedCorrelation(
+          fixture,
+          ["same-view-artifact"],
+          fixture.runInput,
+          "-same-view-older",
+        );
+        const selected = trustedCorrelation(
+          fixture,
+          ["same-view-artifact"],
+          fixture.runInput,
+          "-same-view-selected",
+        );
+        assert.equal(older.queryViewHash, selected.queryViewHash);
+        return {
+          state: "succeeded" as const,
+          providerReceipt: { id: "terminal-receipt" },
+          selectedQueryView: selectedQueryView(fixture, selected),
+          result: {
+            schemaVersion: 1 as const,
+            assertions: [
+              {
+                testCaseRevisionId: fixture.revision.id,
+                assertionId: "assertion-1",
+                uiObserved: "passed",
+                runtimeObserved: "passed",
+                uiStatus: "passed" as const,
+                runtimeStatus: "passed" as const,
+                correlation: older,
+              },
+            ],
+            evidence: [],
+          },
+        };
+      },
+    };
+    await fixture.runtime.execute({
+      testRunId: fixture.runInput.testRunId,
+      operationId: "operation-1",
+      input: { kind: "electron" },
+      adapter,
+    });
+
+    await assert.rejects(
+      fixture.runtime.reconcile({
+        testRunId: fixture.runInput.testRunId,
+        operationId: "operation-1",
+        adapter,
+      }),
+      (error: unknown) =>
+        error instanceof TestRuntimeError &&
+        error.code === "TEST_ASSERTION_CORRELATION_INVALID",
+    );
     fixture.database.close();
   });
 
@@ -3637,7 +3768,13 @@ describe("Test Runtime", () => {
       },
     });
     const prior = fixture.runtime.complete(fixture.runInput.testRunId);
-    const automaticDefectId = `test-defect:assertion:${prior.id}:${fixture.revision.id}:assertion-1`;
+    const automaticDefectId = `test-defect:assertion:${prior.id}:${canonicalHash(
+      {
+        schemaVersion: 1,
+        testCaseRevisionId: fixture.revision.id,
+        assertionId: "assertion-1",
+      },
+    )}`;
     assert.deepEqual(
       prior.defects.map((defect) => defect.id).sort(),
       [automaticDefectId, "related-defect"].sort(),
@@ -3727,9 +3864,22 @@ describe("Test Runtime", () => {
       mappings
         .map((mapping) => ({
           ...mapping,
+          priorTestRunId: prior.id,
+          priorIntegrationGenerationId:
+            prior.manifest.integrationAuthority.generationId,
           priorTestCaseRevisionId: fixture.revision.id,
           priorAssertionId: "assertion-1",
           priorResultHash: failed.assertion.resultHash,
+          responsibilityRoute:
+            mapping.defectId === "related-defect"
+              ? {
+                  destination: "ui-runtime-contract" as const,
+                  owner: "shared" as const,
+                }
+              : {
+                  destination: "ui-runtime-contract" as const,
+                  owner: "runtime" as const,
+                },
         }))
         .sort((left, right) => left.defectId.localeCompare(right.defectId)),
     );
@@ -3793,6 +3943,185 @@ describe("Test Runtime", () => {
     assert.equal(
       resolvedPrior.obligations.every(
         (obligation) => obligation.status === "closed",
+      ),
+      true,
+    );
+    assert.equal(
+      fixture.runtime.downstreamAuthority(passed.id).testRunId,
+      passed.id,
+    );
+    fixture.database.close();
+  });
+
+  it("recursively freezes and resolves ancestor and current rework scope with each responsibility route", async () => {
+    const fixture = openFixture();
+    const failed = await prepareFailedAssertion(fixture, "recursive-base");
+    fixture.runtime.recordDefect({
+      id: "ancestor-work-package-defect",
+      testRunId: fixture.runInput.testRunId,
+      testCaseRevisionId: fixture.revision.id,
+      assertionId: "assertion-1",
+      responsibility: {
+        kind: "work-package",
+        workPackageId: "package-1",
+        workPackageVersionId: "package-1-v1",
+      },
+      evidence: {
+        schemaVersion: 1,
+        kind: "assertion",
+        assertion: {
+          testCaseRevisionId: fixture.revision.id,
+          assertionId: "assertion-1",
+          resultHash: failed.assertion.resultHash,
+        },
+        evidenceRefs: failed.evidenceRefs,
+      },
+    });
+    const base = fixture.runtime.complete(fixture.runInput.testRunId);
+    const baseDefectIds = base.defects.map((defect) => defect.id).sort();
+    const revision2 = fixture.runtime.registerCaseRevision({
+      ...fixture.revisionInput,
+      revisionId: "case-recursive-r2",
+      supersedesRevisionId: fixture.revision.id,
+    });
+    seedFreshTestAttempt(fixture, "recursive-r2");
+    const firstInput = {
+      ...fixture.runInput,
+      testRunId: "test:run-1:test-node-recursive-r2",
+      requestId: "request-recursive-r2",
+      nodeRunId: "test-node-recursive-r2",
+      nodeAttemptId: "test-attempt-recursive-r2",
+      sessionId: "test-session-recursive-r2",
+      testCaseRevisions: [{ id: revision2.id, hash: revision2.manifestHash }],
+      risk: testRiskInput([revision2.id]),
+    };
+    const first = fixture.runtime.createReworkRun({
+      defectId: "ancestor-work-package-defect",
+      input: firstInput,
+      successorAssertions: baseDefectIds.map((defectId) => ({
+        defectId,
+        nextTestCaseRevisionId: revision2.id,
+        nextAssertionId: "assertion-1",
+      })),
+    });
+    await succeedRequiredExecution(fixture, firstInput);
+    fixture.runtime.recordAssertion({
+      operationId: "operation-1",
+      testRunId: first.run.id,
+      testCaseRevisionId: revision2.id,
+      assertionId: "assertion-1",
+      uiObserved: "passed",
+      runtimeObserved: "failed",
+      uiStatus: "passed",
+      runtimeStatus: "failed",
+      correlation: trustedCorrelation(fixture, [], firstInput, "-recursive-r2"),
+    });
+    const firstFailed = fixture.runtime.complete(first.run.id);
+    const currentDefectId = firstFailed.defects[0]!.id;
+    const revision3 = fixture.runtime.registerCaseRevision({
+      ...fixture.revisionInput,
+      revisionId: "case-recursive-r3",
+      supersedesRevisionId: revision2.id,
+    });
+    seedFreshTestAttempt(fixture, "recursive-r3");
+    const secondInput = {
+      ...fixture.runInput,
+      testRunId: "test:run-1:test-node-recursive-r3",
+      requestId: "request-recursive-r3",
+      nodeRunId: "test-node-recursive-r3",
+      nodeAttemptId: "test-attempt-recursive-r3",
+      sessionId: "test-session-recursive-r3",
+      testCaseRevisions: [{ id: revision3.id, hash: revision3.manifestHash }],
+      risk: testRiskInput([revision3.id]),
+    };
+    const recursiveDefectIds = [...baseDefectIds, currentDefectId].sort();
+
+    const second = fixture.runtime.createReworkRun({
+      defectId: currentDefectId,
+      input: secondInput,
+      successorAssertions: recursiveDefectIds.map((defectId) => ({
+        defectId,
+        nextTestCaseRevisionId: revision3.id,
+        nextAssertionId: "assertion-1",
+      })),
+    });
+
+    assert.deepEqual(second.lineage.scope.defectIds, recursiveDefectIds);
+    const routes = new Map(
+      second.lineage.successorAssertions.map((mapping) => [
+        mapping.defectId,
+        mapping.responsibilityRoute,
+      ]),
+    );
+    assert.equal(
+      routes.get("ancestor-work-package-defect")?.destination,
+      "work-package",
+    );
+    assert.equal(
+      routes.get(currentDefectId)?.destination,
+      "ui-runtime-contract",
+    );
+
+    await succeedRequiredExecution(fixture, secondInput);
+    const evidenceIds = [
+      ["recursive-pass-ui", "screenshot", "image/png", hash("4")],
+      ["recursive-pass-runtime", "runtime", "application/json", hash("5")],
+    ] as const;
+    for (const [id, kind, mediaType, contentHash] of evidenceIds) {
+      seedEvidenceArtifact(fixture, {
+        id,
+        contentHash,
+        byteSize: 42,
+        locator: `evidence/${id}`,
+      });
+      fixture.runtime.recordEvidence({
+        id,
+        operationId: "operation-1",
+        testRunId: second.run.id,
+        testCaseRevisionId: revision3.id,
+        assertionId: "assertion-1",
+        kind,
+        mediaType,
+        contentHash,
+        byteSize: 42,
+        artifactVersionId: id,
+        redactionProfile: "default",
+        retentionClass: "durable",
+        locator: `evidence/${id}`,
+        metadata: {},
+      });
+    }
+    fixture.runtime.recordAssertion({
+      operationId: "operation-1",
+      testRunId: second.run.id,
+      testCaseRevisionId: revision3.id,
+      assertionId: "assertion-1",
+      uiObserved: "passed",
+      runtimeObserved: "passed",
+      uiStatus: "passed",
+      runtimeStatus: "passed",
+      correlation: trustedCorrelation(
+        fixture,
+        evidenceIds.map(([id]) => id),
+        secondInput,
+        "-recursive-r3",
+      ),
+    });
+
+    const passed = fixture.runtime.complete(second.run.id);
+
+    assert.equal(passed.state, "passed");
+    assert.equal(
+      recursiveDefectIds.every(
+        (defectId) =>
+          fixture.runtime
+            .inspect(
+              defectId === currentDefectId
+                ? first.run.id
+                : fixture.runInput.testRunId,
+            )
+            .defects.find((defect) => defect.id === defectId)?.status ===
+          "closed",
       ),
       true,
     );
