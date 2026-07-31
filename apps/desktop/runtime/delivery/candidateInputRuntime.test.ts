@@ -986,6 +986,46 @@ describe("Delivery Candidate Input Runtime", () => {
     fixture.database.close();
   });
 
+  it("rejects a producer whose exact Candidate Node Attempt does not exist", () => {
+    const fixture = openFixture();
+
+    assert.throws(
+      () =>
+        fixture.runtime.freeze({
+          ...freezeInput,
+          nodeRunId: "missing-candidate-input-node",
+          nodeAttemptId: "missing-candidate-input-attempt",
+        }),
+      (error: unknown) =>
+        error instanceof CandidateInputRuntimeError &&
+        error.code === "CANDIDATE_PRODUCER_BINDING_INVALID",
+    );
+    fixture.database.close();
+  });
+
+  it("keeps a failed exact Work Package assignment forbidden from review", () => {
+    const fixture = openFixture();
+    fixture.database
+      .prepare(
+        "UPDATE work_package_assignments SET state = 'failed' WHERE id = ?",
+      )
+      .run("package-1-assignment");
+
+    const frozen = fixture.runtime.freeze(freezeInput);
+
+    assert.equal(
+      (frozen.manifest.forbiddenReviewerIdentities ?? []).some(
+        (identity) =>
+          identity.aiMemberId === "implementer-member" &&
+          identity.positionId === "implementer-position" &&
+          identity.sessionId === "package-session-1" &&
+          identity.reason === "integration-assignment",
+      ),
+      true,
+    );
+    fixture.database.close();
+  });
+
   it("rejects evidence that exceeds the frozen aggregate retention budget", () => {
     const fixture = openFixture();
 

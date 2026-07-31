@@ -3181,26 +3181,16 @@ const executeDeliveryQualityCommand = (
       const priorResult = CommandResultSchema.parse(
         JSON.parse(receipt.resultJson),
       ) as CommandResult<unknown>;
-      const replacesActorRejection =
-        validRuntimeActor &&
-        priorResult.status === "rejected" &&
-        priorResult.error.code === "DELIVERY_QUALITY_ACTOR_INVALID";
-      if (replacesActorRejection) {
-        database
-          .prepare("DELETE FROM command_deduplication WHERE command_id = ?")
-          .run(envelope.commandId);
-      } else {
-        const sameRequest =
-          receipt.actorType === envelope.actor.type &&
-          receipt.actorId === envelope.actor.id &&
-          receipt.authenticatedBy === envelope.actor.authenticatedBy &&
-          receipt.consumerId === (envelope.consumerId ?? null) &&
-          receipt.schemaVersion === envelope.schemaVersion &&
-          receipt.requestHash === requestHash;
-        database.exec("COMMIT");
-        if (!sameRequest) return commandIdReuse(envelope.commandId);
-        return priorResult;
-      }
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      return priorResult;
     }
     database
       .prepare(
@@ -3308,27 +3298,29 @@ const executeDeliveryQualityCommand = (
       .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
       .run();
     const resultJson = canonicalJson(result);
-    database
-      .prepare(
-        `INSERT INTO command_deduplication(
-           command_id, actor_type, actor_id, authenticated_by, consumer_id,
-           schema_version, request_hash, status, result_json, result_hash,
-           effect_ids_json, completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
-      )
-      .run(
-        envelope.commandId,
-        envelope.actor.type,
-        envelope.actor.id,
-        envelope.actor.authenticatedBy,
-        envelope.consumerId ?? null,
-        envelope.schemaVersion,
-        requestHash,
-        resultJson,
-        sha256(resultJson),
-        canonicalJson(result.effectIds),
-        clock().toISOString(),
-      );
+    if (validRuntimeActor) {
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+        )
+        .run(
+          envelope.commandId,
+          envelope.actor.type,
+          envelope.actor.id,
+          envelope.actor.authenticatedBy,
+          envelope.consumerId ?? null,
+          envelope.schemaVersion,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(result.effectIds),
+          clock().toISOString(),
+        );
+    }
     database.exec("COMMIT");
     return result;
   } catch (error) {

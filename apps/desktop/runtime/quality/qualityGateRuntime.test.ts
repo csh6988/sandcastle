@@ -1551,6 +1551,16 @@ describe("Quality Gate Runtime input", () => {
     if (rejected.status === "rejected") {
       assert.equal(rejected.error.code, "DELIVERY_QUALITY_ACTOR_INVALID");
     }
+    assert.equal(
+      (
+        fixture.database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+          )
+          .get(envelope.commandId) as { count: number }
+      ).count,
+      0,
+    );
 
     const first = registry.execute(envelope);
 

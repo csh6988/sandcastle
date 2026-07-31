@@ -685,18 +685,7 @@ export const openCandidateInputRuntime = (
         input.producer.aiMemberId,
         input.producer.positionId,
       );
-    const producerContextExists = database
-      .prepare(
-        `SELECT 1 AS present
-           FROM node_runs nodes
-           JOIN node_attempts attempts ON attempts.node_run_id = nodes.id
-          WHERE nodes.id = ? AND attempts.id = ?
-            AND nodes.run_id = ?
-            AND nodes.handler_kind_id = 'delivery-candidate-input@1'
-          LIMIT 1`,
-      )
-      .get(input.nodeRunId, input.nodeAttemptId, input.runId);
-    if (producerContextExists && !producerBinding) {
+    if (!producerBinding) {
       throw new CandidateInputRuntimeError(
         "CANDIDATE_PRODUCER_BINDING_INVALID",
         "Delivery Candidate producer must resolve to the exact active Run/Node Attempt/Session/AI/Position identity.",
@@ -739,8 +728,7 @@ export const openCandidateInputRuntime = (
              FROM work_package_assignments assignments
              JOIN work_package_versions versions
                ON versions.id = assignments.work_package_version_id
-            WHERE versions.id = ?
-              AND assignments.state NOT IN ('superseded', 'failed')`,
+            WHERE versions.id = ?`,
         )
         .all(entry.workPackageVersionId) as Array<{
         readonly aiMemberId: string;
