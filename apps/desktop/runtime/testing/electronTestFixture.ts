@@ -38,6 +38,12 @@ export const applyElectronTestFixtureExitCode = (
   processControl.exit(exitCode);
 };
 
+export const electronTestFixtureRuntimePrincipal = {
+  type: "runtime-worker",
+  id: "electron-test-fixture",
+  authenticatedBy: "runtime",
+} as const;
+
 export type ElectronTestFixtureConfig = {
   readonly schemaVersion: 1;
   readonly configHash: string;

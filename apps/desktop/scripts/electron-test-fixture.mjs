@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -185,6 +186,32 @@ const readFixtureObservation = async () => {
   } finally {
     debuggerSession.detach();
   }
+};
+
+const readCandidateObservation = async () => {
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-candidate-quality-gates]");return panel?{candidateInputId:panel.getAttribute("data-candidate-input"),authorityId:panel.getAttribute("data-candidate-authority"),sync:panel.getAttribute("data-candidate-sync"),passGateCount:panel.querySelectorAll('[data-quality-gate-result="PASS"]').length,text:panel.textContent}:null})())`,
+      returnByValue: true,
+    });
+    return JSON.parse(result.result.value);
+  } finally {
+    debuggerSession.detach();
+  }
+};
+
+const waitForCandidateObservation = async (predicate, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const observation = await readCandidateObservation();
+    if (observation && predicate(observation)) return observation;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Candidate Quality Gate renderer observation; found ${JSON.stringify(await readCandidateObservation())}.`,
+  );
 };
 
 const caseManifestFor = (seeded, operations) => ({
@@ -419,10 +446,13 @@ const runInputFor = (seeded, caseRevisionHash, operations) => ({
     electron: process.versions.electron,
   },
   capabilities: [
+    "branch",
     "electron",
+    "git-ref-write-isolation",
     "main-ipc",
     "preload",
     "query-view",
+    "runtime-import-only",
     "runtime-child",
     "sqlite",
   ],
@@ -932,7 +962,7 @@ const run = async () => {
   await waitForTitle("idle");
   let cleanupMaterialized = false;
   let terminalView;
-  for (let gesture = 1; gesture <= 8; gesture += 1) {
+  for (let gesture = 1; gesture <= 12; gesture += 1) {
     await clickFixtureButton();
     await waitForTitle("working");
     await waitForTitle(["ready", "pass"]);
@@ -1013,6 +1043,136 @@ const run = async () => {
     type: "test-pass-authority.inspect",
     testRunId: route.testRunId,
   });
+  const qualityReceiptPath = join(
+    fixture.config.evidenceDirectory,
+    "runtime",
+    "candidate-quality-gates.json",
+  );
+  for (
+    let attempt = 0;
+    attempt < 400 && !existsSync(qualityReceiptPath);
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(
+    existsSync(qualityReceiptPath),
+    true,
+    `Candidate Quality Gate setup receipt was not materialized; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
+  );
+  const qualityReceipt = JSON.parse(readFileSync(qualityReceiptPath, "utf8"));
+  assert.equal(statSync(qualityReceiptPath).mode & 0o777, 0o600);
+  assert.equal(qualityReceipt.schemaVersion, 1);
+  const candidateInspection = await query("fixture-candidate-input", {
+    type: "delivery-candidate-input.inspect",
+    candidateInputId: qualityReceipt.candidateInputId,
+  });
+  const candidate = candidateInspection.view;
+  assert.equal(candidate.manifestHash, qualityReceipt.candidateInputHash);
+  assert.equal(candidate.manifest.risk.tier, qualityReceipt.candidateRiskTier);
+  assert.equal(
+    candidate.manifest.tests[0]?.passAuthorityHash,
+    downstream.view.passAuthorityHash,
+  );
+  const gateResults = {
+    security: { id: qualityReceipt.securityGateResultId },
+    operability: { id: qualityReceipt.operabilityGateResultId },
+  };
+  const execute = async (commandId, command) => {
+    const result = await supervisor.executeEnvelope({
+      schemaVersion: 1,
+      commandId,
+      actor: {
+        type: "runtime-worker",
+        id: "electron-test-fixture-runtime",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "electron-test-fixture-driver",
+      command,
+    });
+    assert.equal(
+      result.status,
+      "succeeded",
+      result.status === "rejected"
+        ? `${result.error.code}: ${result.error.message}`
+        : undefined,
+    );
+    return result.value;
+  };
+  const beforeAuthority = await query(
+    "fixture-quality-gates-before-authority",
+    {
+      type: "quality-gates.inspect",
+      candidateInputId: candidate.id,
+    },
+  );
+  assert.equal(beforeAuthority.view.authority, null);
+  assert.equal(beforeAuthority.view.gateResults.length, 2);
+
+  const candidateRoute = {
+    ...route,
+    restoreOnLoad: true,
+    candidateInputId: candidate.id,
+  };
+  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
+  await waitForTitle("pass");
+  const blockedCandidateObservation = await waitForCandidateObservation(
+    (observation) =>
+      observation.candidateInputId === candidate.id &&
+      observation.authorityId === "blocked" &&
+      observation.sync === "ready" &&
+      observation.passGateCount === 2,
+  );
+  const authority = await execute("fixture-candidate-input-authorize", {
+    type: "delivery.candidate-input.authorize",
+    authorityId: "fixture-candidate-input-authority",
+    candidateInputId: candidate.id,
+    expectedCandidateInputHash: candidate.manifestHash,
+    securityGateResultId: gateResults.security.id,
+    operabilityGateResultId: gateResults.operability.id,
+  });
+  const eventRefreshedCandidateObservation = await waitForCandidateObservation(
+    (observation) =>
+      observation.authorityId === authority.id &&
+      observation.sync === "ready" &&
+      observation.passGateCount === 2,
+  );
+  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
+  await waitForTitle("pass");
+  const reloadedCandidateObservation = await waitForCandidateObservation(
+    (observation) =>
+      observation.authorityId === authority.id &&
+      observation.sync === "ready" &&
+      observation.passGateCount === 2,
+  );
+  const finalQualityView = await query("fixture-quality-gates-final", {
+    type: "quality-gates.inspect",
+    candidateInputId: candidate.id,
+  });
+  assert.equal(
+    finalQualityView.view.authority?.authorityHash,
+    authority.authorityHash,
+  );
+  assert.equal(
+    finalQualityView.view.gateResults.every((entry) => entry.result === "PASS"),
+    true,
+  );
+  const finalAudit = await supervisor.audit({
+    runId: seeded.runId,
+    limit: 1_000,
+  });
+  const finalEvents = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  assert.equal(
+    finalEvents.some(
+      (event) =>
+        event.type === "delivery.candidate-input.authorized" &&
+        event.payload?.deliveryCandidateInputId === candidate.id,
+    ),
+    true,
+  );
   const recoveredInteraction = await query("fixture-interaction-recovered", {
     type: "interaction.inspect",
     sessionId: seeded.interactionSessionId,
@@ -1081,7 +1241,7 @@ const run = async () => {
     ),
     true,
   );
-  assert.equal(health.schemaVersion, 48);
+  assert.equal(health.schemaVersion, 49);
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
@@ -1090,10 +1250,23 @@ const run = async () => {
       integrationGenerationId: seeded.integrationAuthority.id,
       runtimePid: (await supervisor.health()).pid,
       schemaVersion: health.schemaVersion,
-      auditRecords: audit.length,
-      runtimeEvents: events.length,
+      auditRecords: finalAudit.length,
+      runtimeEvents: finalEvents.length,
       renderer: "dist",
       reloaded: true,
+      deliveryCandidateInputId: candidate.id,
+      deliveryCandidateInputHash: candidate.manifestHash,
+      candidateRiskTier: candidate.manifest.risk.tier,
+      securityGateResultId: gateResults.security.id,
+      operabilityGateResultId: gateResults.operability.id,
+      candidateAuthorityHash: authority.authorityHash,
+      candidateRenderer: {
+        beforeAuthority: blockedCandidateObservation.authorityId,
+        eventRefreshed: eventRefreshedCandidateObservation.authorityId,
+        reloaded: reloadedCandidateObservation.authorityId,
+      },
+      scope:
+        "T18 Candidate/Gate Query View only; not T21 Product-to-Candidate E2E",
     })}\n`,
   );
 };

@@ -19,6 +19,7 @@ import { describe, it } from "node:test";
 import {
   applyElectronTestFixtureExitCode,
   createElectronTestFixture,
+  electronTestFixtureRuntimePrincipal,
   ElectronTestFixtureError,
   loadElectronTestFixtureConfig,
   normalizeTestEvidenceLocator,
@@ -116,6 +117,14 @@ const scripts = () => {
 };
 
 describe("Electron Test fixture", () => {
+  it("authenticates fixture Runtime commands as a Runtime worker", () => {
+    assert.deepEqual(electronTestFixtureRuntimePrincipal, {
+      type: "runtime-worker",
+      id: "electron-test-fixture",
+      authenticatedBy: "runtime",
+    });
+  });
+
   it("preserves a failed Electron fixture as a non-zero process exit", () => {
     const exits: number[] = [];
     applyElectronTestFixtureExitCode({ exit: (code) => exits.push(code) }, 1);

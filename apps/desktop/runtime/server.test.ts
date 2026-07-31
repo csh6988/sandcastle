@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { companyRuntimeAddress } from "./address.js";
+import {
+  createCompanyRuntimeClientFromTransport,
+  createLocalRuntimeTransport,
+  RuntimeClientError,
+} from "./client.js";
 import { RuntimeRequestSchema } from "./interface.js";
 import {
   prepareCompanyRuntimeStartup,
@@ -232,6 +237,72 @@ describe("Company Runtime server startup", () => {
       }).success,
       false,
     );
+  });
+
+  it("routes Candidate Input and Quality Gate envelopes and fails closed on missing authority", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-server-quality-"),
+    );
+    roots.push(companyDir);
+    const address = companyRuntimeAddress(companyDir);
+    const token = "server-quality-test-token";
+    const server = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token,
+    });
+    const principal = {
+      type: "runtime-worker" as const,
+      id: "quality-server-test",
+      authenticatedBy: "runtime" as const,
+    };
+    const client = createCompanyRuntimeClientFromTransport(
+      createLocalRuntimeTransport({ address, token }),
+      token,
+      { actor: principal, consumerId: "quality-server-test" },
+    );
+    try {
+      for (const query of [
+        {
+          type: "delivery-candidate-input.inspect" as const,
+          candidateInputId: "missing-candidate",
+        },
+        {
+          type: "quality-gates.inspect" as const,
+          candidateInputId: "missing-candidate",
+        },
+      ]) {
+        await assert.rejects(
+          client.queryEnvelope({
+            schemaVersion: 1,
+            requestId: `query-${query.type}`,
+            principal,
+            consumerId: "quality-server-test",
+            query,
+          }),
+          (error: unknown) =>
+            error instanceof RuntimeClientError &&
+            error.code === "CANDIDATE_INPUT_NOT_FOUND",
+        );
+      }
+      const reconciled = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "quality-reconcile-missing",
+        actor: principal,
+        consumerId: "quality-server-test",
+        command: {
+          type: "quality-gate.execution.reconcile",
+          executionId: "missing-execution",
+          observation: { state: "unknown" },
+        },
+      });
+      assert.equal(reconciled.status, "rejected");
+      if (reconciled.status === "rejected") {
+        assert.equal(reconciled.error.code, "DELIVERY_QUALITY_ACTOR_INVALID");
+      }
+    } finally {
+      await server.close();
+    }
   });
 
   it("injects the fake clock and repeatable IDs into the actual Test Runtime", async () => {

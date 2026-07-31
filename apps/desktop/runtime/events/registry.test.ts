@@ -115,6 +115,12 @@ const agUiRegistryFixture = [
   "test.run.failed@1:custom",
   "test.run.blocked@1:custom",
   "test.run.cancelled@1:custom",
+  "delivery.candidate-input.frozen@1:custom",
+  "quality-gate.input.prepared@1:custom",
+  "quality-gate.execution.accepted@1:custom",
+  "quality-gate.execution.reconciled@1:custom",
+  "quality-gate.result.recorded@1:custom",
+  "delivery.candidate-input.authorized@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -160,7 +166,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 16);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 17);
 
     assert.deepEqual(
       registry
@@ -459,6 +465,45 @@ describe("Runtime Event registry", () => {
       (error: unknown) =>
         error instanceof RuntimeEventRegistryError &&
         error.code === "RUNTIME_EVENT_PAYLOAD_INVALID",
+    );
+  });
+
+  it("adds v17 Candidate Input and Quality Gate events without changing v16 contracts", () => {
+    const registry = createRuntimeEventRegistry();
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "delivery.candidate-input.frozen",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          deliveryCandidateInputId: "candidate-input-1",
+        },
+        payload: {
+          deliveryCandidateInputId: "candidate-input-1",
+          manifestHash: "a".repeat(64),
+          riskTier: "high",
+          state: "frozen-for-final-gates",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "quality-gate.result.recorded",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          deliveryCandidateInputId: "candidate-input-1",
+          candidateGateInputId: "security-gate-input-1",
+        },
+        payload: {
+          candidateGateInputId: "security-gate-input-1",
+          candidateGateResultId: "security-result-1",
+          result: "PASS",
+          resultHash: "b".repeat(64),
+        },
+      }),
     );
   });
 

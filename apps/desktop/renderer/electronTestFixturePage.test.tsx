@@ -156,6 +156,140 @@ describe("Electron Test fixture renderer page", () => {
     assert.deepEqual(readElectronTestFixtureRoute(url), fixtureRoute);
   });
 
+  it("round-trips the scoped Delivery Candidate Input Query View identity", () => {
+    const candidateRoute = {
+      ...fixtureRoute,
+      candidateInputId: "candidate-input-1",
+    };
+    const url = new URL(encodeElectronTestFixtureRoute(candidateRoute));
+    assert.deepEqual(readElectronTestFixtureRoute(url), candidateRoute);
+  });
+
+  it("rebuilds the scoped Candidate and Gate panel from the authoritative Query View", async (context) => {
+    const candidateRoute = {
+      ...fixtureRoute,
+      candidateInputId: "candidate-input-1",
+    };
+    const queried: string[] = [];
+    const bridge = {
+      query: async (input: { readonly type: string }) => {
+        queried.push(input.type);
+        return {
+          view: {
+            candidateInput: {
+              id: "candidate-input-1",
+              requestId: "candidate-request-1",
+              manifest: { risk: { tier: "high" } },
+              manifestHash: "a".repeat(64),
+              state: "frozen-for-final-gates",
+              createdAt: "2026-07-30T00:00:00.000Z",
+            },
+            gateInputs: [],
+            gateResults: [
+              {
+                id: "security-result-1",
+                gateInputId: "security-input-1",
+                qualityGateResultId: "quality-gate-security-1",
+                result: "PASS",
+                manifest: {},
+                resultHash: "b".repeat(64),
+                defects: [],
+                obligations: [],
+                createdAt: "2026-07-30T00:00:00.000Z",
+              },
+              {
+                id: "operability-result-1",
+                gateInputId: "operability-input-1",
+                qualityGateResultId: "quality-gate-operability-1",
+                result: "PASS",
+                manifest: {},
+                resultHash: "c".repeat(64),
+                defects: [],
+                obligations: [],
+                createdAt: "2026-07-30T00:00:00.000Z",
+              },
+            ],
+            authority: {
+              id: "candidate-authority-1",
+              candidateInputId: "candidate-input-1",
+              candidateInputHash: "a".repeat(64),
+              security: {},
+              operability: {},
+              risk: { tier: "high" },
+              evidenceRefs: ["artifact-version:evidence-1"],
+              authorityHash: "d".repeat(64),
+              createdAt: "2026-07-30T00:00:00.000Z",
+            },
+          },
+          asOfSequence: 17,
+          viewSyncToken: "candidate-view-token-17",
+        };
+      },
+      execute: async () => ({
+        status: "succeeded" as const,
+        value: {
+          acknowledged: true,
+          subscriptionGeneration: 17,
+          barrierSequence: 17,
+          auditId: "audit-17",
+        },
+        effectIds: [],
+      }),
+      openEventStream: async () => ({
+        subscriptionId: "candidate-subscription",
+        subscriptionGeneration: 17,
+        barrierSequence: 17,
+      }),
+      closeEventStream: async () => undefined,
+    } as unknown as SandcastleBridge;
+    const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+      url: "http://127.0.0.1/",
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    });
+
+    await act(async () => {
+      root.render(
+        <ElectronTestFixturePage route={candidateRoute} bridge={bridge} />,
+      );
+    });
+    await act(async () => undefined);
+
+    assert.deepEqual(queried, ["quality-gates.inspect"]);
+    assert.match(container.textContent, /candidate-input-1/);
+    assert.match(container.textContent, /high/);
+    assert.match(container.textContent, new RegExp("d{64}"));
+    assert.equal(
+      container.querySelectorAll('[data-quality-gate-result="PASS"]').length,
+      2,
+    );
+  });
+
   it("routes a real fixture gesture through an exact Interaction Prompt", async (context) => {
     const interactionRoute: ElectronTestFixtureRoute = {
       ...fixtureRoute,

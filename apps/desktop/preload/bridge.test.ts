@@ -728,6 +728,8 @@ describe("Sandcastle preload bridge", () => {
       "executeTechnicalReviewCommand",
       "reviewTopics",
       "inspectReviewTopic",
+      "inspectDeliveryCandidateInput",
+      "inspectQualityGates",
       "executeReviewCommand",
       "updateProject",
       "archiveProject",
@@ -1373,6 +1375,78 @@ describe("Sandcastle preload bridge", () => {
     );
     for (const call of calls) {
       const payload = call.payload as Record<string, unknown>;
+      assert.equal("actor" in payload, false);
+      assert.equal("principal" in payload, false);
+      assert.equal("consumerId" in payload, false);
+    }
+  });
+
+  it("routes Candidate Input and Quality Gate queries and Commands through the typed tunnel", async () => {
+    const calls: unknown[] = [];
+    const candidateInput = {
+      id: "candidate-input-1",
+      requestId: "candidate-request-1",
+      manifest: { schemaVersion: 1, risk: { tier: "high" } },
+      manifestHash: "a".repeat(64),
+      state: "frozen-for-final-gates" as const,
+      createdAt: "2026-07-30T00:00:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: { readonly type?: string };
+      };
+      if (request.operation === "execute") {
+        return {
+          status: "rejected",
+          error: {
+            code: "QUALITY_GATE_EXECUTION_NOT_FOUND",
+            message: "Gate execution is absent.",
+          },
+          effectIds: [],
+        };
+      }
+      return {
+        view:
+          request.query?.type === "quality-gates.inspect"
+            ? {
+                candidateInput,
+                gateInputs: [],
+                gateResults: [],
+                authority: null,
+              }
+            : candidateInput,
+        asOfSequence: 49,
+      };
+    });
+
+    assert.equal(
+      (await bridge.runtime.inspectDeliveryCandidateInput(candidateInput.id))
+        .id,
+      candidateInput.id,
+    );
+    assert.equal(
+      (await bridge.runtime.inspectQualityGates(candidateInput.id))
+        .candidateInput.manifestHash,
+      candidateInput.manifestHash,
+    );
+    const reconciled = await bridge.execute({
+      commandId: "quality-reconcile-1",
+      command: {
+        type: "quality-gate.execution.reconcile",
+        executionId: "missing-execution",
+        observation: { state: "unknown" },
+      },
+    });
+    assert.equal(reconciled.status, "rejected");
+    assert.deepEqual(
+      calls.map((call) => (call as { readonly operation: string }).operation),
+      ["query", "query", "execute"],
+    );
+    for (const call of calls) {
+      const payload = call as Record<string, unknown>;
       assert.equal("actor" in payload, false);
       assert.equal("principal" in payload, false);
       assert.equal("consumerId" in payload, false);

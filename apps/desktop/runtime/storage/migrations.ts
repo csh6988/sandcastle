@@ -6,7 +6,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 48;
+export const CURRENT_SCHEMA_VERSION = 49;
 
 interface CompanyMigration {
   readonly version: number;
@@ -5666,6 +5666,311 @@ const migrations: readonly CompanyMigration[] = [
       }
     },
   },
+  {
+    version: 49,
+    name: "frozen_delivery_candidate_quality_gates",
+    migrate: (database) => {
+      const createSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE delivery_candidate_inputs (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+            node_run_id TEXT NOT NULL,
+            node_attempt_id TEXT NOT NULL,
+            producer_json TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            risk_tier TEXT NOT NULL CHECK (risk_tier IN ('low', 'medium', 'high', 'critical')),
+            state TEXT NOT NULL CHECK (state = 'frozen-for-final-gates'),
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, id)
+          ) STRICT;
+
+          CREATE INDEX delivery_candidate_inputs_run_idx
+            ON delivery_candidate_inputs(run_id, created_at, id);
+          CREATE TRIGGER delivery_candidate_inputs_immutable_update
+            BEFORE UPDATE ON delivery_candidate_inputs
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate Input is immutable'); END;
+          CREATE TRIGGER delivery_candidate_inputs_immutable_delete
+            BEFORE DELETE ON delivery_candidate_inputs
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate Input is immutable'); END;
+
+          CREATE TABLE candidate_gate_inputs (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            candidate_input_id TEXT NOT NULL REFERENCES delivery_candidate_inputs(id),
+            candidate_input_hash TEXT NOT NULL CHECK (length(candidate_input_hash) = 64),
+            kind TEXT NOT NULL CHECK (kind IN ('security', 'operability')),
+            node_run_id TEXT NOT NULL,
+            node_attempt_id TEXT NOT NULL,
+            review_topic_id TEXT NOT NULL UNIQUE REFERENCES review_topics(id),
+            prior_gate_input_id TEXT REFERENCES candidate_gate_inputs(id),
+            reviewer_position_id TEXT NOT NULL,
+            reviewer_session_id TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            risk_tier TEXT NOT NULL CHECK (risk_tier IN ('low', 'medium', 'high', 'critical')),
+            review_depth TEXT NOT NULL CHECK (review_depth IN ('lightweight', 'targeted', 'deep-independent', 'deep-independent-escalated')),
+            state TEXT NOT NULL CHECK (state IN ('scheduled', 'running', 'reconciling', 'unknown', 'blocked', 'completed')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (candidate_input_id, kind, id)
+          ) STRICT;
+
+          CREATE INDEX candidate_gate_inputs_candidate_idx
+            ON candidate_gate_inputs(candidate_input_id, kind, created_at, id);
+          CREATE TRIGGER candidate_gate_inputs_identity_update
+            BEFORE UPDATE ON candidate_gate_inputs
+            WHEN NEW.id <> OLD.id OR NEW.request_id <> OLD.request_id
+              OR NEW.candidate_input_id <> OLD.candidate_input_id
+              OR NEW.candidate_input_hash <> OLD.candidate_input_hash
+              OR NEW.kind <> OLD.kind OR NEW.node_run_id <> OLD.node_run_id
+              OR NEW.node_attempt_id <> OLD.node_attempt_id
+              OR NEW.review_topic_id <> OLD.review_topic_id
+              OR NEW.prior_gate_input_id IS NOT OLD.prior_gate_input_id
+              OR NEW.reviewer_position_id <> OLD.reviewer_position_id
+              OR NEW.reviewer_session_id <> OLD.reviewer_session_id
+              OR NEW.manifest_json <> OLD.manifest_json
+              OR NEW.manifest_hash <> OLD.manifest_hash
+              OR NEW.request_hash <> OLD.request_hash
+              OR NEW.risk_tier <> OLD.risk_tier
+              OR NEW.review_depth <> OLD.review_depth
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate input is immutable'); END;
+          CREATE TRIGGER candidate_gate_inputs_terminal_update
+            BEFORE UPDATE ON candidate_gate_inputs
+            WHEN OLD.state IN ('blocked', 'completed') AND (
+              NEW.state IS NOT OLD.state OR NEW.updated_at IS NOT OLD.updated_at
+            ) BEGIN SELECT RAISE(ABORT, 'Terminal Candidate Gate input is immutable'); END;
+          CREATE TRIGGER candidate_gate_inputs_immutable_delete
+            BEFORE DELETE ON candidate_gate_inputs
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate input is immutable'); END;
+
+          CREATE TABLE candidate_gate_executions (
+            id TEXT PRIMARY KEY,
+            gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            operation_key TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            state TEXT NOT NULL CHECK (state IN ('intent', 'running', 'reconciling', 'unknown', 'succeeded', 'failed', 'cancelled')),
+            fact_hash TEXT CHECK (fact_hash IS NULL OR length(fact_hash) = 64),
+            receipt_hash TEXT CHECK (receipt_hash IS NULL OR length(receipt_hash) = 64),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (gate_input_id, id)
+          ) STRICT;
+          CREATE INDEX candidate_gate_executions_state_idx
+            ON candidate_gate_executions(state, updated_at, id);
+          CREATE TRIGGER candidate_gate_executions_identity_update
+            BEFORE UPDATE ON candidate_gate_executions
+            WHEN NEW.id <> OLD.id OR NEW.gate_input_id <> OLD.gate_input_id
+              OR NEW.operation_key <> OLD.operation_key
+              OR NEW.request_json <> OLD.request_json
+              OR NEW.request_hash <> OLD.request_hash
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate execution intent is immutable'); END;
+          CREATE TRIGGER candidate_gate_executions_terminal_update
+            BEFORE UPDATE ON candidate_gate_executions
+            WHEN OLD.state IN ('succeeded', 'failed', 'cancelled') AND (
+              NEW.state IS NOT OLD.state OR NEW.fact_hash IS NOT OLD.fact_hash
+              OR NEW.receipt_hash IS NOT OLD.receipt_hash
+              OR NEW.updated_at IS NOT OLD.updated_at
+            ) BEGIN SELECT RAISE(ABORT, 'Terminal Candidate Gate execution is immutable'); END;
+          CREATE TRIGGER candidate_gate_executions_immutable_delete
+            BEFORE DELETE ON candidate_gate_executions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate execution is immutable'); END;
+
+          CREATE TABLE candidate_gate_execution_facts (
+            execution_id TEXT PRIMARY KEY REFERENCES candidate_gate_executions(id),
+            fact_json TEXT NOT NULL,
+            fact_hash TEXT NOT NULL CHECK (length(fact_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_gate_execution_facts_immutable_update
+            BEFORE UPDATE ON candidate_gate_execution_facts
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate execution fact is immutable'); END;
+          CREATE TRIGGER candidate_gate_execution_facts_immutable_delete
+            BEFORE DELETE ON candidate_gate_execution_facts
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate execution fact is immutable'); END;
+
+          CREATE TABLE candidate_gate_results (
+            id TEXT PRIMARY KEY,
+            gate_input_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_inputs(id),
+            quality_gate_result_id TEXT NOT NULL UNIQUE REFERENCES quality_gate_results(id),
+            result TEXT NOT NULL CHECK (result IN ('PASS', 'CONDITIONAL_PASS', 'FAIL')),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL CHECK (length(result_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_gate_results_immutable_update
+            BEFORE UPDATE ON candidate_gate_results
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate result is immutable'); END;
+          CREATE TRIGGER candidate_gate_results_immutable_delete
+            BEFORE DELETE ON candidate_gate_results
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate result is immutable'); END;
+
+          CREATE TABLE candidate_gate_defects (
+            id TEXT PRIMARY KEY,
+            gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            check_id TEXT NOT NULL,
+            responsibility_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+          ) STRICT;
+          CREATE INDEX candidate_gate_defects_input_idx
+            ON candidate_gate_defects(gate_input_id, status, created_at, id);
+          CREATE TRIGGER candidate_gate_defects_identity_update
+            BEFORE UPDATE ON candidate_gate_defects
+            WHEN NEW.id <> OLD.id OR NEW.gate_input_id <> OLD.gate_input_id
+              OR NEW.check_id <> OLD.check_id
+              OR NEW.responsibility_json <> OLD.responsibility_json
+              OR NEW.evidence_json <> OLD.evidence_json
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect identity is immutable'); END;
+          CREATE TRIGGER candidate_gate_defects_immutable_delete
+            BEFORE DELETE ON candidate_gate_defects
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect is immutable'); END;
+
+          CREATE TABLE candidate_gate_defect_resolutions (
+            id TEXT PRIMARY KEY,
+            defect_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_defects(id),
+            fresh_gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            evidence_json TEXT NOT NULL,
+            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_gate_defect_resolutions_immutable_update
+            BEFORE UPDATE ON candidate_gate_defect_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+          CREATE TRIGGER candidate_gate_defect_resolutions_immutable_delete
+            BEFORE DELETE ON candidate_gate_defect_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+
+          CREATE TABLE candidate_gate_obligations (
+            id TEXT PRIMARY KEY,
+            gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            defect_id TEXT REFERENCES candidate_gate_defects(id),
+            check_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+          ) STRICT;
+          CREATE INDEX candidate_gate_obligations_input_idx
+            ON candidate_gate_obligations(gate_input_id, status, created_at, id);
+          CREATE TRIGGER candidate_gate_obligations_identity_update
+            BEFORE UPDATE ON candidate_gate_obligations
+            WHEN NEW.id <> OLD.id OR NEW.gate_input_id <> OLD.gate_input_id
+              OR NEW.defect_id IS NOT OLD.defect_id OR NEW.check_id <> OLD.check_id
+              OR NEW.description <> OLD.description
+              OR NEW.evidence_json <> OLD.evidence_json
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate obligation identity is immutable'); END;
+          CREATE TRIGGER candidate_gate_obligations_immutable_delete
+            BEFORE DELETE ON candidate_gate_obligations
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate obligation is immutable'); END;
+
+          CREATE TABLE candidate_gate_obligation_resolutions (
+            id TEXT PRIMARY KEY,
+            obligation_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_obligations(id),
+            fresh_gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            evidence_json TEXT NOT NULL,
+            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_gate_obligation_resolutions_immutable_update
+            BEFORE UPDATE ON candidate_gate_obligation_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate obligation resolution is immutable'); END;
+          CREATE TRIGGER candidate_gate_obligation_resolutions_immutable_delete
+            BEFORE DELETE ON candidate_gate_obligation_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate obligation resolution is immutable'); END;
+
+          CREATE TABLE delivery_candidate_input_authorities (
+            id TEXT PRIMARY KEY,
+            candidate_input_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidate_inputs(id),
+            security_gate_result_id TEXT NOT NULL REFERENCES candidate_gate_results(id),
+            operability_gate_result_id TEXT NOT NULL REFERENCES candidate_gate_results(id),
+            authority_json TEXT NOT NULL,
+            authority_hash TEXT NOT NULL CHECK (length(authority_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER delivery_candidate_input_authorities_immutable_update
+            BEFORE UPDATE ON delivery_candidate_input_authorities
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate Input authority is immutable'); END;
+          CREATE TRIGGER delivery_candidate_input_authorities_immutable_delete
+            BEFORE DELETE ON delivery_candidate_input_authorities
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate Input authority is immutable'); END;
+        `);
+
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const prefixSql = (target: DatabaseSync) =>
+        target
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'candidate_gate_%'
+                 OR name LIKE 'delivery_candidate_input%'
+              ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createSchema(reference);
+        const expected = prefixSql(reference);
+        const actual = prefixSql(database);
+        if (actual.length === 0) {
+          createSchema(database);
+        } else {
+          const actualByName = new Map(
+            actual.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(expected.map((entry) => entry.name));
+          const incompatible = expected
+            .filter((entry) => {
+              const found = actualByName.get(entry.name);
+              return (
+                !found ||
+                found.type !== entry.type ||
+                normalizeSql(found.sql) !== normalizeSql(entry.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actual
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Delivery/Quality schema is incompatible: ${[
+                ...new Set(incompatible),
+              ]
+                .sort()
+                .join(", ")}`,
+            );
+          }
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
 ];
 
 const schemaMetadataExists = (database: DatabaseSync): boolean =>
@@ -5742,6 +6047,24 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
         applied_at TEXT NOT NULL
       ) STRICT;
     `);
+    if (existingVersion >= 49) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS candidate_gate_defect_resolutions (
+          id TEXT PRIMARY KEY,
+          defect_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_defects(id),
+          fresh_gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+          evidence_json TEXT NOT NULL,
+          resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TRIGGER IF NOT EXISTS candidate_gate_defect_resolutions_immutable_update
+          BEFORE UPDATE ON candidate_gate_defect_resolutions
+          BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS candidate_gate_defect_resolutions_immutable_delete
+          BEFORE DELETE ON candidate_gate_defect_resolutions
+          BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+      `);
+    }
     for (const migration of migrations) {
       if (migration.version > existingVersion) migration.migrate(database);
       if (migration.version <= CURRENT_SCHEMA_VERSION) {

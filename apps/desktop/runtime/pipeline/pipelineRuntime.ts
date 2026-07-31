@@ -222,6 +222,12 @@ export interface PipelineRuntime {
       readonly nodeRunId: string;
     }) => Promise<void>,
   ) => void;
+  readonly registerDeliveryQualityExecutor: (
+    executor: (input: {
+      readonly runId: string;
+      readonly nodeRunId: string;
+    }) => Promise<void>,
+  ) => void;
   readonly registerIntegrationCancellationDispatcher: (
     dispatcher: (input: {
       readonly runId: string;
@@ -249,6 +255,18 @@ export interface PipelineRuntime {
   readonly executeIntegrationReviewStage: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
+    readonly reviewerSessionId: string;
+    readonly reviewerAiMemberId: string;
+    readonly operationKey: string;
+    readonly reconcileExisting: boolean;
+    readonly timeoutSeconds: number;
+    readonly request: ReviewerExecutionInput;
+    readonly adapter: ReviewerExecutionAdapter;
+  }) => Promise<ReviewerExecutionResult>;
+  readonly executeQualityReviewStage: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly handlerKindId: "security-review@1" | "operability-review@1";
     readonly reviewerSessionId: string;
     readonly reviewerAiMemberId: string;
     readonly operationKey: string;
@@ -304,6 +322,18 @@ export interface PipelineRuntime {
     readonly workerId: string;
     readonly leaseDurationMs: number;
   }) => ReadyAttemptClaim;
+  readonly blockClaimedAttempt: (input: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly attemptId: string;
+    readonly leaseId: string;
+    readonly workerId: string;
+    readonly terminalExecutionFactId?: string;
+    readonly failure: {
+      readonly code: string;
+      readonly message: string;
+    };
+  }) => DepartmentRunView;
   readonly prepareWorkPackageAttemptInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -733,6 +763,16 @@ export const openPipelineRuntime = (
   ) => {
     testExecutor = executor;
   };
+  let deliveryQualityExecutor:
+    | ((input: {
+        readonly runId: string;
+        readonly nodeRunId: string;
+      }) => Promise<void>)
+    | undefined;
+  const registerDeliveryQualityExecutor: PipelineRuntime["registerDeliveryQualityExecutor"] =
+    (executor) => {
+      deliveryQualityExecutor = executor;
+    };
   let integrationCancellationDispatcher:
     | ((input: {
         readonly runId: string;
@@ -756,6 +796,7 @@ export const openPipelineRuntime = (
     };
   let executeCodeReviewStage: PipelineRuntime["executeCodeReviewStage"];
   let executeIntegrationReviewStage: PipelineRuntime["executeIntegrationReviewStage"];
+  let executeQualityReviewStage: PipelineRuntime["executeQualityReviewStage"];
   const appendRuntimeMutation = (input: {
     readonly action: string;
     readonly entityType: string;
@@ -944,6 +985,11 @@ export const openPipelineRuntime = (
       ...input,
       handlerKindId: "integration@1",
       workerId: "integration-node-handler",
+    });
+  executeQualityReviewStage = (input) =>
+    executeReviewerStage({
+      ...input,
+      workerId: "delivery-quality-node-handler",
     });
 
   const auditRecords = (
@@ -3401,6 +3447,100 @@ export const openPipelineRuntime = (
       },
       timestamp: input.now,
     });
+  };
+
+  const blockClaimedAttempt: PipelineRuntime["blockClaimedAttempt"] = (
+    input,
+  ) => {
+    const now = clock().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const blockedAttempt = database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'reconciling', recoverable = 1,
+                  failure_code = ?, failure_message = ?, completed_at = NULL,
+                  terminal_execution_fact_id = COALESCE(?, terminal_execution_fact_id)
+            WHERE id = ? AND node_run_id = ? AND status = 'running'
+              AND lease_id = ? AND lease_owner = ?
+              AND lease_expires_at > ?`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          input.terminalExecutionFactId ?? null,
+          input.attemptId,
+          input.nodeRunId,
+          input.leaseId,
+          input.workerId,
+          now,
+        );
+      const blockedNode = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'blocked', failure_code = ?, failure_message = ?,
+                  updated_at = ?
+            WHERE id = ? AND run_id = ? AND status = 'running'`,
+        )
+        .run(
+          input.failure.code,
+          input.failure.message,
+          now,
+          input.nodeRunId,
+          input.runId,
+        );
+      const blockedRun = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'blocked', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, input.runId);
+      if (
+        blockedAttempt.changes !== 1 ||
+        blockedNode.changes !== 1 ||
+        blockedRun.changes !== 1
+      ) {
+        throw new PipelineRuntimeError(
+          "LEASE_OWNERSHIP_INVALID",
+          `Node Attempt ${input.attemptId} is no longer owned by this scheduler worker.`,
+        );
+      }
+      database
+        .prepare(
+          `UPDATE execution_leases
+              SET released_at = ?
+            WHERE id = ? AND worker_id = ? AND released_at IS NULL`,
+        )
+        .run(now, input.leaseId, input.workerId);
+      appendRuntimeMutation({
+        action: "attempt.block",
+        entityType: "node-attempt",
+        entityId: input.attemptId,
+        eventType: "attempt.reconciling",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: { status: "reconciling", failure: input.failure },
+        createdAt: now,
+      });
+      appendRuntimeMutation({
+        action: "run.block",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.blocked",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: { status: "blocked", failure: input.failure },
+        createdAt: now,
+      });
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    return inspectRun(input.runId);
   };
 
   const completeClaimedAttempt = (input: {
@@ -9428,6 +9568,32 @@ export const openPipelineRuntime = (
       }
       ensureHandlerAvailable(view, ready, node);
 
+      if (
+        ready.handler &&
+        [
+          "delivery-candidate-input@1",
+          "security-review@1",
+          "operability-review@1",
+        ].includes(ready.handler.handlerKindId)
+      ) {
+        if (!deliveryQualityExecutor) {
+          throw new PipelineRuntimeError(
+            "DELIVERY_QUALITY_EXECUTOR_UNAVAILABLE",
+            "The frozen Delivery/Quality Node has no registered Runtime executor.",
+          );
+        }
+        ensureReadyAttempt({
+          runId: input.runId,
+          nodeRunId: ready.id,
+          snapshotRevisionId: view.snapshot.id,
+        });
+        await deliveryQualityExecutor({
+          runId: input.runId,
+          nodeRunId: ready.id,
+        });
+        return inspectRun(input.runId);
+      }
+
       if (ready.handler?.handlerKindId === "code-review@1") {
         if (!codeReviewExecutor) {
           throw new PipelineRuntimeError(
@@ -10352,10 +10518,12 @@ export const openPipelineRuntime = (
     registerCodeReviewExecutor,
     registerIntegrationExecutor,
     registerTestExecutor,
+    registerDeliveryQualityExecutor,
     registerIntegrationCancellationDispatcher,
     registerTestCancellationDispatcher,
     executeCodeReviewStage,
     executeIntegrationReviewStage,
+    executeQualityReviewStage,
     reconcileWorkPackageImports,
     controlRun,
     cancelNodeAttempt,
@@ -10364,6 +10532,7 @@ export const openPipelineRuntime = (
     applyGovernedIntervention,
     recoverRun,
     claimReadyAttempt,
+    blockClaimedAttempt,
     prepareWorkPackageAttemptInTransaction,
     blockWorkPackageAttemptInTransaction,
     blockCodeReviewInTransaction,

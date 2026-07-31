@@ -480,6 +480,10 @@ describe("Company database migrations", () => {
               version: 48,
               name: "test_rework_resolution_authority",
             },
+            {
+              version: 49,
+              name: "frozen_delivery_candidate_quality_gates",
+            },
           ],
         );
         assert.deepEqual(
@@ -2438,8 +2442,8 @@ describe("Test authority schema migration", () => {
   it("upgrades through the historical v47 contract to the complete immutable v48 Test schema", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 48);
-    assert.equal(opened.schemaVersion(), 48);
+    assert.equal(CURRENT_SCHEMA_VERSION, 49);
+    assert.equal(opened.schemaVersion(), 49);
     opened.close();
 
     const database = new DatabaseSync(
@@ -2534,17 +2538,18 @@ describe("Test authority schema migration", () => {
     const historical = new DatabaseSync(path);
     restoreHistoricalV47Contract(historical);
 
-    assert.equal(migrateCompanyDatabase(historical), 48);
+    assert.equal(migrateCompanyDatabase(historical), 49);
     assert.deepEqual(
       historical
         .prepare(
-          "SELECT version, name FROM schema_migrations WHERE version IN (47, 48) ORDER BY version",
+          "SELECT version, name FROM schema_migrations WHERE version IN (47, 48, 49) ORDER BY version",
         )
         .all()
         .map((row) => ({ ...row })),
       [
         { version: 47, name: "versioned_test_cases_and_runs" },
         { version: 48, name: "test_rework_resolution_authority" },
+        { version: 49, name: "frozen_delivery_candidate_quality_gates" },
       ],
     );
     assert.equal(
@@ -2579,7 +2584,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 48;
       PRAGMA user_version = 47;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 48);
+    assert.equal(migrateCompanyDatabase(compatible), 49);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2638,6 +2643,48 @@ describe("Test authority schema migration", () => {
     database.close();
   });
 
+  it("adopts a complete v49 Delivery/Quality schema and rejects a partial one transactionally", () => {
+    const compatibleDir = tempCompanyDir();
+    openCompanyDatabase(compatibleDir).close();
+    const compatible = new DatabaseSync(
+      join(compatibleDir, ".sandcastle", "company.sqlite"),
+    );
+    compatible.exec(`
+      UPDATE schema_metadata SET value = '48' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 49;
+      PRAGMA user_version = 48;
+    `);
+    assert.equal(migrateCompanyDatabase(compatible), 49);
+    compatible.close();
+
+    const partialDir = tempCompanyDir();
+    openCompanyDatabase(partialDir).close();
+    const partial = new DatabaseSync(
+      join(partialDir, ".sandcastle", "company.sqlite"),
+    );
+    partial.exec(`
+      DROP TRIGGER candidate_gate_results_immutable_delete;
+      UPDATE schema_metadata SET value = '48' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 49;
+      PRAGMA user_version = 48;
+    `);
+    assert.throws(
+      () => migrateCompanyDatabase(partial),
+      /Existing Delivery\/Quality schema is incompatible: candidate_gate_results_immutable_delete/,
+    );
+    assert.equal(
+      (
+        partial
+          .prepare(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+          )
+          .get() as { readonly value: string }
+      ).value,
+      "48",
+    );
+    partial.close();
+  });
+
   it("rejects a future Test authority schema without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const initialized = openCompanyDatabase(companyDir);
@@ -2645,12 +2692,12 @@ describe("Test authority schema migration", () => {
     initialized.close();
     const future = new DatabaseSync(path);
     future.exec(`
-      UPDATE schema_metadata SET value = '49' WHERE key = 'schema_version';
-      PRAGMA user_version = 49;
+      UPDATE schema_metadata SET value = '50' WHERE key = 'schema_version';
+      PRAGMA user_version = 50;
     `);
     assert.throws(
       () => migrateCompanyDatabase(future),
-      /Unsupported company database schema version 49/,
+      /Unsupported company database schema version 50/,
     );
     assert.equal(
       (
@@ -2660,7 +2707,7 @@ describe("Test authority schema migration", () => {
           )
           .get() as { readonly value: string }
       ).value,
-      "49",
+      "50",
     );
     future.close();
   });

@@ -649,6 +649,10 @@ export interface TestRuntime {
     readonly manifest: TestCaseRevisionManifestInput;
   }) => TestCaseRevisionView;
   readonly inspectCase: (testCaseId: string) => readonly TestCaseRevisionView[];
+  readonly readCaseRevision: (
+    revisionId: string,
+    expectedManifestHash: string,
+  ) => TestCaseRevisionView;
   readonly createRun: (input: TestRunManifestInput) => TestRunView;
   readonly inspect: (testRunId: string) => TestRunView;
   readonly execute: (input: {
@@ -736,6 +740,11 @@ export interface TestRuntime {
     readonly testRunId: string;
     readonly manifestHash: string;
     readonly passAuthorityHash: string;
+    readonly testEngineer: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+    };
     readonly integrationAuthority: TestRunManifest["integrationAuthority"];
     readonly testCaseRevisions: TestRunManifest["testCaseRevisions"];
     readonly coverageHash: string;
@@ -5366,6 +5375,38 @@ export const openTestRuntime = (
     testRunId,
   ) => {
     const run = readRun(testRunId);
+    const testEngineer = database
+      .prepare(
+        `SELECT participants.participant_ref AS aiMemberId,
+                positions.id AS positionId, sessions.id AS sessionId
+           FROM interaction_sessions AS sessions
+           JOIN session_participants AS participants
+             ON participants.session_id = sessions.id
+            AND participants.participant_type = 'ai-member'
+            AND participants.role = 'test-engineer'
+           JOIN positions ON positions.ai_member_id = participants.participant_ref
+          WHERE sessions.id = ? AND sessions.project_id = ?
+            AND sessions.run_id = ? AND sessions.node_run_id = ?
+            AND sessions.status = 'active'`,
+      )
+      .get(
+        run.manifest.sessionId,
+        run.manifest.projectId,
+        run.manifest.runId,
+        run.manifest.nodeRunId,
+      ) as
+      | {
+          readonly aiMemberId: string;
+          readonly positionId: string;
+          readonly sessionId: string;
+        }
+      | undefined;
+    if (!testEngineer) {
+      throw new TestRuntimeError(
+        "TEST_ENGINEER_AUTHORITY_INVALID",
+        `Test Run ${testRunId} no longer resolves its exact active Test engineer identity.`,
+      );
+    }
     const authority = validateAuthority(run.manifest);
     const relatedScope = unresolvedRelatedReworkScope(run.manifest, authority);
     const openDefectIds = run.defects
@@ -5468,6 +5509,7 @@ export const openTestRuntime = (
       testRunId,
       manifestHash: run.manifestHash,
       passAuthorityHash: run.passAuthorityHash,
+      testEngineer,
       integrationAuthority: run.manifest.integrationAuthority,
       testCaseRevisions: run.manifest.testCaseRevisions,
       coverageHash: run.manifest.coverageHash,
@@ -5506,6 +5548,16 @@ export const openTestRuntime = (
   return {
     registerCaseRevision,
     inspectCase,
+    readCaseRevision: (revisionId, expectedManifestHash) => {
+      const revision = readCaseRevision(revisionId);
+      if (revision.manifestHash !== expectedManifestHash) {
+        throw new TestRuntimeError(
+          "TEST_CASE_REVISION_AUTHORITY_MISMATCH",
+          `Test Case revision ${revisionId} does not match its exact immutable manifest hash.`,
+        );
+      }
+      return revision;
+    },
     createRun,
     inspect: readRun,
     execute,

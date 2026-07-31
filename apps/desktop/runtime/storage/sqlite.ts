@@ -144,6 +144,19 @@ import {
   openTestNodeHandler,
   type TestNodeHandler,
 } from "../testing/testNodeHandler.js";
+import {
+  openCandidateInputRuntime,
+  type CandidateInputRuntime,
+} from "../delivery/candidateInputRuntime.js";
+import {
+  openQualityGateRuntime,
+  type QualityGateRuntime,
+} from "../quality/qualityGateRuntime.js";
+import {
+  openQualityGateNodeHandler,
+  type DeliveryQualityNodePlanProvider,
+  type QualityGateNodeHandler,
+} from "../quality/qualityGateNodeHandler.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -171,6 +184,9 @@ export interface CompanyDatabase {
   readonly codeReviewNodeHandler: CodeReviewNodeHandler;
   readonly integrations: IntegrationRuntime;
   readonly testRuns: TestRuntime;
+  readonly candidateInputs: CandidateInputRuntime;
+  readonly qualityGates: QualityGateRuntime;
+  readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
   readonly schemaVersion: () => number;
@@ -312,6 +328,10 @@ export const openCompanyDatabase = (
         readonly artifacts: ArtifactRegistry;
         readonly commandRegistry: CompanyCommandRegistry;
       }) => readonly TestExecutionAdapter[];
+    };
+    readonly deliveryQualityRuntime?: {
+      readonly plans?: DeliveryQualityNodePlanProvider;
+      readonly leaseDurationMs?: number;
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -501,6 +521,18 @@ export const openCompanyDatabase = (
       : {}),
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const candidateInputs = openCandidateInputRuntime(database, {
+    tests: testRuns,
+    integrations,
+    artifacts: artifactRegistry,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
+  const qualityGates = openQualityGateRuntime(database, {
+    candidates: candidateInputs,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -530,6 +562,8 @@ export const openCompanyDatabase = (
     codeReviews,
     integrations,
     testRuns,
+    candidateInputs,
+    qualityGates,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -596,6 +630,19 @@ export const openCompanyDatabase = (
     executionAdapters: testExecutionAdapters,
   });
   pipelineRuntime.registerTestExecutor(testNodeHandler.executeReady);
+  const qualityGateNodeHandler = openQualityGateNodeHandler({
+    pipelineRuntime,
+    commandRegistry,
+    ...(options.deliveryQualityRuntime?.plans
+      ? { plans: options.deliveryQualityRuntime.plans }
+      : {}),
+    ...(options.deliveryQualityRuntime?.leaseDurationMs
+      ? { leaseDurationMs: options.deliveryQualityRuntime.leaseDurationMs }
+      : {}),
+  });
+  pipelineRuntime.registerDeliveryQualityExecutor(
+    qualityGateNodeHandler.executeReady,
+  );
   pipelineRuntime.registerTestCancellationDispatcher(async (input) => {
     await testNodeHandler.cancelPending(
       `test:${input.runId}:${input.nodeRunId}`,
@@ -632,6 +679,9 @@ export const openCompanyDatabase = (
     codeReviewNodeHandler,
     integrations,
     testRuns,
+    candidateInputs,
+    qualityGates,
+    qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,
     schemaVersion: () => {

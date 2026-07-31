@@ -40,6 +40,8 @@ import { CompanyCommandError } from "./commandRegistry.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
 import { WorkPackageRuntimeError } from "./workspaces/workPackages.js";
+import { CandidateInputRuntimeError } from "./delivery/candidateInputRuntime.js";
+import { QualityGateRuntimeError } from "./quality/qualityGateRuntime.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -515,6 +517,12 @@ export const startCompanyRuntimeServer = async (
                     return database.testRuns.downstreamAuthority(
                       query.testRunId,
                     );
+                  case "delivery-candidate-input.inspect":
+                    return database.candidateInputs.inspect(
+                      query.candidateInputId,
+                    );
+                  case "quality-gates.inspect":
+                    return database.qualityGates.view(query.candidateInputId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -1230,6 +1238,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||
                 error instanceof WorkPackageRuntimeError ||
+                error instanceof CandidateInputRuntimeError ||
+                error instanceof QualityGateRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -1247,6 +1257,8 @@ export const startCompanyRuntimeServer = async (
                 error instanceof CompanyCommandError ||
                 error instanceof WorkspaceRuntimeError ||
                 error instanceof WorkPackageRuntimeError ||
+                error instanceof CandidateInputRuntimeError ||
+                error instanceof QualityGateRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

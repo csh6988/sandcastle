@@ -31,6 +31,7 @@ import type {
   SkillConfigurationView,
   AgentCatalogView,
   SkillCatalogView,
+  CandidateQualityGateView,
 } from "../runtime/interface.js";
 import { WorkPackageGraphPanel } from "./workPackageView.js";
 import {
@@ -57,6 +58,10 @@ import {
   connectIntegrationGenerations,
   type IntegrationGenerationConnection,
 } from "./integrationGenerationView.js";
+import {
+  connectCandidateQualityGates,
+  type CandidateQualityGateConnection,
+} from "./candidateQualityGateView.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2504,6 +2509,92 @@ export function IntegrationGenerationPanel({
   );
 }
 
+const candidateRiskTier = (view: CandidateQualityGateView): string => {
+  const manifest = view.candidateInput.manifest;
+  if (typeof manifest !== "object" || manifest === null) return "unknown";
+  const risk = (manifest as { readonly risk?: unknown }).risk;
+  return typeof risk === "object" &&
+    risk !== null &&
+    typeof (risk as { readonly tier?: unknown }).tier === "string"
+    ? String((risk as { readonly tier: string }).tier)
+    : "unknown";
+};
+
+export function CandidateQualityGatePanel({
+  diagnostic,
+  view,
+}: {
+  readonly diagnostic: string | null;
+  readonly view: CandidateQualityGateView | null;
+}) {
+  if (!view) {
+    return diagnostic ? (
+      <section className="create-panel" data-candidate-quality-gates>
+        <h2>Delivery Candidate Input and Quality Gates</h2>
+        <p>{diagnostic}</p>
+      </section>
+    ) : null;
+  }
+  return (
+    <section
+      className="create-panel"
+      data-candidate-quality-gates
+      data-candidate-input={view.candidateInput.id}
+      data-candidate-authority={view.authority?.id ?? "blocked"}
+      data-candidate-sync={diagnostic ?? "ready"}
+    >
+      <span className="eyebrow">Frozen delivery authority</span>
+      <h2>Delivery Candidate Input and Quality Gates</h2>
+      <dl>
+        <div>
+          <dt>Candidate Input</dt>
+          <dd>{view.candidateInput.id}</dd>
+        </div>
+        <div>
+          <dt>Manifest hash</dt>
+          <dd>{view.candidateInput.manifestHash}</dd>
+        </div>
+        <div>
+          <dt>Risk tier</dt>
+          <dd>{candidateRiskTier(view)}</dd>
+        </div>
+        <div>
+          <dt>Downstream authority</dt>
+          <dd>{view.authority?.authorityHash ?? "blocked"}</dd>
+        </div>
+      </dl>
+      {diagnostic ? <p>{diagnostic}</p> : null}
+      <div className="review-list">
+        {view.gateResults.map((result) => (
+          <article key={result.id} data-quality-gate-result={result.result}>
+            <strong>{result.result}</strong>
+            <span>{result.id}</span>
+            <small>{result.resultHash}</small>
+            <small>
+              {result.defects.length} Defects · {result.obligations.length}{" "}
+              obligations
+            </small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export const deliveryCandidateInputIdFromRun = (
+  run: DepartmentRunView | null,
+): string | null => {
+  const result = run?.nodes.find(
+    (node) =>
+      node.handler?.handlerKindId === "delivery-candidate-input@1" &&
+      node.status === "succeeded",
+  )?.result;
+  if (typeof result !== "object" || result === null) return null;
+  const id = (result as { readonly deliveryCandidateInputId?: unknown })
+    .deliveryCandidateInputId;
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+};
+
 export function ProjectDetailView({
   project,
   t,
@@ -2570,6 +2661,13 @@ export function ProjectDetailView({
   const [integrationDiagnostic, setIntegrationDiagnostic] = useState<
     string | null
   >(null);
+  const [candidateQualityGateView, setCandidateQualityGateView] =
+    useState<CandidateQualityGateView | null>(null);
+  const [candidateQualityDiagnostic, setCandidateQualityDiagnostic] = useState<
+    string | null
+  >(null);
+  const candidateQualityConnection =
+    useRef<CandidateQualityGateConnection | null>(null);
   const runtimeViewConnection = useRef<
     | {
         readonly kind: "runs";
@@ -2594,6 +2692,7 @@ export function ProjectDetailView({
   const [collaboration, setCollaboration] = useState<InteractionView | null>(
     null,
   );
+  const candidateInputId = deliveryCandidateInputIdFromRun(selectedRun);
   const [consultationMessage, setConsultationMessage] = useState("");
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [productDiscovery, setProductDiscovery] =
@@ -2758,6 +2857,50 @@ export function ProjectDetailView({
       if (current) void current.connection.close();
     };
   }, [activeTab, selectedRun?.run.id]);
+
+  useEffect(() => {
+    let active = true;
+    const synchronize = async (): Promise<void> => {
+      const previous = candidateQualityConnection.current;
+      candidateQualityConnection.current = null;
+      if (previous) await previous.close();
+      setCandidateQualityGateView(null);
+      setCandidateQualityDiagnostic(null);
+      if (!active || activeTab !== "reviews" || !candidateInputId) return;
+      setCandidateQualityDiagnostic("Synchronizing Candidate Quality Gates…");
+      const connection = await connectCandidateQualityGates({
+        bridge: window.sandcastle,
+        candidateInputId,
+        onView: (view) => {
+          if (active) {
+            setCandidateQualityGateView(view);
+            setCandidateQualityDiagnostic(null);
+          }
+        },
+        onDiagnostic: (diagnostic) => {
+          if (active) setCandidateQualityDiagnostic(diagnostic);
+        },
+      });
+      if (!active) {
+        await connection.close();
+        return;
+      }
+      candidateQualityConnection.current = connection;
+    };
+    void synchronize().catch((nextError: unknown) => {
+      if (active) {
+        setCandidateQualityDiagnostic(
+          `Candidate Quality Gates unavailable; resync required: ${errorMessage(nextError)}`,
+        );
+      }
+    });
+    return () => {
+      active = false;
+      const current = candidateQualityConnection.current;
+      candidateQualityConnection.current = null;
+      if (current) void current.close();
+    };
+  }, [activeTab, candidateInputId]);
 
   useEffect(() => {
     let active = true;
@@ -3779,6 +3922,10 @@ export function ProjectDetailView({
                 ? runtimeViewConnection.current.connection.resync()
                 : undefined)
             }
+          />
+          <CandidateQualityGatePanel
+            diagnostic={candidateQualityDiagnostic}
+            view={candidateQualityGateView}
           />
           <ReviewTopicsPanel topics={reviewTopics} />
         </>

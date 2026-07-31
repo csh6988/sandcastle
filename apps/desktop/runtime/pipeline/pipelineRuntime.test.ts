@@ -849,6 +849,139 @@ describe("Pipeline Runtime", () => {
     }
   });
 
+  it("dispatches Delivery/Quality handlers through one narrow executor while Pipeline owns Attempt transitions", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "security",
+          type: "ai-task",
+          name: "Security Review",
+          positionId,
+          handlerKindId: "security-review@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "security" },
+        { from: "security", to: "complete" },
+      ],
+    }));
+    try {
+      fixture.database.pipelineRuntime.registerDeliveryQualityExecutor(
+        async (input) => {
+          const claim = fixture.database.pipelineRuntime.claimReadyAttempt({
+            ...input,
+            workerId: "delivery-quality-node-handler",
+            leaseDurationMs: 60_000,
+          });
+          assert.equal(claim.kind, "claimed");
+          if (claim.kind !== "claimed") return;
+          fixture.database.pipelineRuntime.completeClaimedAttempt({
+            ...input,
+            attemptId: claim.attemptId,
+            leaseId: claim.leaseId,
+            workerId: "delivery-quality-node-handler",
+            result: {
+              candidateGateResultId: "security-result-1",
+              result: "PASS",
+              resultHash: "a".repeat(64),
+            },
+          });
+        },
+      );
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const completed = await fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const security = completed.nodes.find(
+        (node) => node.pipelineNodeId === "security",
+      );
+      assert.equal(security?.status, "succeeded");
+      assert.deepEqual(security?.result, {
+        candidateGateResultId: "security-result-1",
+        result: "PASS",
+        resultHash: "a".repeat(64),
+      });
+      assert.equal(security?.attempts[0]?.status, "succeeded");
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("blocks a claimed Quality Gate Attempt for reconciliation without a second writer", async () => {
+    const fixture = setup(undefined, (positionId) => ({
+      nodes: [
+        {
+          id: "start",
+          type: "start",
+          name: "Start",
+          handlerKindId: "run-start@1",
+        },
+        {
+          id: "operability",
+          type: "ai-task",
+          name: "Operability Review",
+          positionId,
+          handlerKindId: "operability-review@1",
+        },
+        { id: "complete", type: "complete", name: "Complete" },
+      ],
+      edges: [
+        { from: "start", to: "operability" },
+        { from: "operability", to: "complete" },
+      ],
+    }));
+    try {
+      fixture.database.pipelineRuntime.registerDeliveryQualityExecutor(
+        async (input) => {
+          const claim = fixture.database.pipelineRuntime.claimReadyAttempt({
+            ...input,
+            workerId: "delivery-quality-node-handler",
+            leaseDurationMs: 60_000,
+          });
+          assert.equal(claim.kind, "claimed");
+          if (claim.kind !== "claimed") return;
+          fixture.database.pipelineRuntime.blockClaimedAttempt({
+            ...input,
+            attemptId: claim.attemptId,
+            leaseId: claim.leaseId,
+            workerId: "delivery-quality-node-handler",
+            failure: {
+              code: "QUALITY_GATE_RECONCILIATION_REQUIRED",
+              message: "Provider completion is not yet provable.",
+            },
+          });
+        },
+      );
+      const started = fixture.database.pipelineRuntime.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const blocked = await fixture.database.pipelineRuntime.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      const operability = blocked.nodes.find(
+        (node) => node.pipelineNodeId === "operability",
+      );
+      assert.equal(blocked.run.status, "blocked");
+      assert.equal(operability?.status, "blocked");
+      assert.equal(operability?.attempts[0]?.status, "reconciling");
+    } finally {
+      fixture.database.close();
+    }
+  });
+
   it("keeps an unknown Integration effect reconciling until terminal evidence resumes the same Attempt", async () => {
     const fixture = setup(undefined, (positionId) => ({
       nodes: [

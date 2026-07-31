@@ -132,7 +132,7 @@ describe("Company Runtime command registry", () => {
         .readAfter(0, 100)
         .find((entry) => entry.type === "test.case.revised");
       assert.equal(event?.testCaseRevisionId, "test-case-1-r1");
-      assert.equal(event?.registryVersion, 16);
+      assert.equal(event?.registryVersion, 17);
 
       const inspected = new DatabaseSync(database.path);
       try {
