@@ -5838,6 +5838,21 @@ const migrations: readonly CompanyMigration[] = [
             BEFORE DELETE ON candidate_gate_defects
             BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect is immutable'); END;
 
+          CREATE TABLE candidate_gate_defect_resolutions (
+            id TEXT PRIMARY KEY,
+            defect_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_defects(id),
+            fresh_gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+            evidence_json TEXT NOT NULL,
+            resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_gate_defect_resolutions_immutable_update
+            BEFORE UPDATE ON candidate_gate_defect_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+          CREATE TRIGGER candidate_gate_defect_resolutions_immutable_delete
+            BEFORE DELETE ON candidate_gate_defect_resolutions
+            BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+
           CREATE TABLE candidate_gate_obligations (
             id TEXT PRIMARY KEY,
             gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
@@ -6032,6 +6047,24 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
         applied_at TEXT NOT NULL
       ) STRICT;
     `);
+    if (existingVersion >= 49) {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS candidate_gate_defect_resolutions (
+          id TEXT PRIMARY KEY,
+          defect_id TEXT NOT NULL UNIQUE REFERENCES candidate_gate_defects(id),
+          fresh_gate_input_id TEXT NOT NULL REFERENCES candidate_gate_inputs(id),
+          evidence_json TEXT NOT NULL,
+          resolution_hash TEXT NOT NULL CHECK (length(resolution_hash) = 64),
+          created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TRIGGER IF NOT EXISTS candidate_gate_defect_resolutions_immutable_update
+          BEFORE UPDATE ON candidate_gate_defect_resolutions
+          BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS candidate_gate_defect_resolutions_immutable_delete
+          BEFORE DELETE ON candidate_gate_defect_resolutions
+          BEGIN SELECT RAISE(ABORT, 'Candidate Gate Defect resolution is immutable'); END;
+      `);
+    }
     for (const migration of migrations) {
       if (migration.version > existingVersion) migration.migrate(database);
       if (migration.version <= CURRENT_SCHEMA_VERSION) {

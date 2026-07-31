@@ -242,6 +242,11 @@ const testAuthority = {
   testRunId: "test-run-1",
   manifestHash: hash("test-run-manifest"),
   passAuthorityHash: hash("test-run-pass"),
+  testEngineer: {
+    aiMemberId: "tester-ai",
+    positionId: "position-test-engineer",
+    sessionId: "test-session-1",
+  },
   integrationAuthority: {
     generationId: integrationAuthority.id,
     manifestHash: integrationAuthority.manifestHash,
@@ -348,6 +353,18 @@ const artifact = (input: {
 });
 
 const seedLineage = (database: DatabaseSync): void => {
+  database.exec(`
+    INSERT INTO projects(id, company_id, name, goal, status, created_at)
+    VALUES ('project-1', 'company', 'Project', 'Candidate test', 'active', '2026-07-30T00:00:00.000Z');
+    INSERT INTO department_runs(
+      id, project_id, department_id, status, created_at,
+      snapshot_revision_id, updated_at
+    ) VALUES (
+      'run-1', 'project-1', 'software-rnd', 'running',
+      '2026-07-30T00:00:00.000Z', 'snapshot-technical',
+      '2026-07-30T00:00:00.000Z'
+    );
+  `);
   const snapshotPayload = {
     schemaVersion: 1,
     pipelineVersion: {
@@ -591,9 +608,107 @@ const seedLineage = (database: DatabaseSync): void => {
       canonicalJson({ redacted: true }),
       "2026-07-30T00:00:00.000Z",
     );
+  database
+    .prepare(
+      `INSERT INTO work_package_versions(
+         id, work_package_id, version, application_id, repository_reference,
+         node_run_id, manifest_json, manifest_hash, status, created_at
+       ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'ready', ?)`,
+    )
+    .run(
+      "package-1-v1",
+      "package-1",
+      "application-1",
+      "repository-a",
+      "package-node-1",
+      canonicalJson({ acceptanceCriteria: ["requirement-1"] }),
+      hash("package-1-v1"),
+      "2026-07-30T00:00:00.000Z",
+    );
+  database
+    .prepare(
+      `INSERT INTO work_package_assignments(
+         id, work_package_version_id, node_attempt_id, position_id,
+         ai_member_id, agent_adapter_id, rationale_json, allocation_id,
+         interaction_session_id, sandbox_identity, evidence_scope, state,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'self-check-passed', ?, ?)`,
+    )
+    .run(
+      "package-1-assignment",
+      "package-1-v1",
+      "package-attempt-1",
+      "implementer-position",
+      "implementer-member",
+      "scripted-agent",
+      canonicalJson({ reason: "exact package assignment" }),
+      "package-allocation-1",
+      "package-session-1",
+      "package-sandbox-1",
+      "package-evidence-scope-1",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+    );
+  database
+    .prepare(
+      `INSERT INTO node_runs(
+         id, run_id, pipeline_node_id, node_type, status, attempt_count,
+         required_dependency_ids_json, created_at, updated_at,
+         handler_kind_id
+       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, ?)`,
+    )
+    .run(
+      "candidate-input-node-1",
+      "run-1",
+      "candidate-input-pipeline-node",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+      "delivery-candidate-input@1",
+    );
+  database
+    .prepare(
+      `INSERT INTO node_attempts(
+         id, node_run_id, attempt_number, snapshot_revision_id, reason,
+         status, created_at, started_at
+       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?)`,
+    )
+    .run(
+      "candidate-input-attempt-1",
+      "candidate-input-node-1",
+      "snapshot-technical",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+    );
+  database
+    .prepare(
+      `INSERT INTO interaction_sessions(
+         id, mode, project_id, run_id, node_run_id, status, created_at
+       ) VALUES (?, 'run-collaboration', ?, ?, ?, 'active', ?)`,
+    )
+    .run(
+      "candidate-input-session-1",
+      "project-1",
+      "run-1",
+      "candidate-input-node-1",
+      "2026-07-30T00:00:00.000Z",
+    );
+  database
+    .prepare(
+      `INSERT INTO session_participants(
+         id, session_id, participant_type, participant_ref, role, created_at
+       ) VALUES (?, ?, 'ai-member', ?, 'delivery-coordinator', ?)`,
+    )
+    .run(
+      "candidate-input-participant-1",
+      "candidate-input-session-1",
+      "delivery-coordinator-member",
+      "2026-07-30T00:00:00.000Z",
+    );
 };
 
-const openFixture = () => {
+const openFixture = (
+  exactIntegration: IntegrationGenerationView = integrationAuthority,
+) => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
   database.exec("PRAGMA foreign_keys = OFF");
@@ -636,8 +751,8 @@ const openFixture = () => {
     },
     integrations: {
       readPassAuthority: (generationId) => {
-        assert.equal(generationId, integrationAuthority.id);
-        return integrationAuthority;
+        assert.equal(generationId, exactIntegration.id);
+        return exactIntegration;
       },
     },
     artifacts: {
@@ -711,6 +826,26 @@ describe("Delivery Candidate Input Runtime", () => {
       ],
     );
     assert.equal(frozen.manifest.risk.tier, "high");
+    assert.deepEqual(frozen.manifest.forbiddenReviewerIdentities, [
+      {
+        aiMemberId: "delivery-coordinator-member",
+        positionId: "delivery-coordinator",
+        sessionId: "candidate-input-session-1",
+        reason: "producer",
+      },
+      {
+        aiMemberId: "implementer-member",
+        positionId: "implementer-position",
+        sessionId: "package-session-1",
+        reason: "integration-assignment",
+      },
+      {
+        aiMemberId: "tester-ai",
+        positionId: "position-test-engineer",
+        sessionId: "test-session-1",
+        reason: "test-engineer",
+      },
+    ]);
     assert.match(frozen.manifestHash, /^[a-f0-9]{64}$/);
     assert.deepEqual(fixture.runtime.inspect(frozen.id), frozen);
     assert.deepEqual(fixture.runtime.freeze(freezeInput), frozen);
@@ -752,6 +887,101 @@ describe("Delivery Candidate Input Runtime", () => {
       (error: unknown) =>
         error instanceof CandidateInputRuntimeError &&
         error.code === "CANDIDATE_EVIDENCE_AUTHORITY_INVALID",
+    );
+    fixture.database.close();
+  });
+
+  it("freezes only the exact Application Spec revisions accepted by the Technical Baseline", () => {
+    const fixture = openFixture();
+    fixture.database
+      .prepare(
+        `INSERT INTO application_spec_revisions(
+           id, application_spec_id, application_id, project_id, run_id,
+           promoted_project_spec_revision_id, promoted_project_spec_hash,
+           revision, supersedes_revision_id, content_json, content_hash,
+           producer_ai_member_id, producer_position_id, producer_session_id,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "application-spec-r2",
+        "application-spec-1",
+        "application-1",
+        "project-1",
+        "run-1",
+        "project-spec-r1",
+        hash("project-spec-r1"),
+        "application-spec-r1",
+        canonicalJson({ requirements: ["requirement-1", "later-change"] }),
+        hash("application-spec-r2"),
+        "architect-member",
+        "architect",
+        "architect-session",
+        "2026-07-30T01:00:00.000Z",
+      );
+
+    const frozen = fixture.runtime.freeze(freezeInput);
+
+    assert.deepEqual(frozen.manifest.technical.applicationSpecRevisions, [
+      {
+        id: "application-spec-r1",
+        applicationId: "application-1",
+        revision: 1,
+        hash: hash("application-spec-r1"),
+      },
+    ]);
+    fixture.database.close();
+  });
+
+  it("rejects hash drift in an Application Spec frozen by the Technical Baseline", () => {
+    const fixture = openFixture();
+    fixture.database.exec(
+      "DROP TRIGGER application_spec_revisions_immutable_update",
+    );
+    fixture.database
+      .prepare(
+        "UPDATE application_spec_revisions SET content_hash = ? WHERE id = ?",
+      )
+      .run(hash("drifted-application-spec"), "application-spec-r1");
+
+    assert.throws(
+      () => fixture.runtime.freeze(freezeInput),
+      (error: unknown) =>
+        error instanceof CandidateInputRuntimeError &&
+        error.code === "CANDIDATE_APPLICATION_SPEC_AUTHORITY_INVALID",
+    );
+    fixture.database.close();
+  });
+
+  it("requires an exact passed Integration validation for every frozen Contract", () => {
+    const invalidIntegration = structuredClone(integrationAuthority);
+    invalidIntegration.repositoryResults[0]!.validationRecords = [];
+    const fixture = openFixture(invalidIntegration);
+
+    assert.throws(
+      () => fixture.runtime.freeze(freezeInput),
+      (error: unknown) =>
+        error instanceof CandidateInputRuntimeError &&
+        error.code === "CANDIDATE_CONTRACT_VALIDATION_MISSING",
+    );
+    fixture.database.close();
+  });
+
+  it("requires the exact active Delivery coordinator Pipeline Session", () => {
+    const fixture = openFixture();
+
+    assert.throws(
+      () =>
+        fixture.runtime.freeze({
+          ...freezeInput,
+          producer: {
+            ...freezeInput.producer,
+            sessionId: "different-session",
+          },
+        }),
+      (error: unknown) =>
+        error instanceof CandidateInputRuntimeError &&
+        error.code === "CANDIDATE_PRODUCER_BINDING_INVALID",
     );
     fixture.database.close();
   });

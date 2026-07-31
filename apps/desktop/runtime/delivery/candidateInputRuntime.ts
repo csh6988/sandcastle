@@ -63,6 +63,16 @@ export type DeliveryCandidateInputManifest = {
     readonly positionId: string;
     readonly sessionId: string;
   };
+  readonly forbiddenReviewerIdentities?: readonly {
+    readonly aiMemberId: string;
+    readonly positionId: string;
+    readonly sessionId: string;
+    readonly reason:
+      | "producer"
+      | "coordinator"
+      | "integration-assignment"
+      | "test-engineer";
+  }[];
   readonly product: {
     readonly baselineId: string;
     readonly baselineHash: string;
@@ -388,25 +398,55 @@ export const openCandidateInputRuntime = (
         "Delivery Candidate Input requires the exact accepted Technical Baseline frozen by the Snapshot Revision.",
       );
     }
-    const applicationSpecRows = database
-      .prepare(
-        `SELECT id, application_id AS applicationId, revision,
-                content_hash AS hash
-           FROM application_spec_revisions
-          WHERE run_id = ? ORDER BY application_id, revision, id`,
-      )
-      .all(input.runId) as Array<{
-      readonly id: string;
-      readonly applicationId: string;
-      readonly revision: number;
-      readonly hash: string;
-    }>;
-    if (applicationSpecRows.length === 0) {
+    const baselineManifest = parseJson<{
+      readonly applicationSpecRevisions?: readonly {
+        readonly id: string;
+        readonly applicationId?: string;
+        readonly hash: string;
+      }[];
+    }>(row.manifestJson, "Technical Baseline");
+    const frozenSpecRefs = baselineManifest.applicationSpecRevisions ?? [];
+    if (frozenSpecRefs.length === 0) {
       throw new CandidateInputRuntimeError(
         "CANDIDATE_APPLICATION_SPEC_AUTHORITY_MISSING",
         "Delivery Candidate Input requires accepted Application Spec revisions.",
       );
     }
+    const applicationSpecRows = frozenSpecRefs
+      .map((reference) => {
+        const spec = database
+          .prepare(
+            `SELECT id, application_id AS applicationId, revision,
+                    content_hash AS hash
+               FROM application_spec_revisions
+              WHERE id = ? AND run_id = ?`,
+          )
+          .get(reference.id, input.runId) as
+          | {
+              readonly id: string;
+              readonly applicationId: string;
+              readonly revision: number;
+              readonly hash: string;
+            }
+          | undefined;
+        if (
+          !spec ||
+          spec.hash !== reference.hash ||
+          (reference.applicationId !== undefined &&
+            spec.applicationId !== reference.applicationId)
+        ) {
+          throw new CandidateInputRuntimeError(
+            "CANDIDATE_APPLICATION_SPEC_AUTHORITY_INVALID",
+            `Application Spec ${reference.id} is not the exact id/hash revision frozen in the accepted Technical Baseline.`,
+          );
+        }
+        return spec;
+      })
+      .sort((left, right) =>
+        `${left.applicationId}:${left.revision}:${left.id}`.localeCompare(
+          `${right.applicationId}:${right.revision}:${right.id}`,
+        ),
+      );
     return {
       baselineId: row.baselineId,
       baselineHash: row.baselineHash,
@@ -414,7 +454,7 @@ export const openCandidateInputRuntime = (
       proposalRevisionHash: row.proposalRevisionHash,
       technicalQualityGateResultId: row.qualityGateResultId,
       applicationSpecRevisions: applicationSpecRows,
-      manifest: parseJson(row.manifestJson, "Technical Baseline"),
+      manifest: baselineManifest,
     };
   };
 
@@ -614,6 +654,54 @@ export const openCandidateInputRuntime = (
     const tests = uniqueSorted(input.requiredTestRunIds).map((testRunId) =>
       options.tests.downstreamAuthority(testRunId),
     );
+    const producerBinding = database
+      .prepare(
+        `SELECT runs.id AS runId, nodes.id AS nodeRunId, attempts.id AS nodeAttemptId,
+                sessions.id AS sessionId, ai.id AS aiMemberId, positions.id AS positionId
+           FROM department_runs runs
+           JOIN projects ON projects.id = runs.project_id
+           JOIN node_runs nodes ON nodes.run_id = runs.id
+           JOIN node_attempts attempts ON attempts.node_run_id = nodes.id
+           JOIN interaction_sessions sessions
+             ON sessions.run_id = runs.id AND sessions.node_run_id = nodes.id
+            AND sessions.status = 'active'
+           JOIN session_participants participants
+             ON participants.session_id = sessions.id
+            AND participants.participant_type = 'ai-member'
+            AND participants.role = 'delivery-coordinator'
+           JOIN ai_members ai ON ai.id = participants.participant_ref
+           JOIN positions ON positions.ai_member_id = ai.id
+          WHERE runs.id = ? AND projects.id = ? AND nodes.id = ? AND attempts.id = ?
+            AND nodes.handler_kind_id = 'delivery-candidate-input@1'
+            AND sessions.id = ? AND ai.id = ? AND positions.id = ?
+            AND ai.status = 'active' AND positions.status = 'active'`,
+      )
+      .get(
+        input.runId,
+        input.projectId,
+        input.nodeRunId,
+        input.nodeAttemptId,
+        input.producer.sessionId,
+        input.producer.aiMemberId,
+        input.producer.positionId,
+      );
+    const producerContextExists = database
+      .prepare(
+        `SELECT 1 AS present
+           FROM node_runs nodes
+           JOIN node_attempts attempts ON attempts.node_run_id = nodes.id
+          WHERE nodes.id = ? AND attempts.id = ?
+            AND nodes.run_id = ?
+            AND nodes.handler_kind_id = 'delivery-candidate-input@1'
+          LIMIT 1`,
+      )
+      .get(input.nodeRunId, input.nodeAttemptId, input.runId);
+    if (producerContextExists && !producerBinding) {
+      throw new CandidateInputRuntimeError(
+        "CANDIDATE_PRODUCER_BINDING_INVALID",
+        "Delivery Candidate producer must resolve to the exact active Run/Node Attempt/Session/AI/Position identity.",
+      );
+    }
     const integrationIds = uniqueSorted(
       tests.map((test) => test.integrationAuthority.generationId),
     );
@@ -636,6 +724,61 @@ export const openCandidateInputRuntime = (
           entry.commit !== null,
       )
       .sort(compareBy((entry) => entry.repositoryReference));
+    const assignmentIdentities: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+      readonly sessionId: string;
+      readonly reason: "integration-assignment";
+    }[] = [];
+    for (const entry of integration.manifest.packages) {
+      const assignments = database
+        .prepare(
+          `SELECT assignments.ai_member_id AS aiMemberId,
+                  assignments.position_id AS positionId,
+                  assignments.interaction_session_id AS sessionId
+             FROM work_package_assignments assignments
+             JOIN work_package_versions versions
+               ON versions.id = assignments.work_package_version_id
+            WHERE versions.id = ?
+              AND assignments.state NOT IN ('superseded', 'failed')`,
+        )
+        .all(entry.workPackageVersionId) as Array<{
+        readonly aiMemberId: string;
+        readonly positionId: string;
+        readonly sessionId: string;
+      }>;
+      if (assignments.length === 0) {
+        throw new CandidateInputRuntimeError(
+          "CANDIDATE_REVIEWER_IDENTITY_AUTHORITY_INVALID",
+          `Integration Work Package ${entry.workPackageVersionId} has no exact assignment identity for reviewer exclusion.`,
+        );
+      }
+      for (const assignment of assignments) {
+        assignmentIdentities.push({
+          ...assignment,
+          reason: "integration-assignment",
+        });
+      }
+    }
+    const forbiddenReviewerIdentities = [
+      ...new Map(
+        [
+          { ...input.producer, reason: "producer" as const },
+          ...tests.map((test) => ({
+            ...test.testEngineer,
+            reason: "test-engineer" as const,
+          })),
+          ...assignmentIdentities,
+        ].map((identity) => [
+          `${identity.aiMemberId}\0${identity.positionId}\0${identity.sessionId}`,
+          identity,
+        ]),
+      ).values(),
+    ].sort((left, right) =>
+      `${left.aiMemberId}:${left.positionId}:${left.sessionId}:${left.reason}`.localeCompare(
+        `${right.aiMemberId}:${right.positionId}:${right.sessionId}:${right.reason}`,
+      ),
+    );
     for (const test of tests) {
       if (
         test.snapshotRevisionId !== input.snapshotRevisionId ||
@@ -661,6 +804,45 @@ export const openCandidateInputRuntime = (
         throw new CandidateInputRuntimeError(
           "CANDIDATE_EXECUTION_ISOLATION_INVALID",
           `Test Run ${test.testRunId} does not prove isolated branch and Runtime-only import authority.`,
+        );
+      }
+    }
+    const requiredContracts = integration.manifest.contractVersions;
+    for (const contract of requiredContracts) {
+      const matchingRequired = integration.manifest.requiredValidations.filter(
+        (validation) =>
+          validation.kind === "contract" &&
+          validation.contract?.id === contract.id &&
+          validation.contract.version === contract.version &&
+          validation.contract.hash === contract.hash &&
+          validation.contract.producerApplicationId ===
+            contract.producerApplicationId &&
+          validation.contract.consumerApplicationId ===
+            contract.consumerApplicationId,
+      );
+      if (matchingRequired.length !== 1) {
+        throw new CandidateInputRuntimeError(
+          "CANDIDATE_CONTRACT_VALIDATION_AUTHORITY_INVALID",
+          `Contract ${contract.id}:${contract.version}:${contract.hash} does not have one exact frozen validation requirement.`,
+        );
+      }
+      const required = matchingRequired[0]!;
+      const passed = integration.repositoryResults.some((repository) =>
+        repository.validationRecords.some(
+          (record) =>
+            record.validationId === required.id &&
+            record.kind === "contract" &&
+            record.status === "passed" &&
+            canonicalJson(record.responsibleWorkPackageVersionIds) ===
+              canonicalJson(required.responsibleWorkPackageVersionIds) &&
+            canonicalJson(record.evidenceRefs) ===
+              canonicalJson(required.evidenceRefs),
+        ),
+      );
+      if (!passed) {
+        throw new CandidateInputRuntimeError(
+          "CANDIDATE_CONTRACT_VALIDATION_MISSING",
+          `Contract ${contract.id}:${contract.version}:${contract.hash} has no exact passed Integration validation record.`,
         );
       }
     }
@@ -756,6 +938,7 @@ export const openCandidateInputRuntime = (
         nodeAttemptId: input.nodeAttemptId,
       },
       producer: input.producer,
+      forbiddenReviewerIdentities,
       product,
       technical,
       codeReviewCoverage: [...integration.manifest.packages].sort(

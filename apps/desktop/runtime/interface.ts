@@ -1665,6 +1665,13 @@ export const TestPassAuthorityViewSchema = z
     testRunId: z.string().trim().min(1),
     manifestHash: Sha256Schema,
     passAuthorityHash: Sha256Schema,
+    testEngineer: z
+      .object({
+        aiMemberId: z.string().trim().min(1),
+        positionId: z.string().trim().min(1),
+        sessionId: z.string().trim().min(1),
+      })
+      .strict(),
     integrationAuthority: TestRunManifestInputSchema.shape.integrationAuthority,
     testCaseRevisions: TestRunManifestInputSchema.shape.testCaseRevisions,
     coverageHash: Sha256Schema,

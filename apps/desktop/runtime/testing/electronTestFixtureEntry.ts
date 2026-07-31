@@ -19,7 +19,9 @@ import type {
   CandidateGateInputView,
   CandidateGateResultView,
 } from "../quality/qualityGateRuntime.js";
+
 import {
+  electronTestFixtureRuntimePrincipal,
   loadElectronTestFixtureConfig,
   normalizeTestEvidenceLocator,
   readElectronTestFixtureAdapterScript,
@@ -530,6 +532,30 @@ const materializeCandidateQualityGates = (input: {
       2,
     );
     const executionId = `fixture-${kind}-gate-execution`;
+    const evidenceRefFor = (evidenceKind: string): string => {
+      const prefixes =
+        evidenceKind === "artifact" || evidenceKind === "static-analysis"
+          ? ["artifact-version:"]
+          : evidenceKind === "runtime-fact"
+            ? ["test-pass-authority:", "integration-pass-authority:"]
+            : evidenceKind === "dynamic-analysis"
+              ? ["test-evidence:", "artifact-version:"]
+              : [
+                  "test-evidence:",
+                  "test-pass-authority:",
+                  "integration-pass-authority:",
+                  "artifact-version:",
+                ];
+      const reference = gateInput.manifest.supportingEvidenceRefs.find((item) =>
+        prefixes.some((prefix) => item.startsWith(prefix)),
+      );
+      if (!reference) {
+        throw new Error(
+          `${kind} fixture Gate has no authoritative ${evidenceKind} evidence reference.`,
+        );
+      }
+      return reference;
+    };
     execute(
       `fixture-${kind}-gate-execution-accept`,
       runtimeActor(input.seeded.gateReview.reviewer.aiMemberId),
@@ -561,7 +587,7 @@ const materializeCandidateQualityGates = (input: {
               status: "passed",
               evidence: check.requiredEvidenceKinds.map((evidenceKind) => ({
                 kind: evidenceKind,
-                ref: `fixture:${kind}:${check.id}:${evidenceKind}`,
+                ref: evidenceRefFor(evidenceKind),
               })),
               responsibility: {
                 kind: "aggregate",
@@ -667,11 +693,7 @@ const main = async (): Promise<void> => {
     companyDir: config.companyDirectory,
     token: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_TOKEN"),
     consumerId: process.env.SANDCASTLE_COMPANY_RUNTIME_CONSUMER_ID,
-    principal: {
-      type: "human",
-      id: "electron-test-fixture",
-      authenticatedBy: "local-session",
-    },
+    principal: electronTestFixtureRuntimePrincipal,
     executionAdapter: fixtureRuntimeOptions.executionAdapter,
     reviewerExecutionAdapter: fixtureRuntimeOptions.reviewerExecutionAdapter,
     integrationValidationProvider:

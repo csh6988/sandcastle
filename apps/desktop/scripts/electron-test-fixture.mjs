@@ -1083,9 +1083,9 @@ const run = async () => {
       schemaVersion: 1,
       commandId,
       actor: {
-        type: "human",
-        id: "electron-test-fixture",
-        authenticatedBy: "local-session",
+        type: "runtime-worker",
+        id: "electron-test-fixture-runtime",
+        authenticatedBy: "runtime",
       },
       consumerId: "electron-test-fixture-driver",
       command,

@@ -252,9 +252,9 @@ describe("Company Runtime server startup", () => {
       token,
     });
     const principal = {
-      type: "test-driver" as const,
+      type: "runtime-worker" as const,
       id: "quality-server-test",
-      authenticatedBy: "ipc-token" as const,
+      authenticatedBy: "runtime" as const,
     };
     const client = createCompanyRuntimeClientFromTransport(
       createLocalRuntimeTransport({ address, token }),
@@ -298,7 +298,7 @@ describe("Company Runtime server startup", () => {
       });
       assert.equal(reconciled.status, "rejected");
       if (reconciled.status === "rejected") {
-        assert.equal(reconciled.error.code, "QUALITY_GATE_EXECUTION_NOT_FOUND");
+        assert.equal(reconciled.error.code, "DELIVERY_QUALITY_ACTOR_INVALID");
       }
     } finally {
       await server.close();

@@ -721,6 +721,11 @@ describe("Company Runtime client", () => {
       testRunId: "test-run-1",
       manifestHash: "e".repeat(64),
       passAuthorityHash: "1".repeat(64),
+      testEngineer: {
+        aiMemberId: "test-engineer-member",
+        positionId: "test-engineer-position",
+        sessionId: "test-engineer-session",
+      },
       integrationAuthority: testRunView.manifest.integrationAuthority,
       testCaseRevisions: testRunView.manifest.testCaseRevisions,
       coverageHash: testRunView.manifest.coverageHash,

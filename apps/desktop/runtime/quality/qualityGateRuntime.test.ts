@@ -41,6 +41,26 @@ const candidate = {
       positionId: "delivery-coordinator",
       sessionId: "candidate-session",
     },
+    forbiddenReviewerIdentities: [
+      {
+        aiMemberId: "delivery-coordinator-member",
+        positionId: "delivery-coordinator",
+        sessionId: "candidate-session",
+        reason: "producer" as const,
+      },
+      {
+        aiMemberId: "implementer-member",
+        positionId: "implementer-position",
+        sessionId: "implementer-session",
+        reason: "integration-assignment" as const,
+      },
+      {
+        aiMemberId: "test-engineer-member",
+        positionId: "test-engineer-position",
+        sessionId: "test-engineer-session",
+        reason: "test-engineer" as const,
+      },
+    ],
     product: {
       baselineId: "product-baseline-1",
       baselineHash: hash("product-baseline-1"),
@@ -319,7 +339,12 @@ const passingChecks = (
     status: "passed" as const,
     evidence: check.requiredEvidenceKinds.map((kind) => ({
       kind,
-      ref: `${kind}:evidence:${check.id}`,
+      ref:
+        kind === "artifact" || kind === "static-analysis"
+          ? "artifact-version:artifact-evidence-1"
+          : kind === "runtime-fact"
+            ? "test-pass-authority:test-run-1"
+            : "test-evidence:test-evidence-1",
     })),
     responsibility: {
       kind: "aggregate" as const,
@@ -392,6 +417,44 @@ const seedQualityGateResult = (
     );
 };
 
+const seedFinding = (
+  database: DatabaseSync,
+  input: {
+    topicId: string;
+    findingId: string;
+    severity: "info" | "low" | "medium" | "high" | "critical";
+    blocking: boolean;
+  },
+): void => {
+  const participant = database
+    .prepare(
+      `SELECT id, session_id AS sessionId FROM review_participants
+        WHERE topic_id = ? AND role = 'reviewer-participant'`,
+    )
+    .get(input.topicId) as { id: string; sessionId: string };
+  database
+    .prepare(
+      `INSERT INTO review_findings(
+         id, topic_id, reviewer_participant_id, reviewer_session_id, severity,
+         summary, rationale, impact, evidence_refs_json, suggested_owner,
+         blocking, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'aggregate', ?, ?)`,
+    )
+    .run(
+      input.findingId,
+      input.topicId,
+      participant.id,
+      participant.sessionId,
+      input.severity,
+      `Finding ${input.findingId}`,
+      "Independent evidence requires disposition.",
+      "Candidate Gate result must reflect the latest disposition.",
+      JSON.stringify(["artifact-version:artifact-evidence-1"]),
+      input.blocking ? 1 : 0,
+      candidate.createdAt,
+    );
+};
+
 describe("Quality Gate Runtime input", () => {
   it("freezes Runtime-owned risk, deep review depth, and the complete Security catalog", () => {
     const fixture = openFixture();
@@ -421,6 +484,7 @@ describe("Quality Gate Runtime input", () => {
         "cross-application-trust",
         "sensitive-logs",
         "rollback",
+        "credential-materialization",
       ],
     );
     assert.deepEqual(prepared.manifest.harnessSnapshotRefs, [
@@ -506,6 +570,47 @@ describe("Quality Gate Runtime input", () => {
         "cross-application-operations",
       ],
     );
+    seedExecutionFact(fixture.database, {
+      gateInputId: prepared.id,
+      executionId: "operability-execution-critical",
+      checks: passingChecks(prepared),
+    });
+    seedQualityGateResult(fixture.database, {
+      topicId,
+      qualityGateResultId: "generic-operability-gate-critical",
+      result: "PASS",
+    });
+    assert.throws(
+      () =>
+        runtime.finalize({
+          candidateGateResultId: "candidate-operability-result-critical",
+          gateInputId: prepared.id,
+          executionId: "operability-execution-critical",
+          qualityGateResultId: "generic-operability-gate-critical",
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
+    );
+    assert.throws(
+      () =>
+        runtime.authorize({
+          authorityId: "critical-authority",
+          candidateInputId: criticalCandidate.id,
+          expectedCandidateInputHash: criticalCandidate.manifestHash,
+          securityGateResultId: "not-materialized",
+          operabilityGateResultId: "not-materialized",
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
+    );
+    assert.throws(
+      () => runtime.downstreamAuthority(criticalCandidate.id),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
+    );
     fixture.database.close();
   });
 
@@ -530,6 +635,25 @@ describe("Quality Gate Runtime input", () => {
         error instanceof QualityGateRuntimeError &&
         error.code === "QUALITY_GATE_RISK_CONFLICT",
     );
+    assert.throws(
+      () => fixture.runtime.prepare(prepareInput),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_REVIEWER_NOT_INDEPENDENT",
+    );
+    fixture.database.close();
+  });
+
+  it("rejects a reviewer colliding with any frozen Work Package or Test identity", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "independent-reviewer-member",
+      reviewerPositionId: "implementer-position",
+      reviewerSessionId: "independent-review-session",
+    });
+
     assert.throws(
       () => fixture.runtime.prepare(prepareInput),
       (error: unknown) =>
@@ -659,6 +783,122 @@ describe("Quality Gate Runtime input", () => {
     fixture.database.close();
   });
 
+  it("maps an unresolved lower-severity Finding to CONDITIONAL_PASS and an obligation", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+    const prepared = fixture.runtime.prepare(prepareInput);
+    seedExecutionFact(fixture.database, {
+      gateInputId: prepared.id,
+      executionId: "security-execution-lower-finding",
+      checks: passingChecks(prepared),
+    });
+    seedFinding(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      findingId: "finding:lower",
+      severity: "medium",
+      blocking: false,
+    });
+    seedQualityGateResult(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      qualityGateResultId: "generic-security-gate-lower-finding",
+      result: "PASS",
+    });
+
+    const result = fixture.runtime.finalize({
+      candidateGateResultId: "candidate-security-result-lower-finding",
+      gateInputId: prepared.id,
+      executionId: "security-execution-lower-finding",
+      qualityGateResultId: "generic-security-gate-lower-finding",
+    });
+
+    assert.equal(result.result, "CONDITIONAL_PASS");
+    assert.deepEqual(
+      result.obligations.map((entry) => entry.checkId),
+      ["review-finding:finding:lower"],
+    );
+    fixture.database.close();
+  });
+
+  it("uses the latest append-only Finding disposition and excludes resolved findings", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+    const prepared = fixture.runtime.prepare(prepareInput);
+    seedExecutionFact(fixture.database, {
+      gateInputId: prepared.id,
+      executionId: "security-execution-resolved-finding",
+      checks: passingChecks(prepared),
+    });
+    seedFinding(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      findingId: "finding:resolved-high",
+      severity: "high",
+      blocking: true,
+    });
+    fixture.database
+      .prepare(
+        `INSERT INTO review_resolutions(
+           id, topic_id, finding_id, participant_id, disposition, response,
+           evidence_refs_json, revised_subject_id, revised_subject_hash,
+           created_at
+         ) VALUES (?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        "resolution:accepted",
+        prepareInput.reviewTopicId,
+        "finding:resolved-high",
+        prepareInput.reviewerParticipantId,
+        "Accepted for remediation.",
+        JSON.stringify(["artifact-version:artifact-evidence-1"]),
+        "2026-07-30T00:00:01.000Z",
+      );
+    fixture.database
+      .prepare(
+        `INSERT INTO review_resolutions(
+           id, topic_id, finding_id, participant_id, disposition, response,
+           evidence_refs_json, revised_subject_id, revised_subject_hash,
+           created_at
+         ) VALUES (?, ?, ?, ?, 'resolved', ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        "resolution:resolved",
+        prepareInput.reviewTopicId,
+        "finding:resolved-high",
+        prepareInput.reviewerParticipantId,
+        "Resolved with exact evidence.",
+        JSON.stringify(["artifact-version:artifact-evidence-1"]),
+        "2026-07-30T00:00:02.000Z",
+      );
+    seedQualityGateResult(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      qualityGateResultId: "generic-security-gate-resolved-finding",
+      result: "PASS",
+    });
+
+    const result = fixture.runtime.finalize({
+      candidateGateResultId: "candidate-security-result-resolved-finding",
+      gateInputId: prepared.id,
+      executionId: "security-execution-resolved-finding",
+      qualityGateResultId: "generic-security-gate-resolved-finding",
+    });
+
+    assert.equal(result.result, "PASS");
+    assert.deepEqual(result.defects, []);
+    assert.deepEqual(result.obligations, []);
+    fixture.database.close();
+  });
+
   it("closes prior obligations only through a fresh independent re-review over unchanged input", () => {
     const fixture = openFixture();
     seedReview(fixture.database, {
@@ -716,7 +956,7 @@ describe("Quality Gate Runtime input", () => {
         {
           subjectType: "obligation",
           subjectId: obligationId,
-          evidenceRefs: ["artifact-version:obligation-resolution-1"],
+          evidenceRefs: ["artifact-version:artifact-evidence-1"],
         },
       ],
     });
@@ -749,6 +989,104 @@ describe("Quality Gate Runtime input", () => {
       )
       .get(obligationId) as { freshGateInputId: string };
     assert.equal(resolution.freshGateInputId, freshInput.id);
+    fixture.database.close();
+  });
+
+  it("closes prior Defects only after recording an immutable fresh-input resolution", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+    const priorInput = fixture.runtime.prepare(prepareInput);
+    const priorChecks = passingChecks(priorInput);
+    seedExecutionFact(fixture.database, {
+      gateInputId: priorInput.id,
+      executionId: "security-execution-prior-defect",
+      checks: priorChecks.map((check, index) =>
+        index === 0 ? { ...check, status: "failed" as const } : check,
+      ),
+    });
+    seedQualityGateResult(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      qualityGateResultId: "generic-security-gate-prior-defect",
+      result: "FAIL",
+    });
+    const priorResult = fixture.runtime.finalize({
+      candidateGateResultId: "candidate-security-result-prior-defect",
+      gateInputId: priorInput.id,
+      executionId: "security-execution-prior-defect",
+      qualityGateResultId: "generic-security-gate-prior-defect",
+    });
+    const defectId = priorResult.defects[0]!.id;
+
+    seedReview(fixture.database, {
+      topicId: "security-topic-fresh-defect",
+      reviewerParticipantId: "security-reviewer-participant-fresh-defect",
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-fresh-defect",
+    });
+    const freshInput = fixture.runtime.prepare({
+      ...prepareInput,
+      gateInputId: "security-gate-input-fresh-defect",
+      requestId: "security-gate-request-fresh-defect",
+      reviewTopicId: "security-topic-fresh-defect",
+      reviewerParticipantId: "security-reviewer-participant-fresh-defect",
+      priorGateInputId: priorInput.id,
+    });
+    seedExecutionFact(fixture.database, {
+      gateInputId: freshInput.id,
+      executionId: "security-execution-fresh-defect",
+      checks: passingChecks(freshInput),
+      resolutions: [
+        {
+          subjectType: "defect",
+          subjectId: defectId,
+          evidenceRefs: ["artifact-version:artifact-evidence-1"],
+        },
+      ],
+    });
+    seedQualityGateResult(fixture.database, {
+      topicId: "security-topic-fresh-defect",
+      qualityGateResultId: "generic-security-gate-fresh-defect",
+      result: "PASS",
+    });
+
+    const freshResult = fixture.runtime.finalize({
+      candidateGateResultId: "candidate-security-result-fresh-defect",
+      gateInputId: freshInput.id,
+      executionId: "security-execution-fresh-defect",
+      qualityGateResultId: "generic-security-gate-fresh-defect",
+    });
+
+    assert.equal(freshResult.result, "PASS");
+    assert.equal(
+      fixture.runtime.inspectResult(priorResult.id).defects[0]?.status,
+      "closed",
+    );
+    const resolution = fixture.database
+      .prepare(
+        `SELECT fresh_gate_input_id AS freshGateInputId,
+                resolution_hash AS resolutionHash
+           FROM candidate_gate_defect_resolutions WHERE defect_id = ?`,
+      )
+      .get(defectId) as {
+      freshGateInputId: string;
+      resolutionHash: string;
+    };
+    assert.equal(resolution.freshGateInputId, freshInput.id);
+    assert.match(resolution.resolutionHash, /^[a-f0-9]{64}$/);
+    assert.throws(() =>
+      fixture.database
+        .prepare(
+          "UPDATE candidate_gate_defect_resolutions SET evidence_json = '[]' WHERE defect_id = ?",
+        )
+        .run(defectId),
+    );
     fixture.database.close();
   });
 
@@ -959,6 +1297,144 @@ describe("Quality Gate Runtime input", () => {
     fixture.database.close();
   });
 
+  it("rejects unknown fact fields and mislabeled evidence before terminal mutation", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+    const prepared = fixture.runtime.prepare(prepareInput);
+    fixture.runtime.acceptExecution({
+      executionId: "security-execution-invalid-fact",
+      gateInputId: prepared.id,
+      operationKey: "security-gate:invalid-fact",
+      request: { gateInputId: prepared.id },
+    });
+    fixture.runtime.markExecutionRunning("security-execution-invalid-fact");
+
+    assert.throws(
+      () =>
+        fixture.runtime.reconcileExecution({
+          executionId: "security-execution-invalid-fact",
+          observation: {
+            state: "succeeded",
+            fact: {
+              schemaVersion: 1,
+              gateInputId: prepared.id,
+              checks: passingChecks(prepared),
+              resolutions: [],
+              unexpected: true,
+            },
+            receiptHash: hash("invalid-fact-receipt"),
+          },
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_FACT_SCHEMA_INVALID",
+    );
+    assert.equal(
+      fixture.runtime.reconcileExecution({
+        executionId: "security-execution-invalid-fact",
+        observation: { state: "running" },
+      }).state,
+      "reconciling",
+    );
+
+    fixture.runtime.acceptExecution({
+      executionId: "security-execution-mislabeled-evidence",
+      gateInputId: prepared.id,
+      operationKey: "security-gate:mislabeled-evidence",
+      request: { gateInputId: prepared.id },
+    });
+    const mislabeledChecks = passingChecks(prepared).map((check, index) =>
+      index === 0
+        ? {
+            ...check,
+            evidence: [
+              {
+                kind: "artifact",
+                ref: "test-pass-authority:test-run-1",
+              },
+            ],
+          }
+        : check,
+    );
+    assert.throws(
+      () =>
+        fixture.runtime.reconcileExecution({
+          executionId: "security-execution-mislabeled-evidence",
+          observation: {
+            state: "succeeded",
+            fact: {
+              schemaVersion: 1,
+              gateInputId: prepared.id,
+              checks: mislabeledChecks,
+              resolutions: [],
+            },
+            receiptHash: hash("mislabeled-evidence-receipt"),
+          },
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_EVIDENCE_REF_INVALID",
+    );
+    fixture.database.close();
+  });
+
+  it("accepts exact current execution fact and receipt references as Runtime evidence", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+    const prepared = fixture.runtime.prepare(prepareInput);
+    const executionId = "security-execution-exact-runtime-evidence";
+    const receiptHash = hash("exact-runtime-evidence-receipt");
+    fixture.runtime.acceptExecution({
+      executionId,
+      gateInputId: prepared.id,
+      operationKey: "security-gate:exact-runtime-evidence",
+      request: { gateInputId: prepared.id },
+    });
+    const checks = passingChecks(prepared).map((check, checkIndex) => ({
+      ...check,
+      evidence: check.evidence.map((evidence, evidenceIndex) =>
+        evidence.kind === "runtime-fact"
+          ? {
+              ...evidence,
+              ref:
+                (checkIndex + evidenceIndex) % 2 === 0
+                  ? `quality-gate-execution:${executionId}:fact`
+                  : `quality-gate-execution:${executionId}:receipt:${receiptHash}`,
+            }
+          : evidence,
+      ),
+    }));
+
+    const terminal = fixture.runtime.reconcileExecution({
+      executionId,
+      observation: {
+        state: "succeeded",
+        fact: {
+          schemaVersion: 1,
+          gateInputId: prepared.id,
+          checks,
+          resolutions: [],
+        },
+        receiptHash,
+      },
+    });
+
+    assert.equal(terminal.state, "succeeded");
+    fixture.database.close();
+  });
+
   it("preserves unknown execution state without inventing PASS, FAIL, or a resend", () => {
     const fixture = openFixture();
     seedReview(fixture.database, {
@@ -1052,9 +1528,9 @@ describe("Quality Gate Runtime input", () => {
       schemaVersion: 1 as const,
       commandId: "command-quality-prepare-1",
       actor: {
-        type: "test-driver" as const,
+        type: "runtime-worker" as const,
         id: "quality-command-test",
-        authenticatedBy: "ipc-token" as const,
+        authenticatedBy: "runtime" as const,
       },
       consumerId: "quality-command-consumer",
       command: {
@@ -1062,6 +1538,19 @@ describe("Quality Gate Runtime input", () => {
         ...prepareInput,
       },
     };
+
+    const rejected = registry.execute({
+      ...envelope,
+      actor: {
+        type: "test-driver" as const,
+        id: "untrusted-quality-command-test",
+        authenticatedBy: "ipc-token" as const,
+      },
+    });
+    assert.equal(rejected.status, "rejected");
+    if (rejected.status === "rejected") {
+      assert.equal(rejected.error.code, "DELIVERY_QUALITY_ACTOR_INVALID");
+    }
 
     const first = registry.execute(envelope);
 

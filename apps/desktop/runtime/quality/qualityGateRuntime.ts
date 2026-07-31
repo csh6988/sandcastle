@@ -286,6 +286,7 @@ const SECURITY_CHECKS = [
   "cross-application-trust",
   "sensitive-logs",
   "rollback",
+  "credential-materialization",
 ] as const;
 
 const OPERABILITY_CHECKS = [
@@ -310,7 +311,8 @@ const evidenceKindsFor = (
     if (
       checkId === "sandbox-worktree-git-boundary" ||
       checkId === "network-filesystem-scope" ||
-      checkId === "rollback"
+      checkId === "rollback" ||
+      checkId === "credential-materialization"
     ) {
       return ["artifact", "runtime-fact", "dynamic-analysis"];
     }
@@ -408,6 +410,153 @@ const validateRisk = (
     throw new QualityGateRuntimeError(
       "QUALITY_GATE_RISK_CONFLICT",
       `Quality Gate expected ${expectedRiskTier} risk but exact Candidate Input requires at least ${factorFloor} and records ${candidate.manifest.risk.tier}.`,
+    );
+  }
+};
+
+const hasExactKeys = (
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> =>
+  value !== null &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+
+function validateSucceededFact(
+  fact: unknown,
+  gateInput: CandidateGateInputView,
+  executionId: string,
+  receiptHash?: string,
+): asserts fact is {
+  readonly schemaVersion: 1;
+  readonly gateInputId: string;
+  readonly checks: readonly CandidateGateCheckOutcome[];
+  readonly resolutions: readonly {
+    readonly subjectType: "defect" | "obligation";
+    readonly subjectId: string;
+    readonly evidenceRefs: readonly string[];
+  }[];
+} {
+  if (
+    !hasExactKeys(fact, [
+      "schemaVersion",
+      "gateInputId",
+      "checks",
+      "resolutions",
+    ]) ||
+    fact.schemaVersion !== 1 ||
+    fact.gateInputId !== gateInput.id ||
+    !Array.isArray(fact.checks) ||
+    !Array.isArray(fact.resolutions)
+  ) {
+    throw new QualityGateRuntimeError(
+      "QUALITY_GATE_FACT_SCHEMA_INVALID",
+      `Gate execution ${executionId} fact must use the exact succeeded-fact schema.`,
+    );
+  }
+  const frozenRefs = new Set(gateInput.manifest.supportingEvidenceRefs);
+  const evidenceAllowed = (kind: string, ref: string): boolean => {
+    const exactExecutionRef =
+      ref === `quality-gate-execution:${executionId}:fact` ||
+      ref === `candidate-gate-execution:${executionId}:fact` ||
+      (receiptHash !== undefined &&
+        (ref ===
+          `quality-gate-execution:${executionId}:receipt:${receiptHash}` ||
+          ref ===
+            `candidate-gate-execution:${executionId}:receipt:${receiptHash}`));
+    if (kind === "runtime-fact" && exactExecutionRef) return true;
+    if (!frozenRefs.has(ref)) return false;
+    if (kind === "artifact" || kind === "static-analysis")
+      return ref.startsWith("artifact-version:");
+    if (kind === "runtime-fact")
+      return (
+        ref.startsWith("test-pass-authority:") ||
+        ref.startsWith("integration-pass-authority:") ||
+        ref.startsWith(`candidate-gate-execution:${executionId}:`)
+      );
+    if (kind === "dynamic-analysis")
+      return (
+        ref.startsWith("test-evidence:") || ref.startsWith("artifact-version:")
+      );
+    return (
+      ref.startsWith("test-evidence:") ||
+      ref.startsWith("test-pass-authority:") ||
+      ref.startsWith("integration-pass-authority:") ||
+      ref.startsWith("artifact-version:")
+    );
+  };
+  for (const check of fact.checks) {
+    if (
+      !hasExactKeys(check, [
+        "checkId",
+        "status",
+        "evidence",
+        "responsibility",
+      ]) ||
+      typeof check.checkId !== "string" ||
+      !["passed", "missing", "failed", "unknown"].includes(
+        String(check.status),
+      ) ||
+      !Array.isArray(check.evidence) ||
+      !hasExactKeys(check.responsibility, ["kind", "candidateIds"]) ||
+      check.responsibility.kind !== "aggregate" ||
+      !Array.isArray(check.responsibility.candidateIds) ||
+      check.responsibility.candidateIds.length !== 1 ||
+      check.responsibility.candidateIds[0] !==
+        gateInput.manifest.candidateInput.id
+    ) {
+      throw new QualityGateRuntimeError(
+        "QUALITY_GATE_FACT_SCHEMA_INVALID",
+        `Gate execution ${executionId} contains an invalid check or responsibility record.`,
+      );
+    }
+    for (const evidence of check.evidence) {
+      if (
+        !hasExactKeys(evidence, ["kind", "ref"]) ||
+        typeof evidence.kind !== "string" ||
+        typeof evidence.ref !== "string" ||
+        ![
+          "artifact",
+          "runtime-fact",
+          "static-analysis",
+          "dynamic-analysis",
+          "recovery",
+        ].includes(evidence.kind) ||
+        !evidenceAllowed(evidence.kind, evidence.ref)
+      ) {
+        throw new QualityGateRuntimeError(
+          "QUALITY_GATE_EVIDENCE_REF_INVALID",
+          `Gate execution ${executionId} cites an unsupported or mislabeled evidence reference (${String(evidence.kind)}:${String(evidence.ref)}).`,
+        );
+      }
+    }
+  }
+  for (const resolution of fact.resolutions) {
+    if (
+      !hasExactKeys(resolution, ["subjectType", "subjectId", "evidenceRefs"]) ||
+      !["defect", "obligation"].includes(String(resolution.subjectType)) ||
+      typeof resolution.subjectId !== "string" ||
+      !Array.isArray(resolution.evidenceRefs) ||
+      resolution.evidenceRefs.some(
+        (ref) => typeof ref !== "string" || !frozenRefs.has(ref),
+      )
+    ) {
+      throw new QualityGateRuntimeError(
+        "QUALITY_GATE_FACT_SCHEMA_INVALID",
+        `Gate execution ${executionId} contains an invalid resolution record.`,
+      );
+    }
+  }
+}
+
+const requireVerifiedHumanEscalation = (
+  candidate: DeliveryCandidateInputView,
+): void => {
+  if (candidate.manifest.risk.tier === "critical") {
+    throw new QualityGateRuntimeError(
+      "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
+      "Critical Candidate Gate input may be prepared for escalation, but finalization and downstream authority require a verified human escalation authority.",
     );
   }
 };
@@ -742,17 +891,24 @@ export const openQualityGateRuntime = (
           readonly independenceSnapshotHash: string;
         }
       | undefined;
+    const forbidden = candidate.manifest.forbiddenReviewerIdentities ?? [
+      { ...candidate.manifest.producer, reason: "producer" as const },
+    ];
+    const collides = forbidden.some(
+      (identity) =>
+        reviewer?.aiMemberId === identity.aiMemberId ||
+        reviewer?.positionId === identity.positionId ||
+        reviewer?.sessionId === identity.sessionId,
+    );
     if (
       !reviewer ||
       reviewer.role !== "reviewer-participant" ||
       reviewer.eligible !== 1 ||
-      reviewer.aiMemberId === candidate.manifest.producer.aiMemberId ||
-      reviewer.positionId === candidate.manifest.producer.positionId ||
-      reviewer.sessionId === candidate.manifest.producer.sessionId
+      collides
     ) {
       throw new QualityGateRuntimeError(
         "QUALITY_GATE_REVIEWER_NOT_INDEPENDENT",
-        `Review participant ${input.reviewerParticipantId} is not independent from the Candidate Input producer.`,
+        `Review participant ${input.reviewerParticipantId} collides with a frozen producer/coordinator/Test engineer identity on AI member, Position, or Session.`,
       );
     }
     return reviewer;
@@ -841,6 +997,12 @@ export const openQualityGateRuntime = (
         ...candidate.manifest.artifacts.map(
           (entry) => `artifact-version:${entry.id}`,
         ),
+        ...candidate.manifest.evidence.flatMap((entry) => [
+          `test-pass-authority:${entry.testRunId}`,
+          ...(entry.artifactVersionId
+            ? [`artifact-version:${entry.artifactVersionId}`]
+            : []),
+        ]),
         ...candidate.manifest.tests.map(
           (entry) => `test-pass-authority:${entry.testRunId}`,
         ),
@@ -948,6 +1110,10 @@ export const openQualityGateRuntime = (
 
   const finalize: QualityGateRuntime["finalize"] = (input) => {
     const gateInput = inspect(input.gateInputId);
+    const candidateForEscalation = options.candidates.inspect(
+      gateInput.manifest.candidateInput.id,
+    );
+    requireVerifiedHumanEscalation(candidateForEscalation);
     const gateInputRow = database
       .prepare(
         `SELECT review_topic_id AS reviewTopicId FROM candidate_gate_inputs
@@ -998,6 +1164,12 @@ export const openQualityGateRuntime = (
         readonly evidenceRefs: readonly string[];
       }[];
     }>(factRow.factJson, `Gate execution ${input.executionId} fact`);
+    validateSucceededFact(
+      fact,
+      gateInput,
+      input.executionId,
+      execution.receiptHash,
+    );
     const expectedCheckIds = gateInput.manifest.checkCatalog.checks.map(
       (check) => check.id,
     );
@@ -1067,16 +1239,43 @@ export const openQualityGateRuntime = (
     }
     const findings = database
       .prepare(
-        `SELECT id, severity, evidence_refs_json AS evidenceRefsJson
-           FROM review_findings WHERE topic_id = ? ORDER BY created_at, id`,
+        `SELECT findings.id, findings.severity, findings.blocking,
+                findings.evidence_refs_json AS evidenceRefsJson,
+                (SELECT disposition FROM review_resolutions resolutions
+                  WHERE resolutions.finding_id = findings.id
+                  ORDER BY resolutions.created_at DESC, resolutions.id DESC
+                  LIMIT 1) AS disposition
+           FROM review_findings findings WHERE findings.topic_id = ?
+          ORDER BY findings.created_at, findings.id`,
       )
       .all(gateInputRow.reviewTopicId) as Array<{
       readonly id: string;
       readonly severity: "info" | "low" | "medium" | "high" | "critical";
+      readonly blocking: number;
       readonly evidenceRefsJson: string;
+      readonly disposition:
+        | "accepted"
+        | "disputed"
+        | "resolved"
+        | "rejected"
+        | null;
     }>;
-    const criticalFinding = findings.some(
-      (finding) => finding.severity === "critical",
+    const openFindings = findings.filter(
+      (finding) =>
+        finding.disposition !== "resolved" &&
+        finding.disposition !== "rejected",
+    );
+    const criticalFinding = openFindings.some(
+      (finding) =>
+        finding.blocking === 1 ||
+        finding.severity === "critical" ||
+        finding.severity === "high",
+    );
+    const conditionalFinding = openFindings.some(
+      (finding) =>
+        finding.blocking === 0 &&
+        finding.severity !== "critical" &&
+        finding.severity !== "high",
     );
     const failedCheck = effectiveChecks.some(
       (check) => check.status === "failed",
@@ -1087,7 +1286,9 @@ export const openQualityGateRuntime = (
     const result: CandidateGateResultView["result"] =
       criticalFinding || failedCheck || qualityGate.result === "FAIL"
         ? "FAIL"
-        : missingCheck || qualityGate.result === "CONDITIONAL_PASS"
+        : conditionalFinding ||
+            missingCheck ||
+            qualityGate.result === "CONDITIONAL_PASS"
           ? "CONDITIONAL_PASS"
           : "PASS";
     const priorOpenDefects = gateInput.manifest.priorGateInputId
@@ -1131,7 +1332,7 @@ export const openQualityGateRuntime = (
       ...effectiveChecks.flatMap((check) =>
         check.evidence.map((entry) => entry.ref),
       ),
-      ...findings.flatMap((finding) =>
+      ...openFindings.flatMap((finding) =>
         parseJson<readonly string[]>(
           finding.evidenceRefsJson,
           `Review Finding ${finding.id} evidence`,
@@ -1216,8 +1417,11 @@ export const openQualityGateRuntime = (
         now,
       );
     }
-    for (const finding of findings.filter(
-      (entry) => entry.severity === "critical" || qualityGate.result === "FAIL",
+    for (const finding of openFindings.filter(
+      (entry) =>
+        entry.blocking === 1 ||
+        entry.severity === "critical" ||
+        entry.severity === "high",
     )) {
       insertDefect.run(
         `${input.candidateGateResultId}:defect:finding:${finding.id}`,
@@ -1251,6 +1455,26 @@ export const openQualityGateRuntime = (
         check.checkId,
         `Provide every required evidence kind for ${check.checkId} and complete a fresh independent re-review.`,
         canonicalJson(check.evidence),
+        now,
+      );
+    }
+    for (const finding of openFindings.filter(
+      (entry) =>
+        entry.blocking === 0 &&
+        entry.severity !== "critical" &&
+        entry.severity !== "high",
+    )) {
+      insertObligation.run(
+        `${input.candidateGateResultId}:obligation:finding:${finding.id}`,
+        input.gateInputId,
+        `review-finding:${finding.id}`,
+        `Resolve or reject lower-severity Review Finding ${finding.id} with a fresh independent re-review.`,
+        canonicalJson(
+          parseJson(
+            finding.evidenceRefsJson,
+            `Review Finding ${finding.id} evidence`,
+          ),
+        ),
         now,
       );
     }
@@ -1293,6 +1517,25 @@ export const openQualityGateRuntime = (
             )
             .run(now, resolution.subjectId);
         } else {
+          database
+            .prepare(
+              `INSERT INTO candidate_gate_defect_resolutions(
+                 id, defect_id, fresh_gate_input_id, evidence_json,
+                 resolution_hash, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              `${input.candidateGateResultId}:resolution:${resolution.subjectId}`,
+              resolution.subjectId,
+              gateInput.id,
+              canonicalJson(resolution.evidenceRefs),
+              sha256({
+                defectId: resolution.subjectId,
+                freshGateInputId: gateInput.id,
+                evidenceRefs: resolution.evidenceRefs,
+              }),
+              now,
+            );
           database
             .prepare(
               `UPDATE candidate_gate_defects
@@ -1421,6 +1664,7 @@ export const openQualityGateRuntime = (
 
   const authorize: QualityGateRuntime["authorize"] = (input) => {
     const candidate = options.candidates.inspect(input.candidateInputId);
+    requireVerifiedHumanEscalation(candidate);
     if (
       candidate.id !== input.candidateInputId ||
       candidate.manifestHash !== input.expectedCandidateInputHash
@@ -1526,9 +1770,10 @@ export const openQualityGateRuntime = (
   const downstreamAuthority: QualityGateRuntime["downstreamAuthority"] = (
     candidateInputId,
   ) => {
+    const candidate = options.candidates.inspect(candidateInputId);
+    requireVerifiedHumanEscalation(candidate);
     ensureNoOpenItems(candidateInputId);
     const authority = readAuthority(candidateInputId);
-    const candidate = options.candidates.inspect(candidateInputId);
     if (candidate.manifestHash !== authority.candidateInputHash) {
       throw new QualityGateRuntimeError(
         "QUALITY_GATE_CANDIDATE_CONFLICT",
@@ -1798,6 +2043,15 @@ export const openQualityGateRuntime = (
       throw new QualityGateRuntimeError(
         "QUALITY_GATE_EXECUTION_STATE_CONFLICT",
         `Gate execution ${input.executionId} has an unsupported reconciliation observation.`,
+      );
+    }
+    if (terminalObservation.state === "succeeded") {
+      const gateInput = inspect(execution.gateInputId);
+      validateSucceededFact(
+        terminalObservation.fact,
+        gateInput,
+        input.executionId,
+        terminalObservation.receiptHash,
       );
     }
     const factJson = canonicalJson(terminalObservation.fact);
