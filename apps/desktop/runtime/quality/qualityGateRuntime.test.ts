@@ -250,6 +250,16 @@ const openFixture = () => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
   database.exec("PRAGMA foreign_keys = OFF");
+  seedGateSource(database, {
+    kind: "security",
+    nodeRunId: "security-node-1",
+    nodeAttemptId: "security-attempt-1",
+  });
+  seedGateSource(database, {
+    kind: "operability",
+    nodeRunId: "operability-node-1",
+    nodeAttemptId: "operability-attempt-1",
+  });
   const candidates = { inspect: () => candidate };
   const events = openRuntimeEvents(database, {
     clock: () => new Date(candidate.createdAt),
@@ -259,7 +269,65 @@ const openFixture = () => {
     events,
     clock: () => new Date(candidate.createdAt),
   });
-  return { database, runtime, events };
+  return {
+    database,
+    runtime: {
+      ...runtime,
+      prepare: (input: Omit<Parameters<typeof runtime.prepare>[0], "actor">) =>
+        runtime.prepare({ ...input, actor: qualityGateActor }),
+    },
+    events,
+  };
+};
+
+const qualityGateActor = {
+  type: "runtime-worker" as const,
+  id: "quality-gate-test-worker",
+  authenticatedBy: "runtime" as const,
+};
+
+const seedGateSource = (
+  database: DatabaseSync,
+  input: {
+    readonly kind: "security" | "operability";
+    readonly nodeRunId: string;
+    readonly nodeAttemptId: string;
+    readonly workerId?: string;
+  },
+): void => {
+  database
+    .prepare(
+      `INSERT INTO node_runs(
+         id, run_id, pipeline_node_id, node_type, status, attempt_count,
+         required_dependency_ids_json, created_at, updated_at, handler_kind_id
+       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, ?)`,
+    )
+    .run(
+      input.nodeRunId,
+      candidate.manifest.runId,
+      input.nodeRunId,
+      candidate.createdAt,
+      candidate.createdAt,
+      `${input.kind}-review@1`,
+    );
+  database
+    .prepare(
+      `INSERT INTO node_attempts(
+         id, node_run_id, attempt_number, snapshot_revision_id, reason,
+         status, created_at, started_at, lease_id, lease_owner,
+         lease_expires_at
+       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.nodeAttemptId,
+      input.nodeRunId,
+      candidate.manifest.snapshot.id,
+      candidate.createdAt,
+      candidate.createdAt,
+      `${input.nodeAttemptId}:lease`,
+      input.workerId ?? qualityGateActor.id,
+      new Date(Date.parse(candidate.createdAt) + 300_000).toISOString(),
+    );
 };
 
 const prepareInput = {
@@ -470,6 +538,16 @@ describe("Quality Gate Runtime input", () => {
 
     assert.equal(prepared.manifest.risk.tier, "high");
     assert.equal(prepared.manifest.reviewDepth, "deep-independent");
+    assert.deepEqual(prepared.manifest.source, {
+      runId: candidate.manifest.runId,
+      nodeRunId: prepareInput.nodeRunId,
+      nodeAttemptId: prepareInput.nodeAttemptId,
+      handlerKindId: "security-review@1",
+      attemptNumber: 1,
+      snapshotRevisionId: candidate.manifest.snapshot.id,
+      leaseId: `${prepareInput.nodeAttemptId}:lease`,
+      workerId: qualityGateActor.id,
+    });
     assert.deepEqual(
       prepared.manifest.checkCatalog.checks.map((check) => check.id),
       [
@@ -498,6 +576,41 @@ describe("Quality Gate Runtime input", () => {
     ]);
     assert.deepEqual(fixture.runtime.inspect(prepared.id), prepared);
     assert.deepEqual(fixture.runtime.prepare(prepareInput), prepared);
+    fixture.database.close();
+  });
+
+  it("rejects a missing or cross-kind Gate source Attempt", () => {
+    const fixture = openFixture();
+    seedReview(fixture.database, {
+      topicId: prepareInput.reviewTopicId,
+      reviewerParticipantId: prepareInput.reviewerParticipantId,
+      reviewerAiMemberId: "security-reviewer-member",
+      reviewerPositionId: "security-reviewer",
+      reviewerSessionId: "security-review-session-1",
+    });
+
+    for (const input of [
+      {
+        ...prepareInput,
+        gateInputId: "missing-source-gate-input",
+        requestId: "missing-source-gate-request",
+        nodeRunId: "missing-security-node",
+        nodeAttemptId: "missing-security-attempt",
+      },
+      {
+        ...prepareInput,
+        gateInputId: "cross-kind-gate-input",
+        requestId: "cross-kind-gate-request",
+        kind: "operability" as const,
+      },
+    ]) {
+      assert.throws(
+        () => fixture.runtime.prepare(input),
+        (error: unknown) =>
+          error instanceof QualityGateRuntimeError &&
+          error.code === "QUALITY_GATE_SOURCE_ATTEMPT_INVALID",
+      );
+    }
     fixture.database.close();
   });
 
@@ -541,6 +654,7 @@ describe("Quality Gate Runtime input", () => {
 
     const prepared = runtime.prepare({
       ...prepareInput,
+      actor: qualityGateActor,
       gateInputId: "operability-gate-input-1",
       requestId: "operability-gate-request-1",
       kind: "operability",
@@ -1102,6 +1216,11 @@ describe("Quality Gate Runtime input", () => {
         reviewerPositionId: `${kind}-reviewer`,
         reviewerSessionId: `${kind}-review-session-${suffix}`,
       });
+      seedGateSource(fixture.database, {
+        kind,
+        nodeRunId: `${kind}-node-${suffix}`,
+        nodeAttemptId: `${kind}-attempt-${suffix}`,
+      });
       const gateInput = fixture.runtime.prepare({
         ...prepareInput,
         gateInputId: `${kind}-gate-input-${suffix}`,
@@ -1529,7 +1648,7 @@ describe("Quality Gate Runtime input", () => {
       commandId: "command-quality-prepare-1",
       actor: {
         type: "runtime-worker" as const,
-        id: "quality-command-test",
+        id: qualityGateActor.id,
         authenticatedBy: "runtime" as const,
       },
       consumerId: "quality-command-consumer",

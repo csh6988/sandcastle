@@ -6,6 +6,7 @@ import type {
   DeliveryCandidateInputView,
 } from "../delivery/candidateInputRuntime.js";
 import type { RuntimeEvents } from "../events/subscription.js";
+import type { ActorRef } from "../interface.js";
 
 export type CandidateGateKind = "security" | "operability";
 
@@ -43,6 +44,16 @@ export type CandidateGateInputManifest = {
     readonly positionId: string;
     readonly sessionId: string;
     readonly independenceSnapshotHash: string;
+  };
+  readonly source: {
+    readonly runId: string;
+    readonly nodeRunId: string;
+    readonly nodeAttemptId: string;
+    readonly handlerKindId: string;
+    readonly attemptNumber: number;
+    readonly snapshotRevisionId: string;
+    readonly leaseId: string;
+    readonly workerId: string;
   };
   readonly checkCatalog: {
     readonly revisionId: string;
@@ -200,6 +211,7 @@ type CandidateGateCheckOutcome = {
 };
 
 export type PrepareCandidateGateInput = {
+  readonly actor: ActorRef;
   readonly gateInputId: string;
   readonly requestId: string;
   readonly kind: CandidateGateKind;
@@ -914,6 +926,75 @@ export const openQualityGateRuntime = (
     return reviewer;
   };
 
+  const readSource = (
+    input: PrepareCandidateGateInput,
+    candidate: DeliveryCandidateInputView,
+  ): CandidateGateInputManifest["source"] => {
+    const source = database
+      .prepare(
+        `SELECT nodes.run_id AS runId,
+                nodes.handler_kind_id AS handlerKindId,
+                nodes.status AS nodeStatus,
+                nodes.attempt_count AS attemptCount,
+                attempts.attempt_number AS attemptNumber,
+                attempts.snapshot_revision_id AS snapshotRevisionId,
+                attempts.status AS attemptStatus,
+                attempts.lease_id AS leaseId,
+                attempts.lease_owner AS leaseOwner,
+                attempts.lease_expires_at AS leaseExpiresAt
+           FROM node_runs nodes
+           JOIN node_attempts attempts ON attempts.node_run_id = nodes.id
+          WHERE nodes.id = ? AND attempts.id = ?`,
+      )
+      .get(input.nodeRunId, input.nodeAttemptId) as
+      | {
+          readonly runId: string;
+          readonly handlerKindId: string | null;
+          readonly nodeStatus: string;
+          readonly attemptCount: number;
+          readonly attemptNumber: number;
+          readonly snapshotRevisionId: string;
+          readonly attemptStatus: string;
+          readonly leaseId: string | null;
+          readonly leaseOwner: string | null;
+          readonly leaseExpiresAt: string | null;
+        }
+      | undefined;
+    const leaseExpiresAt = source?.leaseExpiresAt
+      ? Date.parse(source.leaseExpiresAt)
+      : Number.NaN;
+    if (
+      input.actor.type !== "runtime-worker" ||
+      input.actor.authenticatedBy !== "runtime" ||
+      !source ||
+      source.runId !== candidate.manifest.runId ||
+      source.handlerKindId !== `${input.kind}-review@1` ||
+      source.nodeStatus !== "running" ||
+      source.attemptStatus !== "running" ||
+      source.attemptNumber !== source.attemptCount ||
+      source.snapshotRevisionId !== candidate.manifest.snapshot.id ||
+      !source.leaseId?.trim() ||
+      source.leaseOwner !== input.actor.id ||
+      !Number.isFinite(leaseExpiresAt) ||
+      leaseExpiresAt <= clock().getTime()
+    ) {
+      throw new QualityGateRuntimeError(
+        "QUALITY_GATE_SOURCE_ATTEMPT_INVALID",
+        `Candidate Gate ${input.kind} source must be the exact current running ${input.kind}-review@1 Attempt held by the authenticated Runtime worker.`,
+      );
+    }
+    return {
+      runId: source.runId,
+      nodeRunId: input.nodeRunId,
+      nodeAttemptId: input.nodeAttemptId,
+      handlerKindId: source.handlerKindId,
+      attemptNumber: source.attemptNumber,
+      snapshotRevisionId: source.snapshotRevisionId,
+      leaseId: source.leaseId,
+      workerId: input.actor.id,
+    };
+  };
+
   const prepare = (
     input: PrepareCandidateGateInput,
   ): CandidateGateInputView => {
@@ -929,6 +1010,7 @@ export const openQualityGateRuntime = (
       );
     }
     validateRisk(candidate, input.expectedRiskTier);
+    const source = readSource(input, candidate);
     const reviewer = readReview(input, candidate);
     if (input.priorGateInputId) {
       const prior = inspect(input.priorGateInputId);
@@ -982,6 +1064,7 @@ export const openQualityGateRuntime = (
         sessionId: reviewer.sessionId,
         independenceSnapshotHash: reviewer.independenceSnapshotHash,
       },
+      source,
       checkCatalog: {
         ...catalogIdentity,
         hash: sha256(catalogIdentity),

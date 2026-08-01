@@ -3243,7 +3243,10 @@ const executeDeliveryQualityCommand = (
               )
             : command.type === "quality-gate.input.prepare"
               ? CandidateGateInputViewSchema.parse(
-                  qualityGates.prepare(command),
+                  qualityGates.prepare({
+                    ...command,
+                    actor: envelope.actor,
+                  }),
                 )
               : command.type === "quality-gate.execution.accept"
                 ? CandidateGateExecutionViewSchema.parse(

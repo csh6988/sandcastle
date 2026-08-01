@@ -455,6 +455,56 @@ const materializeCandidateQualityGates = (input: {
     const ownerParticipantId = `${topicId}:owner`;
     const reviewerParticipantId = `${topicId}:reviewer`;
     const gateInputId = `fixture-${kind}-gate-input`;
+    const sourceNodeRunId = `${gateInputId}:node`;
+    const sourceNodeAttemptId = `${gateInputId}:attempt`;
+    const sourceSessionId = `${gateInputId}:session`;
+    const sourceWorker = runtimeActor(input.seeded.testOwnerAiMemberId);
+    input.database
+      .prepare(
+        `INSERT OR IGNORE INTO node_runs(
+           id, run_id, pipeline_node_id, node_type, status, attempt_count,
+           required_dependency_ids_json, created_at, updated_at, handler_kind_id
+         ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, ?)`,
+      )
+      .run(
+        sourceNodeRunId,
+        input.seeded.runId,
+        sourceNodeRunId,
+        input.config.fakeClock,
+        input.config.fakeClock,
+        `${kind}-review@1`,
+      );
+    input.database
+      .prepare(
+        `INSERT OR IGNORE INTO node_attempts(
+           id, node_run_id, attempt_number, snapshot_revision_id, reason,
+           status, created_at, started_at, lease_id, lease_owner,
+           lease_expires_at
+         ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sourceNodeAttemptId,
+        sourceNodeRunId,
+        input.seeded.snapshotRevisionId,
+        input.config.fakeClock,
+        input.config.fakeClock,
+        `${sourceNodeAttemptId}:lease`,
+        sourceWorker.id,
+        new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
+      );
+    input.database
+      .prepare(
+        `INSERT OR IGNORE INTO interaction_sessions(
+           id, mode, project_id, run_id, node_run_id, status, created_at
+         ) VALUES (?, 'run-collaboration', ?, ?, ?, 'active', ?)`,
+      )
+      .run(
+        sourceSessionId,
+        input.seeded.projectId,
+        input.seeded.runId,
+        sourceNodeRunId,
+        input.config.fakeClock,
+      );
     const acceptanceCriteria = [
       ...new Set(
         candidate.manifest.integration.manifest.packages.flatMap(
@@ -464,7 +514,7 @@ const materializeCandidateQualityGates = (input: {
     ].sort();
     execute(
       `fixture-${kind}-review-topic-create`,
-      runtimeActor(input.seeded.testOwnerAiMemberId),
+      sourceWorker,
       {
         type: "review.topic.create",
         topicId,
@@ -537,7 +587,7 @@ const materializeCandidateQualityGates = (input: {
     );
     const gateInput = execute<CandidateGateInputView>(
       `fixture-${kind}-gate-input-prepare`,
-      runtimeActor(input.seeded.testOwnerAiMemberId),
+      sourceWorker,
       {
         type: "quality-gate.input.prepare",
         gateInputId,
@@ -546,8 +596,8 @@ const materializeCandidateQualityGates = (input: {
         candidateInputId: candidate.id,
         expectedCandidateInputHash: candidate.manifestHash,
         expectedRiskTier: candidate.manifest.risk.tier,
-        nodeRunId: candidateNodeRunId,
-        nodeAttemptId: candidateNodeAttemptId,
+        nodeRunId: sourceNodeRunId,
+        nodeAttemptId: sourceNodeAttemptId,
         reviewTopicId: topicId,
         reviewerParticipantId,
       },
