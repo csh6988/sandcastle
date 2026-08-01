@@ -314,6 +314,7 @@ const registerEvidence = (input: {
 };
 
 const materializeCandidateQualityGates = (input: {
+  readonly database: import("node:sqlite").DatabaseSync;
   readonly config: ReturnType<typeof loadElectronTestFixtureConfig>;
   readonly tests: TestRuntime;
   readonly commandRegistry: CompanyCommandRegistry;
@@ -353,6 +354,62 @@ const materializeCandidateQualityGates = (input: {
     authenticatedBy: "runtime" as const,
   });
   const candidateInputId = "fixture-delivery-candidate-input";
+  const candidateNodeRunId = `${candidateInputId}:node`;
+  const candidateNodeAttemptId = `${candidateInputId}:attempt`;
+  const candidateSessionId = `${candidateInputId}:session`;
+  input.database
+    .prepare(
+      `INSERT OR IGNORE INTO node_runs(
+         id, run_id, pipeline_node_id, node_type, status, attempt_count,
+         required_dependency_ids_json, created_at, updated_at, handler_kind_id
+       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, 'delivery-candidate-input@1')`,
+    )
+    .run(
+      candidateNodeRunId,
+      input.seeded.runId,
+      candidateNodeRunId,
+      input.config.fakeClock,
+      input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `INSERT OR IGNORE INTO node_attempts(
+         id, node_run_id, attempt_number, snapshot_revision_id, reason,
+         status, created_at, started_at
+       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?)`,
+    )
+    .run(
+      candidateNodeAttemptId,
+      candidateNodeRunId,
+      input.seeded.snapshotRevisionId,
+      input.config.fakeClock,
+      input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `INSERT OR IGNORE INTO interaction_sessions(
+         id, mode, project_id, run_id, node_run_id, status, created_at
+       ) VALUES (?, 'run-collaboration', ?, ?, ?, 'active', ?)`,
+    )
+    .run(
+      candidateSessionId,
+      input.seeded.projectId,
+      input.seeded.runId,
+      candidateNodeRunId,
+      input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `INSERT OR IGNORE INTO session_participants(
+         id, session_id, participant_type, participant_ref, role, created_at
+       ) VALUES (?, ?, 'ai-member', ?, 'delivery-coordinator', ?)`,
+    )
+    .run(
+      `${candidateInputId}:participant`,
+      candidateSessionId,
+      input.seeded.testOwnerAiMemberId,
+      input.config.fakeClock,
+    );
   const candidate = execute<DeliveryCandidateInputView>(
     "fixture-candidate-input-freeze",
     runtimeActor(input.seeded.testOwnerAiMemberId),
@@ -363,12 +420,12 @@ const materializeCandidateQualityGates = (input: {
       projectId: input.seeded.projectId,
       runId: input.seeded.runId,
       snapshotRevisionId: input.seeded.snapshotRevisionId,
-      nodeRunId: input.seeded.testNodeRunId,
-      nodeAttemptId: input.seeded.testNodeAttemptId,
+      nodeRunId: candidateNodeRunId,
+      nodeAttemptId: candidateNodeAttemptId,
       producer: {
         aiMemberId: input.seeded.testOwnerAiMemberId,
         positionId: input.seeded.testOwnerPositionId,
-        sessionId: input.seeded.testSessionId,
+        sessionId: candidateSessionId,
       },
       requiredTestRunIds: [testRunId],
       environment: {
@@ -489,8 +546,8 @@ const materializeCandidateQualityGates = (input: {
         candidateInputId: candidate.id,
         expectedCandidateInputHash: candidate.manifestHash,
         expectedRiskTier: candidate.manifest.risk.tier,
-        nodeRunId: input.seeded.testNodeRunId,
-        nodeAttemptId: input.seeded.testNodeAttemptId,
+        nodeRunId: candidateNodeRunId,
+        nodeAttemptId: candidateNodeAttemptId,
         reviewTopicId: topicId,
         reviewerParticipantId,
       },
@@ -791,6 +848,7 @@ const main = async (): Promise<void> => {
             const testRunId = `test:${currentSeed.runId}:${currentSeed.testNodeRunId}`;
             if (tests.inspect(testRunId).state === "passed") {
               materializeCandidateQualityGates({
+                database,
                 config,
                 tests,
                 commandRegistry,
