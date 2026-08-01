@@ -180,6 +180,23 @@ export type DeliveryCandidateInputGateAuthority = {
   readonly createdAt: string;
 };
 
+export type CriticalRiskEscalationDecision = {
+  readonly id: string;
+  readonly candidateInputId: string;
+  readonly candidateInputHash: string;
+  readonly decision: "authorize-gate-continuation" | "reject";
+  readonly actor: ActorRef & {
+    readonly type: "human";
+    readonly authenticatedBy: "local-session";
+  };
+  readonly risk: DeliveryCandidateInputView["manifest"]["risk"];
+  readonly riskHash: string;
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly decisionHash: string;
+  readonly createdAt: string;
+};
+
 export type CandidateGateExecutionView = {
   readonly id: string;
   readonly gateInputId: string;
@@ -226,6 +243,15 @@ export type PrepareCandidateGateInput = {
 };
 
 export interface QualityGateRuntime {
+  readonly decideCriticalEscalation: (input: {
+    readonly actor: ActorRef;
+    readonly escalationId: string;
+    readonly candidateInputId: string;
+    readonly expectedCandidateInputHash: string;
+    readonly decision: CriticalRiskEscalationDecision["decision"];
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+  }) => CriticalRiskEscalationDecision;
   readonly prepare: (
     input: PrepareCandidateGateInput,
   ) => CandidateGateInputView;
@@ -564,8 +590,15 @@ function validateSucceededFact(
 
 const requireVerifiedHumanEscalation = (
   candidate: DeliveryCandidateInputView,
+  escalation: CriticalRiskEscalationDecision | null,
 ): void => {
-  if (candidate.manifest.risk.tier === "critical") {
+  if (
+    candidate.manifest.risk.tier === "critical" &&
+    (escalation?.decision !== "authorize-gate-continuation" ||
+      escalation.candidateInputId !== candidate.id ||
+      escalation.candidateInputHash !== candidate.manifestHash ||
+      escalation.riskHash !== sha256(candidate.manifest.risk))
+  ) {
     throw new QualityGateRuntimeError(
       "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
       "Critical Candidate Gate input may be prepared for escalation, but finalization and downstream authority require a verified human escalation authority.",
@@ -646,6 +679,7 @@ export const openQualityGateRuntime = (
         ...(input.nodeRunId ? { nodeRunId: input.nodeRunId } : {}),
         ...(input.nodeAttemptId ? { nodeAttemptId: input.nodeAttemptId } : {}),
         deliveryCandidateInputId: input.candidateInputId,
+        commandId: context.commandId,
         ...(input.gateInputId
           ? { candidateGateInputId: input.gateInputId }
           : {}),
@@ -657,6 +691,189 @@ export const openQualityGateRuntime = (
       timestamp: input.timestamp,
     });
   };
+
+  const readCriticalEscalation = (
+    candidateInputId: string,
+  ): CriticalRiskEscalationDecision | null => {
+    const row = database
+      .prepare(
+        `SELECT id, candidate_input_id AS candidateInputId,
+                candidate_input_hash AS candidateInputHash, decision,
+                actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy, risk_json AS riskJson,
+                risk_hash AS riskHash, reason,
+                evidence_refs_json AS evidenceRefsJson,
+                decision_hash AS decisionHash, created_at AS createdAt
+           FROM candidate_critical_escalations
+          WHERE candidate_input_id = ?`,
+      )
+      .get(candidateInputId) as
+      | {
+          readonly id: string;
+          readonly candidateInputId: string;
+          readonly candidateInputHash: string;
+          readonly decision: CriticalRiskEscalationDecision["decision"];
+          readonly actorType: "human";
+          readonly actorId: string;
+          readonly authenticatedBy: "local-session";
+          readonly riskJson: string;
+          readonly riskHash: string;
+          readonly reason: string;
+          readonly evidenceRefsJson: string;
+          readonly decisionHash: string;
+          readonly createdAt: string;
+        }
+      | undefined;
+    if (!row) return null;
+    const risk = parseJson<CriticalRiskEscalationDecision["risk"]>(
+      row.riskJson,
+      `Critical escalation ${row.id} risk`,
+    );
+    const evidenceRefs = parseJson<readonly string[]>(
+      row.evidenceRefsJson,
+      `Critical escalation ${row.id} evidence`,
+    );
+    const decision = {
+      id: row.id,
+      candidateInputId: row.candidateInputId,
+      candidateInputHash: row.candidateInputHash,
+      decision: row.decision,
+      actor: {
+        type: row.actorType,
+        id: row.actorId,
+        authenticatedBy: row.authenticatedBy,
+      },
+      risk,
+      riskHash: row.riskHash,
+      reason: row.reason,
+      evidenceRefs,
+      createdAt: row.createdAt,
+    };
+    if (
+      sha256(risk) !== row.riskHash ||
+      sha256(decision) !== row.decisionHash
+    ) {
+      throw new QualityGateRuntimeError(
+        "QUALITY_GATE_HUMAN_ESCALATION_INTEGRITY_FAILED",
+        `Critical-risk escalation ${row.id} failed immutable integrity validation.`,
+      );
+    }
+    return { ...decision, decisionHash: row.decisionHash };
+  };
+
+  const decideCriticalEscalation: QualityGateRuntime["decideCriticalEscalation"] =
+    (input) => {
+      if (
+        input.actor.type !== "human" ||
+        input.actor.authenticatedBy !== "local-session"
+      ) {
+        throw new QualityGateRuntimeError(
+          "QUALITY_GATE_HUMAN_ESCALATION_ACTOR_INVALID",
+          "Critical-risk escalation requires actor {type:'human', authenticatedBy:'local-session'}.",
+        );
+      }
+      const candidate = options.candidates.inspect(input.candidateInputId);
+      if (
+        candidate.manifest.risk.tier !== "critical" ||
+        candidate.manifestHash !== input.expectedCandidateInputHash
+      ) {
+        throw new QualityGateRuntimeError(
+          "QUALITY_GATE_HUMAN_ESCALATION_INPUT_CONFLICT",
+          `Delivery Candidate Input ${input.candidateInputId} is not the exact frozen critical-risk input.`,
+        );
+      }
+      const reason = input.reason.trim();
+      const evidenceRefs = uniqueSorted(
+        input.evidenceRefs.map((ref) => ref.trim()),
+      );
+      if (
+        reason.length === 0 ||
+        reason.length > 4_000 ||
+        evidenceRefs.length === 0 ||
+        evidenceRefs.length > 64 ||
+        evidenceRefs.some((ref) => ref.length === 0 || ref.length > 512)
+      ) {
+        throw new QualityGateRuntimeError(
+          "QUALITY_GATE_HUMAN_ESCALATION_EVIDENCE_INVALID",
+          "Critical-risk escalation requires a bounded reason and evidence references.",
+        );
+      }
+      const now = clock().toISOString();
+      const riskHash = sha256(candidate.manifest.risk);
+      const decision = {
+        id: input.escalationId,
+        candidateInputId: candidate.id,
+        candidateInputHash: candidate.manifestHash,
+        decision: input.decision,
+        actor: {
+          type: input.actor.type,
+          id: input.actor.id,
+          authenticatedBy: input.actor.authenticatedBy,
+        },
+        risk: candidate.manifest.risk,
+        riskHash,
+        reason,
+        evidenceRefs,
+        createdAt: now,
+      } satisfies Omit<CriticalRiskEscalationDecision, "decisionHash">;
+      const decisionHash = sha256(decision);
+      const existing = readCriticalEscalation(candidate.id);
+      if (existing) {
+        if (
+          existing.id === input.escalationId &&
+          existing.decisionHash === decisionHash
+        ) {
+          return existing;
+        }
+        throw new QualityGateRuntimeError(
+          "QUALITY_GATE_HUMAN_ESCALATION_EXISTS",
+          `Delivery Candidate Input ${candidate.id} already has a critical-risk escalation decision.`,
+        );
+      }
+      database
+        .prepare(
+          `INSERT INTO candidate_critical_escalations(
+             id, candidate_input_id, candidate_input_hash, decision,
+             actor_type, actor_id, authenticated_by, risk_json, risk_hash,
+             reason, evidence_refs_json, decision_hash, created_at
+           ) VALUES (?, ?, ?, ?, 'human', ?, 'local-session', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.escalationId,
+          candidate.id,
+          candidate.manifestHash,
+          input.decision,
+          input.actor.id,
+          canonicalJson(candidate.manifest.risk),
+          riskHash,
+          reason,
+          canonicalJson(evidenceRefs),
+          decisionHash,
+          now,
+        );
+      appendMutation({
+        type:
+          input.decision === "authorize-gate-continuation"
+            ? "quality-gate.critical-escalation.authorized"
+            : "quality-gate.critical-escalation.rejected",
+        entityType: "critical-risk-escalation",
+        entityId: input.escalationId,
+        candidateInputId: candidate.id,
+        projectId: candidate.manifest.projectId,
+        runId: candidate.manifest.runId,
+        payload: {
+          criticalEscalationId: input.escalationId,
+          deliveryCandidateInputId: candidate.id,
+          candidateInputHash: candidate.manifestHash,
+          decision: input.decision,
+          riskTier: candidate.manifest.risk.tier,
+          riskHash,
+          evidenceRefs,
+        },
+        timestamp: now,
+      });
+      return readCriticalEscalation(candidate.id)!;
+    };
 
   const inspect = (gateInputId: string): CandidateGateInputView => {
     const row = database
@@ -1196,7 +1413,10 @@ export const openQualityGateRuntime = (
     const candidateForEscalation = options.candidates.inspect(
       gateInput.manifest.candidateInput.id,
     );
-    requireVerifiedHumanEscalation(candidateForEscalation);
+    requireVerifiedHumanEscalation(
+      candidateForEscalation,
+      readCriticalEscalation(candidateForEscalation.id),
+    );
     const gateInputRow = database
       .prepare(
         `SELECT review_topic_id AS reviewTopicId FROM candidate_gate_inputs
@@ -1747,7 +1967,10 @@ export const openQualityGateRuntime = (
 
   const authorize: QualityGateRuntime["authorize"] = (input) => {
     const candidate = options.candidates.inspect(input.candidateInputId);
-    requireVerifiedHumanEscalation(candidate);
+    requireVerifiedHumanEscalation(
+      candidate,
+      readCriticalEscalation(candidate.id),
+    );
     if (
       candidate.id !== input.candidateInputId ||
       candidate.manifestHash !== input.expectedCandidateInputHash
@@ -1854,7 +2077,10 @@ export const openQualityGateRuntime = (
     candidateInputId,
   ) => {
     const candidate = options.candidates.inspect(candidateInputId);
-    requireVerifiedHumanEscalation(candidate);
+    requireVerifiedHumanEscalation(
+      candidate,
+      readCriticalEscalation(candidate.id),
+    );
     ensureNoOpenItems(candidateInputId);
     const authority = readAuthority(candidateInputId);
     if (candidate.manifestHash !== authority.candidateInputHash) {
@@ -2216,6 +2442,7 @@ export const openQualityGateRuntime = (
   };
 
   return {
+    decideCriticalEscalation,
     prepare,
     inspect,
     finalize,

@@ -53,6 +53,10 @@ const agUiRegistryFixture = [
   "run.paused@1:custom",
   "run.resumed@1:custom",
   "run.blocked@1:custom",
+  "run.waiting-human-release@1:custom",
+  "run.completed@1:custom",
+  "run.release-rejected@1:custom",
+  "run.superseded@1:custom",
   "run.cancelled@1:custom",
   "run.intervention.recorded@1:custom",
   "snapshot.revision.created@1:custom",
@@ -121,6 +125,12 @@ const agUiRegistryFixture = [
   "quality-gate.execution.reconciled@1:custom",
   "quality-gate.result.recorded@1:custom",
   "delivery.candidate-input.authorized@1:custom",
+  "quality-gate.critical-escalation.authorized@1:custom",
+  "quality-gate.critical-escalation.rejected@1:custom",
+  "delivery.candidate.created@1:custom",
+  "delivery.release.accepted@1:custom",
+  "delivery.release.rejected@1:custom",
+  "delivery.release.changes-requested@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -166,7 +176,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 17);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 18);
 
     assert.deepEqual(
       registry
@@ -504,6 +514,73 @@ describe("Runtime Event registry", () => {
           resultHash: "b".repeat(64),
         },
       }),
+    );
+  });
+
+  it("adds v18 Delivery Candidate and Human release events without changing v17 contracts", () => {
+    const registry = createRuntimeEventRegistry();
+    const scope = {
+      companyId: "company",
+      projectId: "project-1",
+      runId: "run-1",
+      snapshotRevisionId: "snapshot-1",
+      deliveryCandidateInputId: "candidate-input-1",
+      deliveryCandidateId: "candidate-1",
+      commandId: "command-1",
+    } as const;
+
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "delivery.candidate.created",
+        scope,
+        payload: {
+          deliveryCandidateId: "candidate-1",
+          deliveryCandidateInputId: "candidate-input-1",
+          candidateHash: "a".repeat(64),
+          candidateInputHash: "b".repeat(64),
+          gateAuthorityId: "gate-authority-1",
+          gateAuthorityHash: "c".repeat(64),
+          supersedesCandidateId: null,
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "delivery.release.accepted",
+        scope: { ...scope, releaseDecisionId: "decision-1" },
+        payload: {
+          humanReleaseDecisionId: "decision-1",
+          deliveryCandidateId: "candidate-1",
+          deliveryCandidateInputId: "candidate-input-1",
+          candidateHash: "a".repeat(64),
+          decision: "accepted",
+          decisionHash: "d".repeat(64),
+          evidenceRefs: ["artifact-version:evidence-1"],
+          reworkScope: null,
+          childRunId: null,
+        },
+      }),
+    );
+    assert.throws(
+      () =>
+        registry.validate({
+          type: "delivery.release.accepted",
+          scope,
+          payload: {
+            humanReleaseDecisionId: "decision-1",
+            deliveryCandidateId: "candidate-1",
+            deliveryCandidateInputId: "candidate-input-1",
+            candidateHash: "a".repeat(64),
+            decision: "accepted",
+            decisionHash: "d".repeat(64),
+            evidenceRefs: ["artifact-version:evidence-1"],
+            reworkScope: null,
+            childRunId: null,
+          },
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_SCOPE_INVALID",
     );
   });
 

@@ -885,6 +885,98 @@ describe("Company Runtime client", () => {
     );
   });
 
+  it("parses Delivery Candidate projections and accepted downstream authority", async () => {
+    const candidate = {
+      id: "delivery-candidate-1",
+      requestId: "delivery-candidate-request-1",
+      manifest: {},
+      manifestHash: "a".repeat(64),
+      projection: "accepted" as const,
+      decision: null,
+      supersededByCandidateId: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+    };
+    const authority = {
+      id: "accepted-authority-1",
+      candidateId: candidate.id,
+      candidateHash: candidate.manifestHash,
+      releaseDecisionId: "release-decision-1",
+      releaseDecisionHash: "b".repeat(64),
+      candidateInputId: "candidate-input-1",
+      candidateInputHash: "c".repeat(64),
+      gateAuthorityId: "gate-authority-1",
+      gateAuthorityHash: "d".repeat(64),
+      integrationGenerationId: "integration-generation-1",
+      integrationAuthorityHash: "e".repeat(64),
+      repositoryCommits: [
+        {
+          repositoryReference: "/repositories/api",
+          commit: "f".repeat(40),
+        },
+      ],
+      artifactVersionIds: ["artifact-version-1"],
+      runId: "run-1",
+      snapshotRevisionId: "snapshot-1",
+      authorityHash: "1".repeat(64),
+      createdAt: "2026-08-01T00:01:00.000Z",
+    };
+    const client = createCompanyRuntimeClientFromTransport(
+      {
+        request: async (input: unknown): Promise<RuntimeResponse> => {
+          const request = RuntimeRequestSchema.parse(input);
+          const query =
+            request.kind === "query" && "envelope" in request
+              ? request.envelope.query
+              : null;
+          return {
+            id: request.id,
+            ok: true,
+            result: {
+              view:
+                query?.type === "delivery-candidates.list"
+                  ? [candidate]
+                  : query?.type === "accepted-delivery-authority.inspect"
+                    ? authority
+                    : candidate,
+              asOfSequence: 50,
+            },
+          };
+        },
+      },
+      "token",
+    );
+
+    const inspected = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "delivery-candidate-inspect",
+      principal: actor,
+      consumerId: "delivery-coordinator",
+      query: { type: "delivery-candidates.inspect", candidateId: candidate.id },
+    });
+    const listed = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "delivery-candidate-list",
+      principal: actor,
+      consumerId: "delivery-coordinator",
+      query: { type: "delivery-candidates.list", runId: authority.runId },
+    });
+    const accepted = await client.queryEnvelope({
+      schemaVersion: 1,
+      requestId: "delivery-authority-inspect",
+      principal: actor,
+      consumerId: "release-consumer",
+      query: {
+        type: "accepted-delivery-authority.inspect",
+        candidateId: candidate.id,
+      },
+    });
+
+    assert.equal(inspected.view.projection, "accepted");
+    assert.equal(listed.view[0]?.id, candidate.id);
+    assert.equal(accepted.view.authorityHash, authority.authorityHash);
+    assert.equal("releaseOperationId" in accepted.view, false);
+  });
+
   it("uses the transport-neutral subscription protocol and keeps consumer identity out of Ack bodies", async () => {
     const requests: ReturnType<typeof RuntimeRequestSchema.parse>[] = [];
     const transport = {

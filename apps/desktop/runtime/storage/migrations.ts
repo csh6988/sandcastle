@@ -6,7 +6,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 49;
+export const CURRENT_SCHEMA_VERSION = 50;
 
 interface CompanyMigration {
   readonly version: number;
@@ -5959,6 +5959,191 @@ const migrations: readonly CompanyMigration[] = [
           if (incompatible.length > 0) {
             throw new Error(
               `Existing Delivery/Quality schema is incompatible: ${[
+                ...new Set(incompatible),
+              ]
+                .sort()
+                .join(", ")}`,
+            );
+          }
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
+  {
+    version: 50,
+    name: "delivery_candidates_and_human_release",
+    migrate: (database) => {
+      const createSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE candidate_critical_escalations (
+            id TEXT PRIMARY KEY,
+            candidate_input_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidate_inputs(id),
+            candidate_input_hash TEXT NOT NULL CHECK (length(candidate_input_hash) = 64),
+            decision TEXT NOT NULL CHECK (decision IN ('authorize-gate-continuation', 'reject')),
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            risk_json TEXT NOT NULL,
+            risk_hash TEXT NOT NULL CHECK (length(risk_hash) = 64),
+            reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
+            evidence_refs_json TEXT NOT NULL,
+            decision_hash TEXT NOT NULL CHECK (length(decision_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER candidate_critical_escalations_immutable_update
+            BEFORE UPDATE ON candidate_critical_escalations
+            BEGIN SELECT RAISE(ABORT, 'Critical-risk escalation is immutable'); END;
+          CREATE TRIGGER candidate_critical_escalations_immutable_delete
+            BEFORE DELETE ON candidate_critical_escalations
+            BEGIN SELECT RAISE(ABORT, 'Critical-risk escalation is immutable'); END;
+
+          CREATE TABLE delivery_candidates (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+            candidate_input_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidate_inputs(id),
+            candidate_input_hash TEXT NOT NULL CHECK (length(candidate_input_hash) = 64),
+            gate_authority_id TEXT NOT NULL REFERENCES delivery_candidate_input_authorities(id),
+            gate_authority_hash TEXT NOT NULL CHECK (length(gate_authority_hash) = 64),
+            source_node_run_id TEXT NOT NULL,
+            source_node_attempt_id TEXT NOT NULL,
+            supersedes_candidate_id TEXT REFERENCES delivery_candidates(id),
+            lineage_hash TEXT NOT NULL CHECK (length(lineage_hash) = 64),
+            manifest_json TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX delivery_candidates_run_idx
+            ON delivery_candidates(run_id, created_at, id);
+          CREATE INDEX delivery_candidates_supersedes_idx
+            ON delivery_candidates(supersedes_candidate_id);
+          CREATE TRIGGER delivery_candidates_immutable_update
+            BEFORE UPDATE ON delivery_candidates
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate is immutable'); END;
+          CREATE TRIGGER delivery_candidates_immutable_delete
+            BEFORE DELETE ON delivery_candidates
+            BEGIN SELECT RAISE(ABORT, 'Delivery Candidate is immutable'); END;
+
+          CREATE TABLE human_release_decisions (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidates(id),
+            candidate_hash TEXT NOT NULL CHECK (length(candidate_hash) = 64),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+            decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected', 'changes-requested')),
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
+            comment TEXT CHECK (comment IS NULL OR length(comment) <= 4000),
+            evidence_refs_json TEXT NOT NULL,
+            rework_json TEXT,
+            rework_hash TEXT CHECK (rework_hash IS NULL OR length(rework_hash) = 64),
+            child_run_id TEXT REFERENCES department_runs(id),
+            decision_hash TEXT NOT NULL CHECK (length(decision_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX human_release_decisions_run_idx
+            ON human_release_decisions(run_id, created_at, id);
+          CREATE TRIGGER human_release_decisions_immutable_update
+            BEFORE UPDATE ON human_release_decisions
+            BEGIN SELECT RAISE(ABORT, 'Human release decision is immutable'); END;
+          CREATE TRIGGER human_release_decisions_immutable_delete
+            BEFORE DELETE ON human_release_decisions
+            BEGIN SELECT RAISE(ABORT, 'Human release decision is immutable'); END;
+
+          CREATE TABLE delivery_release_rework_records (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL UNIQUE REFERENCES human_release_decisions(id),
+            candidate_id TEXT NOT NULL REFERENCES delivery_candidates(id),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            scope TEXT NOT NULL CHECK (scope IN ('same-boundary', 'boundary-changing')),
+            responsibility_json TEXT NOT NULL,
+            responsibility_hash TEXT NOT NULL CHECK (length(responsibility_hash) = 64),
+            child_run_id TEXT REFERENCES department_runs(id),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER delivery_release_rework_records_immutable_update
+            BEFORE UPDATE ON delivery_release_rework_records
+            BEGIN SELECT RAISE(ABORT, 'Release rework record is immutable'); END;
+          CREATE TRIGGER delivery_release_rework_records_immutable_delete
+            BEFORE DELETE ON delivery_release_rework_records
+            BEGIN SELECT RAISE(ABORT, 'Release rework record is immutable'); END;
+
+          CREATE TABLE accepted_delivery_candidate_authorities (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidates(id),
+            release_decision_id TEXT NOT NULL UNIQUE REFERENCES human_release_decisions(id),
+            authority_json TEXT NOT NULL,
+            authority_hash TEXT NOT NULL CHECK (length(authority_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE TRIGGER accepted_delivery_candidate_authorities_immutable_update
+            BEFORE UPDATE ON accepted_delivery_candidate_authorities
+            BEGIN SELECT RAISE(ABORT, 'Accepted Delivery Candidate authority is immutable'); END;
+          CREATE TRIGGER accepted_delivery_candidate_authorities_immutable_delete
+            BEFORE DELETE ON accepted_delivery_candidate_authorities
+            BEGIN SELECT RAISE(ABORT, 'Accepted Delivery Candidate authority is immutable'); END;
+        `);
+
+      const objects = (target: DatabaseSync) =>
+        target
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'candidate_critical_escalation%'
+                 OR name = 'delivery_candidates'
+                 OR name LIKE 'delivery_candidates_%'
+                 OR name LIKE 'human_release_decision%'
+                 OR name LIKE 'delivery_release_rework%'
+                 OR name LIKE 'accepted_delivery_candidate%'
+              ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createSchema(reference);
+        const expected = objects(reference);
+        const actual = objects(database);
+        if (actual.length === 0) {
+          createSchema(database);
+        } else {
+          const actualByName = new Map(
+            actual.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(expected.map((entry) => entry.name));
+          const incompatible = expected
+            .filter((entry) => {
+              const found = actualByName.get(entry.name);
+              return (
+                !found ||
+                found.type !== entry.type ||
+                normalizeSql(found.sql) !== normalizeSql(entry.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actual
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Delivery v50 schema is incompatible: ${[
                 ...new Set(incompatible),
               ]
                 .sort()

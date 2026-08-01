@@ -729,6 +729,82 @@ const materializeCandidateQualityGates = (input: {
     }
     gateResultIds[kind] = candidateGateResult.id;
   }
+  const deliveryCandidateId = "fixture-delivery-candidate";
+  const deliveryCandidateNodeRunId = `${deliveryCandidateId}:node`;
+  const deliveryCandidateNodeAttemptId = `${deliveryCandidateId}:attempt`;
+  const deliveryCandidateLeaseId = `${deliveryCandidateId}:lease`;
+  const deliveryCandidateWorkerId = electronTestFixtureRuntimePrincipal.id;
+  const humanReleaseNodeRunId = `${deliveryCandidateId}:human-release-node`;
+  input.database
+    .prepare(
+      `UPDATE department_runs
+          SET status = 'running', revision = revision + 1, updated_at = ?
+        WHERE id = ?`,
+    )
+    .run(input.config.fakeClock, input.seeded.runId);
+  input.database
+    .prepare(
+      `INSERT INTO node_runs(
+         id, run_id, pipeline_node_id, node_type, status, attempt_count,
+         required_dependency_ids_json, created_at, updated_at, handler_kind_id
+       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, 'delivery-candidate@1')`,
+    )
+    .run(
+      deliveryCandidateNodeRunId,
+      input.seeded.runId,
+      deliveryCandidateNodeRunId,
+      input.config.fakeClock,
+      input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `INSERT INTO node_runs(
+         id, run_id, pipeline_node_id, node_type, status, attempt_count,
+         required_dependency_ids_json, created_at, updated_at, handler_kind_id
+       ) VALUES (?, ?, ?, 'human-approval', 'queued', 0, '[]', ?, ?, 'human-release@1')`,
+    )
+    .run(
+      humanReleaseNodeRunId,
+      input.seeded.runId,
+      humanReleaseNodeRunId,
+      input.config.fakeClock,
+      input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `INSERT INTO node_attempts(
+         id, node_run_id, attempt_number, snapshot_revision_id, reason,
+         status, created_at, started_at, lease_id, lease_owner,
+         lease_expires_at
+       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      deliveryCandidateNodeAttemptId,
+      deliveryCandidateNodeRunId,
+      input.seeded.snapshotRevisionId,
+      input.config.fakeClock,
+      input.config.fakeClock,
+      deliveryCandidateLeaseId,
+      deliveryCandidateWorkerId,
+      new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
+    );
+  input.database
+    .prepare(
+      `INSERT INTO execution_leases(
+         id, target_kind, target_id, lease_kind, operation_key,
+         execution_epoch, fence_token, worker_id, issued_at, expires_at,
+         renewed_at, released_at, cancel_requested
+       ) VALUES (?, 'node-attempt', ?, 'execution', ?, 1, ?, ?, ?, ?, NULL, NULL, 0)`,
+    )
+    .run(
+      deliveryCandidateLeaseId,
+      deliveryCandidateNodeAttemptId,
+      `node-attempt:${deliveryCandidateNodeAttemptId}`,
+      `${deliveryCandidateNodeAttemptId}:fence:1`,
+      deliveryCandidateWorkerId,
+      input.config.fakeClock,
+      new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
+    );
   writeFileSync(
     receiptPath,
     JSON.stringify({
@@ -738,6 +814,12 @@ const materializeCandidateQualityGates = (input: {
       candidateRiskTier: candidate.manifest.risk.tier,
       securityGateResultId: gateResultIds.security,
       operabilityGateResultId: gateResultIds.operability,
+      deliveryCandidateId,
+      deliveryCandidateNodeRunId,
+      deliveryCandidateNodeAttemptId,
+      deliveryCandidateLeaseId,
+      deliveryCandidateWorkerId,
+      humanReleaseNodeRunId,
     }),
     { flag: "wx", mode: 0o600 },
   );
@@ -801,6 +883,19 @@ const main = async (): Promise<void> => {
     token: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_TOKEN"),
     consumerId: process.env.SANDCASTLE_COMPANY_RUNTIME_CONSUMER_ID,
     principal: electronTestFixtureRuntimePrincipal,
+    trustedConnections: [
+      {
+        token: requiredEnvironment(
+          "SANDCASTLE_ELECTRON_TEST_FIXTURE_HUMAN_TOKEN",
+        ),
+        principal: {
+          type: "human",
+          id: "electron-test-fixture",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "electron-test-fixture-human-release",
+      },
+    ],
     executionAdapter: fixtureRuntimeOptions.executionAdapter,
     reviewerExecutionAdapter: fixtureRuntimeOptions.reviewerExecutionAdapter,
     integrationValidationProvider:

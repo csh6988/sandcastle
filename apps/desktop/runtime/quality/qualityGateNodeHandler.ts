@@ -12,6 +12,7 @@ import type {
 
 export type DeliveryQualityHandlerKind =
   | "delivery-candidate-input@1"
+  | "delivery-candidate@1"
   | "security-review@1"
   | "operability-review@1";
 
@@ -165,6 +166,19 @@ export const openQualityGateNodeHandler = (options: {
           manifestHash: value.manifestHash,
         },
       });
+      return;
+    }
+    if (plan.handlerKindId === "delivery-candidate@1") {
+      const value = initial.last?.value as
+        | { readonly id?: string; readonly manifestHash?: string }
+        | undefined;
+      if (!value?.id || !value.manifestHash) {
+        block(attempt, input.runId, {
+          code: "DELIVERY_CANDIDATE_RESULT_INVALID",
+          message:
+            "Delivery Candidate Command did not return immutable identity and manifest hash.",
+        });
+      }
       return;
     }
     if (!plan.review) {

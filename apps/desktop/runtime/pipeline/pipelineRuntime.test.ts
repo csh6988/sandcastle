@@ -21,6 +21,7 @@ import type {
 import { createScriptedReviewerExecutionAdapter } from "../review/reviewerExecution.js";
 import { canonicalPipelineJson, pipelineHash } from "./canonicalPipeline.js";
 import { createNodeHandlerRegistry } from "./nodeHandlerRegistry.js";
+import { openPipelineRuntime } from "./pipelineRuntime.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-pipeline-runtime-"));
@@ -914,6 +915,224 @@ describe("Pipeline Runtime", () => {
       });
       assert.equal(security?.attempts[0]?.status, "succeeded");
     } finally {
+      fixture.database.close();
+    }
+  });
+
+  it("owns Candidate and Human release transitions including atomic boundary-changing Fork rollback", async () => {
+    const fixedNow = "2026-08-01T00:00:00.000Z";
+    const fixture = setup(
+      createScriptedExecutionAdapter(),
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "candidate",
+            type: "ai-task",
+            name: "Delivery Candidate",
+            positionId,
+            handlerKindId: "delivery-candidate@1",
+          },
+          {
+            id: "human-release",
+            type: "human-approval",
+            name: "Human release",
+            positionId,
+            handlerKindId: "human-release@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "candidate" },
+          { from: "candidate", to: "human-release" },
+          { from: "human-release", to: "complete" },
+        ],
+      }),
+      () => new Date(fixedNow),
+    );
+    const raw = new DatabaseSync(fixture.database.path);
+    const pipeline = openPipelineRuntime(
+      raw,
+      createScriptedExecutionAdapter(),
+      {
+        clock: () => new Date(fixedNow),
+        handlerRegistry: createNodeHandlerRegistry(),
+      },
+    );
+    pipeline.registerDeliveryQualityExecutor(async (input) => {
+      const workerId = "delivery-candidate-node-handler";
+      const claim = pipeline.claimReadyAttempt({
+        ...input,
+        workerId,
+        leaseDurationMs: 60_000,
+      });
+      assert.equal(claim.kind, "claimed");
+      if (claim.kind !== "claimed") return;
+      raw.exec("BEGIN IMMEDIATE");
+      try {
+        pipeline.completeDeliveryCandidateInTransaction({
+          ...input,
+          snapshotRevisionId: claim.snapshotRevisionId,
+          nodeAttemptId: claim.attemptId,
+          leaseId: claim.leaseId,
+          workerId,
+          candidateId: `candidate:${input.runId}`,
+          candidateHash: "a".repeat(64),
+          completedAt: fixedNow,
+        });
+        raw.exec("COMMIT");
+      } catch (error) {
+        raw.exec("ROLLBACK");
+        throw error;
+      }
+    });
+
+    const createWaitingRun = async () => {
+      const started = pipeline.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const waiting = await pipeline.executeReady({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+      });
+      assert.equal(waiting.run.status, "waiting-human-release");
+      assert.equal(
+        waiting.nodes.find((node) => node.pipelineNodeId === "candidate")
+          ?.status,
+        "succeeded",
+      );
+      assert.equal(
+        waiting.nodes.find((node) => node.pipelineNodeId === "human-release")
+          ?.status,
+        "waiting-approval",
+      );
+      return waiting;
+    };
+
+    try {
+      const accepted = await createWaitingRun();
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.applyHumanReleaseDecisionInTransaction({
+        runId: accepted.run.id,
+        candidateId: `candidate:${accepted.run.id}`,
+        candidateHash: "a".repeat(64),
+        decisionId: `decision:${accepted.run.id}`,
+        decision: "accepted",
+        decidedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+      assert.equal(
+        pipeline.inspectRun(accepted.run.id).run.status,
+        "completed",
+      );
+
+      const rejected = await createWaitingRun();
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.applyHumanReleaseDecisionInTransaction({
+        runId: rejected.run.id,
+        candidateId: `candidate:${rejected.run.id}`,
+        candidateHash: "a".repeat(64),
+        decisionId: `decision:${rejected.run.id}`,
+        decision: "rejected",
+        decidedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+      assert.equal(
+        pipeline.inspectRun(rejected.run.id).run.status,
+        "release-rejected",
+      );
+
+      const sameBoundary = await createWaitingRun();
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.applyHumanReleaseDecisionInTransaction({
+        runId: sameBoundary.run.id,
+        candidateId: `candidate:${sameBoundary.run.id}`,
+        candidateHash: "a".repeat(64),
+        decisionId: `decision:${sameBoundary.run.id}`,
+        decision: "changes-requested",
+        decidedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+      assert.equal(
+        pipeline.inspectRun(sameBoundary.run.id).run.status,
+        "blocked",
+      );
+
+      const boundaryChanging = await createWaitingRun();
+      const forkPoint = boundaryChanging.nodes.find(
+        (node) => node.pipelineNodeId === "candidate",
+      )!;
+      raw.exec("BEGIN IMMEDIATE");
+      const child = pipeline.forkRunInTransaction({
+        runId: boundaryChanging.run.id,
+        snapshotRevisionId: boundaryChanging.snapshot.id,
+        fromNodeRunId: forkPoint.id,
+        mode: "reconfigure",
+      });
+      pipeline.applyHumanReleaseDecisionInTransaction({
+        runId: boundaryChanging.run.id,
+        candidateId: `candidate:${boundaryChanging.run.id}`,
+        candidateHash: "a".repeat(64),
+        decisionId: `decision:${boundaryChanging.run.id}`,
+        decision: "changes-requested",
+        childRunId: child.run.id,
+        decidedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+      assert.equal(
+        pipeline.inspectRun(boundaryChanging.run.id).run.status,
+        "superseded",
+      );
+      assert.equal(child.run.parentRunId, boundaryChanging.run.id);
+
+      const rolledBack = await createWaitingRun();
+      const rolledBackForkPoint = rolledBack.nodes.find(
+        (node) => node.pipelineNodeId === "candidate",
+      )!;
+      raw.exec("BEGIN IMMEDIATE");
+      const rolledBackChild = pipeline.forkRunInTransaction({
+        runId: rolledBack.run.id,
+        snapshotRevisionId: rolledBack.snapshot.id,
+        fromNodeRunId: rolledBackForkPoint.id,
+        mode: "reconfigure",
+      });
+      pipeline.applyHumanReleaseDecisionInTransaction({
+        runId: rolledBack.run.id,
+        candidateId: `candidate:${rolledBack.run.id}`,
+        candidateHash: "a".repeat(64),
+        decisionId: `decision:${rolledBack.run.id}`,
+        decision: "changes-requested",
+        childRunId: rolledBackChild.run.id,
+        decidedAt: fixedNow,
+      });
+      raw.exec("ROLLBACK");
+      assert.equal(
+        pipeline.inspectRun(rolledBack.run.id).run.status,
+        "waiting-human-release",
+      );
+      assert.equal(
+        (
+          raw
+            .prepare(
+              "SELECT COUNT(*) AS count FROM department_runs WHERE id = ?",
+            )
+            .get(rolledBackChild.run.id) as { readonly count: number }
+        ).count,
+        0,
+      );
+    } finally {
+      raw.close();
       fixture.database.close();
     }
   });

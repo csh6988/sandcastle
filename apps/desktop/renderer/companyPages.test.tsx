@@ -21,7 +21,9 @@ import {
   CodeReviewAuthorityPanel,
   IntegrationGenerationPanel,
   CandidateQualityGatePanel,
+  DeliveryCandidatePanel,
   deliveryCandidateInputIdFromRun,
+  deliveryCandidateIdFromRun,
   CompanyInteractionPage,
   InteractionRunPanel,
   RUN_PROGRESS_POLL_INTERVAL_MS,
@@ -55,6 +57,7 @@ import type {
   CodeReviewView,
   IntegrationGenerationView,
   CandidateQualityGateView,
+  DeliveryCandidateView,
 } from "../runtime/interface.js";
 import type {
   AgentCatalogView,
@@ -108,6 +111,51 @@ describe("Delivery Candidate quality", () => {
     assert.match(markup, /security-result-1/);
     assert.match(markup, /blocked/);
     assert.equal(deliveryCandidateInputIdFromRun(run), "candidate-input-1");
+  });
+
+  it("renders an authoritative Human release gesture and finds the Candidate Run result", () => {
+    const view = {
+      id: "delivery-candidate-1",
+      requestId: "delivery-candidate-request-1",
+      manifest: { artifacts: [{ id: "artifact-version-1" }] },
+      manifestHash: "c".repeat(64),
+      projection: "awaiting-decision",
+      decision: null,
+      supersededByCandidateId: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+    } as DeliveryCandidateView;
+    const markup = renderToStaticMarkup(
+      <DeliveryCandidatePanel
+        busy={false}
+        diagnostic={null}
+        onDecision={() => undefined}
+        view={view}
+      />,
+    );
+    const run = {
+      nodes: [
+        {
+          handler: { handlerKindId: "delivery-candidate@1" },
+          status: "succeeded",
+          result: { deliveryCandidateId: view.id },
+        },
+      ],
+    } as unknown as DepartmentRunView;
+
+    assert.match(markup, /accept-delivery-candidate/);
+    assert.match(markup, /reject-delivery-candidate/);
+    assert.match(markup, /request-delivery-changes/);
+    assert.match(markup, /1 immutable evidence reference/);
+    assert.equal(deliveryCandidateIdFromRun(run), view.id);
+    const acceptedMarkup = renderToStaticMarkup(
+      <DeliveryCandidatePanel
+        busy={false}
+        diagnostic={null}
+        onDecision={() => undefined}
+        view={{ ...view, projection: "accepted" }}
+      />,
+    );
+    assert.doesNotMatch(acceptedMarkup, /accept-delivery-candidate/);
   });
 });
 

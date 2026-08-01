@@ -445,6 +445,32 @@ export interface PipelineRuntime {
     readonly testRunId: string;
     readonly passAuthorityHash: string;
   }) => void;
+  readonly completeDeliveryCandidateInTransaction: (input: {
+    readonly runId: string;
+    readonly snapshotRevisionId: string;
+    readonly nodeRunId: string;
+    readonly nodeAttemptId: string;
+    readonly leaseId: string;
+    readonly workerId: string;
+    readonly candidateId: string;
+    readonly candidateHash: string;
+    readonly completedAt: string;
+  }) => void;
+  readonly applyHumanReleaseDecisionInTransaction: (input: {
+    readonly runId: string;
+    readonly candidateId: string;
+    readonly candidateHash: string;
+    readonly decisionId: string;
+    readonly decision: "accepted" | "rejected" | "changes-requested";
+    readonly childRunId?: string;
+    readonly decidedAt: string;
+  }) => void;
+  readonly forkRunInTransaction: (input: {
+    readonly runId: string;
+    readonly snapshotRevisionId: string;
+    readonly fromNodeRunId: string;
+    readonly mode?: "replay" | "reconfigure";
+  }) => DepartmentRunView;
   readonly releaseWorkPackageSuccessorsInTransaction: (input: {
     readonly runId: string;
     readonly nodeRunId: string;
@@ -2743,12 +2769,254 @@ export const openPipelineRuntime = (
     return { id, hash };
   };
 
-  const forkRun = (input: {
-    readonly runId: string;
-    readonly snapshotRevisionId: string;
-    readonly fromNodeRunId: string;
-    readonly mode?: "replay" | "reconfigure";
-  }): DepartmentRunView => {
+  const completeDeliveryCandidateInTransaction: PipelineRuntime["completeDeliveryCandidateInTransaction"] =
+    (input) => {
+      const source = database
+        .prepare(
+          `SELECT department_runs.status AS runStatus,
+                  department_runs.snapshot_revision_id AS runSnapshotRevisionId,
+                  node_runs.status AS nodeStatus,
+                  node_runs.handler_kind_id AS handlerKindId,
+                  node_attempts.status AS attemptStatus,
+                  node_attempts.snapshot_revision_id AS attemptSnapshotRevisionId,
+                  node_attempts.lease_id AS attemptLeaseId,
+                  node_attempts.lease_owner AS attemptLeaseOwner,
+                  leases.worker_id AS leaseWorkerId,
+                  leases.expires_at AS leaseExpiresAt,
+                  leases.released_at AS leaseReleasedAt,
+                  leases.cancel_requested AS cancelRequested
+             FROM department_runs
+             JOIN node_runs
+               ON node_runs.id = ? AND node_runs.run_id = department_runs.id
+             JOIN node_attempts
+               ON node_attempts.id = ? AND node_attempts.node_run_id = node_runs.id
+             LEFT JOIN execution_leases AS leases
+               ON leases.id = ? AND leases.target_kind = 'node-attempt'
+              AND leases.target_id = node_attempts.id
+            WHERE department_runs.id = ?`,
+        )
+        .get(
+          input.nodeRunId,
+          input.nodeAttemptId,
+          input.leaseId,
+          input.runId,
+        ) as
+        | {
+            readonly runStatus: string;
+            readonly runSnapshotRevisionId: string | null;
+            readonly nodeStatus: string;
+            readonly handlerKindId: string | null;
+            readonly attemptStatus: string;
+            readonly attemptSnapshotRevisionId: string;
+            readonly attemptLeaseId: string | null;
+            readonly attemptLeaseOwner: string | null;
+            readonly leaseWorkerId: string | null;
+            readonly leaseExpiresAt: string | null;
+            readonly leaseReleasedAt: string | null;
+            readonly cancelRequested: number | null;
+          }
+        | undefined;
+      if (
+        !source ||
+        source.runSnapshotRevisionId !== input.snapshotRevisionId ||
+        source.attemptSnapshotRevisionId !== input.snapshotRevisionId ||
+        source.handlerKindId !== "delivery-candidate@1" ||
+        source.runStatus !== "running" ||
+        source.nodeStatus !== "running" ||
+        source.attemptStatus !== "running" ||
+        source.attemptLeaseId !== input.leaseId ||
+        source.attemptLeaseOwner !== input.workerId ||
+        source.leaseWorkerId !== input.workerId ||
+        source.leaseReleasedAt !== null ||
+        source.cancelRequested !== 0 ||
+        !source.leaseExpiresAt ||
+        source.leaseExpiresAt <= input.completedAt
+      ) {
+        throw new PipelineRuntimeError(
+          "DELIVERY_CANDIDATE_SOURCE_ATTEMPT_INVALID",
+          `Delivery Candidate ${input.candidateId} is not bound to the exact current claimed delivery-candidate@1 Attempt and Lease.`,
+        );
+      }
+      const result = {
+        deliveryCandidateId: input.candidateId,
+        candidateHash: input.candidateHash,
+      };
+      const attempt = database
+        .prepare(
+          `UPDATE node_attempts
+              SET status = 'succeeded', structured_result_json = ?,
+                  failure_code = NULL, failure_message = NULL,
+                  recoverable = 0, completed_at = ?
+            WHERE id = ? AND node_run_id = ? AND status = 'running'`,
+        )
+        .run(
+          JSON.stringify(result),
+          input.completedAt,
+          input.nodeAttemptId,
+          input.nodeRunId,
+        );
+      const node = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'succeeded', result_json = ?, failure_code = NULL,
+                  failure_message = NULL, updated_at = ?
+            WHERE id = ? AND run_id = ? AND status = 'running'
+              AND handler_kind_id = 'delivery-candidate@1'`,
+        )
+        .run(
+          JSON.stringify(result),
+          input.completedAt,
+          input.nodeRunId,
+          input.runId,
+        );
+      const humanRelease = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = 'waiting-approval', updated_at = ?
+            WHERE run_id = ? AND handler_kind_id = 'human-release@1'
+              AND status IN ('queued', 'ready')`,
+        )
+        .run(input.completedAt, input.runId);
+      const run = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'waiting-human-release', revision = revision + 1,
+                  updated_at = ?
+            WHERE id = ? AND status = 'running'
+              AND snapshot_revision_id = ?`,
+        )
+        .run(input.completedAt, input.runId, input.snapshotRevisionId);
+      const lease = database
+        .prepare(
+          `UPDATE execution_leases SET released_at = ?
+            WHERE id = ? AND worker_id = ? AND released_at IS NULL`,
+        )
+        .run(input.completedAt, input.leaseId, input.workerId);
+      if (
+        attempt.changes !== 1 ||
+        node.changes !== 1 ||
+        humanRelease.changes !== 1 ||
+        run.changes !== 1 ||
+        lease.changes !== 1
+      ) {
+        throw new PipelineRuntimeError(
+          "DELIVERY_CANDIDATE_TRANSITION_CONFLICT",
+          `Delivery Candidate ${input.candidateId} could not atomically enter waiting-human-release.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "run.waiting-human-release",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.waiting-human-release",
+        runId: input.runId,
+        nodeRunId: input.nodeRunId,
+        before: { status: "running" },
+        after: {
+          status: "waiting-human-release",
+          deliveryCandidateId: input.candidateId,
+          candidateHash: input.candidateHash,
+        },
+        createdAt: input.completedAt,
+      });
+    };
+
+  const applyHumanReleaseDecisionInTransaction: PipelineRuntime["applyHumanReleaseDecisionInTransaction"] =
+    (input) => {
+      const run = database
+        .prepare("SELECT status FROM department_runs WHERE id = ?")
+        .get(input.runId) as { readonly status: string } | undefined;
+      const expectedRunStatus = input.childRunId
+        ? "superseded"
+        : "waiting-human-release";
+      if (!run || run.status !== expectedRunStatus) {
+        throw new PipelineRuntimeError(
+          "RELEASE_DECISION_RUN_STATE_INVALID",
+          `Run ${input.runId} cannot accept Human release decision ${input.decisionId}.`,
+        );
+      }
+      const nodeStatus =
+        input.decision === "changes-requested" ? "blocked" : "succeeded";
+      const result = {
+        releaseDecisionId: input.decisionId,
+        deliveryCandidateId: input.candidateId,
+        candidateHash: input.candidateHash,
+        decision: input.decision,
+        childRunId: input.childRunId ?? null,
+      };
+      const node = database
+        .prepare(
+          `UPDATE node_runs
+              SET status = ?, result_json = ?, failure_code = ?,
+                  failure_message = ?, updated_at = ?
+            WHERE run_id = ? AND handler_kind_id = 'human-release@1'
+              AND status = 'waiting-approval'`,
+        )
+        .run(
+          nodeStatus,
+          JSON.stringify(result),
+          input.decision === "changes-requested" ? "RELEASE_REWORK" : null,
+          input.decision === "changes-requested"
+            ? "Human release requested recorded rework."
+            : null,
+          input.decidedAt,
+          input.runId,
+        );
+      if (node.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "RELEASE_DECISION_NODE_STATE_INVALID",
+          `Run ${input.runId} has no waiting human-release@1 Node.`,
+        );
+      }
+      if (!input.childRunId) {
+        const nextRunStatus =
+          input.decision === "accepted"
+            ? "completed"
+            : input.decision === "rejected"
+              ? "release-rejected"
+              : "blocked";
+        const updated = database
+          .prepare(
+            `UPDATE department_runs
+                SET status = ?, revision = revision + 1, updated_at = ?
+              WHERE id = ? AND status = 'waiting-human-release'`,
+          )
+          .run(nextRunStatus, input.decidedAt, input.runId);
+        if (updated.changes !== 1) {
+          throw new PipelineRuntimeError(
+            "RELEASE_DECISION_TRANSITION_CONFLICT",
+            `Run ${input.runId} changed before Human release decision ${input.decisionId}.`,
+          );
+        }
+      }
+      appendRuntimeMutation({
+        action: "human-release.decide",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType:
+          input.decision === "accepted"
+            ? "run.completed"
+            : input.decision === "rejected"
+              ? "run.release-rejected"
+              : input.childRunId
+                ? "run.superseded"
+                : "run.blocked",
+        runId: input.runId,
+        before: { status: "waiting-human-release" },
+        after: result,
+        createdAt: input.decidedAt,
+      });
+    };
+
+  const forkRunInternal = (
+    input: {
+      readonly runId: string;
+      readonly snapshotRevisionId: string;
+      readonly fromNodeRunId: string;
+      readonly mode?: "replay" | "reconfigure";
+    },
+    manageTransaction: boolean,
+  ): DepartmentRunView => {
     const source = inspectRun(input.runId);
     const selectedSnapshot = database
       .prepare(
@@ -2819,7 +3087,7 @@ export const openPipelineRuntime = (
     for (const edge of selectedPayload.pipelineVersion.graph.edges) {
       dependenciesByNode.get(edge.to)?.push(edge.from);
     }
-    database.exec("BEGIN IMMEDIATE");
+    if (manageTransaction) database.exec("BEGIN IMMEDIATE");
     try {
       database
         .prepare(
@@ -2998,13 +3266,20 @@ export const openPipelineRuntime = (
         },
         createdAt: now,
       });
-      database.exec("COMMIT");
+      if (manageTransaction) database.exec("COMMIT");
     } catch (error) {
-      database.exec("ROLLBACK");
+      if (manageTransaction) database.exec("ROLLBACK");
       throw error;
     }
     return inspectRun(runId);
   };
+
+  const forkRun: PipelineRuntime["forkRun"] = (input) =>
+    forkRunInternal(input, true);
+
+  const forkRunInTransaction: PipelineRuntime["forkRunInTransaction"] = (
+    input,
+  ) => forkRunInternal(input, false);
 
   const claimReadyAttempt = (input: {
     readonly runId: string;
@@ -6061,7 +6336,9 @@ export const openPipelineRuntime = (
           `UPDATE department_runs SET status = 'blocked',
                   revision = revision + 1, updated_at = ?
             WHERE id = ? AND revision = ?
-              AND status NOT IN ('completed', 'cancelled')`,
+              AND status NOT IN (
+                'completed', 'cancelled', 'release-rejected', 'superseded'
+              )`,
         )
         .run(now, input.runId, input.expectedRevision);
       if (changed.changes !== 1) {
@@ -6242,6 +6519,7 @@ export const openPipelineRuntime = (
             "ready",
             "running",
             "waiting-approval",
+            "waiting-human-release",
             "blocked",
             "recovering",
           ].includes(current.status)
@@ -6377,7 +6655,11 @@ export const openPipelineRuntime = (
           );
         }
       } else {
-        if (["completed", "cancelled"].includes(current.status)) {
+        if (
+          ["completed", "cancelled", "release-rejected", "superseded"].includes(
+            current.status,
+          )
+        ) {
           throw new PipelineRuntimeError(
             "RUN_CONTROL_STATE_INVALID",
             `Department Run ${input.runId} cannot cancel from ${current.status}.`,
@@ -6456,7 +6738,9 @@ export const openPipelineRuntime = (
                     paused_from_status = NULL,
                     revision = revision + 1, updated_at = ?
               WHERE id = ? AND revision = ?
-                AND status NOT IN ('completed', 'cancelled')`,
+                AND status NOT IN (
+                  'completed', 'cancelled', 'release-rejected', 'superseded'
+                )`,
           )
           .run(now, input.runId, input.expectedRevision);
         if (cancelled.changes !== 1) {
@@ -6822,7 +7106,9 @@ export const openPipelineRuntime = (
                 SET status = 'paused', paused_from_status = ?,
                     revision = revision + 1, updated_at = ?
               WHERE id = ? AND revision = ?
-                AND status NOT IN ('completed', 'cancelled', 'superseded')`,
+                AND status NOT IN (
+                  'completed', 'cancelled', 'release-rejected', 'superseded'
+                )`,
           )
           .run(
             nextAttemptId ? "recovering" : current.run.status,
@@ -9513,9 +9799,15 @@ export const openPipelineRuntime = (
       );
     }
     if (
-      ["completed", "failed", "cancelled", "paused", "blocked"].includes(
-        initial.run.status,
-      )
+      [
+        "completed",
+        "failed",
+        "cancelled",
+        "paused",
+        "blocked",
+        "release-rejected",
+        "superseded",
+      ].includes(initial.run.status)
     ) {
       throw new PipelineRuntimeError(
         "RUN_STATE_INVALID",
@@ -9526,9 +9818,15 @@ export const openPipelineRuntime = (
     while (true) {
       const view = inspectRun(input.runId);
       if (
-        ["completed", "failed", "blocked", "waiting-approval"].includes(
-          view.run.status,
-        )
+        [
+          "completed",
+          "failed",
+          "blocked",
+          "waiting-approval",
+          "waiting-human-release",
+          "release-rejected",
+          "superseded",
+        ].includes(view.run.status)
       ) {
         return view;
       }
@@ -9572,6 +9870,7 @@ export const openPipelineRuntime = (
         ready.handler &&
         [
           "delivery-candidate-input@1",
+          "delivery-candidate@1",
           "security-review@1",
           "operability-review@1",
         ].includes(ready.handler.handlerKindId)
@@ -10549,6 +10848,9 @@ export const openPipelineRuntime = (
     resumeTestInTransaction,
     failTestInTransaction,
     completeTestInTransaction,
+    completeDeliveryCandidateInTransaction,
+    applyHumanReleaseDecisionInTransaction,
+    forkRunInTransaction,
     releaseWorkPackageSuccessorsInTransaction,
     recoverExpiredLeases,
     reconcilePendingExecutions,

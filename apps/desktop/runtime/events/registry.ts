@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 17;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 18;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -37,6 +37,8 @@ export interface RuntimeEventScope {
   readonly testCaseRevisionId?: string;
   readonly testRunId?: string;
   readonly deliveryCandidateInputId?: string;
+  readonly deliveryCandidateId?: string;
+  readonly releaseDecisionId?: string;
   readonly candidateGateInputId?: string;
   readonly defectId?: string;
   readonly permissionRequestId?: string;
@@ -641,6 +643,38 @@ const candidateGateEventPayloadSchema = z
   })
   .passthrough();
 
+const deliveryCandidateEventPayloadSchema = z
+  .object({
+    deliveryCandidateId: z.string().trim().min(1),
+    deliveryCandidateInputId: z.string().trim().min(1),
+    candidateHash: z.string().regex(/^[a-f0-9]{64}$/),
+    candidateInputHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    gateAuthorityId: z.string().trim().min(1).optional(),
+    gateAuthorityHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    supersedesCandidateId: z.string().trim().min(1).nullable().optional(),
+  })
+  .passthrough();
+
+const humanReleaseEventPayloadSchema = z
+  .object({
+    humanReleaseDecisionId: z.string().trim().min(1),
+    deliveryCandidateId: z.string().trim().min(1),
+    deliveryCandidateInputId: z.string().trim().min(1),
+    candidateHash: z.string().regex(/^[a-f0-9]{64}$/),
+    decision: z.enum(["accepted", "rejected", "changes-requested"]),
+    decisionHash: z.string().regex(/^[a-f0-9]{64}$/),
+    evidenceRefs: z.array(z.string().trim().min(1)),
+    reworkScope: z.enum(["same-boundary", "boundary-changing"]).nullable(),
+    childRunId: z.string().trim().min(1).nullable(),
+  })
+  .passthrough();
+
 const pipelineEventDefinitions = [
   "run.created",
   "run.started",
@@ -648,6 +682,10 @@ const pipelineEventDefinitions = [
   "run.paused",
   "run.resumed",
   "run.blocked",
+  "run.waiting-human-release",
+  "run.completed",
+  "run.release-rejected",
+  "run.superseded",
   "run.cancelled",
   "run.intervention.recorded",
   "snapshot.revision.created",
@@ -1297,6 +1335,69 @@ const definitions = [
     agUiMapping: "custom",
     acpMapping: "custom",
   },
+  ...[
+    "quality-gate.critical-escalation.authorized",
+    "quality-gate.critical-escalation.rejected",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "deliveryCandidateInputId",
+          "commandId",
+        ],
+        payloadSchema: deliveryCandidateInputEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
+  {
+    type: "delivery.candidate.created",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "snapshotRevisionId",
+      "deliveryCandidateInputId",
+      "deliveryCandidateId",
+      "commandId",
+    ],
+    payloadSchema: deliveryCandidateEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  ...[
+    "delivery.release.accepted",
+    "delivery.release.rejected",
+    "delivery.release.changes-requested",
+  ].map(
+    (type) =>
+      ({
+        type,
+        schemaVersion: 1,
+        requiredTopLevelIds: [
+          "companyId",
+          "projectId",
+          "runId",
+          "snapshotRevisionId",
+          "deliveryCandidateInputId",
+          "deliveryCandidateId",
+          "releaseDecisionId",
+          "commandId",
+        ],
+        payloadSchema: humanReleaseEventPayloadSchema,
+        retentionClass: "durable",
+        agUiMapping: "custom",
+        acpMapping: "custom",
+      }) satisfies RuntimeEventDefinition,
+  ),
   ...[
     "interaction.turn.started",
     "interaction.turn.reconciling",

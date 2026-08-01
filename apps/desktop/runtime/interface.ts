@@ -1802,6 +1802,25 @@ export const DeliveryCandidateInputGateAuthoritySchema = z
   })
   .strict();
 
+export const CriticalRiskEscalationDecisionSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    candidateInputId: z.string().trim().min(1),
+    candidateInputHash: Sha256Schema,
+    decision: z.enum(["authorize-gate-continuation", "reject"]),
+    actor: ActorRefSchema.extend({
+      type: z.literal("human"),
+      authenticatedBy: z.literal("local-session"),
+    }),
+    risk: z.unknown(),
+    riskHash: Sha256Schema,
+    reason: z.string().trim().min(1).max(4_000),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+    decisionHash: Sha256Schema,
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
 export const CandidateQualityGateViewSchema = z
   .object({
     candidateInput: DeliveryCandidateInputViewSchema,
@@ -1826,8 +1845,109 @@ export type CandidateGateResultView = z.infer<
 export type DeliveryCandidateInputGateAuthorityView = z.infer<
   typeof DeliveryCandidateInputGateAuthoritySchema
 >;
+export type CriticalRiskEscalationDecisionView = z.infer<
+  typeof CriticalRiskEscalationDecisionSchema
+>;
 export type CandidateQualityGateView = z.infer<
   typeof CandidateQualityGateViewSchema
+>;
+
+export const HumanReleaseDecisionViewSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
+    candidateHash: Sha256Schema,
+    runId: z.string().trim().min(1),
+    snapshotRevisionId: z.string().trim().min(1),
+    decision: z.enum(["accepted", "rejected", "changes-requested"]),
+    actor: ActorRefSchema.extend({
+      type: z.literal("human"),
+      authenticatedBy: z.literal("local-session"),
+    }),
+    reason: z.string().trim().min(1).max(4_000),
+    comment: z.string().max(4_000).nullable(),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+    rework: z
+      .object({
+        scope: z.enum(["same-boundary", "boundary-changing"]),
+        responsibility: z
+          .object({
+            kind: z.enum([
+              "defect",
+              "work-package",
+              "contract",
+              "test",
+              "gate",
+              "aggregate",
+              "unknown",
+            ]),
+            id: z.string().trim().min(1).optional(),
+            summary: z.string().trim().min(1).max(1_000),
+          })
+          .strict(),
+      })
+      .strict()
+      .nullable(),
+    childRunId: z.string().trim().min(1).nullable(),
+    decisionHash: Sha256Schema,
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export const DeliveryCandidateViewSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    requestId: z.string().trim().min(1),
+    manifest: z.unknown(),
+    manifestHash: Sha256Schema,
+    projection: z.enum([
+      "awaiting-decision",
+      "accepted",
+      "rejected",
+      "changes-requested",
+      "superseded",
+    ]),
+    decision: HumanReleaseDecisionViewSchema.nullable(),
+    supersededByCandidateId: z.string().trim().min(1).nullable(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export const AcceptedDeliveryCandidateAuthoritySchema = z
+  .object({
+    id: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
+    candidateHash: Sha256Schema,
+    releaseDecisionId: z.string().trim().min(1),
+    releaseDecisionHash: Sha256Schema,
+    candidateInputId: z.string().trim().min(1),
+    candidateInputHash: Sha256Schema,
+    gateAuthorityId: z.string().trim().min(1),
+    gateAuthorityHash: Sha256Schema,
+    integrationGenerationId: z.string().trim().min(1),
+    integrationAuthorityHash: Sha256Schema,
+    repositoryCommits: z.array(
+      z
+        .object({
+          repositoryReference: z.string().trim().min(1),
+          commit: z.string().regex(/^[a-f0-9]{40}$/),
+        })
+        .strict(),
+    ),
+    artifactVersionIds: z.array(z.string().trim().min(1)),
+    runId: z.string().trim().min(1),
+    snapshotRevisionId: z.string().trim().min(1),
+    authorityHash: Sha256Schema,
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export type HumanReleaseDecisionView = z.infer<
+  typeof HumanReleaseDecisionViewSchema
+>;
+export type DeliveryCandidateView = z.infer<typeof DeliveryCandidateViewSchema>;
+export type AcceptedDeliveryCandidateAuthorityView = z.infer<
+  typeof AcceptedDeliveryCandidateAuthoritySchema
 >;
 
 export const ReviewTopicViewSchema = z.object({
@@ -2498,6 +2618,8 @@ export const DepartmentRunStatusSchema = z.enum([
   "ready",
   "running",
   "waiting-approval",
+  "candidate-ready",
+  "waiting-human-release",
   "blocked",
   "failed",
   "recovering",
@@ -2505,6 +2627,7 @@ export const DepartmentRunStatusSchema = z.enum([
   "paused",
   "cancelled",
   "superseded",
+  "release-rejected",
 ]);
 
 export type DepartmentRunStatus = z.infer<typeof DepartmentRunStatusSchema>;
@@ -3478,6 +3601,18 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
     candidateInputId: z.string().trim().min(1),
   }),
   z.object({
+    type: z.literal("delivery-candidates.inspect"),
+    candidateId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("delivery-candidates.list"),
+    runId: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("accepted-delivery-authority.inspect"),
+    candidateId: z.string().trim().min(1),
+  }),
+  z.object({
     type: z.literal("product.discovery.inspect"),
     projectId: z.string().trim().min(1),
   }),
@@ -3616,59 +3751,65 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
                                   ? DeliveryCandidateInputView
                                   : Query["type"] extends "quality-gates.inspect"
                                     ? CandidateQualityGateView
-                                    : Query["type"] extends "product.discovery.inspect"
-                                      ? ProductDiscoveryView
-                                      : Query["type"] extends "product-review.inspect"
-                                        ? ProductReviewStateView
-                                        : Query["type"] extends "technical-review.inspect"
-                                          ? TechnicalReviewStateView
-                                          : Query["type"] extends "departments.list"
-                                            ? readonly CompanyDepartment[]
-                                            : Query["type"] extends "department.inspect"
-                                              ? DepartmentInspect
-                                              : Query["type"] extends "department.skill-configuration.inspect"
-                                                ? SkillConfigurationView
-                                                : Query["type"] extends "department.pipeline.inspect"
-                                                  ? DepartmentPipelineEditorView
-                                                  : Query["type"] extends "department.pipeline.validate"
-                                                    ? PipelineValidationResult
-                                                    : Query["type"] extends "runs.list"
-                                                      ? readonly DepartmentRunView[]
-                                                      : Query["type"] extends "run.supervision.inspect"
-                                                        ? RunSupervisionView
-                                                        : Query["type"] extends "execution.inspect"
-                                                          ? ExecutionInspectionView
-                                                          : Query["type"] extends "runtime.audit"
-                                                            ? readonly RuntimeAuditRecord[]
-                                                            : Query["type"] extends
-                                                                  | "runtime.events"
-                                                                  | "runtime.events.consumer"
-                                                              ? readonly RuntimeEventRecord[]
-                                                              : Query["type"] extends "artifacts.list"
-                                                                ? readonly ArtifactVersionView[]
-                                                                : Query["type"] extends "artifact.inspect"
-                                                                  ? ArtifactLineageView
-                                                                  : Query["type"] extends "artifact.lineage.inspect"
-                                                                    ? ArtifactLineageGraphView
-                                                                    : Query["type"] extends "interactions.list"
-                                                                      ? readonly InteractionView[]
-                                                                      : Query["type"] extends "interaction.inspect"
-                                                                        ? InteractionView
-                                                                        : Query["type"] extends "ag-ui.events"
-                                                                          ? AgUiReplayView
-                                                                          : Query["type"] extends "memory.candidates.list"
-                                                                            ? readonly MemoryCandidateView[]
-                                                                            : Query["type"] extends "memory.records.list"
-                                                                              ? readonly LegacyMemoryRecordView[]
-                                                                              : Query["type"] extends "memory.entries.list"
-                                                                                ? readonly MemoryEntryView[]
-                                                                                : Query["type"] extends "memory.selections.list"
-                                                                                  ? readonly RunMemorySelectionView[]
-                                                                                  : Query["type"] extends "memory.legacy-records.list"
+                                    : Query["type"] extends "delivery-candidates.inspect"
+                                      ? DeliveryCandidateView
+                                      : Query["type"] extends "delivery-candidates.list"
+                                        ? readonly DeliveryCandidateView[]
+                                        : Query["type"] extends "accepted-delivery-authority.inspect"
+                                          ? AcceptedDeliveryCandidateAuthorityView
+                                          : Query["type"] extends "product.discovery.inspect"
+                                            ? ProductDiscoveryView
+                                            : Query["type"] extends "product-review.inspect"
+                                              ? ProductReviewStateView
+                                              : Query["type"] extends "technical-review.inspect"
+                                                ? TechnicalReviewStateView
+                                                : Query["type"] extends "departments.list"
+                                                  ? readonly CompanyDepartment[]
+                                                  : Query["type"] extends "department.inspect"
+                                                    ? DepartmentInspect
+                                                    : Query["type"] extends "department.skill-configuration.inspect"
+                                                      ? SkillConfigurationView
+                                                      : Query["type"] extends "department.pipeline.inspect"
+                                                        ? DepartmentPipelineEditorView
+                                                        : Query["type"] extends "department.pipeline.validate"
+                                                          ? PipelineValidationResult
+                                                          : Query["type"] extends "runs.list"
+                                                            ? readonly DepartmentRunView[]
+                                                            : Query["type"] extends "run.supervision.inspect"
+                                                              ? RunSupervisionView
+                                                              : Query["type"] extends "execution.inspect"
+                                                                ? ExecutionInspectionView
+                                                                : Query["type"] extends "runtime.audit"
+                                                                  ? readonly RuntimeAuditRecord[]
+                                                                  : Query["type"] extends
+                                                                        | "runtime.events"
+                                                                        | "runtime.events.consumer"
+                                                                    ? readonly RuntimeEventRecord[]
+                                                                    : Query["type"] extends "artifacts.list"
+                                                                      ? readonly ArtifactVersionView[]
+                                                                      : Query["type"] extends "artifact.inspect"
+                                                                        ? ArtifactLineageView
+                                                                        : Query["type"] extends "artifact.lineage.inspect"
+                                                                          ? ArtifactLineageGraphView
+                                                                          : Query["type"] extends "interactions.list"
+                                                                            ? readonly InteractionView[]
+                                                                            : Query["type"] extends "interaction.inspect"
+                                                                              ? InteractionView
+                                                                              : Query["type"] extends "ag-ui.events"
+                                                                                ? AgUiReplayView
+                                                                                : Query["type"] extends "memory.candidates.list"
+                                                                                  ? readonly MemoryCandidateView[]
+                                                                                  : Query["type"] extends "memory.records.list"
                                                                                     ? readonly LegacyMemoryRecordView[]
-                                                                                    : Query["type"] extends "runtime.diagnostics"
-                                                                                      ? RuntimeDiagnosticsView
-                                                                                      : DepartmentRunView;
+                                                                                    : Query["type"] extends "memory.entries.list"
+                                                                                      ? readonly MemoryEntryView[]
+                                                                                      : Query["type"] extends "memory.selections.list"
+                                                                                        ? readonly RunMemorySelectionView[]
+                                                                                        : Query["type"] extends "memory.legacy-records.list"
+                                                                                          ? readonly LegacyMemoryRecordView[]
+                                                                                          : Query["type"] extends "runtime.diagnostics"
+                                                                                            ? RuntimeDiagnosticsView
+                                                                                            : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -4858,13 +4999,59 @@ export const DeliveryCandidateInputAuthorizeEnvelopeCommandSchema = z
   })
   .strict();
 
+export const CriticalRiskEscalationDecideEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("quality-gate.critical-escalation.decide"),
+    escalationId: z.string().trim().min(1),
+    candidateInputId: z.string().trim().min(1),
+    expectedCandidateInputHash: Sha256Schema,
+    decision: z.enum(["authorize-gate-continuation", "reject"]),
+    reason: z.string().trim().min(1).max(4_000),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+  })
+  .strict();
+
+export const DeliveryCandidateAssembleEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("delivery.candidate.assemble"),
+    candidateId: z.string().trim().min(1),
+    requestId: z.string().trim().min(1),
+    candidateInputId: z.string().trim().min(1),
+    expectedCandidateInputHash: Sha256Schema,
+    expectedGateAuthorityHash: Sha256Schema,
+    nodeRunId: z.string().trim().min(1),
+    nodeAttemptId: z.string().trim().min(1),
+    leaseId: z.string().trim().min(1),
+    workerId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const HumanReleaseDecideEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("delivery.release.decide"),
+    decisionId: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
+    expectedCandidateHash: Sha256Schema,
+    decision: z.enum(["accepted", "rejected", "changes-requested"]),
+    reason: z.string().trim().min(1).max(4_000),
+    comment: z.string().max(4_000).optional(),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+    rework: HumanReleaseDecisionViewSchema.shape.rework.unwrap().optional(),
+  })
+  .strict();
+
+export type DeliveryEnvelopeCommand =
+  | z.infer<typeof DeliveryCandidateAssembleEnvelopeCommandSchema>
+  | z.infer<typeof HumanReleaseDecideEnvelopeCommandSchema>;
+
 export type DeliveryQualityEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateInputFreezeEnvelopeCommandSchema>
   | z.infer<typeof CandidateGateInputPrepareEnvelopeCommandSchema>
   | z.infer<typeof CandidateGateExecutionAcceptEnvelopeCommandSchema>
   | z.infer<typeof CandidateGateExecutionReconcileEnvelopeCommandSchema>
   | z.infer<typeof CandidateGateResultFinalizeEnvelopeCommandSchema>
-  | z.infer<typeof DeliveryCandidateInputAuthorizeEnvelopeCommandSchema>;
+  | z.infer<typeof DeliveryCandidateInputAuthorizeEnvelopeCommandSchema>
+  | z.infer<typeof CriticalRiskEscalationDecideEnvelopeCommandSchema>;
 
 export const ReviewFindingSubmitEnvelopeCommandSchema = z
   .object({
@@ -5030,6 +5217,9 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   CandidateGateExecutionReconcileEnvelopeCommandSchema,
   CandidateGateResultFinalizeEnvelopeCommandSchema,
   DeliveryCandidateInputAuthorizeEnvelopeCommandSchema,
+  CriticalRiskEscalationDecideEnvelopeCommandSchema,
+  DeliveryCandidateAssembleEnvelopeCommandSchema,
+  HumanReleaseDecideEnvelopeCommandSchema,
   ArtifactRegisterEnvelopeCommandSchema,
   ArtifactFinalizeEnvelopeCommandSchema,
   ArtifactSupersedeEnvelopeCommandSchema,
@@ -5066,58 +5256,62 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
             ? CandidateGateResultView
             : Command["type"] extends "delivery.candidate-input.authorize"
               ? DeliveryCandidateInputGateAuthorityView
-              : Command["type"] extends WorkspaceEnvelopeCommand["type"]
-                ? WorkspaceAllocationView
-                : Command["type"] extends WorkPackageEnvelopeCommand["type"]
-                  ? WorkPackageGraphView
-                  : Command["type"] extends CodeReviewEnvelopeCommand["type"]
-                    ? CodeReviewView
-                    : Command["type"] extends IntegrationEnvelopeCommand["type"]
-                      ? IntegrationGenerationView
-                      : Command["type"] extends "test.case-revision.register"
-                        ? TestCaseRevisionView
-                        : Command["type"] extends TestEnvelopeCommand["type"]
-                          ? TestRunView
-                          : Command["type"] extends "application.register"
-                            ? ApplicationView
-                            : Command["type"] extends
-                                  | "application-spec.revise"
-                                  | "technical-baseline-proposal.revise"
-                                  | "technical-review.start"
-                                  | "technical-gate.promote"
-                              ? TechnicalReviewStateView
-                              : Command["type"] extends "interaction.prompt"
-                                ? InteractionTurnView
+              : Command["type"] extends "quality-gate.critical-escalation.decide"
+                ? CriticalRiskEscalationDecisionView
+                : Command["type"] extends DeliveryEnvelopeCommand["type"]
+                  ? DeliveryCandidateView
+                  : Command["type"] extends WorkspaceEnvelopeCommand["type"]
+                    ? WorkspaceAllocationView
+                    : Command["type"] extends WorkPackageEnvelopeCommand["type"]
+                      ? WorkPackageGraphView
+                      : Command["type"] extends CodeReviewEnvelopeCommand["type"]
+                        ? CodeReviewView
+                        : Command["type"] extends IntegrationEnvelopeCommand["type"]
+                          ? IntegrationGenerationView
+                          : Command["type"] extends "test.case-revision.register"
+                            ? TestCaseRevisionView
+                            : Command["type"] extends TestEnvelopeCommand["type"]
+                              ? TestRunView
+                              : Command["type"] extends "application.register"
+                                ? ApplicationView
                                 : Command["type"] extends
-                                      | "node-attempt.cancel"
-                                      | "interaction-turn.cancel"
-                                      | "run.governed-intervention"
-                                  ? RunSupervisionView
-                                  : Command["type"] extends "interaction.turn.cancel"
+                                      | "application-spec.revise"
+                                      | "technical-baseline-proposal.revise"
+                                      | "technical-review.start"
+                                      | "technical-gate.promote"
+                                  ? TechnicalReviewStateView
+                                  : Command["type"] extends "interaction.prompt"
                                     ? InteractionTurnView
-                                    : Command["type"] extends "permission.decide"
-                                      ? PermissionRequestView
-                                      : Command["type"] extends
-                                            | "memory.candidate.propose"
-                                            | "memory.review.start"
-                                        ? MemoryCandidateView
-                                        : Command["type"] extends "memory.candidate.decide"
-                                          ? MemoryDecisionView
-                                          : Command["type"] extends "memory.entry.select-for-run"
-                                            ? RunMemorySelectionView
-                                            : Command["type"] extends ReviewEnvelopeCommand["type"]
-                                              ? ReviewTopicView
-                                              : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-                                                ? ProductReviewStateView
-                                                : Command["type"] extends ProductEnvelopeCommand["type"]
-                                                  ? ProductDiscoveryView
-                                                  : Command["type"] extends "artifact.version.register"
-                                                    ? ArtifactRegistrationView
-                                                    : Command["type"] extends
-                                                          | "artifact.version.finalize"
-                                                          | "artifact.version.supersede"
-                                                      ? ArtifactVersionView
-                                                      : ProjectEditorView;
+                                    : Command["type"] extends
+                                          | "node-attempt.cancel"
+                                          | "interaction-turn.cancel"
+                                          | "run.governed-intervention"
+                                      ? RunSupervisionView
+                                      : Command["type"] extends "interaction.turn.cancel"
+                                        ? InteractionTurnView
+                                        : Command["type"] extends "permission.decide"
+                                          ? PermissionRequestView
+                                          : Command["type"] extends
+                                                | "memory.candidate.propose"
+                                                | "memory.review.start"
+                                            ? MemoryCandidateView
+                                            : Command["type"] extends "memory.candidate.decide"
+                                              ? MemoryDecisionView
+                                              : Command["type"] extends "memory.entry.select-for-run"
+                                                ? RunMemorySelectionView
+                                                : Command["type"] extends ReviewEnvelopeCommand["type"]
+                                                  ? ReviewTopicView
+                                                  : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                                                    ? ProductReviewStateView
+                                                    : Command["type"] extends ProductEnvelopeCommand["type"]
+                                                      ? ProductDiscoveryView
+                                                      : Command["type"] extends "artifact.version.register"
+                                                        ? ArtifactRegistrationView
+                                                        : Command["type"] extends
+                                                              | "artifact.version.finalize"
+                                                              | "artifact.version.supersede"
+                                                          ? ArtifactVersionView
+                                                          : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

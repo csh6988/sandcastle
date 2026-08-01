@@ -165,6 +165,139 @@ describe("Electron Test fixture renderer page", () => {
     assert.deepEqual(readElectronTestFixtureRoute(url), candidateRoute);
   });
 
+  it("round-trips the scoped Delivery Candidate Human release identity", () => {
+    const candidateRoute = {
+      ...fixtureRoute,
+      candidateInputId: "candidate-input-1",
+      candidateId: "delivery-candidate-1",
+    };
+    const url = new URL(encodeElectronTestFixtureRoute(candidateRoute));
+    assert.deepEqual(readElectronTestFixtureRoute(url), candidateRoute);
+  });
+
+  it("sends one accepted Human release Command from the authoritative Candidate panel", async (context) => {
+    const candidateRoute = {
+      ...fixtureRoute,
+      candidateId: "delivery-candidate-1",
+    };
+    const commands: unknown[] = [];
+    const awaiting = {
+      id: "delivery-candidate-1",
+      requestId: "delivery-candidate-request-1",
+      manifest: { artifacts: [{ id: "artifact-version-1" }] },
+      manifestHash: "c".repeat(64),
+      projection: "awaiting-decision" as const,
+      decision: null,
+      supersededByCandidateId: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+    };
+    const bridge = {
+      query: async () => ({
+        view: awaiting,
+        asOfSequence: 18,
+        viewSyncToken: null,
+      }),
+      execute: async (input: { readonly command: unknown }) => {
+        commands.push(input.command);
+        return {
+          status: "succeeded" as const,
+          value: {
+            ...awaiting,
+            projection: "accepted" as const,
+            decision: {
+              id: "release-decision-1",
+              candidateId: awaiting.id,
+              candidateHash: awaiting.manifestHash,
+              runId: "run-1",
+              snapshotRevisionId: "snapshot-1",
+              decision: "accepted" as const,
+              actor: {
+                type: "human" as const,
+                id: "local-release-owner",
+                authenticatedBy: "local-session" as const,
+              },
+              reason:
+                "Reviewed the immutable Delivery Candidate evidence in this local session.",
+              comment: null,
+              evidenceRefs: ["artifact-version:artifact-version-1"],
+              rework: null,
+              childRunId: null,
+              decisionHash: "d".repeat(64),
+              createdAt: "2026-08-01T00:01:00.000Z",
+            },
+          },
+          effectIds: [],
+        };
+      },
+      openEventStream: async () => ({
+        subscriptionId: "delivery-subscription",
+        subscriptionGeneration: 18,
+        barrierSequence: 18,
+      }),
+      closeEventStream: async () => undefined,
+    } as unknown as SandcastleBridge;
+    const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+      url: "http://127.0.0.1/",
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    });
+
+    await act(async () => {
+      root.render(
+        <ElectronTestFixturePage route={candidateRoute} bridge={bridge} />,
+      );
+    });
+    await act(async () => undefined);
+    const accept = container.querySelector<HTMLButtonElement>(
+      "#accept-delivery-candidate",
+    );
+    assert.ok(accept);
+    await act(async () => accept.click());
+
+    assert.equal(commands.length, 1);
+    assert.deepEqual(commands[0], {
+      type: "delivery.release.decide",
+      decisionId: "delivery-candidate-1:human-release-decision",
+      candidateId: awaiting.id,
+      expectedCandidateHash: awaiting.manifestHash,
+      decision: "accepted",
+      reason:
+        "Reviewed the immutable Delivery Candidate evidence in this local session.",
+      evidenceRefs: ["artifact-version:artifact-version-1"],
+    });
+    assert.equal(
+      container
+        .querySelector("[data-delivery-candidate]")
+        ?.getAttribute("data-delivery-candidate-projection"),
+      "accepted",
+    );
+  });
+
   it("rebuilds the scoped Candidate and Gate panel from the authoritative Query View", async (context) => {
     const candidateRoute = {
       ...fixtureRoute,
