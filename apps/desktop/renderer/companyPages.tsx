@@ -32,6 +32,7 @@ import type {
   AgentCatalogView,
   SkillCatalogView,
   CandidateQualityGateView,
+  DeliveryCandidateView,
 } from "../runtime/interface.js";
 import { WorkPackageGraphPanel } from "./workPackageView.js";
 import {
@@ -62,6 +63,10 @@ import {
   connectCandidateQualityGates,
   type CandidateQualityGateConnection,
 } from "./candidateQualityGateView.js";
+import {
+  connectDeliveryCandidate,
+  type DeliveryCandidateConnection,
+} from "./deliveryCandidateView.js";
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2581,6 +2586,154 @@ export function CandidateQualityGatePanel({
   );
 }
 
+const deliveryCandidateEvidenceRefs = (
+  view: DeliveryCandidateView,
+): readonly string[] => {
+  if (typeof view.manifest !== "object" || view.manifest === null) {
+    return [`delivery-candidate:${view.id}`];
+  }
+  const artifacts = (view.manifest as { readonly artifacts?: unknown })
+    .artifacts;
+  if (!Array.isArray(artifacts)) return [`delivery-candidate:${view.id}`];
+  const refs = artifacts.flatMap((artifact) =>
+    typeof artifact === "object" &&
+    artifact !== null &&
+    typeof (artifact as { readonly id?: unknown }).id === "string"
+      ? [`artifact-version:${String((artifact as { readonly id: string }).id)}`]
+      : [],
+  );
+  return refs.length > 0
+    ? [...new Set(refs)].sort()
+    : [`delivery-candidate:${view.id}`];
+};
+
+export function DeliveryCandidatePanel({
+  busy,
+  diagnostic,
+  view,
+  onDecision,
+}: {
+  readonly busy: boolean;
+  readonly diagnostic: string | null;
+  readonly view: DeliveryCandidateView | null;
+  readonly onDecision: (input: {
+    readonly decision: "accepted" | "rejected" | "changes-requested";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+    readonly reworkScope?: "same-boundary" | "boundary-changing";
+  }) => void;
+}) {
+  const [reason, setReason] = useState(
+    "Reviewed the immutable Delivery Candidate evidence in this local session.",
+  );
+  const [reworkScope, setReworkScope] = useState<
+    "same-boundary" | "boundary-changing"
+  >("same-boundary");
+  if (!view) {
+    return diagnostic ? (
+      <section className="create-panel" data-delivery-candidate>
+        <h2>Delivery Candidate and Human release</h2>
+        <p>{diagnostic}</p>
+      </section>
+    ) : null;
+  }
+  const evidenceRefs = deliveryCandidateEvidenceRefs(view);
+  const awaiting = view.projection === "awaiting-decision";
+  const decide = (decision: "accepted" | "rejected" | "changes-requested") =>
+    onDecision({
+      decision,
+      reason,
+      evidenceRefs,
+      ...(decision === "changes-requested" ? { reworkScope } : {}),
+    });
+  return (
+    <section
+      className="create-panel"
+      data-delivery-candidate
+      data-delivery-candidate-id={view.id}
+      data-delivery-candidate-projection={view.projection}
+      data-delivery-candidate-sync={diagnostic ?? "ready"}
+    >
+      <span className="eyebrow">Immutable delivery review</span>
+      <h2>Delivery Candidate and Human release</h2>
+      <dl>
+        <div>
+          <dt>Candidate</dt>
+          <dd>{view.id}</dd>
+        </div>
+        <div>
+          <dt>Manifest hash</dt>
+          <dd>{view.manifestHash}</dd>
+        </div>
+        <div>
+          <dt>Decision</dt>
+          <dd>{view.projection}</dd>
+        </div>
+      </dl>
+      {view.decision ? (
+        <p data-human-release-decision={view.decision.id}>
+          {view.decision.reason}
+        </p>
+      ) : null}
+      {diagnostic ? <p>{diagnostic}</p> : null}
+      {awaiting ? (
+        <div className="form" data-human-release-controls>
+          <label htmlFor={`delivery-release-reason-${view.id}`}>
+            Decision reason
+          </label>
+          <textarea
+            id={`delivery-release-reason-${view.id}`}
+            onChange={(event) => setReason(event.target.value)}
+            value={reason}
+          />
+          <label htmlFor={`delivery-release-scope-${view.id}`}>
+            Changes-requested scope
+          </label>
+          <select
+            id={`delivery-release-scope-${view.id}`}
+            onChange={(event) =>
+              setReworkScope(
+                event.target.value as "same-boundary" | "boundary-changing",
+              )
+            }
+            value={reworkScope}
+          >
+            <option value="same-boundary">Same boundary</option>
+            <option value="boundary-changing">Boundary changing</option>
+          </select>
+          <small>{evidenceRefs.length} immutable evidence reference(s)</small>
+          <div className="button-row">
+            <button
+              disabled={busy || reason.trim().length === 0}
+              id="accept-delivery-candidate"
+              onClick={() => decide("accepted")}
+              type="button"
+            >
+              Accept Candidate
+            </button>
+            <button
+              disabled={busy || reason.trim().length === 0}
+              id="reject-delivery-candidate"
+              onClick={() => decide("rejected")}
+              type="button"
+            >
+              Reject Candidate
+            </button>
+            <button
+              disabled={busy || reason.trim().length === 0}
+              id="request-delivery-changes"
+              onClick={() => decide("changes-requested")}
+              type="button"
+            >
+              Request changes
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export const deliveryCandidateInputIdFromRun = (
   run: DepartmentRunView | null,
 ): string | null => {
@@ -2592,6 +2745,20 @@ export const deliveryCandidateInputIdFromRun = (
   if (typeof result !== "object" || result === null) return null;
   const id = (result as { readonly deliveryCandidateInputId?: unknown })
     .deliveryCandidateInputId;
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+};
+
+export const deliveryCandidateIdFromRun = (
+  run: DepartmentRunView | null,
+): string | null => {
+  const result = run?.nodes.find(
+    (node) =>
+      node.handler?.handlerKindId === "delivery-candidate@1" &&
+      node.status === "succeeded",
+  )?.result;
+  if (typeof result !== "object" || result === null) return null;
+  const id = (result as { readonly deliveryCandidateId?: unknown })
+    .deliveryCandidateId;
   return typeof id === "string" && id.trim() !== "" ? id : null;
 };
 
@@ -2668,6 +2835,12 @@ export function ProjectDetailView({
   >(null);
   const candidateQualityConnection =
     useRef<CandidateQualityGateConnection | null>(null);
+  const [deliveryCandidateView, setDeliveryCandidateView] =
+    useState<DeliveryCandidateView | null>(null);
+  const [deliveryCandidateDiagnostic, setDeliveryCandidateDiagnostic] =
+    useState<string | null>(null);
+  const deliveryCandidateConnection =
+    useRef<DeliveryCandidateConnection | null>(null);
   const runtimeViewConnection = useRef<
     | {
         readonly kind: "runs";
@@ -2693,6 +2866,7 @@ export function ProjectDetailView({
     null,
   );
   const candidateInputId = deliveryCandidateInputIdFromRun(selectedRun);
+  const deliveryCandidateId = deliveryCandidateIdFromRun(selectedRun);
   const [consultationMessage, setConsultationMessage] = useState("");
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [productDiscovery, setProductDiscovery] =
@@ -2901,6 +3075,50 @@ export function ProjectDetailView({
       if (current) void current.close();
     };
   }, [activeTab, candidateInputId]);
+
+  useEffect(() => {
+    let active = true;
+    const synchronize = async (): Promise<void> => {
+      const previous = deliveryCandidateConnection.current;
+      deliveryCandidateConnection.current = null;
+      if (previous) await previous.close();
+      setDeliveryCandidateView(null);
+      setDeliveryCandidateDiagnostic(null);
+      if (!active || activeTab !== "reviews" || !deliveryCandidateId) return;
+      setDeliveryCandidateDiagnostic("Synchronizing Delivery Candidate…");
+      const connection = await connectDeliveryCandidate({
+        bridge: window.sandcastle,
+        candidateId: deliveryCandidateId,
+        onView: (view) => {
+          if (active) {
+            setDeliveryCandidateView(view);
+            setDeliveryCandidateDiagnostic(null);
+          }
+        },
+        onDiagnostic: (diagnostic) => {
+          if (active) setDeliveryCandidateDiagnostic(diagnostic);
+        },
+      });
+      if (!active) {
+        await connection.close();
+        return;
+      }
+      deliveryCandidateConnection.current = connection;
+    };
+    void synchronize().catch((nextError: unknown) => {
+      if (active) {
+        setDeliveryCandidateDiagnostic(
+          `Delivery Candidate unavailable; resync required: ${errorMessage(nextError)}`,
+        );
+      }
+    });
+    return () => {
+      active = false;
+      const current = deliveryCandidateConnection.current;
+      deliveryCandidateConnection.current = null;
+      if (current) void current.close();
+    };
+  }, [activeTab, deliveryCandidateId]);
 
   useEffect(() => {
     let active = true;
@@ -3427,6 +3645,57 @@ export function ProjectDetailView({
     }
   };
 
+  const decideHumanRelease = async (input: {
+    readonly decision: "accepted" | "rejected" | "changes-requested";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+    readonly reworkScope?: "same-boundary" | "boundary-changing";
+  }): Promise<void> => {
+    if (!selectedRun || !deliveryCandidateView) return;
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    try {
+      const decided = await window.sandcastle.runtime.executeDeliveryCommand({
+        commandId: globalThis.crypto.randomUUID(),
+        command: {
+          type: "delivery.release.decide",
+          decisionId: globalThis.crypto.randomUUID(),
+          candidateId: deliveryCandidateView.id,
+          expectedCandidateHash: deliveryCandidateView.manifestHash,
+          decision: input.decision,
+          reason: input.reason,
+          evidenceRefs: [...input.evidenceRefs],
+          ...(input.decision === "changes-requested"
+            ? {
+                rework: {
+                  scope: input.reworkScope ?? "same-boundary",
+                  responsibility: {
+                    kind: "aggregate" as const,
+                    summary:
+                      input.reworkScope === "boundary-changing"
+                        ? "The Product Baseline, Repository, or Pipeline boundary must change."
+                        : "The frozen Candidate requires same-boundary rework.",
+                  },
+                },
+              }
+            : {}),
+        },
+      });
+      setDeliveryCandidateView(decided);
+      const refreshed = await window.sandcastle.runtime.inspectRun(
+        selectedRun.run.id,
+      );
+      setSelectedRun(refreshed);
+      await refreshRuns();
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
   const continueRun = async (): Promise<void> => {
     if (!selectedRun) return;
     setRunBusy(true);
@@ -3926,6 +4195,12 @@ export function ProjectDetailView({
           <CandidateQualityGatePanel
             diagnostic={candidateQualityDiagnostic}
             view={candidateQualityGateView}
+          />
+          <DeliveryCandidatePanel
+            busy={runBusy}
+            diagnostic={deliveryCandidateDiagnostic}
+            onDecision={(input) => void decideHumanRelease(input)}
+            view={deliveryCandidateView}
           />
           <ReviewTopicsPanel topics={reviewTopics} />
         </>

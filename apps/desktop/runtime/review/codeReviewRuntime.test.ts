@@ -1018,7 +1018,7 @@ describe("Code Review Runtime", () => {
     companyDirs.push(companyDir);
     const database = openCompanyDatabase(companyDir);
     try {
-      assert.equal(CURRENT_SCHEMA_VERSION, 49);
+      assert.equal(CURRENT_SCHEMA_VERSION, 50);
       assert.equal(database.schemaVersion(), CURRENT_SCHEMA_VERSION);
     } finally {
       database.close();

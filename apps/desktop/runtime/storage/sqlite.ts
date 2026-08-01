@@ -153,6 +153,10 @@ import {
   type QualityGateRuntime,
 } from "../quality/qualityGateRuntime.js";
 import {
+  openDeliveryRuntime,
+  type DeliveryRuntime,
+} from "../delivery/deliveryRuntime.js";
+import {
   openQualityGateNodeHandler,
   type DeliveryQualityNodePlanProvider,
   type QualityGateNodeHandler,
@@ -186,6 +190,7 @@ export interface CompanyDatabase {
   readonly testRuns: TestRuntime;
   readonly candidateInputs: CandidateInputRuntime;
   readonly qualityGates: QualityGateRuntime;
+  readonly delivery: DeliveryRuntime;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -533,6 +538,13 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const delivery = openDeliveryRuntime(database, {
+    candidateInputs,
+    qualityGates,
+    pipelineRuntime,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -564,6 +576,7 @@ export const openCompanyDatabase = (
     testRuns,
     candidateInputs,
     qualityGates,
+    delivery,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -681,6 +694,7 @@ export const openCompanyDatabase = (
     testRuns,
     candidateInputs,
     qualityGates,
+    delivery,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

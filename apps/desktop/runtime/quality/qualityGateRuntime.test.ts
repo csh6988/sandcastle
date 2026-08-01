@@ -640,6 +640,7 @@ describe("Quality Gate Runtime input", () => {
     } satisfies DeliveryCandidateInputView;
     const runtime = openQualityGateRuntime(fixture.database, {
       candidates: { inspect: () => criticalCandidate },
+      events: fixture.events,
       clock: () => new Date(candidate.createdAt),
     });
     const topicId = "operability-topic-critical";
@@ -724,6 +725,183 @@ describe("Quality Gate Runtime input", () => {
       (error: unknown) =>
         error instanceof QualityGateRuntimeError &&
         error.code === "QUALITY_GATE_HUMAN_ESCALATION_REQUIRED",
+    );
+    fixture.database.close();
+  });
+
+  it("requires one append-only verified-human escalation decision for a critical input", () => {
+    const fixture = openFixture();
+    const criticalCandidate = {
+      ...candidate,
+      id: "candidate-input-critical-escalation",
+      manifestHash: hash("candidate-input-critical-escalation"),
+      manifest: {
+        ...candidate.manifest,
+        candidateInputId: "candidate-input-critical-escalation",
+        risk: {
+          ...candidate.manifest.risk,
+          tier: "critical" as const,
+          factors: [
+            ...candidate.manifest.risk.factors,
+            {
+              id: "destructive-action",
+              minimumTier: "critical" as const,
+              present: true,
+              evidenceRefs: ["artifact-version:artifact-evidence-1"],
+            },
+          ],
+        },
+      },
+    } satisfies DeliveryCandidateInputView;
+    const runtime = openQualityGateRuntime(fixture.database, {
+      candidates: { inspect: () => criticalCandidate },
+      events: fixture.events,
+      clock: () => new Date(candidate.createdAt),
+    });
+    const request = {
+      escalationId: "critical-escalation-1",
+      candidateInputId: criticalCandidate.id,
+      expectedCandidateInputHash: criticalCandidate.manifestHash,
+      decision: "authorize-gate-continuation" as const,
+      reason: "A local human reviewed the frozen critical-risk evidence.",
+      evidenceRefs: ["artifact-version:artifact-evidence-1"],
+    };
+
+    assert.throws(
+      () =>
+        runtime.decideCriticalEscalation({
+          ...request,
+          actor: qualityGateActor,
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_HUMAN_ESCALATION_ACTOR_INVALID",
+    );
+
+    const candidateRuntime = {
+      inspect: () => criticalCandidate,
+      freeze: () => {
+        throw new Error("Candidate freeze is outside this escalation fixture.");
+      },
+    } as CandidateInputRuntime;
+    const registry = openCompanyCommandRegistry(
+      fixture.database,
+      openProjectConfiguration(fixture.database),
+      undefined,
+      () => new Date(candidate.createdAt),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      candidateRuntime,
+      runtime,
+    );
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "critical-escalation-command-1",
+      actor: {
+        type: "human" as const,
+        id: "local-release-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      consumerId: "desktop-critical-escalation",
+      command: {
+        type: "quality-gate.critical-escalation.decide" as const,
+        ...request,
+      },
+    };
+    const rejected = registry.execute({
+      ...envelope,
+      commandId: "critical-escalation-untrusted-command",
+      actor: qualityGateActor,
+    });
+    assert.equal(rejected.status, "rejected");
+    if (rejected.status === "rejected") {
+      assert.equal(
+        rejected.error.code,
+        "QUALITY_GATE_HUMAN_ESCALATION_ACTOR_INVALID",
+      );
+    }
+
+    const commandResult = registry.execute(envelope);
+    assert.equal(
+      commandResult.status,
+      "succeeded",
+      JSON.stringify(commandResult),
+    );
+    if (commandResult.status !== "succeeded") {
+      throw new Error("Critical escalation Command did not succeed.");
+    }
+    const decision = commandResult.value;
+
+    assert.equal(decision.decision, "authorize-gate-continuation");
+    assert.equal(decision.candidateInputHash, criticalCandidate.manifestHash);
+    assert.equal((decision.risk as { readonly tier: string }).tier, "critical");
+    assert.equal(commandResult.effectIds.length, 1);
+    assert.deepEqual(registry.execute(envelope), commandResult);
+    const escalationEvent = fixture.events
+      .readAfter(0, 100)
+      .find(
+        (event) => event.type === "quality-gate.critical-escalation.authorized",
+      );
+    assert.ok(escalationEvent);
+    assert.deepEqual(
+      {
+        ...(fixture.database
+          .prepare(
+            `SELECT json_extract(scope_json, '$.commandId') AS commandId,
+                    json_extract(scope_json, '$.deliveryCandidateInputId') AS candidateInputId
+               FROM runtime_event_outbox
+              WHERE type = 'quality-gate.critical-escalation.authorized'`,
+          )
+          .get() as {
+          readonly commandId: string;
+          readonly candidateInputId: string;
+        }),
+      },
+      {
+        commandId: envelope.commandId,
+        candidateInputId: criticalCandidate.id,
+      },
+    );
+    assert.equal(
+      (
+        fixture.database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+          )
+          .get(envelope.commandId) as { readonly count: number }
+      ).count,
+      1,
+    );
+    assert.throws(
+      () =>
+        runtime.decideCriticalEscalation({
+          ...request,
+          escalationId: "critical-escalation-conflict",
+          decision: "reject",
+          actor: {
+            type: "human",
+            id: "local-release-owner",
+            authenticatedBy: "local-session",
+          },
+        }),
+      (error: unknown) =>
+        error instanceof QualityGateRuntimeError &&
+        error.code === "QUALITY_GATE_HUMAN_ESCALATION_EXISTS",
     );
     fixture.database.close();
   });

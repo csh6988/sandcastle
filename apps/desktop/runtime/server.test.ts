@@ -285,6 +285,48 @@ describe("Company Runtime server startup", () => {
             error.code === "CANDIDATE_INPUT_NOT_FOUND",
         );
       }
+      await assert.rejects(
+        client.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "query-delivery-candidate-missing",
+          principal,
+          consumerId: "quality-server-test",
+          query: {
+            type: "delivery-candidates.inspect",
+            candidateId: "missing-delivery-candidate",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError &&
+          error.code === "DELIVERY_CANDIDATE_NOT_FOUND",
+      );
+      assert.deepEqual(
+        (
+          await client.queryEnvelope({
+            schemaVersion: 1,
+            requestId: "query-delivery-candidates-empty",
+            principal,
+            consumerId: "quality-server-test",
+            query: { type: "delivery-candidates.list", runId: "missing-run" },
+          })
+        ).view,
+        [],
+      );
+      await assert.rejects(
+        client.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "query-accepted-delivery-authority-missing",
+          principal,
+          consumerId: "quality-server-test",
+          query: {
+            type: "accepted-delivery-authority.inspect",
+            candidateId: "missing-delivery-candidate",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError &&
+          error.code === "ACCEPTED_DELIVERY_AUTHORITY_NOT_FOUND",
+      );
       const reconciled = await client.executeEnvelope({
         schemaVersion: 1,
         commandId: "quality-reconcile-missing",
@@ -299,6 +341,25 @@ describe("Company Runtime server startup", () => {
       assert.equal(reconciled.status, "rejected");
       if (reconciled.status === "rejected") {
         assert.equal(reconciled.error.code, "DELIVERY_QUALITY_ACTOR_INVALID");
+      }
+      const release = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "release-missing-candidate",
+        actor: principal,
+        consumerId: "quality-server-test",
+        command: {
+          type: "delivery.release.decide",
+          decisionId: "release-decision-missing",
+          candidateId: "missing-delivery-candidate",
+          expectedCandidateHash: "a".repeat(64),
+          decision: "accepted",
+          reason: "The immutable Candidate evidence was reviewed.",
+          evidenceRefs: ["artifact-version:artifact-version-1"],
+        },
+      });
+      assert.equal(release.status, "rejected");
+      if (release.status === "rejected") {
+        assert.equal(release.error.code, "DELIVERY_CANDIDATE_NOT_FOUND");
       }
     } finally {
       await server.close();

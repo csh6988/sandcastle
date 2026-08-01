@@ -691,11 +691,11 @@ An immutable pre-candidate manifest assembled only from an exact complete set of
 _Avoid_: **Delivery candidate** (which additionally contains the final PASS Gate Results), a mutable staging list, a review scope inferred from a moving Integration branch
 
 **Delivery candidate**:
-The immutable set assembled from one exact **Delivery Candidate Input** plus all required `PASS` Quality Gate Results, including Security and Operability, and waiting for the human release decision. Accepted, rejected, and changes-requested are projections of the separate decision, not mutable fields on the candidate. A Delivery candidate is not deployed or marked released merely because all Agent gates passed.
+The immutable set assembled from one exact **Delivery Candidate Input** downstream authority plus all required `PASS` Quality Gate Results, including Security and Operability, and waiting for the human release decision. Accepted, rejected, changes-requested, and superseded are projections of the separate decision and candidate lineage, not mutable fields on the candidate; only an unaccepted candidate can be superseded. A Delivery candidate is not deployed or marked released merely because all Agent gates passed.
 _Avoid_: "done" (the human release decision is still pending), "release" (release is a later controlled action), a mutable latest build
 
 **Human release decision**:
-The explicit, single append-only human action that accepts, rejects, or sends back a **Delivery candidate** after every declared Agent and quality gate has a `PASS` **Quality Gate Result**. Accepting completes the Run and permits a separate **Release operation**; rejecting terminates that Run's release path, while changes-requested creates traceable same-Run rework or a child Run when frozen boundaries must change. No outcome rewrites historical evidence or adds a second decision to the same manifest.
+The explicit, single append-only action by a verified local-session human that accepts, rejects, or sends back a **Delivery candidate** after every declared Agent and quality gate has a `PASS` **Quality Gate Result**. Accepting completes the Run and exposes immutable downstream authority for a separate **Release operation**, but names no destination and performs no merge, export, branch update, or deployment. Rejecting terminates that Run's release path, while changes-requested creates traceable same-Run rework or a child Run when frozen boundaries must change. No outcome rewrites historical evidence or adds a second decision to the same manifest.
 _Avoid_: "automatic release" (the decision is a separate gate), "approval button" without candidate evidence, treating all Agent PASS results as a release decision
 
 **Release operation**:

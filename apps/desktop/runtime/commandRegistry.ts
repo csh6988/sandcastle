@@ -42,7 +42,10 @@ import {
   CandidateGateExecutionViewSchema,
   CandidateGateResultViewSchema,
   DeliveryCandidateInputGateAuthoritySchema,
+  CriticalRiskEscalationDecisionSchema,
   type DeliveryQualityEnvelopeCommand,
+  DeliveryCandidateViewSchema,
+  type DeliveryEnvelopeCommand,
   type MemoryEnvelopeCommand,
   MemoryCandidateViewSchema,
   MemoryDecisionViewSchema,
@@ -116,6 +119,10 @@ import {
   QualityGateRuntimeError,
   type QualityGateRuntime,
 } from "./quality/qualityGateRuntime.js";
+import {
+  DeliveryRuntimeError,
+  type DeliveryRuntime,
+} from "./delivery/deliveryRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -328,6 +335,18 @@ export const companyCommandDefinitions = {
     primaryAggregate: "delivery-candidate-input",
     expectedRevisionRequired: false,
   },
+  "quality-gate.critical-escalation.decide": {
+    primaryAggregate: "critical-risk-escalation",
+    expectedRevisionRequired: false,
+  },
+  "delivery.candidate.assemble": {
+    primaryAggregate: "delivery-candidate",
+    expectedRevisionRequired: false,
+  },
+  "delivery.release.decide": {
+    primaryAggregate: "human-release-decision",
+    expectedRevisionRequired: false,
+  },
 } as const;
 
 const canonicalize = (value: unknown): unknown => {
@@ -411,6 +430,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof QualityGateRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof DeliveryRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof RuntimeMemoryError) {
@@ -3144,9 +3166,15 @@ const executeDeliveryQualityCommand = (
   envelope: CommandEnvelope<DeliveryQualityEnvelopeCommand>,
   clock: () => Date,
 ): CommandResult<unknown> => {
+  const criticalEscalation =
+    envelope.command.type === "quality-gate.critical-escalation.decide";
   const validRuntimeActor =
     envelope.actor.type === "runtime-worker" &&
     envelope.actor.authenticatedBy === "runtime";
+  const validHumanActor =
+    envelope.actor.type === "human" &&
+    envelope.actor.authenticatedBy === "local-session";
+  const validActor = criticalEscalation ? validHumanActor : validRuntimeActor;
   const requestHash = sha256(
     canonicalJson({
       schemaVersion: envelope.schemaVersion,
@@ -3209,15 +3237,18 @@ const executeDeliveryQualityCommand = (
       );
     let result: CommandResult<unknown>;
     database.exec("SAVEPOINT delivery_quality_command");
-    if (!validRuntimeActor) {
+    if (!validActor) {
       database.exec("ROLLBACK TO delivery_quality_command");
       database.exec("RELEASE delivery_quality_command");
       result = {
         status: "rejected",
         error: {
-          code: "DELIVERY_QUALITY_ACTOR_INVALID",
-          message:
-            "Delivery Candidate Input and Quality Gate Commands require actor {type:'runtime-worker', authenticatedBy:'runtime'}.",
+          code: criticalEscalation
+            ? "QUALITY_GATE_HUMAN_ESCALATION_ACTOR_INVALID"
+            : "DELIVERY_QUALITY_ACTOR_INVALID",
+          message: criticalEscalation
+            ? "Critical-risk escalation requires actor {type:'human', authenticatedBy:'local-session'}."
+            : "Delivery Candidate Input and Quality Gate Commands require actor {type:'runtime-worker', authenticatedBy:'runtime'}.",
         },
         effectIds: [],
       };
@@ -3225,61 +3256,68 @@ const executeDeliveryQualityCommand = (
       try {
         const command = envelope.command;
         const value =
-          command.type === "delivery.candidate-input.freeze"
-            ? DeliveryCandidateInputViewSchema.parse(
-                candidateInputs.freeze({
-                  candidateInputId: command.candidateInputId,
-                  requestId: command.requestId,
-                  projectId: command.projectId,
-                  runId: command.runId,
-                  snapshotRevisionId: command.snapshotRevisionId,
-                  nodeRunId: command.nodeRunId,
-                  nodeAttemptId: command.nodeAttemptId,
-                  producer: command.producer,
-                  requiredTestRunIds: command.requiredTestRunIds,
-                  environment: command.environment,
-                  evidencePolicy: command.evidencePolicy,
+          command.type === "quality-gate.critical-escalation.decide"
+            ? CriticalRiskEscalationDecisionSchema.parse(
+                qualityGates.decideCriticalEscalation({
+                  ...command,
+                  actor: envelope.actor,
                 }),
               )
-            : command.type === "quality-gate.input.prepare"
-              ? CandidateGateInputViewSchema.parse(
-                  qualityGates.prepare({
-                    ...command,
-                    actor: envelope.actor,
+            : command.type === "delivery.candidate-input.freeze"
+              ? DeliveryCandidateInputViewSchema.parse(
+                  candidateInputs.freeze({
+                    candidateInputId: command.candidateInputId,
+                    requestId: command.requestId,
+                    projectId: command.projectId,
+                    runId: command.runId,
+                    snapshotRevisionId: command.snapshotRevisionId,
+                    nodeRunId: command.nodeRunId,
+                    nodeAttemptId: command.nodeAttemptId,
+                    producer: command.producer,
+                    requiredTestRunIds: command.requiredTestRunIds,
+                    environment: command.environment,
+                    evidencePolicy: command.evidencePolicy,
                   }),
                 )
-              : command.type === "quality-gate.execution.accept"
-                ? CandidateGateExecutionViewSchema.parse(
-                    qualityGates.acceptExecution({
-                      executionId: command.executionId,
-                      gateInputId: command.gateInputId,
-                      operationKey: command.operationKey,
-                      request: command.request,
+              : command.type === "quality-gate.input.prepare"
+                ? CandidateGateInputViewSchema.parse(
+                    qualityGates.prepare({
+                      ...command,
+                      actor: envelope.actor,
                     }),
                   )
-                : command.type === "quality-gate.execution.reconcile"
+                : command.type === "quality-gate.execution.accept"
                   ? CandidateGateExecutionViewSchema.parse(
-                      qualityGates.reconcileExecution({
+                      qualityGates.acceptExecution({
                         executionId: command.executionId,
-                        observation:
-                          "receiptHash" in command.observation
-                            ? {
-                                state: command.observation.state,
-                                fact: command.observation.fact,
-                                receiptHash: command.observation.receiptHash,
-                              }
-                            : {
-                                state: command.observation.state,
-                              },
+                        gateInputId: command.gateInputId,
+                        operationKey: command.operationKey,
+                        request: command.request,
                       }),
                     )
-                  : command.type === "quality-gate.result.finalize"
-                    ? CandidateGateResultViewSchema.parse(
-                        qualityGates.finalize(command),
+                  : command.type === "quality-gate.execution.reconcile"
+                    ? CandidateGateExecutionViewSchema.parse(
+                        qualityGates.reconcileExecution({
+                          executionId: command.executionId,
+                          observation:
+                            "receiptHash" in command.observation
+                              ? {
+                                  state: command.observation.state,
+                                  fact: command.observation.fact,
+                                  receiptHash: command.observation.receiptHash,
+                                }
+                              : {
+                                  state: command.observation.state,
+                                },
+                        }),
                       )
-                    : DeliveryCandidateInputGateAuthoritySchema.parse(
-                        qualityGates.authorize(command),
-                      );
+                    : command.type === "quality-gate.result.finalize"
+                      ? CandidateGateResultViewSchema.parse(
+                          qualityGates.finalize(command),
+                        )
+                      : DeliveryCandidateInputGateAuthoritySchema.parse(
+                          qualityGates.authorize(command),
+                        );
         database.exec("RELEASE delivery_quality_command");
         const effectIds = (
           database
@@ -3301,7 +3339,159 @@ const executeDeliveryQualityCommand = (
       .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
       .run();
     const resultJson = canonicalJson(result);
-    if (validRuntimeActor) {
+    if (validActor) {
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+        )
+        .run(
+          envelope.commandId,
+          envelope.actor.type,
+          envelope.actor.id,
+          envelope.actor.authenticatedBy,
+          envelope.consumerId ?? null,
+          envelope.schemaVersion,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(result.effectIds),
+          clock().toISOString(),
+        );
+    }
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
+const executeDeliveryCommand = (
+  database: DatabaseSync,
+  delivery: DeliveryRuntime,
+  envelope: CommandEnvelope<DeliveryEnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<unknown> => {
+  const assemble = envelope.command.type === "delivery.candidate.assemble";
+  const validActor = assemble
+    ? envelope.actor.type === "runtime-worker" &&
+      envelope.actor.authenticatedBy === "runtime" &&
+      envelope.command.type === "delivery.candidate.assemble" &&
+      envelope.command.workerId === envelope.actor.id
+    : envelope.actor.type === "human" &&
+      envelope.actor.authenticatedBy === "local-session";
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const priorResult = CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<unknown>;
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      return priorResult;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<unknown>;
+    database.exec("SAVEPOINT delivery_command");
+    if (!validActor) {
+      database.exec("ROLLBACK TO delivery_command");
+      database.exec("RELEASE delivery_command");
+      result = {
+        status: "rejected",
+        error: {
+          code: assemble
+            ? "DELIVERY_CANDIDATE_ACTOR_INVALID"
+            : "RELEASE_DECISION_ACTOR_INVALID",
+          message: assemble
+            ? "Delivery Candidate assembly requires a trusted Runtime worker."
+            : "Human release requires a verified local-session human.",
+        },
+        effectIds: [],
+      };
+    } else {
+      try {
+        const command = envelope.command;
+        const value = DeliveryCandidateViewSchema.parse(
+          command.type === "delivery.candidate.assemble"
+            ? delivery.assemble(command)
+            : delivery.decide({ ...command, actor: envelope.actor }),
+        );
+        database.exec("RELEASE delivery_command");
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = { status: "succeeded", value, effectIds };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        database.exec("ROLLBACK TO delivery_command");
+        database.exec("RELEASE delivery_command");
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    if (validActor) {
       database
         .prepare(
           `INSERT INTO command_deduplication(
@@ -3358,11 +3548,29 @@ export const openCompanyCommandRegistry = (
   testRuntime?: TestRuntime,
   candidateInputs?: CandidateInputRuntime,
   qualityGates?: QualityGateRuntime,
+  delivery?: DeliveryRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
       input,
     ) as CommandEnvelope<EnvelopeCommand>;
+    if (
+      envelope.command.type === "delivery.candidate.assemble" ||
+      envelope.command.type === "delivery.release.decide"
+    ) {
+      if (!delivery) {
+        throw new CompanyCommandError(
+          "DELIVERY_RUNTIME_UNAVAILABLE",
+          "Delivery Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeDeliveryCommand(
+        database,
+        delivery,
+        envelope as CommandEnvelope<DeliveryEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
     if (
       envelope.command.type.startsWith("delivery.candidate-input.") ||
       envelope.command.type.startsWith("quality-gate.")

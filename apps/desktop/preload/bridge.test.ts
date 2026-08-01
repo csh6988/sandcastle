@@ -730,6 +730,10 @@ describe("Sandcastle preload bridge", () => {
       "inspectReviewTopic",
       "inspectDeliveryCandidateInput",
       "inspectQualityGates",
+      "inspectDeliveryCandidate",
+      "listDeliveryCandidates",
+      "inspectAcceptedDeliveryAuthority",
+      "executeDeliveryCommand",
       "executeReviewCommand",
       "updateProject",
       "archiveProject",
@@ -1444,6 +1448,105 @@ describe("Sandcastle preload bridge", () => {
     assert.deepEqual(
       calls.map((call) => (call as { readonly operation: string }).operation),
       ["query", "query", "execute"],
+    );
+    for (const call of calls) {
+      const payload = call as Record<string, unknown>;
+      assert.equal("actor" in payload, false);
+      assert.equal("principal" in payload, false);
+      assert.equal("consumerId" in payload, false);
+    }
+  });
+
+  it("routes Delivery Candidate queries and Human release Commands through the typed tunnel", async () => {
+    const calls: unknown[] = [];
+    const candidate = {
+      id: "delivery-candidate-1",
+      requestId: "delivery-candidate-request-1",
+      manifest: {},
+      manifestHash: "a".repeat(64),
+      projection: "awaiting-decision" as const,
+      decision: null,
+      supersededByCandidateId: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+    };
+    const authority = {
+      id: "accepted-authority-1",
+      candidateId: candidate.id,
+      candidateHash: candidate.manifestHash,
+      releaseDecisionId: "release-decision-1",
+      releaseDecisionHash: "b".repeat(64),
+      candidateInputId: "candidate-input-1",
+      candidateInputHash: "c".repeat(64),
+      gateAuthorityId: "gate-authority-1",
+      gateAuthorityHash: "d".repeat(64),
+      integrationGenerationId: "integration-generation-1",
+      integrationAuthorityHash: "e".repeat(64),
+      repositoryCommits: [
+        {
+          repositoryReference: "/repositories/api",
+          commit: "f".repeat(40),
+        },
+      ],
+      artifactVersionIds: ["artifact-version-1"],
+      runId: "run-1",
+      snapshotRevisionId: "snapshot-1",
+      authorityHash: "1".repeat(64),
+      createdAt: "2026-08-01T00:01:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: { readonly type?: string };
+      };
+      if (request.operation === "execute") {
+        return { status: "succeeded", value: candidate, effectIds: [] };
+      }
+      return {
+        view:
+          request.query?.type === "delivery-candidates.list"
+            ? [candidate]
+            : request.query?.type === "accepted-delivery-authority.inspect"
+              ? authority
+              : candidate,
+        asOfSequence: 50,
+      };
+    });
+
+    assert.equal(
+      (await bridge.runtime.inspectDeliveryCandidate(candidate.id)).id,
+      candidate.id,
+    );
+    assert.equal(
+      (await bridge.runtime.listDeliveryCandidates(authority.runId))[0]?.id,
+      candidate.id,
+    );
+    assert.equal(
+      (await bridge.runtime.inspectAcceptedDeliveryAuthority(candidate.id))
+        .authorityHash,
+      authority.authorityHash,
+    );
+    assert.equal(
+      (
+        await bridge.runtime.executeDeliveryCommand({
+          commandId: "release-command-1",
+          command: {
+            type: "delivery.release.decide",
+            decisionId: authority.releaseDecisionId,
+            candidateId: candidate.id,
+            expectedCandidateHash: candidate.manifestHash,
+            decision: "accepted",
+            reason: "The immutable Candidate evidence was reviewed.",
+            evidenceRefs: ["artifact-version:artifact-version-1"],
+          },
+        })
+      ).id,
+      candidate.id,
+    );
+    assert.deepEqual(
+      calls.map((call) => (call as { readonly operation: string }).operation),
+      ["query", "query", "query", "execute"],
     );
     for (const call of calls) {
       const payload = call as Record<string, unknown>;

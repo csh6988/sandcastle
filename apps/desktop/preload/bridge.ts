@@ -31,6 +31,11 @@ import {
   TestRunViewSchema,
   type DeliveryCandidateInputView,
   type CandidateQualityGateView,
+  DeliveryCandidateViewSchema,
+  AcceptedDeliveryCandidateAuthoritySchema,
+  type DeliveryCandidateView,
+  type AcceptedDeliveryCandidateAuthorityView,
+  type DeliveryEnvelopeCommand,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
   AgentCatalogViewSchema,
@@ -423,6 +428,19 @@ export interface SandcastleBridge {
     readonly inspectQualityGates: (
       candidateInputId: string,
     ) => Promise<CandidateQualityGateView>;
+    readonly inspectDeliveryCandidate: (
+      candidateId: string,
+    ) => Promise<DeliveryCandidateView>;
+    readonly listDeliveryCandidates: (
+      runId: string,
+    ) => Promise<readonly DeliveryCandidateView[]>;
+    readonly inspectAcceptedDeliveryAuthority: (
+      candidateId: string,
+    ) => Promise<AcceptedDeliveryCandidateAuthorityView>;
+    readonly executeDeliveryCommand: (input: {
+      readonly commandId: string;
+      readonly command: DeliveryEnvelopeCommand;
+    }) => Promise<DeliveryCandidateView>;
     readonly executeReviewCommand: (input: {
       readonly commandId: string;
       readonly expectedRevision: number;
@@ -965,23 +983,30 @@ export const createSandcastleBridge = (
                                             ? WorkPackageGraphViewSchema.parse(
                                                 result.value,
                                               )
-                                            : z
-                                                .object({
-                                                  acknowledged: z.literal(true),
-                                                  subscriptionGeneration: z
-                                                    .number()
-                                                    .int()
-                                                    .positive(),
-                                                  barrierSequence: z
-                                                    .number()
-                                                    .int()
-                                                    .nonnegative(),
-                                                  auditId: z
-                                                    .string()
-                                                    .trim()
-                                                    .min(1),
-                                                })
-                                                .parse(result.value);
+                                            : input.command.type.startsWith(
+                                                  "delivery.",
+                                                )
+                                              ? DeliveryCandidateViewSchema.parse(
+                                                  result.value,
+                                                )
+                                              : z
+                                                  .object({
+                                                    acknowledged:
+                                                      z.literal(true),
+                                                    subscriptionGeneration: z
+                                                      .number()
+                                                      .int()
+                                                      .positive(),
+                                                    barrierSequence: z
+                                                      .number()
+                                                      .int()
+                                                      .nonnegative(),
+                                                    auditId: z
+                                                      .string()
+                                                      .trim()
+                                                      .min(1),
+                                                  })
+                                                  .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,
@@ -1196,6 +1221,31 @@ export const createSandcastleBridge = (
         ).view,
       inspectQualityGates: async (candidateInputId) =>
         (await query({ type: "quality-gates.inspect", candidateInputId })).view,
+      inspectDeliveryCandidate: async (candidateId) =>
+        DeliveryCandidateViewSchema.parse(
+          (await query({ type: "delivery-candidates.inspect", candidateId }))
+            .view,
+        ),
+      listDeliveryCandidates: async (runId) =>
+        DeliveryCandidateViewSchema.array().parse(
+          (await query({ type: "delivery-candidates.list", runId })).view,
+        ),
+      inspectAcceptedDeliveryAuthority: async (candidateId) =>
+        AcceptedDeliveryCandidateAuthoritySchema.parse(
+          (
+            await query({
+              type: "accepted-delivery-authority.inspect",
+              candidateId,
+            })
+          ).view,
+        ),
+      executeDeliveryCommand: async (input) => {
+        const result = await execute(input);
+        if (result.status === "rejected") {
+          throw runtimeBridgeError(result.error.code, result.error.message);
+        }
+        return DeliveryCandidateViewSchema.parse(result.value);
+      },
       executeReviewCommand: async (input) => {
         const result = await execute(input);
         if (result.status === "rejected") {

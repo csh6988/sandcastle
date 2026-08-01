@@ -40,6 +40,8 @@ import {
   TestRunViewSchema,
   DeliveryCandidateInputViewSchema,
   CandidateQualityGateViewSchema,
+  DeliveryCandidateViewSchema,
+  AcceptedDeliveryCandidateAuthoritySchema,
   WorkspaceAllocationViewSchema,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
@@ -330,6 +332,18 @@ export const createCompanyRuntimeClientFromTransport = (
         return CandidateQualityGateViewSchema.parse(
           queryValue,
         ) as CompanyQueryResult<Query>;
+      case "delivery-candidates.inspect":
+        return DeliveryCandidateViewSchema.parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "delivery-candidates.list":
+        return DeliveryCandidateViewSchema.array().parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
+      case "accepted-delivery-authority.inspect":
+        return AcceptedDeliveryCandidateAuthoritySchema.parse(
+          queryValue,
+        ) as unknown as CompanyQueryResult<Query>;
       case "departments.list":
         return CompanyDepartmentSchema.array().parse(
           result,
@@ -853,43 +867,58 @@ export const createCompanyRuntimeClientFromTransport = (
                                         parsed.view,
                                       )
                                     : envelope.query.type ===
-                                        "run.supervision.inspect"
-                                      ? RunSupervisionViewSchema.parse(
+                                        "delivery-candidates.inspect"
+                                      ? DeliveryCandidateViewSchema.parse(
                                           parsed.view,
                                         )
                                       : envelope.query.type ===
-                                          "memory.candidates.list"
-                                        ? MemoryCandidateViewSchema.array().parse(
+                                          "delivery-candidates.list"
+                                        ? DeliveryCandidateViewSchema.array().parse(
                                             parsed.view,
                                           )
                                         : envelope.query.type ===
-                                              "memory.records.list" ||
-                                            envelope.query.type ===
-                                              "memory.legacy-records.list"
-                                          ? LegacyMemoryRecordViewSchema.array().parse(
+                                            "accepted-delivery-authority.inspect"
+                                          ? AcceptedDeliveryCandidateAuthoritySchema.parse(
                                               parsed.view,
                                             )
                                           : envelope.query.type ===
-                                              "memory.entries.list"
-                                            ? MemoryEntryViewSchema.array().parse(
+                                              "run.supervision.inspect"
+                                            ? RunSupervisionViewSchema.parse(
                                                 parsed.view,
                                               )
                                             : envelope.query.type ===
-                                                "memory.selections.list"
-                                              ? RunMemorySelectionViewSchema.array().parse(
+                                                "memory.candidates.list"
+                                              ? MemoryCandidateViewSchema.array().parse(
                                                   parsed.view,
                                                 )
                                               : envelope.query.type ===
-                                                  "interaction.inspect"
-                                                ? InteractionViewSchema.parse(
+                                                    "memory.records.list" ||
+                                                  envelope.query.type ===
+                                                    "memory.legacy-records.list"
+                                                ? LegacyMemoryRecordViewSchema.array().parse(
                                                     parsed.view,
                                                   )
-                                                : (() => {
-                                                    throw new RuntimeClientError(
-                                                      "PROTOCOL_ERROR",
-                                                      `Verified QueryEnvelope does not support ${envelope.query.type}.`,
-                                                    );
-                                                  })();
+                                                : envelope.query.type ===
+                                                    "memory.entries.list"
+                                                  ? MemoryEntryViewSchema.array().parse(
+                                                      parsed.view,
+                                                    )
+                                                  : envelope.query.type ===
+                                                      "memory.selections.list"
+                                                    ? RunMemorySelectionViewSchema.array().parse(
+                                                        parsed.view,
+                                                      )
+                                                    : envelope.query.type ===
+                                                        "interaction.inspect"
+                                                      ? InteractionViewSchema.parse(
+                                                          parsed.view,
+                                                        )
+                                                      : (() => {
+                                                          throw new RuntimeClientError(
+                                                            "PROTOCOL_ERROR",
+                                                            `Verified QueryEnvelope does not support ${envelope.query.type}.`,
+                                                          );
+                                                        })();
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: parsed.asOfSequence,

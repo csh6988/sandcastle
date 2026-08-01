@@ -42,6 +42,7 @@ import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
 import { WorkPackageRuntimeError } from "./workspaces/workPackages.js";
 import { CandidateInputRuntimeError } from "./delivery/candidateInputRuntime.js";
 import { QualityGateRuntimeError } from "./quality/qualityGateRuntime.js";
+import { DeliveryRuntimeError } from "./delivery/deliveryRuntime.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -523,6 +524,14 @@ export const startCompanyRuntimeServer = async (
                     );
                   case "quality-gates.inspect":
                     return database.qualityGates.view(query.candidateInputId);
+                  case "delivery-candidates.inspect":
+                    return database.delivery.inspect(query.candidateId);
+                  case "delivery-candidates.list":
+                    return database.delivery.inspectRun(query.runId);
+                  case "accepted-delivery-authority.inspect":
+                    return database.delivery.acceptedAuthority(
+                      query.candidateId,
+                    );
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -608,6 +617,22 @@ export const startCompanyRuntimeServer = async (
                 case "test-pass-authority.inspect":
                   return database.testRuns.downstreamAuthority(
                     request.query.testRunId,
+                  );
+                case "delivery-candidate-input.inspect":
+                  return database.candidateInputs.inspect(
+                    request.query.candidateInputId,
+                  );
+                case "quality-gates.inspect":
+                  return database.qualityGates.view(
+                    request.query.candidateInputId,
+                  );
+                case "delivery-candidates.inspect":
+                  return database.delivery.inspect(request.query.candidateId);
+                case "delivery-candidates.list":
+                  return database.delivery.inspectRun(request.query.runId);
+                case "accepted-delivery-authority.inspect":
+                  return database.delivery.acceptedAuthority(
+                    request.query.candidateId,
                   );
                 case "departments.list":
                   return database.catalog.departments();
@@ -1240,6 +1265,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof WorkPackageRuntimeError ||
                 error instanceof CandidateInputRuntimeError ||
                 error instanceof QualityGateRuntimeError ||
+                error instanceof DeliveryRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -1259,6 +1285,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof WorkPackageRuntimeError ||
                 error instanceof CandidateInputRuntimeError ||
                 error instanceof QualityGateRuntimeError ||
+                error instanceof DeliveryRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

@@ -3,11 +3,16 @@ import type { SandcastleBridge } from "../preload/bridge.js";
 import {
   EnvelopeCommandSchema,
   type CandidateQualityGateView,
+  type DeliveryCandidateView,
   type EnvelopeCommand,
   type TestRunView,
 } from "../runtime/interface.js";
 import { connectCandidateQualityGates } from "./candidateQualityGateView.js";
-import { CandidateQualityGatePanel } from "./companyPages.js";
+import {
+  CandidateQualityGatePanel,
+  DeliveryCandidatePanel,
+} from "./companyPages.js";
+import { connectDeliveryCandidate } from "./deliveryCandidateView.js";
 
 type TestCaseRevisionCommand = Extract<
   EnvelopeCommand,
@@ -23,6 +28,7 @@ export type ElectronTestFixtureRoute = {
   readonly restoreOnLoad: boolean;
   readonly testRunId: string;
   readonly candidateInputId?: string;
+  readonly candidateId?: string;
   readonly caseCommandId: string;
   readonly caseCommand: TestCaseRevisionCommand;
   readonly runCommandId: string;
@@ -78,6 +84,9 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     (input.candidateInputId !== undefined &&
       (typeof input.candidateInputId !== "string" ||
         input.candidateInputId.trim() === "")) ||
+    (input.candidateId !== undefined &&
+      (typeof input.candidateId !== "string" ||
+        input.candidateId.trim() === "")) ||
     typeof input.caseCommandId !== "string" ||
     input.caseCommandId.trim() === "" ||
     typeof input.runCommandId !== "string" ||
@@ -97,6 +106,9 @@ const parseRoute = (value: unknown): ElectronTestFixtureRoute | null => {
     testRunId: input.testRunId,
     ...(typeof input.candidateInputId === "string"
       ? { candidateInputId: input.candidateInputId }
+      : {}),
+    ...(typeof input.candidateId === "string"
+      ? { candidateId: input.candidateId }
       : {}),
     caseCommandId: input.caseCommandId,
     caseCommand: caseCommand.data,
@@ -159,6 +171,11 @@ export function ElectronTestFixturePage(props: {
   const [candidateDiagnostic, setCandidateDiagnostic] = useState<string | null>(
     null,
   );
+  const [deliveryCandidateView, setDeliveryCandidateView] =
+    useState<DeliveryCandidateView | null>(null);
+  const [deliveryCandidateDiagnostic, setDeliveryCandidateDiagnostic] =
+    useState<string | null>(null);
+  const [deliveryDecisionBusy, setDeliveryDecisionBusy] = useState(false);
 
   const inspectAndAcknowledge = async (): Promise<TestRunView> => {
     const result = await bridge.query({
@@ -310,6 +327,100 @@ export function ElectronTestFixturePage(props: {
     };
   }, [bridge, props.route.candidateInputId]);
 
+  useEffect(() => {
+    const candidateId = props.route.candidateId;
+    if (!candidateId) return;
+    if (!bridge.openEventStream || !bridge.closeEventStream) {
+      setDeliveryCandidateDiagnostic(
+        "Delivery Candidate unavailable; Runtime Event stream is missing.",
+      );
+      return;
+    }
+    let active = true;
+    let close: (() => Promise<void>) | undefined;
+    setDeliveryCandidateDiagnostic("Synchronizing Delivery Candidate…");
+    void connectDeliveryCandidate({
+      bridge: {
+        query: bridge.query,
+        execute: bridge.execute,
+        openEventStream: bridge.openEventStream,
+        closeEventStream: bridge.closeEventStream,
+      },
+      candidateId,
+      onView: (view) => {
+        if (active) setDeliveryCandidateView(view);
+      },
+      onDiagnostic: (diagnostic) => {
+        if (active) setDeliveryCandidateDiagnostic(diagnostic);
+      },
+    })
+      .then((connection) => {
+        close = connection.close;
+        if (!active) void connection.close();
+      })
+      .catch((cause) => {
+        if (active) {
+          setDeliveryCandidateDiagnostic(
+            `Delivery Candidate unavailable; resync required: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          );
+        }
+      });
+    return () => {
+      active = false;
+      if (close) void close();
+    };
+  }, [bridge, props.route.candidateId]);
+
+  const decideHumanRelease = async (input: {
+    readonly decision: "accepted" | "rejected" | "changes-requested";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+    readonly reworkScope?: "same-boundary" | "boundary-changing";
+  }): Promise<void> => {
+    if (!deliveryCandidateView) return;
+    setDeliveryDecisionBusy(true);
+    setDeliveryCandidateDiagnostic(null);
+    try {
+      const result = unwrap(
+        await bridge.execute({
+          commandId: `${deliveryCandidateView.id}:human-release-command`,
+          command: {
+            type: "delivery.release.decide",
+            decisionId: `${deliveryCandidateView.id}:human-release-decision`,
+            candidateId: deliveryCandidateView.id,
+            expectedCandidateHash: deliveryCandidateView.manifestHash,
+            decision: input.decision,
+            reason: input.reason,
+            evidenceRefs: [...input.evidenceRefs],
+            ...(input.decision === "changes-requested"
+              ? {
+                  rework: {
+                    scope: input.reworkScope ?? "same-boundary",
+                    responsibility: {
+                      kind: "aggregate" as const,
+                      summary:
+                        input.reworkScope === "boundary-changing"
+                          ? "The Product Baseline, Repository, or Pipeline boundary must change."
+                          : "The frozen Candidate requires same-boundary rework.",
+                    },
+                  },
+                }
+              : {}),
+          },
+        }),
+      ) as DeliveryCandidateView;
+      setDeliveryCandidateView(result);
+    } catch (cause) {
+      setDeliveryCandidateDiagnostic(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    } finally {
+      setDeliveryDecisionBusy(false);
+    }
+  };
+
   const advance = async (): Promise<void> => {
     if (status === "working" || status === "observed" || status === "pass")
       return;
@@ -384,6 +495,12 @@ export function ElectronTestFixturePage(props: {
       <CandidateQualityGatePanel
         diagnostic={candidateDiagnostic}
         view={candidateView}
+      />
+      <DeliveryCandidatePanel
+        busy={deliveryDecisionBusy}
+        diagnostic={deliveryCandidateDiagnostic}
+        onDecision={(input) => void decideHumanRelease(input)}
+        view={deliveryCandidateView}
       />
     </main>
   );
