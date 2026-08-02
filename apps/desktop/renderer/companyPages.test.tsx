@@ -77,6 +77,7 @@ describe("Delivery Candidate quality", () => {
         state: "frozen-for-final-gates",
         createdAt: "2026-07-30T00:00:00.000Z",
       },
+      criticalEscalation: null,
       gateInputs: [],
       gateResults: [
         {
@@ -94,7 +95,12 @@ describe("Delivery Candidate quality", () => {
       authority: null,
     } as CandidateQualityGateView;
     const markup = renderToStaticMarkup(
-      <CandidateQualityGatePanel diagnostic={null} view={view} />,
+      <CandidateQualityGatePanel
+        busy={false}
+        diagnostic={null}
+        onCriticalEscalation={() => undefined}
+        view={view}
+      />,
     );
     const run = {
       nodes: [
@@ -111,6 +117,40 @@ describe("Delivery Candidate quality", () => {
     assert.match(markup, /security-result-1/);
     assert.match(markup, /blocked/);
     assert.equal(deliveryCandidateInputIdFromRun(run), "candidate-input-1");
+
+    const escalatedMarkup = renderToStaticMarkup(
+      <CandidateQualityGatePanel
+        busy={false}
+        diagnostic={null}
+        onCriticalEscalation={() => undefined}
+        view={{
+          ...view,
+          candidateInput: {
+            ...view.candidateInput,
+            manifest: { schemaVersion: 1, risk: { tier: "critical" } },
+          },
+          criticalEscalation: {
+            id: "critical-escalation-1",
+            candidateInputId: view.candidateInput.id,
+            candidateInputHash: view.candidateInput.manifestHash,
+            decision: "reject",
+            actor: {
+              type: "human",
+              id: "verified-local-human",
+              authenticatedBy: "local-session",
+            },
+            risk: { tier: "critical" },
+            riskHash: "d".repeat(64),
+            reason: "Critical risk was rejected by the verified local human.",
+            evidenceRefs: ["artifact-version:risk-evidence-1"],
+            decisionHash: "e".repeat(64),
+            createdAt: "2026-08-02T00:00:00.000Z",
+          },
+        }}
+      />,
+    );
+    assert.match(escalatedMarkup, /critical-escalation-1/);
+    assert.match(escalatedMarkup, /Critical risk was rejected/);
   });
 
   it("renders an authoritative Human release gesture and finds the Candidate Run result", () => {
@@ -156,6 +196,107 @@ describe("Delivery Candidate quality", () => {
       />,
     );
     assert.doesNotMatch(acceptedMarkup, /accept-delivery-candidate/);
+  });
+
+  it("requires and submits an exact child Run for boundary-changing release rework", async () => {
+    const view = {
+      id: "delivery-candidate-boundary-change",
+      requestId: "delivery-candidate-request-boundary-change",
+      manifest: { artifacts: [{ id: "artifact-version-1" }] },
+      manifestHash: "f".repeat(64),
+      projection: "awaiting-decision",
+      decision: null,
+      supersededByCandidateId: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+    } as DeliveryCandidateView;
+    const submitted: unknown[] = [];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      HTMLInputElement: dom.window.HTMLInputElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <DeliveryCandidatePanel
+            busy={false}
+            diagnostic={null}
+            onDecision={(input) => submitted.push(input)}
+            view={view}
+          />,
+        );
+      });
+      const scope = container.querySelector("select") as HTMLSelectElement;
+      await act(async () => {
+        scope.value = "boundary-changing";
+        scope.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      });
+      const button = container.querySelector(
+        "#request-delivery-changes",
+      ) as HTMLButtonElement;
+      assert.equal(button.disabled, true);
+      const childRun = container.querySelector(
+        "#delivery-release-child-run-delivery-candidate-boundary-change",
+      ) as HTMLInputElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          dom.window.HTMLInputElement.prototype,
+          "value",
+        )?.set?.call(childRun, "confirmed-child-run-1");
+        childRun.dispatchEvent(
+          new dom.window.InputEvent("input", { bubbles: true }),
+        );
+        childRun.dispatchEvent(
+          new dom.window.Event("change", { bubbles: true }),
+        );
+      });
+      assert.equal(
+        (
+          container.querySelector(
+            "#request-delivery-changes",
+          ) as HTMLButtonElement
+        ).disabled,
+        false,
+      );
+      await act(async () => button.click());
+      assert.deepEqual(submitted, [
+        {
+          decision: "changes-requested",
+          reason:
+            "Reviewed the immutable Delivery Candidate evidence in this local session.",
+          evidenceRefs: ["artifact-version:artifact-version-1"],
+          reworkScope: "boundary-changing",
+          childRunId: "confirmed-child-run-1",
+        },
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    }
   });
 });
 

@@ -186,10 +186,11 @@ describe("Delivery Runtime", () => {
         completeDeliveryCandidateInTransaction: (input) => {
           transitions.push(input);
         },
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
         applyHumanReleaseDecisionInTransaction: () => {},
-        forkRunInTransaction: () => {
-          throw new Error("Fork is outside this Candidate assembly slice.");
-        },
+        validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
     });
@@ -248,12 +249,13 @@ describe("Delivery Runtime", () => {
       qualityGates: { downstreamAuthority: () => gateAuthority },
       pipelineRuntime: {
         completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
         applyHumanReleaseDecisionInTransaction: (input) => {
           decisions.push(input);
         },
-        forkRunInTransaction: () => {
-          throw new Error("Accepted does not create a child Run.");
-        },
+        validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
     });
@@ -367,12 +369,13 @@ describe("Delivery Runtime", () => {
       qualityGates: { downstreamAuthority: () => currentAuthority },
       pipelineRuntime: {
         completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
         applyHumanReleaseDecisionInTransaction: (input) => {
           decisions.push(input);
         },
-        forkRunInTransaction: () => {
-          throw new Error("Same-boundary rework does not create a child Run.");
-        },
+        validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
     });
@@ -402,8 +405,7 @@ describe("Delivery Runtime", () => {
       rework: {
         scope: "same-boundary",
         responsibility: {
-          kind: "contract",
-          id: "contract-1",
+          kind: "aggregate",
           summary: "Re-run the exact contract validation.",
         },
       },
@@ -481,19 +483,21 @@ describe("Delivery Runtime", () => {
     database.exec("PRAGMA foreign_keys = OFF");
     const input = candidateInputFor("candidate-input-boundary-change");
     const authority = gateAuthorityFor(input);
-    const forks: unknown[] = [];
+    const boundaryValidations: unknown[] = [];
     const decisions: unknown[] = [];
     const runtime = openDeliveryRuntime(database, {
       candidateInputs: { inspect: () => input },
       qualityGates: { downstreamAuthority: () => authority },
       pipelineRuntime: {
         completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
         applyHumanReleaseDecisionInTransaction: (decision) => {
           decisions.push(decision);
         },
-        forkRunInTransaction: (fork) => {
-          forks.push(fork);
-          return { run: { id: "child-run-1" } } as never;
+        validateReleaseBoundaryChildInTransaction: (boundary) => {
+          boundaryValidations.push(boundary);
         },
       },
       clock: () => new Date(candidateInput.createdAt),
@@ -525,6 +529,7 @@ describe("Delivery Runtime", () => {
       evidenceRefs: ["artifact-version:artifact-version-1"],
       rework: {
         scope: "boundary-changing",
+        childRunId: "child-run-1",
         responsibility: {
           kind: "aggregate",
           summary: "Change the Product Baseline repository scope.",
@@ -532,7 +537,7 @@ describe("Delivery Runtime", () => {
       },
     });
 
-    assert.equal(forks.length, 1);
+    assert.equal(boundaryValidations.length, 1);
     assert.equal(decisions.length, 1);
     assert.equal(decided.decision?.childRunId, "child-run-1");
     assert.equal(
@@ -566,6 +571,9 @@ describe("Delivery Runtime", () => {
             )
             .run();
         },
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
         applyHumanReleaseDecisionInTransaction: () => {
           database
             .prepare(
@@ -576,9 +584,7 @@ describe("Delivery Runtime", () => {
             throw new Error("injected decision crash");
           }
         },
-        forkRunInTransaction: () => {
-          throw new Error("Accepted does not create a child Run.");
-        },
+        validateReleaseBoundaryChildInTransaction: () => {},
       },
       events: openRuntimeEvents(database),
       clock: () => new Date(candidateInput.createdAt),

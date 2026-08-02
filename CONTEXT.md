@@ -690,6 +690,10 @@ _Avoid_: "SRE sign-off" (the review is evidence and a gate, not a personal appro
 An immutable pre-candidate manifest assembled only from an exact complete set of PASS **Test run** authorities and their frozen Product, Technical, Work Package, Code Review, Integration, per-Repository commit, Artifact, Contract, Snapshot, environment, risk, and evidence lineage. Security and Operability Gate Results bind this input ID/hash; changed lineage requires a new input, and only exact dual PASS with no open Finding, Defect, or obligation exposes downstream authority for a later Delivery candidate.
 _Avoid_: **Delivery candidate** (which additionally contains the final PASS Gate Results), a mutable staging list, a review scope inferred from a moving Integration branch
 
+**Critical-risk escalation**:
+The single append-only decision by a verified local-session human that either authorizes Security and Operability Gate work for an exact critical-risk **Delivery Candidate Input** or rejects that work and blocks its Run. It is pre-Gate authority and is distinct from the final **Human release decision** over a completed Delivery candidate.
+_Avoid_: **Human release decision**, generic Human Approval, Gate reviewer decision
+
 **Delivery candidate**:
 The immutable set assembled from one exact **Delivery Candidate Input** downstream authority plus all required `PASS` Quality Gate Results, including Security and Operability, and waiting for the human release decision. Accepted, rejected, changes-requested, and superseded are projections of the separate decision and candidate lineage, not mutable fields on the candidate; only an unaccepted candidate can be superseded. A Delivery candidate is not deployed or marked released merely because all Agent gates passed.
 _Avoid_: "done" (the human release decision is still pending), "release" (release is a later controlled action), a mutable latest build

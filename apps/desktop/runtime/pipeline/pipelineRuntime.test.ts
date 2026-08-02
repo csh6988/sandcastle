@@ -1022,9 +1022,13 @@ describe("Pipeline Runtime", () => {
 
     try {
       const accepted = await createWaitingRun();
+      const acceptedHumanRelease = accepted.nodes.find(
+        (node) => node.pipelineNodeId === "human-release",
+      )!;
       raw.exec("BEGIN IMMEDIATE");
       pipeline.applyHumanReleaseDecisionInTransaction({
         runId: accepted.run.id,
+        humanReleaseNodeRunId: acceptedHumanRelease.id,
         candidateId: `candidate:${accepted.run.id}`,
         candidateHash: "a".repeat(64),
         decisionId: `decision:${accepted.run.id}`,
@@ -1036,11 +1040,38 @@ describe("Pipeline Runtime", () => {
         pipeline.inspectRun(accepted.run.id).run.status,
         "completed",
       );
+      assert.equal(
+        pipeline
+          .inspectRun(accepted.run.id)
+          .nodes.find((node) => node.pipelineNodeId === "complete")?.status,
+        "succeeded",
+      );
 
       const rejected = await createWaitingRun();
+      const rejectedHumanRelease = rejected.nodes.find(
+        (node) => node.pipelineNodeId === "human-release",
+      )!;
+      raw
+        .prepare(
+          `INSERT INTO node_runs(
+           id, run_id, pipeline_node_id, node_type, handler_kind_id,
+           input_schema_hash, output_schema_hash, status, attempt_count,
+           required_dependency_ids_json, result_json, failure_code,
+           failure_message, created_at, updated_at
+         ) VALUES (?, ?, 'unrelated-human-release', 'human-approval',
+                   'human-release@1', NULL, NULL, 'waiting-approval', 0,
+                   '[]', NULL, NULL, NULL, ?, ?)`,
+        )
+        .run(
+          `unrelated-human-release:${rejected.run.id}`,
+          rejected.run.id,
+          fixedNow,
+          fixedNow,
+        );
       raw.exec("BEGIN IMMEDIATE");
       pipeline.applyHumanReleaseDecisionInTransaction({
         runId: rejected.run.id,
+        humanReleaseNodeRunId: rejectedHumanRelease.id,
         candidateId: `candidate:${rejected.run.id}`,
         candidateHash: "a".repeat(64),
         decisionId: `decision:${rejected.run.id}`,
@@ -1052,41 +1083,115 @@ describe("Pipeline Runtime", () => {
         pipeline.inspectRun(rejected.run.id).run.status,
         "release-rejected",
       );
+      assert.equal(
+        (
+          raw
+            .prepare("SELECT status FROM node_runs WHERE id = ?")
+            .get(`unrelated-human-release:${rejected.run.id}`) as {
+            readonly status: string;
+          }
+        ).status,
+        "waiting-approval",
+      );
 
       const sameBoundary = await createWaitingRun();
+      const sameBoundaryHumanRelease = sameBoundary.nodes.find(
+        (node) => node.pipelineNodeId === "human-release",
+      )!;
+      const sameBoundaryCandidate = sameBoundary.nodes.find(
+        (node) => node.pipelineNodeId === "candidate",
+      )!;
       raw.exec("BEGIN IMMEDIATE");
       pipeline.applyHumanReleaseDecisionInTransaction({
         runId: sameBoundary.run.id,
+        humanReleaseNodeRunId: sameBoundaryHumanRelease.id,
         candidateId: `candidate:${sameBoundary.run.id}`,
         candidateHash: "a".repeat(64),
         decisionId: `decision:${sameBoundary.run.id}`,
         decision: "changes-requested",
+        reworkNodeRunId: sameBoundaryCandidate.id,
         decidedAt: fixedNow,
       });
       raw.exec("COMMIT");
       assert.equal(
         pipeline.inspectRun(sameBoundary.run.id).run.status,
-        "blocked",
+        "recovering",
+      );
+      const reworkView = pipeline.inspectRun(sameBoundary.run.id);
+      assert.equal(
+        reworkView.nodes.find((node) => node.id === sameBoundaryCandidate.id)
+          ?.status,
+        "ready",
+      );
+      assert.equal(
+        reworkView.nodes.find((node) => node.id === sameBoundaryHumanRelease.id)
+          ?.status,
+        "queued",
+      );
+      assert.equal(
+        reworkView.continuationPlan?.targetNodeRunId,
+        sameBoundaryCandidate.id,
       );
 
       const boundaryChanging = await createWaitingRun();
-      const forkPoint = boundaryChanging.nodes.find(
-        (node) => node.pipelineNodeId === "candidate",
-      )!;
+      const boundaryChildRunId = `confirmed-child:${boundaryChanging.run.id}`;
+      const boundaryChildSnapshotId = `confirmed-child-snapshot:${boundaryChanging.run.id}`;
+      raw.exec("PRAGMA foreign_keys = OFF");
+      raw
+        .prepare(
+          "UPDATE department_runs SET product_baseline_id = 'baseline-source' WHERE id = ?",
+        )
+        .run(boundaryChanging.run.id);
+      raw
+        .prepare(
+          `INSERT INTO department_runs(
+           id, project_id, department_id, status, created_at,
+           pipeline_version_id, snapshot_revision_id, revision, updated_at,
+           parent_run_id, forked_from_snapshot_revision_id, product_baseline_id
+         ) VALUES (?, ?, ?, 'ready', ?, ?, ?, 0, ?, ?, ?, 'baseline-child')`,
+        )
+        .run(
+          boundaryChildRunId,
+          boundaryChanging.run.projectId,
+          boundaryChanging.run.departmentId,
+          fixedNow,
+          boundaryChanging.run.pipelineVersionId,
+          boundaryChildSnapshotId,
+          fixedNow,
+          boundaryChanging.run.id,
+          boundaryChanging.snapshot.id,
+        );
+      raw
+        .prepare(
+          `INSERT INTO run_snapshot_revisions(
+           id, run_id, revision, parent_revision, schema_version,
+           canonical_json, hash, created_at
+         ) SELECT ?, ?, 1, NULL, schema_version, canonical_json, hash, ?
+             FROM run_snapshot_revisions WHERE id = ? AND run_id = ?`,
+        )
+        .run(
+          boundaryChildSnapshotId,
+          boundaryChildRunId,
+          fixedNow,
+          boundaryChanging.snapshot.id,
+          boundaryChanging.run.id,
+        );
       raw.exec("BEGIN IMMEDIATE");
-      const child = pipeline.forkRunInTransaction({
-        runId: boundaryChanging.run.id,
-        snapshotRevisionId: boundaryChanging.snapshot.id,
-        fromNodeRunId: forkPoint.id,
-        mode: "reconfigure",
+      pipeline.validateReleaseBoundaryChildInTransaction({
+        sourceRunId: boundaryChanging.run.id,
+        sourceSnapshotRevisionId: boundaryChanging.snapshot.id,
+        childRunId: boundaryChildRunId,
       });
       pipeline.applyHumanReleaseDecisionInTransaction({
         runId: boundaryChanging.run.id,
+        humanReleaseNodeRunId: boundaryChanging.nodes.find(
+          (node) => node.pipelineNodeId === "human-release",
+        )!.id,
         candidateId: `candidate:${boundaryChanging.run.id}`,
         candidateHash: "a".repeat(64),
         decisionId: `decision:${boundaryChanging.run.id}`,
         decision: "changes-requested",
-        childRunId: child.run.id,
+        childRunId: boundaryChildRunId,
         decidedAt: fixedNow,
       });
       raw.exec("COMMIT");
@@ -1094,26 +1199,64 @@ describe("Pipeline Runtime", () => {
         pipeline.inspectRun(boundaryChanging.run.id).run.status,
         "superseded",
       );
-      assert.equal(child.run.parentRunId, boundaryChanging.run.id);
+      assert.equal(
+        pipeline.inspectRun(boundaryChildRunId).run.parentRunId,
+        boundaryChanging.run.id,
+      );
 
       const rolledBack = await createWaitingRun();
-      const rolledBackForkPoint = rolledBack.nodes.find(
-        (node) => node.pipelineNodeId === "candidate",
-      )!;
+      const rolledBackChildRunId = `confirmed-child:${rolledBack.run.id}`;
+      const rolledBackChildSnapshotId = `confirmed-child-snapshot:${rolledBack.run.id}`;
+      raw
+        .prepare(
+          "UPDATE department_runs SET product_baseline_id = 'baseline-source' WHERE id = ?",
+        )
+        .run(rolledBack.run.id);
+      raw
+        .prepare(
+          `INSERT INTO department_runs(
+           id, project_id, department_id, status, created_at,
+           pipeline_version_id, snapshot_revision_id, revision, updated_at,
+           parent_run_id, forked_from_snapshot_revision_id, product_baseline_id
+         ) VALUES (?, ?, ?, 'ready', ?, ?, ?, 0, ?, ?, ?, 'baseline-child')`,
+        )
+        .run(
+          rolledBackChildRunId,
+          rolledBack.run.projectId,
+          rolledBack.run.departmentId,
+          fixedNow,
+          rolledBack.run.pipelineVersionId,
+          rolledBackChildSnapshotId,
+          fixedNow,
+          rolledBack.run.id,
+          rolledBack.snapshot.id,
+        );
+      raw
+        .prepare(
+          `INSERT INTO run_snapshot_revisions(
+           id, run_id, revision, parent_revision, schema_version,
+           canonical_json, hash, created_at
+         ) SELECT ?, ?, 1, NULL, schema_version, canonical_json, hash, ?
+             FROM run_snapshot_revisions WHERE id = ? AND run_id = ?`,
+        )
+        .run(
+          rolledBackChildSnapshotId,
+          rolledBackChildRunId,
+          fixedNow,
+          rolledBack.snapshot.id,
+          rolledBack.run.id,
+        );
       raw.exec("BEGIN IMMEDIATE");
-      const rolledBackChild = pipeline.forkRunInTransaction({
-        runId: rolledBack.run.id,
-        snapshotRevisionId: rolledBack.snapshot.id,
-        fromNodeRunId: rolledBackForkPoint.id,
-        mode: "reconfigure",
-      });
       pipeline.applyHumanReleaseDecisionInTransaction({
         runId: rolledBack.run.id,
+        humanReleaseNodeRunId: rolledBack.nodes.find(
+          (node) => node.pipelineNodeId === "human-release",
+        )!.id,
         candidateId: `candidate:${rolledBack.run.id}`,
         candidateHash: "a".repeat(64),
         decisionId: `decision:${rolledBack.run.id}`,
         decision: "changes-requested",
-        childRunId: rolledBackChild.run.id,
+        childRunId: rolledBackChildRunId,
         decidedAt: fixedNow,
       });
       raw.exec("ROLLBACK");
@@ -1121,15 +1264,137 @@ describe("Pipeline Runtime", () => {
         pipeline.inspectRun(rolledBack.run.id).run.status,
         "waiting-human-release",
       );
+    } finally {
+      raw.close();
+      fixture.database.close();
+    }
+  });
+
+  it("atomically blocks exact Gate Attempts, Nodes, and Run when critical-risk escalation is rejected", () => {
+    const fixedNow = "2026-08-01T00:00:00.000Z";
+    const fixture = setup(
+      createScriptedExecutionAdapter(),
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "security",
+            type: "ai-task",
+            name: "Security",
+            positionId,
+            handlerKindId: "security-review@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+          },
+        ],
+        edges: [
+          { from: "start", to: "security" },
+          { from: "security", to: "complete" },
+        ],
+      }),
+      () => new Date(fixedNow),
+    );
+    const raw = new DatabaseSync(fixture.database.path);
+    const pipeline = openPipelineRuntime(
+      raw,
+      createScriptedExecutionAdapter(),
+      { clock: () => new Date(fixedNow) },
+    );
+    try {
+      const started = pipeline.startRun({
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const source = started.nodes.find(
+        (node) => node.pipelineNodeId === "start",
+      )!;
+      const security = started.nodes.find(
+        (node) => node.pipelineNodeId === "security",
+      )!;
+      raw
+        .prepare(
+          "UPDATE node_runs SET status = 'succeeded', handler_kind_id = 'delivery-candidate-input@1' WHERE id = ?",
+        )
+        .run(source.id);
+      raw
+        .prepare(
+          "UPDATE node_runs SET status = 'running', attempt_count = 1 WHERE id = ?",
+        )
+        .run(security.id);
+      raw
+        .prepare("UPDATE department_runs SET status = 'running' WHERE id = ?")
+        .run(started.run.id);
+      raw
+        .prepare(
+          `INSERT INTO node_attempts(
+           id, node_run_id, attempt_number, snapshot_revision_id, reason,
+           status, structured_result_json, failure_code, failure_message,
+           created_at, started_at, completed_at
+         ) VALUES ('critical-security-attempt', ?, 1, ?, 'initial', 'running',
+                   NULL, NULL, NULL, ?, ?, NULL)`,
+        )
+        .run(security.id, started.snapshot.id, fixedNow, fixedNow);
+
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.rejectCriticalRiskEscalationInTransaction({
+        runId: started.run.id,
+        candidateInputId: "candidate-input-critical",
+        candidateInputNodeRunId: source.id,
+        decidedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+
+      const blocked = pipeline.inspectRun(started.run.id);
+      assert.equal(blocked.run.status, "blocked");
       assert.equal(
-        (
-          raw
-            .prepare(
-              "SELECT COUNT(*) AS count FROM department_runs WHERE id = ?",
-            )
-            .get(rolledBackChild.run.id) as { readonly count: number }
-        ).count,
-        0,
+        blocked.nodes.find((node) => node.id === security.id)?.status,
+        "blocked",
+      );
+      assert.equal(
+        blocked.nodes.find((node) => node.id === security.id)?.attempts.at(-1)
+          ?.status,
+        "failed",
+      );
+      assert.equal(
+        blocked.nodes.find((node) => node.id === security.id)?.failure?.code,
+        "CRITICAL_RISK_ESCALATION_REJECTED",
+      );
+
+      raw
+        .prepare(
+          "UPDATE node_runs SET status = 'running', failure_code = NULL, failure_message = NULL WHERE id = ?",
+        )
+        .run(security.id);
+      raw
+        .prepare(
+          "UPDATE node_attempts SET status = 'running', failure_code = NULL, failure_message = NULL, completed_at = NULL WHERE id = 'critical-security-attempt'",
+        )
+        .run();
+      raw
+        .prepare("UPDATE department_runs SET status = 'running' WHERE id = ?")
+        .run(started.run.id);
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.rejectCriticalRiskEscalationInTransaction({
+        runId: started.run.id,
+        candidateInputId: "candidate-input-critical-rollback",
+        candidateInputNodeRunId: source.id,
+        decidedAt: fixedNow,
+      });
+      raw.exec("ROLLBACK");
+      assert.equal(pipeline.inspectRun(started.run.id).run.status, "running");
+      assert.equal(
+        pipeline
+          .inspectRun(started.run.id)
+          .nodes.find((node) => node.id === security.id)?.status,
+        "running",
       );
     } finally {
       raw.close();

@@ -7,6 +7,12 @@ import { connectCandidateQualityGates } from "./candidateQualityGateView.js";
 const view = (authority: boolean): CandidateQualityGateView =>
   ({
     candidateInput: { id: "candidate-input-1" },
+    criticalEscalation: authority
+      ? {
+          id: "critical-escalation-1",
+          decision: "authorize-gate-continuation",
+        }
+      : null,
     gateInputs: [],
     gateResults: [],
     authority: authority ? { id: "candidate-authority-1" } : null,
@@ -59,6 +65,7 @@ describe("Candidate Quality Gate renderer projection", () => {
       onDiagnostic: () => undefined,
     });
     assert.equal(views.at(-1)?.authority, null);
+    assert.equal(views.at(-1)?.criticalEscalation, null);
     await eventSink({
       subscriptionId: "subscription-candidate",
       subscriptionGeneration: 17,
@@ -85,6 +92,7 @@ describe("Candidate Quality Gate renderer projection", () => {
     });
     assert.equal(queryCount, 2);
     assert.equal(views.at(-1)?.authority?.id, "candidate-authority-1");
+    assert.equal(views.at(-1)?.criticalEscalation?.id, "critical-escalation-1");
 
     await connection.resync();
     assert.equal(queryCount, 3);

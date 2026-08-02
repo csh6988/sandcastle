@@ -1824,6 +1824,7 @@ export const CriticalRiskEscalationDecisionSchema = z
 export const CandidateQualityGateViewSchema = z
   .object({
     candidateInput: DeliveryCandidateInputViewSchema,
+    criticalEscalation: CriticalRiskEscalationDecisionSchema.nullable(),
     gateInputs: z.array(CandidateGateInputViewSchema),
     gateResults: z.array(CandidateGateResultViewSchema),
     authority: DeliveryCandidateInputGateAuthoritySchema.nullable(),
@@ -1870,6 +1871,7 @@ export const HumanReleaseDecisionViewSchema = z
     rework: z
       .object({
         scope: z.enum(["same-boundary", "boundary-changing"]),
+        childRunId: z.string().trim().min(1).optional(),
         responsibility: z
           .object({
             kind: z.enum([

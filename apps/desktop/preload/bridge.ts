@@ -31,10 +31,13 @@ import {
   TestRunViewSchema,
   type DeliveryCandidateInputView,
   type CandidateQualityGateView,
+  CriticalRiskEscalationDecisionSchema,
+  type CriticalRiskEscalationDecisionView,
   DeliveryCandidateViewSchema,
   AcceptedDeliveryCandidateAuthoritySchema,
   type DeliveryCandidateView,
   type AcceptedDeliveryCandidateAuthorityView,
+  type DeliveryQualityEnvelopeCommand,
   type DeliveryEnvelopeCommand,
   WorkPackageGraphViewSchema,
   RuntimeHealthSchema,
@@ -437,6 +440,13 @@ export interface SandcastleBridge {
     readonly inspectAcceptedDeliveryAuthority: (
       candidateId: string,
     ) => Promise<AcceptedDeliveryCandidateAuthorityView>;
+    readonly executeCriticalRiskEscalationCommand: (input: {
+      readonly commandId: string;
+      readonly command: Extract<
+        DeliveryQualityEnvelopeCommand,
+        { readonly type: "quality-gate.critical-escalation.decide" }
+      >;
+    }) => Promise<CriticalRiskEscalationDecisionView>;
     readonly executeDeliveryCommand: (input: {
       readonly commandId: string;
       readonly command: DeliveryEnvelopeCommand;
@@ -989,24 +999,29 @@ export const createSandcastleBridge = (
                                               ? DeliveryCandidateViewSchema.parse(
                                                   result.value,
                                                 )
-                                              : z
-                                                  .object({
-                                                    acknowledged:
-                                                      z.literal(true),
-                                                    subscriptionGeneration: z
-                                                      .number()
-                                                      .int()
-                                                      .positive(),
-                                                    barrierSequence: z
-                                                      .number()
-                                                      .int()
-                                                      .nonnegative(),
-                                                    auditId: z
-                                                      .string()
-                                                      .trim()
-                                                      .min(1),
-                                                  })
-                                                  .parse(result.value);
+                                              : input.command.type ===
+                                                  "quality-gate.critical-escalation.decide"
+                                                ? CriticalRiskEscalationDecisionSchema.parse(
+                                                    result.value,
+                                                  )
+                                                : z
+                                                    .object({
+                                                      acknowledged:
+                                                        z.literal(true),
+                                                      subscriptionGeneration: z
+                                                        .number()
+                                                        .int()
+                                                        .positive(),
+                                                      barrierSequence: z
+                                                        .number()
+                                                        .int()
+                                                        .nonnegative(),
+                                                      auditId: z
+                                                        .string()
+                                                        .trim()
+                                                        .min(1),
+                                                    })
+                                                    .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,
@@ -1239,6 +1254,13 @@ export const createSandcastleBridge = (
             })
           ).view,
         ),
+      executeCriticalRiskEscalationCommand: async (input) => {
+        const result = await execute(input);
+        if (result.status === "rejected") {
+          throw runtimeBridgeError(result.error.code, result.error.message);
+        }
+        return CriticalRiskEscalationDecisionSchema.parse(result.value);
+      },
       executeDeliveryCommand: async (input) => {
         const result = await execute(input);
         if (result.status === "rejected") {

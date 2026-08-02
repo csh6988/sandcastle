@@ -825,6 +825,7 @@ describe("Company Runtime client", () => {
                 query?.type === "quality-gates.inspect"
                   ? {
                       candidateInput,
+                      criticalEscalation: null,
                       gateInputs: [],
                       gateResults: [],
                       authority: null,

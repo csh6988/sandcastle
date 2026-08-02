@@ -38,6 +38,7 @@ export type DeliveryCandidateManifest = {
   readonly source: {
     readonly nodeRunId: string;
     readonly nodeAttemptId: string;
+    readonly humanReleaseNodeRunId: string;
   };
   readonly product: DeliveryCandidateInputManifest["product"];
   readonly technical: DeliveryCandidateInputManifest["technical"];
@@ -86,6 +87,7 @@ export type ReleaseReworkResponsibility = {
 export type ReleaseRework = {
   readonly scope: "same-boundary" | "boundary-changing";
   readonly responsibility: ReleaseReworkResponsibility;
+  readonly childRunId?: string;
 };
 
 export type HumanReleaseDecision = {
@@ -142,8 +144,9 @@ export type AcceptedDeliveryCandidateAuthority = {
 type DeliveryPipelineRuntime = Pick<
   PipelineRuntime,
   | "completeDeliveryCandidateInTransaction"
+  | "resolveHumanReleaseNodeInTransaction"
   | "applyHumanReleaseDecisionInTransaction"
-  | "forkRunInTransaction"
+  | "validateReleaseBoundaryChildInTransaction"
 >;
 
 export interface DeliveryRuntime {
@@ -505,6 +508,11 @@ export const openDeliveryRuntime = (
         );
       }
     }
+    const { humanReleaseNodeRunId } =
+      options.pipelineRuntime.resolveHumanReleaseNodeInTransaction({
+        runId: candidateInput.manifest.runId,
+        candidateNodeRunId: input.nodeRunId,
+      });
     const manifest = {
       schemaVersion: 1,
       candidateId: input.candidateId,
@@ -520,6 +528,7 @@ export const openDeliveryRuntime = (
       source: {
         nodeRunId: input.nodeRunId,
         nodeAttemptId: input.nodeAttemptId,
+        humanReleaseNodeRunId,
       },
       product: candidateInput.manifest.product,
       technical: candidateInput.manifest.technical,
@@ -676,6 +685,122 @@ export const openDeliveryRuntime = (
     };
   };
 
+  const resolveSameBoundaryReworkNode = (
+    candidate: DeliveryCandidateView,
+    responsibility: ReleaseReworkResponsibility,
+  ): string => {
+    if (["aggregate", "unknown"].includes(responsibility.kind)) {
+      return candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
+    }
+    const responsibilityId = responsibility.id;
+    if (!responsibilityId) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+        `Release rework responsibility ${responsibility.kind} requires an exact persisted identity.`,
+      );
+    }
+    let row: { readonly nodeRunId: string } | undefined;
+    if (responsibility.kind === "test") {
+      row = database
+        .prepare(
+          `SELECT node_run_id AS nodeRunId FROM test_runs
+            WHERE id = ? AND run_id = ?`,
+        )
+        .get(responsibilityId, candidate.manifest.runId) as
+        | { readonly nodeRunId: string }
+        | undefined;
+    } else if (responsibility.kind === "work-package") {
+      row = database
+        .prepare(
+          `SELECT versions.node_run_id AS nodeRunId
+             FROM work_package_versions AS versions
+             JOIN node_runs AS nodes ON nodes.id = versions.node_run_id
+            WHERE (versions.id = ? OR versions.work_package_id = ?)
+              AND nodes.run_id = ?
+         ORDER BY versions.created_at DESC LIMIT 1`,
+        )
+        .get(responsibilityId, responsibilityId, candidate.manifest.runId) as
+        | { readonly nodeRunId: string }
+        | undefined;
+    } else if (responsibility.kind === "contract") {
+      if (
+        candidate.manifest.contracts.some(
+          (contract) => contract.id === responsibilityId,
+        )
+      ) {
+        row = database
+          .prepare(
+            `SELECT node_run_id AS nodeRunId FROM integration_generations
+              WHERE id = ? AND run_id = ?`,
+          )
+          .get(
+            (candidate.manifest.integration as { readonly id: string }).id,
+            candidate.manifest.runId,
+          ) as { readonly nodeRunId: string } | undefined;
+      }
+    } else if (responsibility.kind === "gate") {
+      const gateInputId = [
+        candidate.manifest.gateAuthority.security.gateInputId,
+        candidate.manifest.gateAuthority.security.resultId,
+        candidate.manifest.gateAuthority.security.qualityGateResultId,
+      ].includes(responsibilityId)
+        ? candidate.manifest.gateAuthority.security.gateInputId
+        : [
+              candidate.manifest.gateAuthority.operability.gateInputId,
+              candidate.manifest.gateAuthority.operability.resultId,
+              candidate.manifest.gateAuthority.operability.qualityGateResultId,
+            ].includes(responsibilityId)
+          ? candidate.manifest.gateAuthority.operability.gateInputId
+          : null;
+      row = gateInputId
+        ? (database
+            .prepare(
+              "SELECT node_run_id AS nodeRunId FROM candidate_gate_inputs WHERE id = ? AND candidate_input_id = ?",
+            )
+            .get(gateInputId, candidate.manifest.candidateInput.id) as
+            | { readonly nodeRunId: string }
+            | undefined)
+        : undefined;
+    } else if (responsibility.kind === "defect") {
+      row = database
+        .prepare(
+          `SELECT nodeRunId FROM (
+             SELECT inputs.node_run_id AS nodeRunId, inputs.candidate_input_id AS candidateInputId
+               FROM candidate_gate_defects AS defects
+               JOIN candidate_gate_inputs AS inputs ON inputs.id = defects.gate_input_id
+              WHERE defects.id = ?
+             UNION ALL
+             SELECT tests.node_run_id AS nodeRunId, ? AS candidateInputId
+               FROM test_defects AS defects
+               JOIN test_runs AS tests ON tests.id = defects.test_run_id
+              WHERE defects.id = ? AND tests.run_id = ?
+             UNION ALL
+             SELECT generations.node_run_id AS nodeRunId, ? AS candidateInputId
+               FROM integration_defects AS defects
+               JOIN integration_generations AS generations ON generations.id = defects.generation_id
+              WHERE defects.id = ? AND generations.run_id = ?
+           ) WHERE candidateInputId = ? LIMIT 1`,
+        )
+        .get(
+          responsibilityId,
+          candidate.manifest.candidateInput.id,
+          responsibilityId,
+          candidate.manifest.runId,
+          candidate.manifest.candidateInput.id,
+          responsibilityId,
+          candidate.manifest.runId,
+          candidate.manifest.candidateInput.id,
+        ) as { readonly nodeRunId: string } | undefined;
+    }
+    if (!row) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+        `Release rework responsibility ${responsibility.kind}:${responsibilityId} is not bound to the exact Candidate Run.`,
+      );
+    }
+    return row.nodeRunId;
+  };
+
   const decide: DeliveryRuntime["decide"] = (input) => {
     if (
       input.actor.type !== "human" ||
@@ -718,6 +843,10 @@ export const openDeliveryRuntime = (
       (rework &&
         (rework.responsibility.summary.trim().length === 0 ||
           rework.responsibility.summary.length > 1_000 ||
+          (rework.scope === "same-boundary" &&
+            rework.childRunId !== undefined) ||
+          (rework.scope === "boundary-changing" &&
+            !rework.childRunId?.trim()) ||
           (!["aggregate", "unknown"].includes(rework.responsibility.kind) &&
             !rework.responsibility.id?.trim())))
     ) {
@@ -754,22 +883,29 @@ export const openDeliveryRuntime = (
       );
     }
     const now = clock().toISOString();
-    let childRunId: string | null = null;
+    const childRunId = rework?.childRunId?.trim() || null;
+    let reworkNodeRunId: string | undefined;
     if (rework?.scope === "boundary-changing") {
-      childRunId = options.pipelineRuntime.forkRunInTransaction({
-        runId: candidate.manifest.runId,
-        snapshotRevisionId: candidate.manifest.snapshot.id,
-        fromNodeRunId: candidate.manifest.source.nodeRunId,
-        mode: "reconfigure",
-      }).run.id;
+      options.pipelineRuntime.validateReleaseBoundaryChildInTransaction({
+        sourceRunId: candidate.manifest.runId,
+        sourceSnapshotRevisionId: candidate.manifest.snapshot.id,
+        childRunId: childRunId!,
+      });
+    } else if (rework?.scope === "same-boundary") {
+      reworkNodeRunId = resolveSameBoundaryReworkNode(
+        candidate,
+        rework.responsibility,
+      );
     }
     options.pipelineRuntime.applyHumanReleaseDecisionInTransaction({
       runId: candidate.manifest.runId,
+      humanReleaseNodeRunId: candidate.manifest.source.humanReleaseNodeRunId,
       candidateId: candidate.id,
       candidateHash: candidate.manifestHash,
       decisionId: input.decisionId,
       decision: input.decision,
       ...(childRunId ? { childRunId } : {}),
+      ...(reworkNodeRunId ? { reworkNodeRunId } : {}),
       decidedAt: now,
     });
     const persistedDecision = {

@@ -378,6 +378,7 @@ export function ElectronTestFixturePage(props: {
     readonly reason: string;
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
+    readonly childRunId?: string;
   }): Promise<void> => {
     if (!deliveryCandidateView) return;
     setDeliveryDecisionBusy(true);
@@ -398,6 +399,10 @@ export function ElectronTestFixturePage(props: {
               ? {
                   rework: {
                     scope: input.reworkScope ?? "same-boundary",
+                    ...(input.reworkScope === "boundary-changing" &&
+                    input.childRunId
+                      ? { childRunId: input.childRunId }
+                      : {}),
                     responsibility: {
                       kind: "aggregate" as const,
                       summary:
@@ -414,6 +419,39 @@ export function ElectronTestFixturePage(props: {
       setDeliveryCandidateView(result);
     } catch (cause) {
       setDeliveryCandidateDiagnostic(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    } finally {
+      setDeliveryDecisionBusy(false);
+    }
+  };
+
+  const decideCriticalRiskEscalation = async (input: {
+    readonly decision: "authorize-gate-continuation" | "reject";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+  }): Promise<void> => {
+    if (!candidateView) return;
+    setDeliveryDecisionBusy(true);
+    setCandidateDiagnostic(null);
+    try {
+      unwrap(
+        await bridge.execute({
+          commandId: `${candidateView.candidateInput.id}:critical-escalation-command`,
+          command: {
+            type: "quality-gate.critical-escalation.decide",
+            escalationId: `${candidateView.candidateInput.id}:critical-escalation`,
+            candidateInputId: candidateView.candidateInput.id,
+            expectedCandidateInputHash:
+              candidateView.candidateInput.manifestHash,
+            decision: input.decision,
+            reason: input.reason,
+            evidenceRefs: [...input.evidenceRefs],
+          },
+        }),
+      );
+    } catch (cause) {
+      setCandidateDiagnostic(
         cause instanceof Error ? cause.message : String(cause),
       );
     } finally {
@@ -493,7 +531,11 @@ export function ElectronTestFixturePage(props: {
         </output>
       </section>
       <CandidateQualityGatePanel
+        busy={deliveryDecisionBusy}
         diagnostic={candidateDiagnostic}
+        onCriticalEscalation={(input) =>
+          void decideCriticalRiskEscalation(input)
+        }
         view={candidateView}
       />
       <DeliveryCandidatePanel
