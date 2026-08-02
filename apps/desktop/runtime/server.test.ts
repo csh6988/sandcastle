@@ -361,6 +361,26 @@ describe("Company Runtime server startup", () => {
       if (release.status === "rejected") {
         assert.equal(release.error.code, "DELIVERY_CANDIDATE_NOT_FOUND");
       }
+      const recovery = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "release-recovery-missing-candidate",
+        actor: principal,
+        consumerId: "quality-server-test",
+        command: {
+          type: "delivery.release.recover",
+          decisionId: "release-decision-rework-missing",
+          candidateId: "missing-delivery-candidate",
+          expectedCandidateHash: "a".repeat(64),
+          authority: {
+            kind: "candidate-input-recheck",
+            id: "candidate-input-missing",
+          },
+        },
+      });
+      assert.equal(recovery.status, "rejected");
+      if (recovery.status === "rejected") {
+        assert.equal(recovery.error.code, "DELIVERY_CANDIDATE_NOT_FOUND");
+      }
     } finally {
       await server.close();
     }

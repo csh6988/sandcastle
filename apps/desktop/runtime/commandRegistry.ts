@@ -347,6 +347,10 @@ export const companyCommandDefinitions = {
     primaryAggregate: "human-release-decision",
     expectedRevisionRequired: false,
   },
+  "delivery.release.recover": {
+    primaryAggregate: "human-release-decision",
+    expectedRevisionRequired: false,
+  },
 } as const;
 
 const canonicalize = (value: unknown): unknown => {
@@ -3467,7 +3471,9 @@ const executeDeliveryCommand = (
         const value = DeliveryCandidateViewSchema.parse(
           command.type === "delivery.candidate.assemble"
             ? delivery.assemble(command)
-            : delivery.decide({ ...command, actor: envelope.actor }),
+            : command.type === "delivery.release.decide"
+              ? delivery.decide({ ...command, actor: envelope.actor })
+              : delivery.recover({ ...command, actor: envelope.actor }),
         );
         database.exec("RELEASE delivery_command");
         const effectIds = (
@@ -3556,7 +3562,8 @@ export const openCompanyCommandRegistry = (
     ) as CommandEnvelope<EnvelopeCommand>;
     if (
       envelope.command.type === "delivery.candidate.assemble" ||
-      envelope.command.type === "delivery.release.decide"
+      envelope.command.type === "delivery.release.decide" ||
+      envelope.command.type === "delivery.release.recover"
     ) {
       if (!delivery) {
         throw new CompanyCommandError(

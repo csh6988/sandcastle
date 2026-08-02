@@ -379,6 +379,13 @@ export function ElectronTestFixturePage(props: {
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
     readonly childRunId?: string;
+    readonly responsibilityKind?:
+      | "defect"
+      | "work-package"
+      | "contract"
+      | "test"
+      | "gate";
+    readonly responsibilityId?: string;
   }): Promise<void> => {
     if (!deliveryCandidateView) return;
     setDeliveryDecisionBusy(true);
@@ -404,15 +411,55 @@ export function ElectronTestFixturePage(props: {
                       ? { childRunId: input.childRunId }
                       : {}),
                     responsibility: {
-                      kind: "aggregate" as const,
+                      kind: input.responsibilityKind ?? "unknown",
+                      ...(input.responsibilityId
+                        ? { id: input.responsibilityId }
+                        : {}),
                       summary:
                         input.reworkScope === "boundary-changing"
                           ? "The Product Baseline, Repository, or Pipeline boundary must change."
-                          : "The frozen Candidate requires same-boundary rework.",
+                          : "The exact frozen responsibility requires same-boundary rework.",
                     },
                   },
                 }
               : {}),
+          },
+        }),
+      ) as DeliveryCandidateView;
+      setDeliveryCandidateView(result);
+    } catch (cause) {
+      setDeliveryCandidateDiagnostic(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+    } finally {
+      setDeliveryDecisionBusy(false);
+    }
+  };
+
+  const recoverHumanRelease = async (input: {
+    readonly decisionId: string;
+    readonly authorityKind:
+      | "work-package-version"
+      | "test-rework-run"
+      | "candidate-input-recheck";
+    readonly authorityId: string;
+  }): Promise<void> => {
+    if (!deliveryCandidateView) return;
+    setDeliveryDecisionBusy(true);
+    setDeliveryCandidateDiagnostic(null);
+    try {
+      const result = unwrap(
+        await bridge.execute({
+          commandId: `${deliveryCandidateView.id}:human-release-recovery:${input.decisionId}`,
+          command: {
+            type: "delivery.release.recover",
+            candidateId: deliveryCandidateView.id,
+            expectedCandidateHash: deliveryCandidateView.manifestHash,
+            decisionId: input.decisionId,
+            authority: {
+              kind: input.authorityKind,
+              id: input.authorityId,
+            },
           },
         }),
       ) as DeliveryCandidateView;
@@ -542,6 +589,7 @@ export function ElectronTestFixturePage(props: {
         busy={deliveryDecisionBusy}
         diagnostic={deliveryCandidateDiagnostic}
         onDecision={(input) => void decideHumanRelease(input)}
+        onRecovery={(input) => void recoverHumanRelease(input)}
         view={deliveryCandidateView}
       />
     </main>

@@ -468,8 +468,14 @@ export interface PipelineRuntime {
     readonly decisionId: string;
     readonly decision: "accepted" | "rejected" | "changes-requested";
     readonly childRunId?: string;
-    readonly reworkNodeRunId?: string;
     readonly decidedAt: string;
+  }) => void;
+  readonly activateHumanReleaseReworkInTransaction: (input: {
+    readonly runId: string;
+    readonly humanReleaseNodeRunId: string;
+    readonly decisionId: string;
+    readonly targetNodeRunId: string;
+    readonly activatedAt: string;
   }) => void;
   readonly validateReleaseBoundaryChildInTransaction: (input: {
     readonly sourceRunId: string;
@@ -2978,13 +2984,10 @@ export const openPipelineRuntime = (
 
   const applyHumanReleaseDecisionInTransaction: PipelineRuntime["applyHumanReleaseDecisionInTransaction"] =
     (input) => {
-      if (
-        input.decision === "changes-requested" &&
-        Boolean(input.childRunId) === Boolean(input.reworkNodeRunId)
-      ) {
+      if (input.decision !== "changes-requested" && input.childRunId) {
         throw new PipelineRuntimeError(
           "RELEASE_REWORK_CONTINUATION_INVALID",
-          "Changes requested must identify exactly one same-Run rework Node or confirmed boundary-changing child Run.",
+          "Only changes-requested may identify a confirmed boundary-changing child Run.",
         );
       }
       const run = database
@@ -3032,89 +3035,12 @@ export const openPipelineRuntime = (
         );
       }
       if (!input.childRunId) {
-        if (input.reworkNodeRunId) {
-          const current = inspectRun(input.runId);
-          const target = current.nodes.find(
-            (candidate) => candidate.id === input.reworkNodeRunId,
-          );
-          const humanRelease = current.nodes.find(
-            (candidate) => candidate.id === input.humanReleaseNodeRunId,
-          );
-          if (!target || !humanRelease) {
-            throw new PipelineRuntimeError(
-              "RELEASE_REWORK_NODE_INVALID",
-              `Release rework Node ${input.reworkNodeRunId} is not in Run ${input.runId}.`,
-            );
-          }
-          const affectedNodeIds = reachableNodeIds(
-            current.snapshot.payload.pipelineVersion.graph,
-            [target.pipelineNodeId],
-          );
-          if (!affectedNodeIds.has(humanRelease.pipelineNodeId)) {
-            throw new PipelineRuntimeError(
-              "RELEASE_REWORK_NODE_INVALID",
-              `Release rework Node ${input.reworkNodeRunId} does not invalidate the exact Human release successor.`,
-            );
-          }
-          const reset = database.prepare(
-            `UPDATE node_runs
-                SET status = ?, result_json = NULL, failure_code = NULL,
-                    failure_message = NULL, updated_at = ?
-              WHERE id = ? AND run_id = ?`,
-          );
-          for (const affected of current.nodes.filter((candidate) =>
-            affectedNodeIds.has(candidate.pipelineNodeId),
-          )) {
-            reset.run(
-              affected.id === target.id ? "ready" : "queued",
-              input.decidedAt,
-              affected.id,
-              input.runId,
-            );
-          }
-          insertContinuationPlanInTransaction({
-            kind: "recovery",
-            sourceRunId: input.runId,
-            targetRunId: input.runId,
-            sourceSnapshotRevisionId: current.snapshot.id,
-            targetSnapshotRevisionId: current.snapshot.id,
-            targetNodeRunId: target.id,
-            mode: "recovery",
-            runRevision: current.run.revision + 1,
-            createdAt: input.decidedAt,
-            items: current.nodes.map((candidate) => {
-              const affected = affectedNodeIds.has(candidate.pipelineNodeId);
-              return {
-                pipelineNodeId: candidate.pipelineNodeId,
-                sourceNodeRunId: candidate.id,
-                targetNodeRunId: candidate.id,
-                disposition:
-                  candidate.id === target.id
-                    ? ("rerun" as const)
-                    : affected
-                      ? ("blocked" as const)
-                      : candidate.status === "skipped"
-                        ? ("skip" as const)
-                        : ("reuse-evidence" as const),
-                evidenceRefs: [],
-                reason:
-                  candidate.id === target.id
-                    ? "Human release rework restarts the exact responsible Node."
-                    : affected
-                      ? "The Node depends on the Human release rework responsibility."
-                      : "The Node remains outside the same-boundary invalidation closure.",
-              };
-            }),
-          });
-        }
         const nextRunStatus =
           input.decision === "accepted"
             ? "completed"
             : input.decision === "rejected"
               ? "release-rejected"
-              : input.reworkNodeRunId
-                ? "recovering"
-                : "blocked";
+              : "blocked";
         if (input.decision === "accepted") {
           const humanRelease = database
             .prepare(
@@ -3204,6 +3130,149 @@ export const openPipelineRuntime = (
       });
     };
 
+  const activateHumanReleaseReworkInTransaction: PipelineRuntime["activateHumanReleaseReworkInTransaction"] =
+    (input) => {
+      const current = inspectRun(input.runId);
+      const target = current.nodes.find(
+        (candidate) => candidate.id === input.targetNodeRunId,
+      );
+      const humanRelease = current.nodes.find(
+        (candidate) => candidate.id === input.humanReleaseNodeRunId,
+      );
+      const persistedDecision = database
+        .prepare(
+          `SELECT json_extract(result_json, '$.releaseDecisionId') AS decisionId
+             FROM node_runs
+            WHERE id = ? AND run_id = ? AND handler_kind_id = 'human-release@1'
+              AND status = 'blocked' AND failure_code = 'RELEASE_REWORK'`,
+        )
+        .get(input.humanReleaseNodeRunId, input.runId) as
+        | { readonly decisionId: string | null }
+        | undefined;
+      if (
+        current.run.status !== "blocked" ||
+        !target ||
+        !humanRelease ||
+        persistedDecision?.decisionId !== input.decisionId
+      ) {
+        throw new PipelineRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_INVALID",
+          `Human release decision ${input.decisionId} is not awaiting formal same-boundary rework authority.`,
+        );
+      }
+      const affectedNodeIds = reachableNodeIds(
+        current.snapshot.payload.pipelineVersion.graph,
+        [target.pipelineNodeId],
+      );
+      if (!affectedNodeIds.has(humanRelease.pipelineNodeId)) {
+        throw new PipelineRuntimeError(
+          "RELEASE_REWORK_NODE_INVALID",
+          `Release rework Node ${input.targetNodeRunId} does not invalidate the exact Human release successor.`,
+        );
+      }
+      const activeDownstream = database
+        .prepare(
+          `SELECT attempts.id
+             FROM node_attempts AS attempts
+             JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+            WHERE nodes.run_id = ? AND nodes.id <> ?
+              AND attempts.status IN ('ready', 'running', 'reconciling')`,
+        )
+        .all(input.runId, input.targetNodeRunId) as Array<{
+        readonly id: string;
+      }>;
+      if (activeDownstream.length > 0) {
+        throw new PipelineRuntimeError(
+          "RELEASE_REWORK_ACTIVE_ATTEMPT_CONFLICT",
+          `Human release rework cannot invalidate active downstream Attempt ${activeDownstream[0]!.id}.`,
+        );
+      }
+      const reset = database.prepare(
+        `UPDATE node_runs
+            SET status = ?, result_json = NULL, failure_code = NULL,
+                failure_message = NULL, updated_at = ?
+          WHERE id = ? AND run_id = ?`,
+      );
+      for (const affected of current.nodes.filter((candidate) =>
+        affectedNodeIds.has(candidate.pipelineNodeId),
+      )) {
+        const updated = reset.run(
+          affected.id === target.id ? "ready" : "queued",
+          input.activatedAt,
+          affected.id,
+          input.runId,
+        );
+        if (updated.changes !== 1) {
+          throw new PipelineRuntimeError(
+            "RELEASE_REWORK_TRANSITION_CONFLICT",
+            `Release rework Node ${affected.id} changed before recovery activation.`,
+          );
+        }
+      }
+      insertContinuationPlanInTransaction({
+        kind: "recovery",
+        sourceRunId: input.runId,
+        targetRunId: input.runId,
+        sourceSnapshotRevisionId: current.snapshot.id,
+        targetSnapshotRevisionId: current.snapshot.id,
+        targetNodeRunId: target.id,
+        mode: "recovery",
+        runRevision: current.run.revision + 1,
+        createdAt: input.activatedAt,
+        items: current.nodes.map((candidate) => {
+          const affected = affectedNodeIds.has(candidate.pipelineNodeId);
+          return {
+            pipelineNodeId: candidate.pipelineNodeId,
+            sourceNodeRunId: candidate.id,
+            targetNodeRunId: candidate.id,
+            disposition:
+              candidate.id === target.id
+                ? ("rerun" as const)
+                : affected
+                  ? ("blocked" as const)
+                  : candidate.status === "skipped"
+                    ? ("skip" as const)
+                    : ("reuse-evidence" as const),
+            evidenceRefs: [],
+            reason:
+              candidate.id === target.id
+                ? "Formal Human release rework authority restarts the exact responsible Node."
+                : affected
+                  ? "The Node depends on the formally authorized Human release rework responsibility."
+                  : "The Node remains outside the same-boundary invalidation closure.",
+          };
+        }),
+      });
+      const run = database
+        .prepare(
+          `UPDATE department_runs
+              SET status = 'recovering', revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = 'blocked' AND revision = ?`,
+        )
+        .run(input.activatedAt, input.runId, current.run.revision);
+      if (run.changes !== 1) {
+        throw new PipelineRuntimeError(
+          "RELEASE_REWORK_TRANSITION_CONFLICT",
+          `Run ${input.runId} changed before formal rework recovery activation.`,
+        );
+      }
+      appendRuntimeMutation({
+        action: "human-release.rework-activated",
+        entityType: "department-run",
+        entityId: input.runId,
+        eventType: "run.recovering",
+        runId: input.runId,
+        nodeRunId: target.id,
+        before: { status: "blocked", decisionId: input.decisionId },
+        after: {
+          status: "recovering",
+          decisionId: input.decisionId,
+          targetNodeRunId: target.id,
+        },
+        createdAt: input.activatedAt,
+      });
+    };
+
   const validateReleaseBoundaryChildInTransaction: PipelineRuntime["validateReleaseBoundaryChildInTransaction"] =
     (input) => {
       const boundary = database
@@ -3211,27 +3280,73 @@ export const openPipelineRuntime = (
           `SELECT source.project_id AS sourceProjectId,
                   source.department_id AS sourceDepartmentId,
                   source.product_baseline_id AS sourceProductBaselineId,
+                  source_snapshot.id AS sourceSnapshotId,
                   child.parent_run_id AS parentRunId,
                   child.forked_from_snapshot_revision_id AS forkedFromSnapshotRevisionId,
                   child.product_baseline_id AS childProductBaselineId,
                   child.status AS childStatus,
                   child.project_id AS childProjectId,
-                  child.department_id AS childDepartmentId
+                  child.department_id AS childDepartmentId,
+                  child.snapshot_revision_id AS childSnapshotRevisionId,
+                  child_snapshot.id AS confirmedChildSnapshotId,
+                  child_baseline.id AS confirmedChildBaselineId,
+                  child_baseline.run_id AS confirmedChildRunId,
+                  child_baseline.snapshot_revision_id AS confirmedChildBaselineSnapshotId,
+                  child_baseline.confirmed_by_type AS confirmedByType,
+                  child_baseline.confirmed_by_id AS confirmedById,
+                  child_baseline.confirmed_by_authenticated_by AS confirmedByAuthenticatedBy,
+                  child_baseline.confirmation_command_id AS confirmationCommandId,
+                  confirmation_audit.command_id AS auditCommandId,
+                  confirmation_audit.actor_type AS auditActorType,
+                  confirmation_audit.actor_id AS auditActorId,
+                  confirmation_audit.authenticated_by AS auditAuthenticatedBy
              FROM department_runs AS source
              JOIN department_runs AS child ON child.id = ?
+             JOIN run_snapshot_revisions AS source_snapshot
+               ON source_snapshot.id = ? AND source_snapshot.run_id = source.id
+             JOIN run_snapshot_revisions AS child_snapshot
+               ON child_snapshot.id = child.snapshot_revision_id
+              AND child_snapshot.run_id = child.id
+             JOIN product_baselines AS child_baseline
+               ON child_baseline.id = child.product_baseline_id
+              AND child_baseline.run_id = child.id
+              AND child_baseline.snapshot_revision_id = child.snapshot_revision_id
+             JOIN runtime_audit_records AS confirmation_audit
+               ON confirmation_audit.command_id = child_baseline.confirmation_command_id
+              AND confirmation_audit.action = 'product.baseline.confirmed'
+              AND confirmation_audit.entity_type = 'product-baseline'
+              AND confirmation_audit.entity_id = child_baseline.id
             WHERE source.id = ?`,
         )
-        .get(input.childRunId, input.sourceRunId) as
+        .get(
+          input.childRunId,
+          input.sourceSnapshotRevisionId,
+          input.sourceRunId,
+        ) as
         | {
             readonly sourceProjectId: string;
             readonly sourceDepartmentId: string;
             readonly sourceProductBaselineId: string | null;
+            readonly sourceSnapshotId: string;
             readonly parentRunId: string | null;
             readonly forkedFromSnapshotRevisionId: string | null;
             readonly childProductBaselineId: string | null;
             readonly childStatus: string;
             readonly childProjectId: string;
             readonly childDepartmentId: string;
+            readonly childSnapshotRevisionId: string;
+            readonly confirmedChildSnapshotId: string;
+            readonly confirmedChildBaselineId: string;
+            readonly confirmedChildRunId: string;
+            readonly confirmedChildBaselineSnapshotId: string;
+            readonly confirmedByType: string;
+            readonly confirmedById: string;
+            readonly confirmedByAuthenticatedBy: string;
+            readonly confirmationCommandId: string;
+            readonly auditCommandId: string;
+            readonly auditActorType: string;
+            readonly auditActorId: string;
+            readonly auditAuthenticatedBy: string;
           }
         | undefined;
       if (
@@ -3239,12 +3354,27 @@ export const openPipelineRuntime = (
         !boundary.sourceProductBaselineId ||
         !boundary.childProductBaselineId ||
         boundary.childProductBaselineId === boundary.sourceProductBaselineId ||
+        boundary.sourceSnapshotId !== input.sourceSnapshotRevisionId ||
         boundary.parentRunId !== input.sourceRunId ||
         boundary.forkedFromSnapshotRevisionId !==
           input.sourceSnapshotRevisionId ||
         boundary.childProjectId !== boundary.sourceProjectId ||
         boundary.childDepartmentId !== boundary.sourceDepartmentId ||
-        boundary.childStatus !== "ready"
+        boundary.childStatus !== "ready" ||
+        boundary.confirmedChildSnapshotId !==
+          boundary.childSnapshotRevisionId ||
+        boundary.confirmedChildBaselineId !== boundary.childProductBaselineId ||
+        boundary.confirmedChildRunId !== input.childRunId ||
+        boundary.confirmedChildBaselineSnapshotId !==
+          boundary.childSnapshotRevisionId ||
+        boundary.confirmedByType !== "human" ||
+        boundary.confirmedById.trim().length === 0 ||
+        boundary.confirmedByAuthenticatedBy !== "local-session" ||
+        boundary.confirmationCommandId.trim().length === 0 ||
+        boundary.auditCommandId !== boundary.confirmationCommandId ||
+        boundary.auditActorType !== boundary.confirmedByType ||
+        boundary.auditActorId !== boundary.confirmedById ||
+        boundary.auditAuthenticatedBy !== boundary.confirmedByAuthenticatedBy
       ) {
         throw new PipelineRuntimeError(
           "RELEASE_BOUNDARY_CHILD_INVALID",
@@ -3298,17 +3428,51 @@ export const openPipelineRuntime = (
           WHERE id = ? AND run_id = ?
             AND status IN ('queued', 'ready', 'running', 'blocked')`,
       );
+      const activeAttempt = database.prepare(
+        `SELECT attempts.id, attempts.status,
+                attempts.lease_id AS leaseId,
+                leases.id AS activeLeaseId
+           FROM node_attempts AS attempts
+           LEFT JOIN execution_leases AS leases
+             ON leases.id = attempts.lease_id
+            AND leases.target_kind = 'node-attempt'
+            AND leases.target_id = attempts.id
+            AND leases.released_at IS NULL
+          WHERE attempts.node_run_id = ?
+            AND attempts.status IN ('ready', 'running', 'reconciling')
+       ORDER BY attempts.attempt_number DESC LIMIT 1`,
+      );
       const failAttempt = database.prepare(
         `UPDATE node_attempts
             SET status = 'failed', failure_code = ?, failure_message = ?,
                 recoverable = 0, completed_at = ?, lease_expires_at = NULL
-          WHERE id = (
-            SELECT id FROM node_attempts
-             WHERE node_run_id = ? AND status IN ('ready', 'running', 'reconciling')
-          ORDER BY attempt_number DESC LIMIT 1
-          )`,
+          WHERE id = ? AND status IN ('ready', 'running', 'reconciling')`,
+      );
+      const releaseLease = database.prepare(
+        `UPDATE execution_leases
+            SET released_at = ?
+          WHERE id = ? AND target_kind = 'node-attempt' AND target_id = ?
+            AND released_at IS NULL`,
       );
       for (const gateNode of gateNodes) {
+        const attempt = activeAttempt.get(gateNode.id) as
+          | {
+              readonly id: string;
+              readonly status: string;
+              readonly leaseId: string | null;
+              readonly activeLeaseId: string | null;
+            }
+          | undefined;
+        if (
+          attempt &&
+          ["running", "reconciling"].includes(attempt.status) &&
+          (!attempt.leaseId || attempt.activeLeaseId !== attempt.leaseId)
+        ) {
+          throw new PipelineRuntimeError(
+            "CRITICAL_ESCALATION_GATE_LEASE_INVALID",
+            `Critical-risk Gate Attempt ${attempt.id} has no exact active execution Lease to fence.`,
+          );
+        }
         const blocked = blockNode.run(
           failureCode,
           failureMessage,
@@ -3322,12 +3486,33 @@ export const openPipelineRuntime = (
             `Critical-risk Gate Node ${gateNode.id} changed before rejection could block it.`,
           );
         }
-        failAttempt.run(
-          failureCode,
-          failureMessage,
-          input.decidedAt,
-          gateNode.id,
-        );
+        if (attempt?.activeLeaseId) {
+          const released = releaseLease.run(
+            input.decidedAt,
+            attempt.activeLeaseId,
+            attempt.id,
+          );
+          if (released.changes !== 1) {
+            throw new PipelineRuntimeError(
+              "CRITICAL_ESCALATION_GATE_LEASE_INVALID",
+              `Critical-risk Gate Attempt ${attempt.id} changed before its execution Lease could be fenced.`,
+            );
+          }
+        }
+        if (attempt) {
+          const failed = failAttempt.run(
+            failureCode,
+            failureMessage,
+            input.decidedAt,
+            attempt.id,
+          );
+          if (failed.changes !== 1) {
+            throw new PipelineRuntimeError(
+              "CRITICAL_ESCALATION_GATE_STATE_INVALID",
+              `Critical-risk Gate Attempt ${attempt.id} changed before rejection could fail it.`,
+            );
+          }
+        }
       }
       const run = database
         .prepare(
@@ -7674,13 +7859,23 @@ export const openPipelineRuntime = (
           input.operationKey,
         );
       if (input.reason === "retry") {
-        const resumed = database
+        const releaseReworkBlocked = database
           .prepare(
-            `UPDATE department_runs
-                SET status = 'running', revision = revision + 1, updated_at = ?
-              WHERE id = ? AND status = 'blocked'`,
+            `SELECT 1 AS present FROM node_runs
+              WHERE run_id = ? AND handler_kind_id = 'human-release@1'
+                AND status = 'blocked' AND failure_code = 'RELEASE_REWORK'
+              LIMIT 1`,
           )
-          .run(now, input.runId);
+          .get(input.runId);
+        const resumed = releaseReworkBlocked
+          ? { changes: 0 }
+          : database
+              .prepare(
+                `UPDATE department_runs
+                    SET status = 'running', revision = revision + 1, updated_at = ?
+                  WHERE id = ? AND status = 'blocked'`,
+              )
+              .run(now, input.runId);
         if (resumed.changes === 1) {
           appendRuntimeMutation({
             action: "run.work-package-retry",
@@ -7698,7 +7893,10 @@ export const openPipelineRuntime = (
             },
             createdAt: now,
           });
-        } else if (!["ready", "running"].includes(node.runStatus)) {
+        } else if (
+          !releaseReworkBlocked &&
+          !["ready", "running"].includes(node.runStatus)
+        ) {
           throw new PipelineRuntimeError(
             "RUN_STATE_INVALID",
             `Department Run ${input.runId} cannot resume Work Package execution from ${node.runStatus}.`,
@@ -11202,6 +11400,7 @@ export const openPipelineRuntime = (
     completeDeliveryCandidateInTransaction,
     resolveHumanReleaseNodeInTransaction,
     applyHumanReleaseDecisionInTransaction,
+    activateHumanReleaseReworkInTransaction,
     validateReleaseBoundaryChildInTransaction,
     rejectCriticalRiskEscalationInTransaction,
     forkRunInTransaction,

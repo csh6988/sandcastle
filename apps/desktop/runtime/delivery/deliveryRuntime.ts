@@ -12,6 +12,7 @@ import type {
   DeliveryCandidateInputManifest,
   DeliveryCandidateInputView,
 } from "./candidateInputRuntime.js";
+import type { TestRuntime } from "../testing/testRuntime.js";
 
 export class DeliveryRuntimeError extends Error {
   constructor(
@@ -90,6 +91,14 @@ export type ReleaseRework = {
   readonly childRunId?: string;
 };
 
+export type ReleaseReworkAuthority = {
+  readonly kind:
+    | "work-package-version"
+    | "test-rework-run"
+    | "candidate-input-recheck";
+  readonly id: string;
+};
+
 export type HumanReleaseDecision = {
   readonly id: string;
   readonly candidateId: string;
@@ -146,6 +155,7 @@ type DeliveryPipelineRuntime = Pick<
   | "completeDeliveryCandidateInTransaction"
   | "resolveHumanReleaseNodeInTransaction"
   | "applyHumanReleaseDecisionInTransaction"
+  | "activateHumanReleaseReworkInTransaction"
   | "validateReleaseBoundaryChildInTransaction"
 >;
 
@@ -173,6 +183,13 @@ export interface DeliveryRuntime {
     readonly comment?: string;
     readonly evidenceRefs: readonly string[];
     readonly rework?: ReleaseRework;
+  }) => DeliveryCandidateView;
+  readonly recover: (input: {
+    readonly actor: ActorRef;
+    readonly candidateId: string;
+    readonly expectedCandidateHash: string;
+    readonly decisionId: string;
+    readonly authority: ReleaseReworkAuthority;
   }) => DeliveryCandidateView;
   readonly acceptedAuthority: (
     candidateId: string,
@@ -217,6 +234,7 @@ export const openDeliveryRuntime = (
   options: {
     readonly candidateInputs: Pick<CandidateInputRuntime, "inspect">;
     readonly qualityGates: Pick<QualityGateRuntime, "downstreamAuthority">;
+    readonly tests?: Pick<TestRuntime, "downstreamAuthority">;
     readonly pipelineRuntime: DeliveryPipelineRuntime;
     readonly events?: Pick<RuntimeEvents, "append">;
     readonly clock?: () => Date;
@@ -685,122 +703,6 @@ export const openDeliveryRuntime = (
     };
   };
 
-  const resolveSameBoundaryReworkNode = (
-    candidate: DeliveryCandidateView,
-    responsibility: ReleaseReworkResponsibility,
-  ): string => {
-    if (["aggregate", "unknown"].includes(responsibility.kind)) {
-      return candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
-    }
-    const responsibilityId = responsibility.id;
-    if (!responsibilityId) {
-      throw new DeliveryRuntimeError(
-        "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
-        `Release rework responsibility ${responsibility.kind} requires an exact persisted identity.`,
-      );
-    }
-    let row: { readonly nodeRunId: string } | undefined;
-    if (responsibility.kind === "test") {
-      row = database
-        .prepare(
-          `SELECT node_run_id AS nodeRunId FROM test_runs
-            WHERE id = ? AND run_id = ?`,
-        )
-        .get(responsibilityId, candidate.manifest.runId) as
-        | { readonly nodeRunId: string }
-        | undefined;
-    } else if (responsibility.kind === "work-package") {
-      row = database
-        .prepare(
-          `SELECT versions.node_run_id AS nodeRunId
-             FROM work_package_versions AS versions
-             JOIN node_runs AS nodes ON nodes.id = versions.node_run_id
-            WHERE (versions.id = ? OR versions.work_package_id = ?)
-              AND nodes.run_id = ?
-         ORDER BY versions.created_at DESC LIMIT 1`,
-        )
-        .get(responsibilityId, responsibilityId, candidate.manifest.runId) as
-        | { readonly nodeRunId: string }
-        | undefined;
-    } else if (responsibility.kind === "contract") {
-      if (
-        candidate.manifest.contracts.some(
-          (contract) => contract.id === responsibilityId,
-        )
-      ) {
-        row = database
-          .prepare(
-            `SELECT node_run_id AS nodeRunId FROM integration_generations
-              WHERE id = ? AND run_id = ?`,
-          )
-          .get(
-            (candidate.manifest.integration as { readonly id: string }).id,
-            candidate.manifest.runId,
-          ) as { readonly nodeRunId: string } | undefined;
-      }
-    } else if (responsibility.kind === "gate") {
-      const gateInputId = [
-        candidate.manifest.gateAuthority.security.gateInputId,
-        candidate.manifest.gateAuthority.security.resultId,
-        candidate.manifest.gateAuthority.security.qualityGateResultId,
-      ].includes(responsibilityId)
-        ? candidate.manifest.gateAuthority.security.gateInputId
-        : [
-              candidate.manifest.gateAuthority.operability.gateInputId,
-              candidate.manifest.gateAuthority.operability.resultId,
-              candidate.manifest.gateAuthority.operability.qualityGateResultId,
-            ].includes(responsibilityId)
-          ? candidate.manifest.gateAuthority.operability.gateInputId
-          : null;
-      row = gateInputId
-        ? (database
-            .prepare(
-              "SELECT node_run_id AS nodeRunId FROM candidate_gate_inputs WHERE id = ? AND candidate_input_id = ?",
-            )
-            .get(gateInputId, candidate.manifest.candidateInput.id) as
-            | { readonly nodeRunId: string }
-            | undefined)
-        : undefined;
-    } else if (responsibility.kind === "defect") {
-      row = database
-        .prepare(
-          `SELECT nodeRunId FROM (
-             SELECT inputs.node_run_id AS nodeRunId, inputs.candidate_input_id AS candidateInputId
-               FROM candidate_gate_defects AS defects
-               JOIN candidate_gate_inputs AS inputs ON inputs.id = defects.gate_input_id
-              WHERE defects.id = ?
-             UNION ALL
-             SELECT tests.node_run_id AS nodeRunId, ? AS candidateInputId
-               FROM test_defects AS defects
-               JOIN test_runs AS tests ON tests.id = defects.test_run_id
-              WHERE defects.id = ? AND tests.run_id = ?
-             UNION ALL
-             SELECT generations.node_run_id AS nodeRunId, ? AS candidateInputId
-               FROM integration_defects AS defects
-               JOIN integration_generations AS generations ON generations.id = defects.generation_id
-              WHERE defects.id = ? AND generations.run_id = ?
-           ) WHERE candidateInputId = ? LIMIT 1`,
-        )
-        .get(
-          responsibilityId,
-          candidate.manifest.candidateInput.id,
-          responsibilityId,
-          candidate.manifest.runId,
-          candidate.manifest.candidateInput.id,
-          responsibilityId,
-          candidate.manifest.runId,
-          candidate.manifest.candidateInput.id,
-        ) as { readonly nodeRunId: string } | undefined;
-    }
-    if (!row) {
-      throw new DeliveryRuntimeError(
-        "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
-        `Release rework responsibility ${responsibility.kind}:${responsibilityId} is not bound to the exact Candidate Run.`,
-      );
-    }
-    return row.nodeRunId;
-  };
-
   const decide: DeliveryRuntime["decide"] = (input) => {
     if (
       input.actor.type !== "human" ||
@@ -884,18 +786,12 @@ export const openDeliveryRuntime = (
     }
     const now = clock().toISOString();
     const childRunId = rework?.childRunId?.trim() || null;
-    let reworkNodeRunId: string | undefined;
     if (rework?.scope === "boundary-changing") {
       options.pipelineRuntime.validateReleaseBoundaryChildInTransaction({
         sourceRunId: candidate.manifest.runId,
         sourceSnapshotRevisionId: candidate.manifest.snapshot.id,
         childRunId: childRunId!,
       });
-    } else if (rework?.scope === "same-boundary") {
-      reworkNodeRunId = resolveSameBoundaryReworkNode(
-        candidate,
-        rework.responsibility,
-      );
     }
     options.pipelineRuntime.applyHumanReleaseDecisionInTransaction({
       runId: candidate.manifest.runId,
@@ -905,7 +801,6 @@ export const openDeliveryRuntime = (
       decisionId: input.decisionId,
       decision: input.decision,
       ...(childRunId ? { childRunId } : {}),
-      ...(reworkNodeRunId ? { reworkNodeRunId } : {}),
       decidedAt: now,
     });
     const persistedDecision = {
@@ -1052,5 +947,366 @@ export const openDeliveryRuntime = (
     return inspect(candidate.id);
   };
 
-  return { assemble, inspect, inspectRun, decide, acceptedAuthority };
+  const recover: DeliveryRuntime["recover"] = (input) => {
+    if (
+      input.actor.type !== "human" ||
+      input.actor.authenticatedBy !== "local-session"
+    ) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_ACTOR_INVALID",
+        "Human release rework recovery requires a verified local-session human.",
+      );
+    }
+    const candidate = inspect(input.candidateId);
+    if (candidate.manifestHash !== input.expectedCandidateHash) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_CANDIDATE_CONFLICT",
+        `Delivery Candidate ${input.candidateId} does not match the expected immutable hash.`,
+      );
+    }
+    const decision = candidate.decision;
+    if (
+      !decision ||
+      decision.id !== input.decisionId ||
+      decision.decision !== "changes-requested" ||
+      decision.rework?.scope !== "same-boundary"
+    ) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_DECISION_INVALID",
+        `Human release decision ${input.decisionId} is not awaiting same-boundary rework.`,
+      );
+    }
+    const responsibility = decision.rework.responsibility;
+    if (responsibility.kind === "unknown") {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_RESPONSIBILITY_UNRESOLVED",
+        "Unknown Human release responsibility must remain blocked until one exact formal responsibility is selected.",
+      );
+    }
+    let effectiveKind = responsibility.kind;
+    let effectiveId = responsibility.id?.trim();
+    let targetNodeRunId: string | undefined;
+    const requireCandidateInputRecheck = (): void => {
+      if (
+        input.authority.kind !== "candidate-input-recheck" ||
+        input.authority.id !== candidate.manifest.candidateInput.id
+      ) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_INVALID",
+          `Release recheck must bind exact Delivery Candidate Input ${candidate.manifest.candidateInput.id}.`,
+        );
+      }
+      targetNodeRunId =
+        candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
+    };
+    if (responsibility.kind === "aggregate") {
+      requireCandidateInputRecheck();
+    } else if (!effectiveId) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+        `Release rework responsibility ${responsibility.kind} requires an exact persisted identity.`,
+      );
+    }
+    if (responsibility.kind === "gate") {
+      const exactGateIds = [
+        candidate.manifest.gateAuthority.security.gateInputId,
+        candidate.manifest.gateAuthority.security.resultId,
+        candidate.manifest.gateAuthority.security.qualityGateResultId,
+        candidate.manifest.gateAuthority.operability.gateInputId,
+        candidate.manifest.gateAuthority.operability.resultId,
+        candidate.manifest.gateAuthority.operability.qualityGateResultId,
+      ];
+      if (!exactGateIds.includes(effectiveId!)) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+          `Gate responsibility ${effectiveId} is not frozen by Delivery Candidate ${candidate.id}.`,
+        );
+      }
+      requireCandidateInputRecheck();
+    } else if (responsibility.kind === "contract") {
+      if (input.authority.kind !== "work-package-version") {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_KIND_INVALID",
+          "Contract responsibility requires rework of one formally responsible Work Package.",
+        );
+      }
+      const routed = database
+        .prepare(
+          `SELECT prior.id
+             FROM integration_generations AS generations,
+                  json_each(json_extract(generations.manifest_json, '$.requiredValidations')) AS validation,
+                  json_each(json_extract(validation.value, '$.responsibleWorkPackageVersionIds')) AS responsible
+             JOIN work_package_versions AS prior ON prior.id = responsible.value
+             JOIN work_package_versions AS fresh
+               ON fresh.id = ? AND fresh.work_package_id = prior.work_package_id
+            WHERE generations.id = ?
+              AND generations.run_id = ?
+              AND json_extract(validation.value, '$.contract.id') = ?
+            LIMIT 1`,
+        )
+        .get(
+          input.authority.id,
+          (candidate.manifest.integration as { readonly id: string }).id,
+          candidate.manifest.runId,
+          effectiveId!,
+        ) as { readonly id: string } | undefined;
+      if (!routed) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+          `Contract responsibility ${effectiveId} has no exact formally responsible Work Package route.`,
+        );
+      }
+      effectiveKind = "work-package";
+      effectiveId = routed.id;
+    } else if (responsibility.kind === "defect") {
+      const gateDefect = database
+        .prepare(
+          `SELECT defects.id
+             FROM candidate_gate_defects AS defects
+             JOIN candidate_gate_inputs AS inputs ON inputs.id = defects.gate_input_id
+            WHERE defects.id = ? AND inputs.candidate_input_id = ?`,
+        )
+        .get(effectiveId!, candidate.manifest.candidateInput.id);
+      if (gateDefect) {
+        requireCandidateInputRecheck();
+      } else {
+        const testDefect = database
+          .prepare(
+            `SELECT tests.id AS testRunId
+               FROM test_defects AS defects
+               JOIN test_runs AS tests ON tests.id = defects.test_run_id
+              WHERE defects.id = ? AND tests.run_id = ?`,
+          )
+          .get(effectiveId!, candidate.manifest.runId) as
+          | { readonly testRunId: string }
+          | undefined;
+        if (testDefect) {
+          effectiveKind = "test";
+          effectiveId = testDefect.testRunId;
+        } else {
+          if (input.authority.kind !== "work-package-version") {
+            throw new DeliveryRuntimeError(
+              "RELEASE_REWORK_AUTHORITY_KIND_INVALID",
+              "Integration Defect responsibility requires rework of one formally responsible Work Package.",
+            );
+          }
+          const integrationDefect = database
+            .prepare(
+              `SELECT prior.id
+                 FROM integration_defects AS defects,
+                      json_each(json_extract(defects.responsibility_json, '$.workPackageVersionIds')) AS responsible
+                 JOIN integration_generations AS generations
+                   ON generations.id = defects.generation_id
+                 JOIN work_package_versions AS prior ON prior.id = responsible.value
+                 JOIN work_package_versions AS fresh
+                   ON fresh.id = ? AND fresh.work_package_id = prior.work_package_id
+                WHERE defects.id = ? AND generations.run_id = ?
+                LIMIT 1`,
+            )
+            .get(input.authority.id, effectiveId!, candidate.manifest.runId) as
+            | { readonly id: string }
+            | undefined;
+          if (!integrationDefect) {
+            throw new DeliveryRuntimeError(
+              "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+              `Defect responsibility ${effectiveId} has no exact Candidate Gate, Test, or Integration route.`,
+            );
+          }
+          effectiveKind = "work-package";
+          effectiveId = integrationDefect.id;
+        }
+      }
+    }
+    if (!targetNodeRunId && effectiveKind === "work-package") {
+      if (input.authority.kind !== "work-package-version") {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_KIND_INVALID",
+          "Work Package responsibility requires a fresh Work Package Version authority.",
+        );
+      }
+      const frozenVersionIds = candidate.manifest.codeReviewCoverage.flatMap(
+        (entry) => {
+          const versionId = (
+            entry as { readonly workPackageVersionId?: unknown }
+          ).workPackageVersionId;
+          return typeof versionId === "string" ? [versionId] : [];
+        },
+      );
+      const prior =
+        frozenVersionIds.length === 0
+          ? undefined
+          : (database
+              .prepare(
+                `SELECT versions.id, versions.work_package_id AS workPackageId,
+                  versions.version, versions.node_run_id AS nodeRunId
+             FROM work_package_versions AS versions
+             JOIN work_packages AS packages
+               ON packages.id = versions.work_package_id
+            WHERE packages.run_id = ?
+              AND versions.id IN (${frozenVersionIds.map(() => "?").join(", ")})
+              AND (versions.id = ? OR versions.work_package_id = ?)
+         ORDER BY versions.version DESC LIMIT 1`,
+              )
+              .get(
+                candidate.manifest.runId,
+                ...frozenVersionIds,
+                effectiveId!,
+                effectiveId!,
+              ) as
+              | {
+                  readonly id: string;
+                  readonly workPackageId: string;
+                  readonly version: number;
+                  readonly nodeRunId: string;
+                }
+              | undefined);
+      if (!prior || !frozenVersionIds.includes(prior.id)) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+          `Work Package responsibility ${effectiveId} is not frozen by Delivery Candidate ${candidate.id}.`,
+        );
+      }
+      const fresh = database
+        .prepare(
+          `SELECT fresh.node_run_id AS nodeRunId
+             FROM work_package_versions AS fresh
+             JOIN work_package_versions AS prior ON prior.id = ?
+             JOIN work_package_assignments AS assignment
+               ON assignment.work_package_version_id = fresh.id
+              AND assignment.state IN ('assigned', 'running', 'awaiting-self-check', 'self-check-passed')
+             JOIN workspace_allocations AS allocation
+               ON allocation.id = assignment.allocation_id
+              AND allocation.work_package_version_id = fresh.id
+             JOIN node_attempts AS attempt
+               ON attempt.id = assignment.node_attempt_id
+              AND attempt.node_run_id = fresh.node_run_id
+              AND attempt.status IN ('ready', 'running', 'succeeded')
+             JOIN runtime_audit_records AS audit
+               ON audit.action = 'work-package.rework'
+              AND audit.entity_type = 'work-package'
+              AND audit.entity_id = fresh.work_package_id
+              AND audit.run_id = ?
+              AND audit.node_run_id = fresh.node_run_id
+              AND audit.actor_type = 'runtime-worker'
+              AND audit.authenticated_by = 'runtime'
+             JOIN command_deduplication AS receipt
+               ON receipt.command_id = audit.command_id
+              AND receipt.status = 'completed'
+              AND receipt.actor_type = audit.actor_type
+              AND receipt.actor_id = audit.actor_id
+              AND receipt.authenticated_by = audit.authenticated_by
+            WHERE fresh.id = ?
+              AND fresh.work_package_id = prior.work_package_id
+              AND fresh.version > prior.version
+              AND fresh.status = 'ready'
+              AND prior.status = 'superseded'
+              AND fresh.node_run_id = prior.node_run_id
+            LIMIT 1`,
+        )
+        .get(prior.id, candidate.manifest.runId, input.authority.id) as
+        | { readonly nodeRunId: string }
+        | undefined;
+      if (!fresh) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_INVALID",
+          `Work Package Version ${input.authority.id} is not a fresh formal rework authority for ${prior.id}.`,
+        );
+      }
+      targetNodeRunId = fresh.nodeRunId;
+    } else if (!targetNodeRunId && effectiveKind === "test") {
+      if (input.authority.kind !== "test-rework-run") {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_KIND_INVALID",
+          "Test responsibility requires a fresh Test rework Run authority.",
+        );
+      }
+      if (
+        !candidate.manifest.tests.some((test) => test.testRunId === effectiveId)
+      ) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_RESPONSIBILITY_NOT_FOUND",
+          `Test responsibility ${effectiveId} is not frozen by Delivery Candidate ${candidate.id}.`,
+        );
+      }
+      const rework = database
+        .prepare(
+          `SELECT fresh.run_id AS runId,
+                  fresh.snapshot_revision_id AS snapshotRevisionId
+             FROM test_rework_runs AS rework
+             JOIN test_runs AS fresh ON fresh.id = rework.fresh_test_run_id
+             JOIN runtime_audit_records AS accepted
+               ON accepted.action = 'test.run.accepted'
+              AND accepted.entity_type = 'test-run'
+              AND accepted.entity_id = fresh.id
+             JOIN command_deduplication AS accepted_receipt
+               ON accepted_receipt.command_id = accepted.command_id
+              AND accepted_receipt.status = 'completed'
+              AND accepted_receipt.actor_type = accepted.actor_type
+              AND accepted_receipt.actor_id = accepted.actor_id
+              AND accepted_receipt.authenticated_by = accepted.authenticated_by
+             JOIN runtime_audit_records AS completed
+               ON completed.action = 'test.run.completed'
+              AND completed.entity_type = 'test-run'
+              AND completed.entity_id = fresh.id
+             JOIN command_deduplication AS completed_receipt
+               ON completed_receipt.command_id = completed.command_id
+              AND completed_receipt.status = 'completed'
+              AND completed_receipt.actor_type = completed.actor_type
+              AND completed_receipt.actor_id = completed.actor_id
+              AND completed_receipt.authenticated_by = completed.authenticated_by
+            WHERE rework.prior_test_run_id = ?
+              AND rework.fresh_test_run_id = ?
+              AND fresh.state = 'passed'
+              AND fresh.pass_authority_hash IS NOT NULL
+            LIMIT 1`,
+        )
+        .get(effectiveId!, input.authority.id) as
+        | { readonly runId: string; readonly snapshotRevisionId: string }
+        | undefined;
+      if (
+        !rework ||
+        rework.runId !== candidate.manifest.runId ||
+        rework.snapshotRevisionId !== candidate.manifest.snapshot.id ||
+        !options.tests
+      ) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_INVALID",
+          `Test Run ${input.authority.id} is not a fresh formal PASS rework authority for ${effectiveId}.`,
+        );
+      }
+      try {
+        options.tests.downstreamAuthority(input.authority.id);
+      } catch {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_AUTHORITY_INVALID",
+          `Test Run ${input.authority.id} failed exact downstream authority validation.`,
+        );
+      }
+      targetNodeRunId =
+        candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
+    } else if (!targetNodeRunId) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_AUTHORITY_UNSUPPORTED",
+        `Formal recovery authority for ${responsibility.kind} responsibility is invalid.`,
+      );
+    }
+    const now = clock().toISOString();
+    options.pipelineRuntime.activateHumanReleaseReworkInTransaction({
+      runId: candidate.manifest.runId,
+      humanReleaseNodeRunId: candidate.manifest.source.humanReleaseNodeRunId,
+      decisionId: decision.id,
+      targetNodeRunId: targetNodeRunId!,
+      activatedAt: now,
+    });
+    return inspect(candidate.id);
+  };
+
+  return {
+    assemble,
+    inspect,
+    inspectRun,
+    decide,
+    recover,
+    acceptedAuthority,
+  };
 };

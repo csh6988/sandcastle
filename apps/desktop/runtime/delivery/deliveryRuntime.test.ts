@@ -173,6 +173,184 @@ const gateAuthorityFor = (
   authorityHash: hash(`${input.id}-authority`),
 });
 
+const seedFormalWorkPackageReworkAuthority = (
+  database: DatabaseSync,
+  suffix: string,
+  commandId = `wp-rework-command-${suffix}`,
+  seedReceipt = true,
+) => {
+  const packageId = `work-package-${suffix}`;
+  const priorVersionId = `wp-${suffix}-v1`;
+  const freshVersionId = `wp-${suffix}-v2`;
+  const nodeRunId = `development-node-${suffix}`;
+  const attemptId = `wp-attempt-${suffix}`;
+  const allocationId = `wp-allocation-${suffix}`;
+  database.exec(`
+    INSERT INTO work_packages(
+      id, project_id, run_id, technical_baseline_id, state, revision,
+      created_at, updated_at
+    ) VALUES (
+      '${packageId}', 'project-1', 'run-1', 'technical-baseline-1',
+      'assigned', 2, '${candidateInput.createdAt}', '${candidateInput.createdAt}'
+    );
+    INSERT INTO work_package_versions(
+      id, work_package_id, version, application_id, repository_reference,
+      node_run_id, manifest_json, manifest_hash, status, created_at
+    ) VALUES
+      ('${priorVersionId}', '${packageId}', 1, 'application-1', 'repo-1',
+       '${nodeRunId}', '{}', '${hash(`${suffix}-v1`)}', 'superseded', '${candidateInput.createdAt}'),
+      ('${freshVersionId}', '${packageId}', 2, 'application-1', 'repo-1',
+       '${nodeRunId}', '{}', '${hash(`${suffix}-v2`)}', 'ready', '${candidateInput.createdAt}');
+    INSERT INTO node_attempts(
+      id, node_run_id, attempt_number, snapshot_revision_id, reason, status,
+      structured_result_json, failure_code, failure_message, created_at,
+      started_at, completed_at
+    ) VALUES (
+      '${attemptId}', '${nodeRunId}', 2, 'snapshot-1', 'retry', 'ready',
+      NULL, NULL, NULL, '${candidateInput.createdAt}', NULL, NULL
+    );
+    INSERT INTO workspace_allocations(
+      id, project_id, application_id, execution_profile_id,
+      execution_profile_revision, operation_key, state, repository_root,
+      allocation_root, source_branch, base_commit, expected_source_tip,
+      capability_snapshot_json, capability_snapshot_hash,
+      provision_command_id, revision, created_at, updated_at,
+      work_package_version_id, node_attempt_id
+    ) VALUES (
+      '${allocationId}', 'project-1', 'application-1', 'profile-1', 1,
+      'wp-operation-${suffix}', 'planned', '/repo', '/allocation', 'branch',
+      '${"a".repeat(40)}', '${"a".repeat(40)}', '{}', '${hash(`${suffix}-capability`)}',
+      '${commandId}', 0, '${candidateInput.createdAt}',
+      '${candidateInput.createdAt}', '${freshVersionId}', '${attemptId}'
+    );
+    INSERT INTO work_package_assignments(
+      id, work_package_version_id, node_attempt_id, position_id,
+      ai_member_id, agent_adapter_id, rationale_json, allocation_id,
+      interaction_session_id, sandbox_identity, evidence_scope, state,
+      created_at, updated_at
+    ) VALUES (
+      'wp-assignment-${suffix}', '${freshVersionId}', '${attemptId}',
+      'position-1', 'member-1', 'scripted', '{}', '${allocationId}',
+      'session-${suffix}', 'sandbox-${suffix}', 'evidence-${suffix}',
+      'assigned', '${candidateInput.createdAt}', '${candidateInput.createdAt}'
+    );
+    INSERT INTO runtime_audit_records(
+      id, action, entity_type, entity_id, run_id, node_run_id,
+      before_json, after_json, created_at, command_id, actor_type,
+      actor_id, authenticated_by, consumer_id
+    ) VALUES (
+      'wp-rework-audit-${suffix}', 'work-package.rework', 'work-package',
+      '${packageId}', 'run-1', '${nodeRunId}', NULL,
+      '{"workPackageVersionId":"${freshVersionId}"}', '${candidateInput.createdAt}',
+      '${commandId}', 'runtime-worker', 'work-package-runtime',
+      'runtime', 'work-package-runtime'
+    );
+  `);
+  if (seedReceipt) {
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, 'runtime-worker', 'work-package-runtime', 'runtime',
+                   'work-package-runtime', 1, ?, 'completed', '{}', ?, ?, ?)`,
+      )
+      .run(
+        commandId,
+        hash(`${commandId}:request`),
+        hash("{}"),
+        JSON.stringify([`wp-rework-audit-${suffix}`]),
+        candidateInput.createdAt,
+      );
+  }
+  return { packageId, priorVersionId, freshVersionId, nodeRunId };
+};
+
+const seedFormalTestReworkAuthority = (
+  database: DatabaseSync,
+  suffix: string,
+  priorState: "running" | "failed" = "failed",
+) => {
+  const priorTestRunId = `test-run-${suffix}`;
+  const freshTestRunId = `test-rework-run-${suffix}`;
+  database.exec(`
+    INSERT INTO test_runs(
+      id, request_id, project_id, run_id, snapshot_revision_id, node_run_id,
+      node_attempt_id, session_id, integration_generation_id,
+      integration_manifest_hash, integration_pass_authority_hash,
+      manifest_json, manifest_hash, request_hash, state, pass_authority_hash,
+      failure_code, failure_message, created_at, updated_at
+    ) VALUES
+      ('${priorTestRunId}', 'test-request-${suffix}-prior', 'project-1', 'run-1',
+       'snapshot-1', 'test-node-${suffix}-prior', 'test-attempt-${suffix}-prior',
+       'test-session-${suffix}-prior', 'integration-generation-1',
+       '${hash("integration-manifest")}', '${hash("integration-authority")}',
+       '{}', '${hash(`${suffix}-prior-test-manifest`)}',
+       '${hash(`${suffix}-prior-test-request`)}', '${priorState}', NULL,
+       ${priorState === "failed" ? "'TEST_FAILED', 'failed'" : "NULL, NULL"},
+       '${candidateInput.createdAt}',
+       '${candidateInput.createdAt}'),
+      ('${freshTestRunId}', 'test-request-${suffix}-fresh', 'project-1', 'run-1',
+       'snapshot-1', 'test-node-${suffix}-fresh', 'test-attempt-${suffix}-fresh',
+       'test-session-${suffix}-fresh', 'integration-generation-1',
+       '${hash("integration-manifest")}', '${hash("integration-authority")}',
+       '{}', '${hash("fresh-test-manifest")}',
+       '${hash(`${suffix}-fresh-test-request`)}', 'passed',
+       '${hash("fresh-test-pass")}', NULL, NULL, '${candidateInput.createdAt}',
+       '${candidateInput.createdAt}');
+    INSERT INTO test_rework_runs(
+      id, defect_id, prior_test_run_id, fresh_test_run_id, route_json,
+      lineage_json, lineage_hash, created_at
+    ) VALUES (
+      'test-rework-record-${suffix}', 'test-defect-${suffix}',
+      '${priorTestRunId}', '${freshTestRunId}', '{}', '{}',
+      '${hash(`${suffix}-test-rework-lineage`)}', '${candidateInput.createdAt}'
+    );
+    INSERT INTO runtime_audit_records(
+      id, action, entity_type, entity_id, run_id, node_run_id,
+      before_json, after_json, created_at, command_id, actor_type,
+      actor_id, authenticated_by, consumer_id
+    ) VALUES
+      ('test-rework-accepted-audit-${suffix}', 'test.run.accepted', 'test-run',
+       '${freshTestRunId}', 'run-1', 'test-node-${suffix}-fresh', NULL, '{}',
+       '${candidateInput.createdAt}', 'test-rework-create-command-${suffix}',
+       'runtime-worker', 'test-runtime', 'company-runtime', 'test-runtime'),
+      ('test-rework-completed-audit-${suffix}', 'test.run.completed', 'test-run',
+       '${freshTestRunId}', 'run-1', 'test-node-${suffix}-fresh', NULL, '{}',
+       '${candidateInput.createdAt}', 'test-rework-complete-command-${suffix}',
+       'runtime-worker', 'test-runtime', 'company-runtime', 'test-runtime');
+  `);
+  for (const [commandId, auditId] of [
+    [
+      `test-rework-create-command-${suffix}`,
+      `test-rework-accepted-audit-${suffix}`,
+    ],
+    [
+      `test-rework-complete-command-${suffix}`,
+      `test-rework-completed-audit-${suffix}`,
+    ],
+  ] as const) {
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, 'runtime-worker', 'test-runtime', 'company-runtime',
+                   'test-runtime', 1, ?, 'completed', '{}', ?, ?, ?)`,
+      )
+      .run(
+        commandId,
+        hash(`${commandId}:request`),
+        hash("{}"),
+        JSON.stringify([auditId]),
+        candidateInput.createdAt,
+      );
+  }
+  return { priorTestRunId, freshTestRunId };
+};
+
 describe("Delivery Runtime", () => {
   it("assembles one immutable Candidate only from the exact T18 downstream authority", () => {
     const database = new DatabaseSync(":memory:");
@@ -190,6 +368,7 @@ describe("Delivery Runtime", () => {
           humanReleaseNodeRunId: "human-release-node-1",
         }),
         applyHumanReleaseDecisionInTransaction: () => {},
+        activateHumanReleaseReworkInTransaction: () => {},
         validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
@@ -255,6 +434,7 @@ describe("Delivery Runtime", () => {
         applyHumanReleaseDecisionInTransaction: (input) => {
           decisions.push(input);
         },
+        activateHumanReleaseReworkInTransaction: () => {},
         validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
@@ -375,6 +555,7 @@ describe("Delivery Runtime", () => {
         applyHumanReleaseDecisionInTransaction: (input) => {
           decisions.push(input);
         },
+        activateHumanReleaseReworkInTransaction: () => {},
         validateReleaseBoundaryChildInTransaction: () => {},
       },
       clock: () => new Date(candidateInput.createdAt),
@@ -412,6 +593,42 @@ describe("Delivery Runtime", () => {
     });
     assert.equal(changesRequested.projection, "changes-requested");
     assert.equal(changesRequested.decision?.childRunId, null);
+    assert.throws(
+      () =>
+        runtime.recover({
+          actor: {
+            type: "human",
+            id: "local-release-owner",
+            authenticatedBy: "local-session",
+          },
+          candidateId: first.id,
+          expectedCandidateHash: first.manifestHash,
+          decisionId: "release-decision-rework-1",
+          authority: {
+            kind: "work-package-version",
+            id: "work-package-version-2",
+          },
+        }),
+      (error: unknown) =>
+        error instanceof DeliveryRuntimeError &&
+        error.code === "RELEASE_REWORK_AUTHORITY_INVALID",
+    );
+    assert.doesNotThrow(() =>
+      runtime.recover({
+        actor: {
+          type: "human",
+          id: "local-release-owner",
+          authenticatedBy: "local-session",
+        },
+        candidateId: first.id,
+        expectedCandidateHash: first.manifestHash,
+        decisionId: "release-decision-rework-1",
+        authority: {
+          kind: "candidate-input-recheck",
+          id: first.manifest.candidateInput.id,
+        },
+      }),
+    );
     assert.equal(
       (
         database
@@ -496,6 +713,7 @@ describe("Delivery Runtime", () => {
         applyHumanReleaseDecisionInTransaction: (decision) => {
           decisions.push(decision);
         },
+        activateHumanReleaseReworkInTransaction: () => {},
         validateReleaseBoundaryChildInTransaction: (boundary) => {
           boundaryValidations.push(boundary);
         },
@@ -547,6 +765,698 @@ describe("Delivery Runtime", () => {
     database.close();
   });
 
+  it("activates same-boundary recovery only from a fresh formal Work Package authority", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const input = {
+      ...candidateInputFor("candidate-input-work-package-rework"),
+      manifest: {
+        ...candidateInputFor("candidate-input-work-package-rework").manifest,
+        codeReviewCoverage: [
+          {
+            workPackageId: "work-package-command",
+            workPackageVersionId: "wp-command-v1",
+          },
+        ] as never,
+      },
+    };
+    const authority = gateAuthorityFor(input);
+    const activations: unknown[] = [];
+    const runtime = openDeliveryRuntime(database, {
+      candidateInputs: { inspect: () => input },
+      qualityGates: { downstreamAuthority: () => authority },
+      pipelineRuntime: {
+        completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
+        applyHumanReleaseDecisionInTransaction: () => {},
+        activateHumanReleaseReworkInTransaction: (activation) => {
+          activations.push(activation);
+        },
+        validateReleaseBoundaryChildInTransaction: () => {},
+      },
+      clock: () => new Date(candidateInput.createdAt),
+    });
+    const candidate = runtime.assemble({
+      candidateId: "delivery-candidate-work-package-rework",
+      requestId: "delivery-candidate-work-package-rework-request",
+      candidateInputId: input.id,
+      expectedCandidateInputHash: input.manifestHash,
+      expectedGateAuthorityHash: authority.authorityHash,
+      nodeRunId: "delivery-candidate-node-work-package",
+      nodeAttemptId: "delivery-candidate-attempt-work-package",
+      leaseId: "delivery-candidate-lease-work-package",
+      workerId: "delivery-candidate-node-handler",
+    });
+    runtime.decide({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      decisionId: "release-decision-work-package-rework",
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decision: "changes-requested",
+      reason: "The exact Work Package requires formal rework.",
+      evidenceRefs: ["artifact-version:artifact-version-1"],
+      rework: {
+        scope: "same-boundary",
+        responsibility: {
+          kind: "work-package",
+          id: "work-package-command",
+          summary: "Rework the exact frozen Work Package.",
+        },
+      },
+    });
+    const workPackageRuntime = {
+      reworkInTransaction: (command: { readonly commandId: string }) => {
+        seedFormalWorkPackageReworkAuthority(
+          database,
+          "command",
+          command.commandId,
+          false,
+        );
+        return {
+          projectId: "project-1",
+          runId: "run-1",
+          technicalBaselineId: "technical-baseline-1",
+          packages: [],
+        };
+      },
+    } as never;
+    const registry = openCompanyCommandRegistry(
+      database,
+      openProjectConfiguration(database),
+      undefined,
+      () => new Date(candidateInput.createdAt),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      workPackageRuntime,
+    );
+    const reworked = registry.execute({
+      schemaVersion: 1,
+      commandId: "wp-rework-command-formal",
+      actor: {
+        type: "runtime-worker",
+        id: "work-package-runtime",
+        authenticatedBy: "runtime",
+      },
+      consumerId: "work-package-runtime",
+      expectedRevision: 1,
+      command: {
+        type: "work-package.rework",
+        workPackageId: "work-package-command",
+        versionId: "wp-command-v2",
+        baseCommit: "a".repeat(40),
+        recoveryReason: "Address the exact Human release responsibility.",
+      },
+    });
+    assert.equal(reworked.status, "succeeded", JSON.stringify(reworked));
+    runtime.recover({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decisionId: "release-decision-work-package-rework",
+      authority: { kind: "work-package-version", id: "wp-command-v2" },
+    });
+    assert.equal(activations.length, 1);
+    assert.equal(
+      (activations[0] as { readonly targetNodeRunId: string }).targetNodeRunId,
+      "development-node-command",
+    );
+    database.close();
+  });
+
+  it("routes Contract, Integration Defect, and Test Defect responsibility through exact formal rework authority", () => {
+    const exerciseWorkPackageRoute = (
+      suffix: string,
+      responsibility: {
+        readonly kind: "contract" | "defect";
+        readonly id: string;
+        readonly summary: string;
+      },
+      seedRoute: (database: DatabaseSync, priorVersionId: string) => void,
+    ) => {
+      const database = new DatabaseSync(":memory:");
+      migrateCompanyDatabase(database);
+      database.exec("PRAGMA foreign_keys = OFF");
+      const workPackage = seedFormalWorkPackageReworkAuthority(
+        database,
+        suffix,
+      );
+      seedRoute(database, workPackage.priorVersionId);
+      const baseInput = candidateInputFor(`candidate-input-${suffix}`);
+      const input = {
+        ...baseInput,
+        manifest: {
+          ...baseInput.manifest,
+          codeReviewCoverage: [
+            {
+              workPackageId: workPackage.packageId,
+              workPackageVersionId: workPackage.priorVersionId,
+            },
+          ] as never,
+        },
+      };
+      const authority = gateAuthorityFor(input);
+      const activations: unknown[] = [];
+      const runtime = openDeliveryRuntime(database, {
+        candidateInputs: { inspect: () => input },
+        qualityGates: { downstreamAuthority: () => authority },
+        pipelineRuntime: {
+          completeDeliveryCandidateInTransaction: () => {},
+          resolveHumanReleaseNodeInTransaction: () => ({
+            humanReleaseNodeRunId: "human-release-node-1",
+          }),
+          applyHumanReleaseDecisionInTransaction: () => {},
+          activateHumanReleaseReworkInTransaction: (activation) => {
+            activations.push(activation);
+          },
+          validateReleaseBoundaryChildInTransaction: () => {},
+        },
+        clock: () => new Date(candidateInput.createdAt),
+      });
+      const candidate = runtime.assemble({
+        candidateId: `delivery-candidate-${suffix}`,
+        requestId: `delivery-candidate-${suffix}-request`,
+        candidateInputId: input.id,
+        expectedCandidateInputHash: input.manifestHash,
+        expectedGateAuthorityHash: authority.authorityHash,
+        nodeRunId: `delivery-candidate-node-${suffix}`,
+        nodeAttemptId: `delivery-candidate-attempt-${suffix}`,
+        leaseId: `delivery-candidate-lease-${suffix}`,
+        workerId: "delivery-candidate-node-handler",
+      });
+      runtime.decide({
+        actor: {
+          type: "human",
+          id: "local-release-owner",
+          authenticatedBy: "local-session",
+        },
+        decisionId: `release-decision-${suffix}`,
+        candidateId: candidate.id,
+        expectedCandidateHash: candidate.manifestHash,
+        decision: "changes-requested",
+        reason: "The exact frozen responsibility requires formal rework.",
+        evidenceRefs: ["artifact-version:artifact-version-1"],
+        rework: { scope: "same-boundary", responsibility },
+      });
+      runtime.recover({
+        actor: {
+          type: "human",
+          id: "local-release-owner",
+          authenticatedBy: "local-session",
+        },
+        candidateId: candidate.id,
+        expectedCandidateHash: candidate.manifestHash,
+        decisionId: `release-decision-${suffix}`,
+        authority: {
+          kind: "work-package-version",
+          id: workPackage.freshVersionId,
+        },
+      });
+      assert.equal(activations.length, 1);
+      assert.equal(
+        (activations[0] as { readonly targetNodeRunId: string })
+          .targetNodeRunId,
+        workPackage.nodeRunId,
+      );
+      database.close();
+    };
+
+    exerciseWorkPackageRoute(
+      "contract-route",
+      {
+        kind: "contract",
+        id: "contract-1",
+        summary: "Rework the exact Contract producer.",
+      },
+      (database, priorVersionId) => {
+        const manifest = JSON.stringify({
+          requiredValidations: [
+            {
+              contract: { id: "contract-1", version: "1" },
+              responsibleWorkPackageVersionIds: [priorVersionId],
+            },
+          ],
+        }).replaceAll("'", "''");
+        database.exec(`
+          INSERT INTO integration_generations(
+            id, project_id, run_id, snapshot_revision_id, node_run_id,
+            generation, coverage_id, coverage_node_run_id,
+            coverage_node_attempt_id, coverage_hash, manifest_json,
+            manifest_hash, state, pass_authority_hash, created_at, updated_at
+          ) VALUES (
+            'integration-generation-1', 'project-1', 'run-1', 'snapshot-1',
+            'integration-node-contract-route', 1, 'coverage-contract-route',
+            'coverage-node-contract-route', 'coverage-attempt-contract-route',
+            '${hash("coverage-contract-route")}', '${manifest}',
+            '${hash("integration-manifest")}', 'passed',
+            '${hash("integration-authority")}', '${candidateInput.createdAt}',
+            '${candidateInput.createdAt}'
+          );
+        `);
+      },
+    );
+
+    exerciseWorkPackageRoute(
+      "integration-defect-route",
+      {
+        kind: "defect",
+        id: "integration-defect-route-1",
+        summary: "Rework the exact Integration Defect owner.",
+      },
+      (database, priorVersionId) => {
+        database.exec(`
+          INSERT INTO integration_generations(
+            id, project_id, run_id, snapshot_revision_id, node_run_id,
+            generation, coverage_id, coverage_node_run_id,
+            coverage_node_attempt_id, coverage_hash, manifest_json,
+            manifest_hash, state, pass_authority_hash, created_at, updated_at
+          ) VALUES (
+            'integration-generation-1', 'project-1', 'run-1', 'snapshot-1',
+            'integration-node-defect-route', 1, 'coverage-defect-route',
+            'coverage-node-defect-route', 'coverage-attempt-defect-route',
+            '${hash("coverage-defect-route")}', '{}',
+            '${hash("integration-manifest")}', 'passed',
+            '${hash("integration-authority")}', '${candidateInput.createdAt}',
+            '${candidateInput.createdAt}'
+          );
+          INSERT INTO integration_defects(
+            id, generation_id, kind, responsibility_json, evidence_json,
+            status, created_at
+          ) VALUES (
+            'integration-defect-route-1', 'integration-generation-1',
+            'build-test',
+            '{"workPackageVersionIds":["${priorVersionId}"]}', '[]',
+            'open', '${candidateInput.createdAt}'
+          );
+        `);
+      },
+    );
+
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const testRework = seedFormalTestReworkAuthority(
+      database,
+      "defect-route",
+      "running",
+    );
+    database.exec(`
+      INSERT INTO test_defects(
+        id, test_run_id, test_case_revision_id, assertion_id,
+        integration_generation_id, responsibility_json, evidence_json,
+        status, created_at
+      ) VALUES (
+        'test-defect-route-1', '${testRework.priorTestRunId}',
+        'test-case-revision-defect-route', 'assertion-defect-route',
+        'integration-generation-1', '{}', '[]', 'open',
+        '${candidateInput.createdAt}'
+      );
+      UPDATE test_runs
+         SET state = 'failed', failure_code = 'TEST_FAILED',
+             failure_message = 'failed', updated_at = '${candidateInput.createdAt}'
+       WHERE id = '${testRework.priorTestRunId}';
+    `);
+    const baseInput = candidateInputFor("candidate-input-test-defect-route");
+    const input = {
+      ...baseInput,
+      manifest: {
+        ...baseInput.manifest,
+        tests: [
+          {
+            testRunId: testRework.priorTestRunId,
+            passAuthorityHash: hash("prior-test-pass"),
+          },
+        ] as never,
+      },
+    };
+    const authority = gateAuthorityFor(input);
+    const activations: unknown[] = [];
+    const runtime = openDeliveryRuntime(database, {
+      candidateInputs: { inspect: () => input },
+      qualityGates: { downstreamAuthority: () => authority },
+      tests: {
+        downstreamAuthority: (testRunId) =>
+          ({
+            schemaVersion: 1,
+            testRunId,
+            manifestHash: hash("fresh-test-manifest"),
+            passAuthorityHash: hash("fresh-test-pass"),
+          }) as never,
+      },
+      pipelineRuntime: {
+        completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
+        applyHumanReleaseDecisionInTransaction: () => {},
+        activateHumanReleaseReworkInTransaction: (activation) => {
+          activations.push(activation);
+        },
+        validateReleaseBoundaryChildInTransaction: () => {},
+      },
+      clock: () => new Date(candidateInput.createdAt),
+    });
+    const candidate = runtime.assemble({
+      candidateId: "delivery-candidate-test-defect-route",
+      requestId: "delivery-candidate-test-defect-route-request",
+      candidateInputId: input.id,
+      expectedCandidateInputHash: input.manifestHash,
+      expectedGateAuthorityHash: authority.authorityHash,
+      nodeRunId: "delivery-candidate-node-test-defect-route",
+      nodeAttemptId: "delivery-candidate-attempt-test-defect-route",
+      leaseId: "delivery-candidate-lease-test-defect-route",
+      workerId: "delivery-candidate-node-handler",
+    });
+    runtime.decide({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      decisionId: "release-decision-test-defect-route",
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decision: "changes-requested",
+      reason: "The exact Test Defect requires formal rework.",
+      evidenceRefs: ["artifact-version:artifact-version-1"],
+      rework: {
+        scope: "same-boundary",
+        responsibility: {
+          kind: "defect",
+          id: "test-defect-route-1",
+          summary: "Rework the exact Test Defect owner.",
+        },
+      },
+    });
+    runtime.recover({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decisionId: "release-decision-test-defect-route",
+      authority: {
+        kind: "test-rework-run",
+        id: testRework.freshTestRunId,
+      },
+    });
+    assert.equal(activations.length, 1);
+    database.close();
+  });
+
+  it("starts an exact Gate full recheck explicitly and keeps unknown responsibility blocked", () => {
+    const exercise = (
+      suffix: string,
+      responsibility: {
+        readonly kind: "gate" | "defect" | "unknown";
+        readonly id?: string;
+        readonly summary: string;
+      },
+    ) => {
+      const database = new DatabaseSync(":memory:");
+      migrateCompanyDatabase(database);
+      database.exec("PRAGMA foreign_keys = OFF");
+      const input = candidateInputFor(`candidate-input-${suffix}`);
+      const authority = gateAuthorityFor(input);
+      const activations: unknown[] = [];
+      const runtime = openDeliveryRuntime(database, {
+        candidateInputs: { inspect: () => input },
+        qualityGates: { downstreamAuthority: () => authority },
+        pipelineRuntime: {
+          completeDeliveryCandidateInTransaction: () => {},
+          resolveHumanReleaseNodeInTransaction: () => ({
+            humanReleaseNodeRunId: "human-release-node-1",
+          }),
+          applyHumanReleaseDecisionInTransaction: () => {},
+          activateHumanReleaseReworkInTransaction: (activation) => {
+            activations.push(activation);
+          },
+          validateReleaseBoundaryChildInTransaction: () => {},
+        },
+        clock: () => new Date(candidateInput.createdAt),
+      });
+      const candidate = runtime.assemble({
+        candidateId: `delivery-candidate-${suffix}`,
+        requestId: `delivery-candidate-${suffix}-request`,
+        candidateInputId: input.id,
+        expectedCandidateInputHash: input.manifestHash,
+        expectedGateAuthorityHash: authority.authorityHash,
+        nodeRunId: `delivery-candidate-node-${suffix}`,
+        nodeAttemptId: `delivery-candidate-attempt-${suffix}`,
+        leaseId: `delivery-candidate-lease-${suffix}`,
+        workerId: "delivery-candidate-node-handler",
+      });
+      runtime.decide({
+        actor: {
+          type: "human",
+          id: "local-release-owner",
+          authenticatedBy: "local-session",
+        },
+        decisionId: `release-decision-${suffix}`,
+        candidateId: candidate.id,
+        expectedCandidateHash: candidate.manifestHash,
+        decision: "changes-requested",
+        reason: "The exact frozen responsibility requires recheck.",
+        evidenceRefs: ["artifact-version:artifact-version-1"],
+        rework: { scope: "same-boundary", responsibility },
+      });
+      const recover = () =>
+        runtime.recover({
+          actor: {
+            type: "human",
+            id: "local-release-owner",
+            authenticatedBy: "local-session",
+          },
+          candidateId: candidate.id,
+          expectedCandidateHash: candidate.manifestHash,
+          decisionId: `release-decision-${suffix}`,
+          authority: {
+            kind: "candidate-input-recheck",
+            id: input.id,
+          },
+        });
+      return { activations, database, recover };
+    };
+
+    const gate = exercise("gate-recheck", {
+      kind: "gate",
+      id: "security-result-1",
+      summary: "Recheck the exact Security Gate lineage.",
+    });
+    assert.doesNotThrow(gate.recover);
+    assert.equal(gate.activations.length, 1);
+    gate.database.close();
+
+    const gateDefect = exercise("gate-defect-recheck", {
+      kind: "defect",
+      id: "candidate-gate-defect-1",
+      summary: "Resolve the exact Candidate Gate Defect through full recheck.",
+    });
+    gateDefect.database.exec(`
+      INSERT INTO candidate_gate_inputs(
+        id, request_id, candidate_input_id, candidate_input_hash, kind,
+        node_run_id, node_attempt_id, review_topic_id, prior_gate_input_id,
+        reviewer_position_id, reviewer_session_id, manifest_json,
+        manifest_hash, request_hash, risk_tier, review_depth, state,
+        created_at, updated_at
+      ) VALUES (
+        'candidate-gate-input-defect-1', 'candidate-gate-input-defect-request-1',
+        'candidate-input-gate-defect-recheck', '${hash("candidate-input-gate-defect-recheck")}',
+        'security', 'security-node-1', 'security-attempt-1', 'review-topic-1',
+        NULL, 'security-reviewer', 'security-session', '{}', '${hash("gate-manifest")}',
+        '${hash("gate-request")}', 'high', 'deep-independent', 'completed',
+        '${candidateInput.createdAt}', '${candidateInput.createdAt}'
+      );
+      INSERT INTO candidate_gate_defects(
+        id, gate_input_id, check_id, responsibility_json, evidence_json,
+        status, created_at, closed_at
+      ) VALUES (
+        'candidate-gate-defect-1', 'candidate-gate-input-defect-1',
+        'security-check-1', '{}', '[]', 'open',
+        '${candidateInput.createdAt}', NULL
+      );
+    `);
+    assert.doesNotThrow(gateDefect.recover);
+    assert.equal(gateDefect.activations.length, 1);
+    gateDefect.database.close();
+
+    const unknown = exercise("unknown-recheck", {
+      kind: "unknown",
+      summary: "The responsibility has not been resolved.",
+    });
+    assert.throws(
+      unknown.recover,
+      (error: unknown) =>
+        error instanceof DeliveryRuntimeError &&
+        error.code === "RELEASE_REWORK_RESPONSIBILITY_UNRESOLVED",
+    );
+    assert.equal(unknown.activations.length, 0);
+    unknown.database.close();
+  });
+
+  it("accepts only a fresh formal PASS Test rework authority", () => {
+    const database = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(database);
+    database.exec("PRAGMA foreign_keys = OFF");
+    const input = candidateInputFor("candidate-input-test-rework");
+    const authority = gateAuthorityFor(input);
+    const activations: unknown[] = [];
+    const runtime = openDeliveryRuntime(database, {
+      candidateInputs: { inspect: () => input },
+      qualityGates: { downstreamAuthority: () => authority },
+      tests: {
+        downstreamAuthority: (testRunId) =>
+          ({
+            schemaVersion: 1,
+            testRunId,
+            manifestHash: hash("fresh-test-manifest"),
+            passAuthorityHash: hash("fresh-test-pass"),
+          }) as never,
+      },
+      pipelineRuntime: {
+        completeDeliveryCandidateInTransaction: () => {},
+        resolveHumanReleaseNodeInTransaction: () => ({
+          humanReleaseNodeRunId: "human-release-node-1",
+        }),
+        applyHumanReleaseDecisionInTransaction: () => {},
+        activateHumanReleaseReworkInTransaction: (activation) => {
+          activations.push(activation);
+        },
+        validateReleaseBoundaryChildInTransaction: () => {},
+      },
+      clock: () => new Date(candidateInput.createdAt),
+    });
+    const candidate = runtime.assemble({
+      candidateId: "delivery-candidate-test-rework",
+      requestId: "delivery-candidate-test-rework-request",
+      candidateInputId: input.id,
+      expectedCandidateInputHash: input.manifestHash,
+      expectedGateAuthorityHash: authority.authorityHash,
+      nodeRunId: "delivery-candidate-node-test",
+      nodeAttemptId: "delivery-candidate-attempt-test",
+      leaseId: "delivery-candidate-lease-test",
+      workerId: "delivery-candidate-node-handler",
+    });
+    runtime.decide({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      decisionId: "release-decision-test-rework",
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decision: "changes-requested",
+      reason: "The exact Test Run requires formal rework.",
+      evidenceRefs: ["artifact-version:artifact-version-1"],
+      rework: {
+        scope: "same-boundary",
+        responsibility: {
+          kind: "test",
+          id: "test-run-1",
+          summary: "Rework the frozen Test Run.",
+        },
+      },
+    });
+    database.exec(`
+      INSERT INTO test_runs(
+        id, request_id, project_id, run_id, snapshot_revision_id, node_run_id,
+        node_attempt_id, session_id, integration_generation_id,
+        integration_manifest_hash, integration_pass_authority_hash,
+        manifest_json, manifest_hash, request_hash, state, pass_authority_hash,
+        failure_code, failure_message, created_at, updated_at
+      ) VALUES
+        ('test-run-1', 'test-request-1', 'project-1', 'run-1', 'snapshot-1',
+         'test-node-1', 'test-attempt-1', 'test-session-1',
+         'integration-generation-1', '${hash("integration-manifest")}',
+         '${hash("integration-authority")}', '{}', '${hash("prior-test-manifest")}',
+         '${hash("prior-test-request")}', 'failed', NULL, 'TEST_FAILED',
+         'failed', '${candidateInput.createdAt}', '${candidateInput.createdAt}'),
+        ('test-rework-run-2', 'test-request-2', 'project-1', 'run-1', 'snapshot-1',
+         'test-node-2', 'test-attempt-2', 'test-session-2',
+         'integration-generation-1', '${hash("integration-manifest")}',
+         '${hash("integration-authority")}', '{}', '${hash("fresh-test-manifest")}',
+         '${hash("fresh-test-request")}', 'passed', '${hash("fresh-test-pass")}',
+         NULL, NULL, '${candidateInput.createdAt}', '${candidateInput.createdAt}');
+      INSERT INTO test_rework_runs(
+        id, defect_id, prior_test_run_id, fresh_test_run_id, route_json,
+        lineage_json, lineage_hash, created_at
+      ) VALUES (
+        'test-rework-record-2', 'test-defect-1', 'test-run-1',
+        'test-rework-run-2', '{}', '{}', '${hash("test-rework-lineage")}',
+        '${candidateInput.createdAt}'
+      );
+      INSERT INTO runtime_audit_records(
+        id, action, entity_type, entity_id, run_id, node_run_id,
+        before_json, after_json, created_at, command_id, actor_type,
+        actor_id, authenticated_by, consumer_id
+      ) VALUES
+        ('test-rework-accepted-audit', 'test.run.accepted', 'test-run',
+         'test-rework-run-2', 'run-1', 'test-node-2', NULL, '{}',
+         '${candidateInput.createdAt}', 'test-rework-create-command',
+         'runtime-worker', 'test-runtime', 'company-runtime', 'test-runtime'),
+        ('test-rework-completed-audit', 'test.run.completed', 'test-run',
+         'test-rework-run-2', 'run-1', 'test-node-2', NULL, '{}',
+         '${candidateInput.createdAt}', 'test-rework-complete-command',
+         'runtime-worker', 'test-runtime', 'company-runtime', 'test-runtime');
+      INSERT INTO command_deduplication(
+        command_id, actor_type, actor_id, authenticated_by, consumer_id,
+        schema_version, request_hash, status, result_json, result_hash,
+        effect_ids_json, completed_at
+      ) VALUES
+        ('test-rework-create-command', 'runtime-worker', 'test-runtime',
+         'company-runtime', 'test-runtime', 1,
+         '${hash("test-rework-create-request")}', 'completed', '{}',
+         '${hash("{}")}', '["test-rework-accepted-audit"]',
+         '${candidateInput.createdAt}'),
+        ('test-rework-complete-command', 'runtime-worker', 'test-runtime',
+         'company-runtime', 'test-runtime', 1,
+         '${hash("test-rework-complete-request")}', 'completed', '{}',
+         '${hash("{}")}', '["test-rework-completed-audit"]',
+         '${candidateInput.createdAt}');
+    `);
+    runtime.recover({
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      candidateId: candidate.id,
+      expectedCandidateHash: candidate.manifestHash,
+      decisionId: "release-decision-test-rework",
+      authority: { kind: "test-rework-run", id: "test-rework-run-2" },
+    });
+    assert.equal(activations.length, 1);
+    assert.equal(
+      (activations[0] as { readonly targetNodeRunId: string }).targetNodeRunId,
+      "candidate-input-node-1",
+    );
+    database.close();
+  });
+
   it("persists Candidate and Human release Commands atomically with replay receipts", () => {
     const database = new DatabaseSync(":memory:");
     migrateCompanyDatabase(database);
@@ -584,6 +1494,7 @@ describe("Delivery Runtime", () => {
             throw new Error("injected decision crash");
           }
         },
+        activateHumanReleaseReworkInTransaction: () => {},
         validateReleaseBoundaryChildInTransaction: () => {},
       },
       events: openRuntimeEvents(database),
