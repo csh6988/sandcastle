@@ -542,6 +542,7 @@ export const openCompanyDatabase = (
   const delivery = openDeliveryRuntime(database, {
     candidateInputs,
     qualityGates,
+    tests: testRuns,
     pipelineRuntime,
     events,
     ...(options.clock ? { clock: options.clock } : {}),

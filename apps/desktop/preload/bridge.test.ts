@@ -1545,9 +1545,27 @@ describe("Sandcastle preload bridge", () => {
       ).id,
       candidate.id,
     );
+    assert.equal(
+      (
+        await bridge.runtime.executeDeliveryCommand({
+          commandId: "release-recovery-command-1",
+          command: {
+            type: "delivery.release.recover",
+            decisionId: "release-decision-rework-1",
+            candidateId: candidate.id,
+            expectedCandidateHash: candidate.manifestHash,
+            authority: {
+              kind: "candidate-input-recheck",
+              id: "candidate-input-1",
+            },
+          },
+        })
+      ).id,
+      candidate.id,
+    );
     assert.deepEqual(
       calls.map((call) => (call as { readonly operation: string }).operation),
-      ["query", "query", "query", "execute"],
+      ["query", "query", "query", "execute", "execute"],
     );
     for (const call of calls) {
       const payload = call as Record<string, unknown>;

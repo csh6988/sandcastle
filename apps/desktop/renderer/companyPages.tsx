@@ -2714,6 +2714,7 @@ export function DeliveryCandidatePanel({
   diagnostic,
   view,
   onDecision,
+  onRecovery,
 }: {
   readonly busy: boolean;
   readonly diagnostic: string | null;
@@ -2724,6 +2725,21 @@ export function DeliveryCandidatePanel({
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
     readonly childRunId?: string;
+    readonly responsibilityKind?:
+      | "defect"
+      | "work-package"
+      | "contract"
+      | "test"
+      | "gate";
+    readonly responsibilityId?: string;
+  }) => void;
+  readonly onRecovery?: (input: {
+    readonly decisionId: string;
+    readonly authorityKind:
+      | "work-package-version"
+      | "test-rework-run"
+      | "candidate-input-recheck";
+    readonly authorityId: string;
   }) => void;
 }) {
   const [reason, setReason] = useState(
@@ -2733,6 +2749,14 @@ export function DeliveryCandidatePanel({
     "same-boundary" | "boundary-changing"
   >("same-boundary");
   const [childRunId, setChildRunId] = useState("");
+  const [responsibilityKind, setResponsibilityKind] = useState<
+    "defect" | "work-package" | "contract" | "test" | "gate"
+  >("work-package");
+  const [responsibilityId, setResponsibilityId] = useState("");
+  const [authorityKind, setAuthorityKind] = useState<
+    "work-package-version" | "test-rework-run" | "candidate-input-recheck"
+  >("work-package-version");
+  const [authorityId, setAuthorityId] = useState("");
   if (!view) {
     return diagnostic ? (
       <section className="create-panel" data-delivery-candidate>
@@ -2749,6 +2773,12 @@ export function DeliveryCandidatePanel({
       reason,
       evidenceRefs,
       ...(decision === "changes-requested" ? { reworkScope } : {}),
+      ...(decision === "changes-requested"
+        ? {
+            responsibilityKind,
+            responsibilityId: responsibilityId.trim(),
+          }
+        : {}),
       ...(decision === "changes-requested" &&
       reworkScope === "boundary-changing"
         ? { childRunId: childRunId.trim() }
@@ -2809,6 +2839,32 @@ export function DeliveryCandidatePanel({
             <option value="same-boundary">Same boundary</option>
             <option value="boundary-changing">Boundary changing</option>
           </select>
+          <label htmlFor={`delivery-release-responsibility-kind-${view.id}`}>
+            Exact responsibility kind
+          </label>
+          <select
+            id={`delivery-release-responsibility-kind-${view.id}`}
+            onChange={(event) =>
+              setResponsibilityKind(
+                event.target.value as typeof responsibilityKind,
+              )
+            }
+            value={responsibilityKind}
+          >
+            <option value="work-package">Work Package</option>
+            <option value="test">Test Run</option>
+            <option value="defect">Defect</option>
+            <option value="contract">Contract</option>
+            <option value="gate">Quality Gate</option>
+          </select>
+          <label htmlFor={`delivery-release-responsibility-id-${view.id}`}>
+            Exact responsibility ID
+          </label>
+          <input
+            id={`delivery-release-responsibility-id-${view.id}`}
+            onInput={(event) => setResponsibilityId(event.currentTarget.value)}
+            value={responsibilityId}
+          />
           {reworkScope === "boundary-changing" ? (
             <>
               <label htmlFor={`delivery-release-child-run-${view.id}`}>
@@ -2843,6 +2899,7 @@ export function DeliveryCandidatePanel({
               disabled={
                 busy ||
                 reason.trim().length === 0 ||
+                responsibilityId.trim().length === 0 ||
                 (reworkScope === "boundary-changing" &&
                   childRunId.trim().length === 0)
               }
@@ -2853,6 +2910,50 @@ export function DeliveryCandidatePanel({
               Request changes
             </button>
           </div>
+        </div>
+      ) : null}
+      {view.projection === "changes-requested" &&
+      view.decision?.rework?.scope === "same-boundary" &&
+      onRecovery ? (
+        <div className="form" data-human-release-recovery-controls>
+          <label htmlFor={`delivery-release-authority-kind-${view.id}`}>
+            Formal rework authority kind
+          </label>
+          <select
+            id={`delivery-release-authority-kind-${view.id}`}
+            onChange={(event) =>
+              setAuthorityKind(event.target.value as typeof authorityKind)
+            }
+            value={authorityKind}
+          >
+            <option value="work-package-version">Work Package Version</option>
+            <option value="test-rework-run">Test rework Run</option>
+            <option value="candidate-input-recheck">
+              Candidate Input full recheck
+            </option>
+          </select>
+          <label htmlFor={`delivery-release-authority-id-${view.id}`}>
+            Fresh authority ID
+          </label>
+          <input
+            id={`delivery-release-authority-id-${view.id}`}
+            onInput={(event) => setAuthorityId(event.currentTarget.value)}
+            value={authorityId}
+          />
+          <button
+            disabled={busy || authorityId.trim().length === 0}
+            id="activate-delivery-rework"
+            onClick={() =>
+              onRecovery({
+                decisionId: view.decision!.id,
+                authorityKind,
+                authorityId: authorityId.trim(),
+              })
+            }
+            type="button"
+          >
+            Validate authority and recover
+          </button>
         </div>
       ) : null}
     </section>
@@ -3776,6 +3877,13 @@ export function ProjectDetailView({
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
     readonly childRunId?: string;
+    readonly responsibilityKind?:
+      | "defect"
+      | "work-package"
+      | "contract"
+      | "test"
+      | "gate";
+    readonly responsibilityId?: string;
   }): Promise<void> => {
     if (!selectedRun || !deliveryCandidateView) return;
     setRunBusy(true);
@@ -3801,7 +3909,10 @@ export function ProjectDetailView({
                     ? { childRunId: input.childRunId }
                     : {}),
                   responsibility: {
-                    kind: "aggregate" as const,
+                    kind: input.responsibilityKind ?? "unknown",
+                    ...(input.responsibilityId
+                      ? { id: input.responsibilityId }
+                      : {}),
                     summary:
                       input.reworkScope === "boundary-changing"
                         ? "The Product Baseline, Repository, or Pipeline boundary must change."
@@ -3813,6 +3924,46 @@ export function ProjectDetailView({
         },
       });
       setDeliveryCandidateView(decided);
+      const refreshed = await window.sandcastle.runtime.inspectRun(
+        selectedRun.run.id,
+      );
+      setSelectedRun(refreshed);
+      await refreshRuns();
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const recoverHumanRelease = async (input: {
+    readonly decisionId: string;
+    readonly authorityKind:
+      | "work-package-version"
+      | "test-rework-run"
+      | "candidate-input-recheck";
+    readonly authorityId: string;
+  }): Promise<void> => {
+    if (!selectedRun || !deliveryCandidateView) return;
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    try {
+      const recovered = await window.sandcastle.runtime.executeDeliveryCommand({
+        commandId: globalThis.crypto.randomUUID(),
+        command: {
+          type: "delivery.release.recover",
+          decisionId: input.decisionId,
+          candidateId: deliveryCandidateView.id,
+          expectedCandidateHash: deliveryCandidateView.manifestHash,
+          authority: {
+            kind: input.authorityKind,
+            id: input.authorityId,
+          },
+        },
+      });
+      setDeliveryCandidateView(recovered);
       const refreshed = await window.sandcastle.runtime.inspectRun(
         selectedRun.run.id,
       );
@@ -4371,6 +4522,7 @@ export function ProjectDetailView({
             busy={runBusy}
             diagnostic={deliveryCandidateDiagnostic}
             onDecision={(input) => void decideHumanRelease(input)}
+            onRecovery={(input) => void recoverHumanRelease(input)}
             view={deliveryCandidateView}
           />
           <ReviewTopicsPanel topics={reviewTopics} />

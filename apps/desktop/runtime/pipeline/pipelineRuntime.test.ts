@@ -919,7 +919,7 @@ describe("Pipeline Runtime", () => {
     }
   });
 
-  it("owns Candidate and Human release transitions including atomic boundary-changing Fork rollback", async () => {
+  it("owns Candidate and Human release transitions while same-boundary rework stays blocked", async () => {
     const fixedNow = "2026-08-01T00:00:00.000Z";
     const fixture = setup(
       createScriptedExecutionAdapter(),
@@ -1109,161 +1109,216 @@ describe("Pipeline Runtime", () => {
         candidateHash: "a".repeat(64),
         decisionId: `decision:${sameBoundary.run.id}`,
         decision: "changes-requested",
-        reworkNodeRunId: sameBoundaryCandidate.id,
         decidedAt: fixedNow,
       });
       raw.exec("COMMIT");
-      assert.equal(
-        pipeline.inspectRun(sameBoundary.run.id).run.status,
-        "recovering",
-      );
       const reworkView = pipeline.inspectRun(sameBoundary.run.id);
+      assert.equal(reworkView.run.status, "blocked");
       assert.equal(
         reworkView.nodes.find((node) => node.id === sameBoundaryCandidate.id)
           ?.status,
-        "ready",
+        "succeeded",
       );
       assert.equal(
         reworkView.nodes.find((node) => node.id === sameBoundaryHumanRelease.id)
           ?.status,
+        "blocked",
+      );
+      assert.equal(reworkView.continuationPlan, null);
+
+      raw.exec("BEGIN IMMEDIATE");
+      pipeline.activateHumanReleaseReworkInTransaction({
+        runId: sameBoundary.run.id,
+        humanReleaseNodeRunId: sameBoundaryHumanRelease.id,
+        decisionId: `decision:${sameBoundary.run.id}`,
+        targetNodeRunId: sameBoundaryCandidate.id,
+        activatedAt: fixedNow,
+      });
+      raw.exec("COMMIT");
+      const recovering = pipeline.inspectRun(sameBoundary.run.id);
+      assert.equal(recovering.run.status, "recovering");
+      assert.equal(
+        recovering.nodes.find((node) => node.id === sameBoundaryCandidate.id)
+          ?.status,
+        "ready",
+      );
+      assert.equal(
+        recovering.nodes.find((node) => node.id === sameBoundaryHumanRelease.id)
+          ?.status,
         "queued",
       );
       assert.equal(
-        reworkView.continuationPlan?.targetNodeRunId,
+        recovering.continuationPlan?.targetNodeRunId,
         sameBoundaryCandidate.id,
       );
+    } finally {
+      raw.close();
+      fixture.database.close();
+    }
+  });
 
-      const boundaryChanging = await createWaitingRun();
-      const boundaryChildRunId = `confirmed-child:${boundaryChanging.run.id}`;
-      const boundaryChildSnapshotId = `confirmed-child-snapshot:${boundaryChanging.run.id}`;
-      raw.exec("PRAGMA foreign_keys = OFF");
-      raw
+  it("accepts only a verified-human Product Baseline confirmation as a boundary-changing child", async () => {
+    const fixedNow = "2026-08-01T00:00:00.000Z";
+    const fixture = setup(
+      createScriptedExecutionAdapter(),
+      (positionId) => ({
+        nodes: [
+          {
+            id: "start",
+            type: "start",
+            name: "Start",
+            handlerKindId: "run-start@1",
+          },
+          {
+            id: "candidate",
+            type: "ai-task",
+            name: "Delivery Candidate",
+            positionId,
+            handlerKindId: "delivery-candidate@1",
+          },
+          {
+            id: "human-release",
+            type: "human-approval",
+            name: "Human release",
+            positionId,
+            handlerKindId: "human-release@1",
+          },
+          {
+            id: "complete",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          { from: "start", to: "candidate" },
+          { from: "candidate", to: "human-release" },
+          { from: "human-release", to: "complete" },
+        ],
+      }),
+      () => new Date(fixedNow),
+    );
+    const raw = new DatabaseSync(fixture.database.path);
+    try {
+      const { actor, started } = formalizeAndStart({
+        database: fixture.database,
+        projectId: fixture.project.id,
+        departmentId: fixture.department.id,
+      });
+      const source = fixture.database.pipelineRuntime.inspectRun(
+        started.run.id,
+      );
+      const session = fixture.database.interaction.createSession({
+        projectId: fixture.project.id,
+        mode: "consultation",
+      });
+      fixture.database.interaction.addParticipant({
+        sessionId: session.id,
+        participantType: "ai-member",
+        participantRef: fixture.position.aiMember.id,
+        role: "product-manager",
+      });
+      const proposalRow = raw
         .prepare(
-          "UPDATE department_runs SET product_baseline_id = 'baseline-source' WHERE id = ?",
+          `SELECT proposals.revision, revisions.content_json AS contentJson
+             FROM product_proposals AS proposals
+             JOIN product_proposal_revisions AS revisions
+               ON revisions.id = proposals.current_revision_id
+            WHERE proposals.project_id = ?`,
         )
-        .run(boundaryChanging.run.id);
-      raw
-        .prepare(
-          `INSERT INTO department_runs(
-           id, project_id, department_id, status, created_at,
-           pipeline_version_id, snapshot_revision_id, revision, updated_at,
-           parent_run_id, forked_from_snapshot_revision_id, product_baseline_id
-         ) VALUES (?, ?, ?, 'ready', ?, ?, ?, 0, ?, ?, ?, 'baseline-child')`,
-        )
-        .run(
-          boundaryChildRunId,
-          boundaryChanging.run.projectId,
-          boundaryChanging.run.departmentId,
-          fixedNow,
-          boundaryChanging.run.pipelineVersionId,
-          boundaryChildSnapshotId,
-          fixedNow,
-          boundaryChanging.run.id,
-          boundaryChanging.snapshot.id,
-        );
-      raw
-        .prepare(
-          `INSERT INTO run_snapshot_revisions(
-           id, run_id, revision, parent_revision, schema_version,
-           canonical_json, hash, created_at
-         ) SELECT ?, ?, 1, NULL, schema_version, canonical_json, hash, ?
-             FROM run_snapshot_revisions WHERE id = ? AND run_id = ?`,
-        )
-        .run(
-          boundaryChildSnapshotId,
-          boundaryChildRunId,
-          fixedNow,
-          boundaryChanging.snapshot.id,
-          boundaryChanging.run.id,
-        );
+        .get(fixture.project.id) as {
+        readonly revision: number;
+        readonly contentJson: string;
+      };
+      const revised = fixture.database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "boundary-child-revise",
+        actor,
+        consumerId: "pipeline-runtime-test",
+        expectedRevision: proposalRow.revision,
+        command: {
+          type: "product.proposal.revise",
+          projectId: fixture.project.id,
+          producerSessionId: session.id,
+          content: {
+            ...(JSON.parse(proposalRow.contentJson) as Record<string, unknown>),
+            scope: ["The published no-Agent graph", "A changed boundary"],
+          } as never,
+        },
+      });
+      assert.equal(revised.status, "succeeded", JSON.stringify(revised));
+      if (revised.status !== "succeeded" || !revised.value.proposal) return;
+      const awaiting = fixture.database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "boundary-child-awaiting",
+        actor,
+        consumerId: "pipeline-runtime-test",
+        expectedRevision: revised.value.proposal.revision,
+        command: {
+          type: "product.proposal.mark-awaiting-confirmation",
+          projectId: fixture.project.id,
+          proposalRevisionId: revised.value.proposal.currentRevision.id,
+          proposalHash: revised.value.proposal.currentRevision.hash,
+        },
+      });
+      assert.equal(awaiting.status, "succeeded");
+      if (awaiting.status !== "succeeded" || !awaiting.value.proposal) return;
+      const childConfirmation = fixture.database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "boundary-child-confirm",
+        actor,
+        consumerId: "pipeline-runtime-test",
+        expectedRevision: awaiting.value.proposal.revision,
+        command: {
+          type: "confirm-product-baseline",
+          projectId: fixture.project.id,
+          departmentId: fixture.department.id,
+          forkSourceRunId: source.run.id,
+          forkSourceSnapshotRevisionId: source.snapshot.id,
+          proposalRevisionId: awaiting.value.proposal.currentRevision.id,
+          proposalHash: awaiting.value.proposal.currentRevision.hash,
+        },
+      });
+      assert.equal(childConfirmation.status, "succeeded");
+      if (childConfirmation.status !== "succeeded") return;
+      const child = childConfirmation.value.formalRuns.find(
+        (run) => run.parentRunId === source.run.id,
+      );
+      assert.ok(child);
+
       raw.exec("BEGIN IMMEDIATE");
-      pipeline.validateReleaseBoundaryChildInTransaction({
-        sourceRunId: boundaryChanging.run.id,
-        sourceSnapshotRevisionId: boundaryChanging.snapshot.id,
-        childRunId: boundaryChildRunId,
-      });
-      pipeline.applyHumanReleaseDecisionInTransaction({
-        runId: boundaryChanging.run.id,
-        humanReleaseNodeRunId: boundaryChanging.nodes.find(
-          (node) => node.pipelineNodeId === "human-release",
-        )!.id,
-        candidateId: `candidate:${boundaryChanging.run.id}`,
-        candidateHash: "a".repeat(64),
-        decisionId: `decision:${boundaryChanging.run.id}`,
-        decision: "changes-requested",
-        childRunId: boundaryChildRunId,
-        decidedAt: fixedNow,
-      });
+      fixture.database.pipelineRuntime.validateReleaseBoundaryChildInTransaction(
+        {
+          sourceRunId: source.run.id,
+          sourceSnapshotRevisionId: source.snapshot.id,
+          childRunId: child.runId,
+        },
+      );
       raw.exec("COMMIT");
-      assert.equal(
-        pipeline.inspectRun(boundaryChanging.run.id).run.status,
-        "superseded",
-      );
-      assert.equal(
-        pipeline.inspectRun(boundaryChildRunId).run.parentRunId,
-        boundaryChanging.run.id,
-      );
 
-      const rolledBack = await createWaitingRun();
-      const rolledBackChildRunId = `confirmed-child:${rolledBack.run.id}`;
-      const rolledBackChildSnapshotId = `confirmed-child-snapshot:${rolledBack.run.id}`;
       raw
         .prepare(
-          "UPDATE department_runs SET product_baseline_id = 'baseline-source' WHERE id = ?",
+          `DELETE FROM runtime_audit_records
+            WHERE command_id = 'boundary-child-confirm'
+              AND action = 'product.baseline.confirmed'`,
         )
-        .run(rolledBack.run.id);
-      raw
-        .prepare(
-          `INSERT INTO department_runs(
-           id, project_id, department_id, status, created_at,
-           pipeline_version_id, snapshot_revision_id, revision, updated_at,
-           parent_run_id, forked_from_snapshot_revision_id, product_baseline_id
-         ) VALUES (?, ?, ?, 'ready', ?, ?, ?, 0, ?, ?, ?, 'baseline-child')`,
-        )
-        .run(
-          rolledBackChildRunId,
-          rolledBack.run.projectId,
-          rolledBack.run.departmentId,
-          fixedNow,
-          rolledBack.run.pipelineVersionId,
-          rolledBackChildSnapshotId,
-          fixedNow,
-          rolledBack.run.id,
-          rolledBack.snapshot.id,
-        );
-      raw
-        .prepare(
-          `INSERT INTO run_snapshot_revisions(
-           id, run_id, revision, parent_revision, schema_version,
-           canonical_json, hash, created_at
-         ) SELECT ?, ?, 1, NULL, schema_version, canonical_json, hash, ?
-             FROM run_snapshot_revisions WHERE id = ? AND run_id = ?`,
-        )
-        .run(
-          rolledBackChildSnapshotId,
-          rolledBackChildRunId,
-          fixedNow,
-          rolledBack.snapshot.id,
-          rolledBack.run.id,
-        );
+        .run();
       raw.exec("BEGIN IMMEDIATE");
-      pipeline.applyHumanReleaseDecisionInTransaction({
-        runId: rolledBack.run.id,
-        humanReleaseNodeRunId: rolledBack.nodes.find(
-          (node) => node.pipelineNodeId === "human-release",
-        )!.id,
-        candidateId: `candidate:${rolledBack.run.id}`,
-        candidateHash: "a".repeat(64),
-        decisionId: `decision:${rolledBack.run.id}`,
-        decision: "changes-requested",
-        childRunId: rolledBackChildRunId,
-        decidedAt: fixedNow,
-      });
-      raw.exec("ROLLBACK");
-      assert.equal(
-        pipeline.inspectRun(rolledBack.run.id).run.status,
-        "waiting-human-release",
+      assert.throws(
+        () =>
+          fixture.database.pipelineRuntime.validateReleaseBoundaryChildInTransaction(
+            {
+              sourceRunId: source.run.id,
+              sourceSnapshotRevisionId: source.snapshot.id,
+              childRunId: child.runId,
+            },
+          ),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "RELEASE_BOUNDARY_CHILD_INVALID",
       );
+      raw.exec("ROLLBACK");
     } finally {
       raw.close();
       fixture.database.close();
@@ -1337,11 +1392,28 @@ describe("Pipeline Runtime", () => {
           `INSERT INTO node_attempts(
            id, node_run_id, attempt_number, snapshot_revision_id, reason,
            status, structured_result_json, failure_code, failure_message,
-           created_at, started_at, completed_at
+           created_at, started_at, completed_at, lease_id, lease_owner,
+           lease_expires_at
          ) VALUES ('critical-security-attempt', ?, 1, ?, 'initial', 'running',
-                   NULL, NULL, NULL, ?, ?, NULL)`,
+                   NULL, NULL, NULL, ?, ?, NULL, 'critical-security-lease',
+                   'quality-gate-worker', '2026-07-31T01:00:00.000Z')`,
         )
         .run(security.id, started.snapshot.id, fixedNow, fixedNow);
+      raw
+        .prepare(
+          `INSERT INTO execution_leases(
+             id, target_kind, target_id, lease_kind, operation_key,
+             execution_epoch, fence_token, worker_id, issued_at, expires_at,
+             renewed_at, released_at, cancel_requested
+           ) VALUES (
+             'critical-security-lease', 'node-attempt',
+             'critical-security-attempt', 'execution',
+             'critical-security-operation', 1, 'critical-security-fence',
+             'quality-gate-worker', ?, '2026-07-31T01:00:00.000Z',
+             NULL, NULL, 0
+           )`,
+        )
+        .run(fixedNow);
 
       raw.exec("BEGIN IMMEDIATE");
       pipeline.rejectCriticalRiskEscalationInTransaction({
@@ -1367,6 +1439,32 @@ describe("Pipeline Runtime", () => {
         blocked.nodes.find((node) => node.id === security.id)?.failure?.code,
         "CRITICAL_RISK_ESCALATION_REJECTED",
       );
+      assert.equal(
+        (
+          raw
+            .prepare(
+              "SELECT released_at AS releasedAt FROM execution_leases WHERE id = 'critical-security-lease'",
+            )
+            .get() as { readonly releasedAt: string | null }
+        ).releasedAt,
+        fixedNow,
+      );
+      assert.throws(
+        () =>
+          pipeline.completeClaimedAttempt({
+            runId: started.run.id,
+            nodeRunId: security.id,
+            attemptId: "critical-security-attempt",
+            leaseId: "critical-security-lease",
+            workerId: "quality-gate-worker",
+            result: { late: true },
+          }),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "LEASE_OWNERSHIP_INVALID",
+      );
+      assert.equal(pipeline.inspectRun(started.run.id).run.status, "blocked");
 
       raw
         .prepare(
@@ -1375,7 +1473,12 @@ describe("Pipeline Runtime", () => {
         .run(security.id);
       raw
         .prepare(
-          "UPDATE node_attempts SET status = 'running', failure_code = NULL, failure_message = NULL, completed_at = NULL WHERE id = 'critical-security-attempt'",
+          "UPDATE node_attempts SET status = 'running', failure_code = NULL, failure_message = NULL, completed_at = NULL, lease_expires_at = '2026-07-31T01:00:00.000Z' WHERE id = 'critical-security-attempt'",
+        )
+        .run();
+      raw
+        .prepare(
+          "UPDATE execution_leases SET released_at = NULL WHERE id = 'critical-security-lease'",
         )
         .run();
       raw
@@ -1395,6 +1498,16 @@ describe("Pipeline Runtime", () => {
           .inspectRun(started.run.id)
           .nodes.find((node) => node.id === security.id)?.status,
         "running",
+      );
+      assert.equal(
+        (
+          raw
+            .prepare(
+              "SELECT released_at AS releasedAt FROM execution_leases WHERE id = 'critical-security-lease'",
+            )
+            .get() as { readonly releasedAt: string | null }
+        ).releasedAt,
+        null,
       );
     } finally {
       raw.close();

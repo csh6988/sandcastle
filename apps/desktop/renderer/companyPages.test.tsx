@@ -185,6 +185,8 @@ describe("Delivery Candidate quality", () => {
     assert.match(markup, /accept-delivery-candidate/);
     assert.match(markup, /reject-delivery-candidate/);
     assert.match(markup, /request-delivery-changes/);
+    assert.match(markup, /Exact responsibility kind/);
+    assert.match(markup, /Exact responsibility ID/);
     assert.match(markup, /1 immutable evidence reference/);
     assert.equal(deliveryCandidateIdFromRun(run), view.id);
     const acceptedMarkup = renderToStaticMarkup(
@@ -255,6 +257,9 @@ describe("Delivery Candidate quality", () => {
       const childRun = container.querySelector(
         "#delivery-release-child-run-delivery-candidate-boundary-change",
       ) as HTMLInputElement;
+      const responsibilityId = container.querySelector(
+        "#delivery-release-responsibility-id-delivery-candidate-boundary-change",
+      ) as HTMLInputElement;
       await act(async () => {
         Object.getOwnPropertyDescriptor(
           dom.window.HTMLInputElement.prototype,
@@ -265,6 +270,13 @@ describe("Delivery Candidate quality", () => {
         );
         childRun.dispatchEvent(
           new dom.window.Event("change", { bubbles: true }),
+        );
+        Object.getOwnPropertyDescriptor(
+          dom.window.HTMLInputElement.prototype,
+          "value",
+        )?.set?.call(responsibilityId, "work-package-version-1");
+        responsibilityId.dispatchEvent(
+          new dom.window.InputEvent("input", { bubbles: true }),
         );
       });
       assert.equal(
@@ -284,6 +296,8 @@ describe("Delivery Candidate quality", () => {
           evidenceRefs: ["artifact-version:artifact-version-1"],
           reworkScope: "boundary-changing",
           childRunId: "confirmed-child-run-1",
+          responsibilityKind: "work-package",
+          responsibilityId: "work-package-version-1",
         },
       ]);
     } finally {

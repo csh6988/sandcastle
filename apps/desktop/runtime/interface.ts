@@ -5042,9 +5042,29 @@ export const HumanReleaseDecideEnvelopeCommandSchema = z
   })
   .strict();
 
+export const HumanReleaseRecoverEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("delivery.release.recover"),
+    decisionId: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
+    expectedCandidateHash: Sha256Schema,
+    authority: z
+      .object({
+        kind: z.enum([
+          "work-package-version",
+          "test-rework-run",
+          "candidate-input-recheck",
+        ]),
+        id: z.string().trim().min(1),
+      })
+      .strict(),
+  })
+  .strict();
+
 export type DeliveryEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateAssembleEnvelopeCommandSchema>
-  | z.infer<typeof HumanReleaseDecideEnvelopeCommandSchema>;
+  | z.infer<typeof HumanReleaseDecideEnvelopeCommandSchema>
+  | z.infer<typeof HumanReleaseRecoverEnvelopeCommandSchema>;
 
 export type DeliveryQualityEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateInputFreezeEnvelopeCommandSchema>
@@ -5222,6 +5242,7 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   CriticalRiskEscalationDecideEnvelopeCommandSchema,
   DeliveryCandidateAssembleEnvelopeCommandSchema,
   HumanReleaseDecideEnvelopeCommandSchema,
+  HumanReleaseRecoverEnvelopeCommandSchema,
   ArtifactRegisterEnvelopeCommandSchema,
   ArtifactFinalizeEnvelopeCommandSchema,
   ArtifactSupersedeEnvelopeCommandSchema,
