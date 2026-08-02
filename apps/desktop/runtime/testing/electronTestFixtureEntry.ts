@@ -319,13 +319,13 @@ const materializeCandidateQualityGates = (input: {
   readonly tests: TestRuntime;
   readonly commandRegistry: CompanyCommandRegistry;
   readonly seeded: IntegrationAuthorityFixtureResult;
-}): void => {
+}): boolean => {
   const receiptPath = join(
     input.config.evidenceDirectory,
     "runtime",
     "candidate-quality-gates.json",
   );
-  if (existsSync(receiptPath)) return;
+  if (existsSync(receiptPath)) return true;
   const testRunId = `test:${input.seeded.runId}:${input.seeded.testNodeRunId}`;
   const testAuthority = input.tests.downstreamAuthority(testRunId);
   const execute = <Value>(
@@ -446,6 +446,26 @@ const materializeCandidateQualityGates = (input: {
       },
     },
   );
+  input.database
+    .prepare(
+      "UPDATE node_runs SET status = 'succeeded', updated_at = ? WHERE id = ?",
+    )
+    .run(input.config.fakeClock, candidateNodeRunId);
+  input.database
+    .prepare(
+      "UPDATE node_attempts SET status = 'succeeded', completed_at = ? WHERE id = ?",
+    )
+    .run(input.config.fakeClock, candidateNodeAttemptId);
+  if (
+    candidate.manifest.risk.tier === "critical" &&
+    !input.database
+      .prepare(
+        "SELECT 1 FROM candidate_critical_escalations WHERE candidate_input_id = ?",
+      )
+      .get(candidate.id)
+  ) {
+    return false;
+  }
   const gateResultIds: Record<"security" | "operability", string> = {
     security: "",
     operability: "",
@@ -727,6 +747,16 @@ const materializeCandidateQualityGates = (input: {
     if (candidateGateResult.result !== "PASS") {
       throw new Error(`${kind} fixture Gate did not produce PASS.`);
     }
+    input.database
+      .prepare(
+        "UPDATE node_runs SET status = 'succeeded', updated_at = ? WHERE id = ?",
+      )
+      .run(input.config.fakeClock, sourceNodeRunId);
+    input.database
+      .prepare(
+        "UPDATE node_attempts SET status = 'succeeded', completed_at = ? WHERE id = ?",
+      )
+      .run(input.config.fakeClock, sourceNodeAttemptId);
     gateResultIds[kind] = candidateGateResult.id;
   }
   const deliveryCandidateId = "fixture-delivery-candidate";
@@ -761,14 +791,28 @@ const materializeCandidateQualityGates = (input: {
       `INSERT INTO node_runs(
          id, run_id, pipeline_node_id, node_type, status, attempt_count,
          required_dependency_ids_json, created_at, updated_at, handler_kind_id
-       ) VALUES (?, ?, ?, 'human-approval', 'queued', 0, '[]', ?, ?, 'human-release@1')`,
+       ) VALUES (?, ?, ?, 'human-approval', 'queued', 0, ?, ?, ?, 'human-release@1')`,
     )
     .run(
       humanReleaseNodeRunId,
       input.seeded.runId,
       humanReleaseNodeRunId,
+      canonicalJson([deliveryCandidateNodeRunId]),
       input.config.fakeClock,
       input.config.fakeClock,
+    );
+  input.database
+    .prepare(
+      `UPDATE node_runs
+          SET status = 'queued', result_json = NULL, failure_code = NULL,
+              failure_message = NULL, required_dependency_ids_json = ?,
+              updated_at = ?
+        WHERE run_id = ? AND handler_kind_id = 'run-complete@1'`,
+    )
+    .run(
+      canonicalJson([humanReleaseNodeRunId]),
+      input.config.fakeClock,
+      input.seeded.runId,
     );
   input.database
     .prepare(
@@ -828,6 +872,7 @@ const materializeCandidateQualityGates = (input: {
       "Candidate Quality Gate fixture receipt must be mode 0600.",
     );
   }
+  return true;
 };
 
 const main = async (): Promise<void> => {
@@ -992,14 +1037,14 @@ const main = async (): Promise<void> => {
             const currentSeed = requireSeeded();
             const testRunId = `test:${currentSeed.runId}:${currentSeed.testNodeRunId}`;
             if (tests.inspect(testRunId).state === "passed") {
-              materializeCandidateQualityGates({
+              const complete = materializeCandidateQualityGates({
                 database,
                 config,
                 tests,
                 commandRegistry,
                 seeded: currentSeed,
               });
-              return;
+              if (complete) return;
             }
           } catch (error) {
             process.stderr.write(

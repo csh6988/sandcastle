@@ -906,6 +906,215 @@ describe("Quality Gate Runtime input", () => {
     fixture.database.close();
   });
 
+  it("atomically replays and rolls back a rejected critical-risk escalation Command", () => {
+    const fixture = openFixture();
+    const criticalCandidate = {
+      ...candidate,
+      id: "candidate-input-critical-rejected",
+      manifestHash: hash("candidate-input-critical-rejected"),
+      manifest: {
+        ...candidate.manifest,
+        candidateInputId: "candidate-input-critical-rejected",
+        risk: {
+          ...candidate.manifest.risk,
+          tier: "critical" as const,
+        },
+      },
+    } satisfies DeliveryCandidateInputView;
+    const rollbackCandidate = {
+      ...criticalCandidate,
+      id: "candidate-input-critical-rollback",
+      manifestHash: hash("candidate-input-critical-rollback"),
+      manifest: {
+        ...criticalCandidate.manifest,
+        candidateInputId: "candidate-input-critical-rollback",
+      },
+    } satisfies DeliveryCandidateInputView;
+    fixture.database.exec(`
+      CREATE TABLE quality_pipeline_markers(
+        candidate_input_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL
+      );
+    `);
+    const candidates = {
+      inspect: (candidateInputId: string) =>
+        candidateInputId === rollbackCandidate.id
+          ? rollbackCandidate
+          : criticalCandidate,
+      freeze: () => {
+        throw new Error("Candidate freeze is outside this escalation fixture.");
+      },
+    } as CandidateInputRuntime;
+    const runtime = openQualityGateRuntime(fixture.database, {
+      candidates,
+      pipelineRuntime: {
+        rejectCriticalRiskEscalationInTransaction: (input) => {
+          fixture.database
+            .prepare(
+              "INSERT INTO quality_pipeline_markers(candidate_input_id, run_id) VALUES (?, ?)",
+            )
+            .run(input.candidateInputId, input.runId);
+        },
+      },
+      events: fixture.events,
+      clock: () => new Date(candidate.createdAt),
+    });
+    const openRegistry = () =>
+      openCompanyCommandRegistry(
+        fixture.database,
+        openProjectConfiguration(fixture.database),
+        undefined,
+        () => new Date(candidate.createdAt),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        candidates,
+        runtime,
+      );
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "critical-escalation-reject-command",
+      actor: {
+        type: "human" as const,
+        id: "local-release-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      consumerId: "desktop-critical-escalation",
+      command: {
+        type: "quality-gate.critical-escalation.decide" as const,
+        escalationId: "critical-escalation-rejected",
+        candidateInputId: criticalCandidate.id,
+        expectedCandidateInputHash: criticalCandidate.manifestHash,
+        decision: "reject" as const,
+        reason:
+          "The frozen critical-risk evidence is not authorized to continue.",
+        evidenceRefs: ["artifact-version:artifact-evidence-1"],
+      },
+    };
+
+    const first = openRegistry().execute(envelope);
+    assert.equal(first.status, "succeeded", JSON.stringify(first));
+    assert.deepEqual(openRegistry().execute(envelope), first);
+    assert.deepEqual(
+      {
+        escalation: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM candidate_critical_escalations WHERE candidate_input_id = ?",
+            )
+            .get(criticalCandidate.id) as { readonly count: number }
+        ).count,
+        pipeline: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM quality_pipeline_markers WHERE candidate_input_id = ?",
+            )
+            .get(criticalCandidate.id) as { readonly count: number }
+        ).count,
+        audit: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ?",
+            )
+            .get(envelope.commandId) as { readonly count: number }
+        ).count,
+        outbox: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_event_outbox WHERE type = 'quality-gate.critical-escalation.rejected' AND json_extract(scope_json, '$.commandId') = ?",
+            )
+            .get(envelope.commandId) as { readonly count: number }
+        ).count,
+        receipt: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+            )
+            .get(envelope.commandId) as { readonly count: number }
+        ).count,
+      },
+      { escalation: 1, pipeline: 1, audit: 1, outbox: 1, receipt: 1 },
+    );
+
+    const rollbackEnvelope = {
+      ...envelope,
+      commandId: "critical-escalation-rollback-command",
+      command: {
+        ...envelope.command,
+        escalationId: "critical-escalation-rollback",
+        candidateInputId: rollbackCandidate.id,
+        expectedCandidateInputHash: rollbackCandidate.manifestHash,
+      },
+    };
+    fixture.database.exec(`
+      CREATE TRIGGER fail_critical_escalation_receipt
+      BEFORE INSERT ON command_deduplication
+      WHEN NEW.command_id = '${rollbackEnvelope.commandId}'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced critical escalation receipt failure');
+      END;
+    `);
+    assert.throws(
+      () => openRegistry().execute(rollbackEnvelope),
+      /forced critical escalation receipt failure/,
+    );
+    assert.deepEqual(
+      {
+        escalation: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM candidate_critical_escalations WHERE candidate_input_id = ?",
+            )
+            .get(rollbackCandidate.id) as { readonly count: number }
+        ).count,
+        pipeline: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM quality_pipeline_markers WHERE candidate_input_id = ?",
+            )
+            .get(rollbackCandidate.id) as { readonly count: number }
+        ).count,
+        audit: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_audit_records WHERE command_id = ?",
+            )
+            .get(rollbackEnvelope.commandId) as { readonly count: number }
+        ).count,
+        outbox: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM runtime_event_outbox WHERE json_extract(scope_json, '$.commandId') = ?",
+            )
+            .get(rollbackEnvelope.commandId) as { readonly count: number }
+        ).count,
+        receipt: (
+          fixture.database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM command_deduplication WHERE command_id = ?",
+            )
+            .get(rollbackEnvelope.commandId) as { readonly count: number }
+        ).count,
+      },
+      { escalation: 0, pipeline: 0, audit: 0, outbox: 0, receipt: 0 },
+    );
+    fixture.database.close();
+  });
+
   it("rejects caller down-tiering and an ineligible self-review Session", () => {
     const fixture = openFixture();
     seedReview(fixture.database, {

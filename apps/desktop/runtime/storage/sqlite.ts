@@ -535,6 +535,7 @@ export const openCompanyDatabase = (
   });
   const qualityGates = openQualityGateRuntime(database, {
     candidates: candidateInputs,
+    pipelineRuntime,
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });

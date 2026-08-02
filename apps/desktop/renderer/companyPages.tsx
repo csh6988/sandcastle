@@ -2525,13 +2525,54 @@ const candidateRiskTier = (view: CandidateQualityGateView): string => {
     : "unknown";
 };
 
+const criticalRiskEvidenceRefs = (
+  view: CandidateQualityGateView,
+): readonly string[] => {
+  const manifest = view.candidateInput.manifest;
+  if (typeof manifest !== "object" || manifest === null) {
+    return [`delivery-candidate-input:${view.candidateInput.id}`];
+  }
+  const risk = (manifest as { readonly risk?: unknown }).risk;
+  if (typeof risk !== "object" || risk === null) {
+    return [`delivery-candidate-input:${view.candidateInput.id}`];
+  }
+  const factors = (risk as { readonly factors?: unknown }).factors;
+  const refs = Array.isArray(factors)
+    ? factors.flatMap((factor) => {
+        if (typeof factor !== "object" || factor === null) return [];
+        const evidenceRefs = (factor as { readonly evidenceRefs?: unknown })
+          .evidenceRefs;
+        return Array.isArray(evidenceRefs)
+          ? evidenceRefs.filter(
+              (ref): ref is string =>
+                typeof ref === "string" && ref.trim().length > 0,
+            )
+          : [];
+      })
+    : [];
+  return refs.length > 0
+    ? [...new Set(refs)].sort()
+    : [`delivery-candidate-input:${view.candidateInput.id}`];
+};
+
 export function CandidateQualityGatePanel({
+  busy,
   diagnostic,
+  onCriticalEscalation,
   view,
 }: {
+  readonly busy: boolean;
   readonly diagnostic: string | null;
+  readonly onCriticalEscalation: (input: {
+    readonly decision: "authorize-gate-continuation" | "reject";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+  }) => void;
   readonly view: CandidateQualityGateView | null;
 }) {
+  const [escalationReason, setEscalationReason] = useState(
+    "Reviewed the immutable critical-risk evidence in this local session.",
+  );
   if (!view) {
     return diagnostic ? (
       <section className="create-panel" data-candidate-quality-gates>
@@ -2540,6 +2581,8 @@ export function CandidateQualityGatePanel({
       </section>
     ) : null;
   }
+  const riskTier = candidateRiskTier(view);
+  const escalationEvidenceRefs = criticalRiskEvidenceRefs(view);
   return (
     <section
       className="create-panel"
@@ -2561,13 +2604,72 @@ export function CandidateQualityGatePanel({
         </div>
         <div>
           <dt>Risk tier</dt>
-          <dd>{candidateRiskTier(view)}</dd>
+          <dd>{riskTier}</dd>
+        </div>
+        <div>
+          <dt>Critical-risk escalation</dt>
+          <dd>
+            {view.criticalEscalation
+              ? `${view.criticalEscalation.id} · ${view.criticalEscalation.decision}`
+              : riskTier === "critical"
+                ? "awaiting verified human"
+                : "not required"}
+          </dd>
         </div>
         <div>
           <dt>Downstream authority</dt>
           <dd>{view.authority?.authorityHash ?? "blocked"}</dd>
         </div>
       </dl>
+      {view.criticalEscalation ? (
+        <p data-critical-risk-escalation={view.criticalEscalation.id}>
+          {view.criticalEscalation.reason}
+        </p>
+      ) : riskTier === "critical" ? (
+        <div className="form" data-critical-risk-escalation-controls>
+          <label htmlFor={`critical-risk-reason-${view.candidateInput.id}`}>
+            Escalation reason
+          </label>
+          <textarea
+            id={`critical-risk-reason-${view.candidateInput.id}`}
+            onChange={(event) => setEscalationReason(event.target.value)}
+            value={escalationReason}
+          />
+          <small>
+            {escalationEvidenceRefs.length} immutable risk evidence reference(s)
+          </small>
+          <div className="button-row">
+            <button
+              disabled={busy || escalationReason.trim().length === 0}
+              id="authorize-critical-risk-continuation"
+              onClick={() =>
+                onCriticalEscalation({
+                  decision: "authorize-gate-continuation",
+                  reason: escalationReason,
+                  evidenceRefs: escalationEvidenceRefs,
+                })
+              }
+              type="button"
+            >
+              Authorize Gate continuation
+            </button>
+            <button
+              disabled={busy || escalationReason.trim().length === 0}
+              id="reject-critical-risk-continuation"
+              onClick={() =>
+                onCriticalEscalation({
+                  decision: "reject",
+                  reason: escalationReason,
+                  evidenceRefs: escalationEvidenceRefs,
+                })
+              }
+              type="button"
+            >
+              Reject continuation
+            </button>
+          </div>
+        </div>
+      ) : null}
       {diagnostic ? <p>{diagnostic}</p> : null}
       <div className="review-list">
         {view.gateResults.map((result) => (
@@ -2621,6 +2723,7 @@ export function DeliveryCandidatePanel({
     readonly reason: string;
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
+    readonly childRunId?: string;
   }) => void;
 }) {
   const [reason, setReason] = useState(
@@ -2629,6 +2732,7 @@ export function DeliveryCandidatePanel({
   const [reworkScope, setReworkScope] = useState<
     "same-boundary" | "boundary-changing"
   >("same-boundary");
+  const [childRunId, setChildRunId] = useState("");
   if (!view) {
     return diagnostic ? (
       <section className="create-panel" data-delivery-candidate>
@@ -2645,6 +2749,10 @@ export function DeliveryCandidatePanel({
       reason,
       evidenceRefs,
       ...(decision === "changes-requested" ? { reworkScope } : {}),
+      ...(decision === "changes-requested" &&
+      reworkScope === "boundary-changing"
+        ? { childRunId: childRunId.trim() }
+        : {}),
     });
   return (
     <section
@@ -2701,6 +2809,18 @@ export function DeliveryCandidatePanel({
             <option value="same-boundary">Same boundary</option>
             <option value="boundary-changing">Boundary changing</option>
           </select>
+          {reworkScope === "boundary-changing" ? (
+            <>
+              <label htmlFor={`delivery-release-child-run-${view.id}`}>
+                Confirmed child Run ID
+              </label>
+              <input
+                id={`delivery-release-child-run-${view.id}`}
+                onInput={(event) => setChildRunId(event.currentTarget.value)}
+                value={childRunId}
+              />
+            </>
+          ) : null}
           <small>{evidenceRefs.length} immutable evidence reference(s)</small>
           <div className="button-row">
             <button
@@ -2720,7 +2840,12 @@ export function DeliveryCandidatePanel({
               Reject Candidate
             </button>
             <button
-              disabled={busy || reason.trim().length === 0}
+              disabled={
+                busy ||
+                reason.trim().length === 0 ||
+                (reworkScope === "boundary-changing" &&
+                  childRunId.trim().length === 0)
+              }
               id="request-delivery-changes"
               onClick={() => decide("changes-requested")}
               type="button"
@@ -3650,6 +3775,7 @@ export function ProjectDetailView({
     readonly reason: string;
     readonly evidenceRefs: readonly string[];
     readonly reworkScope?: "same-boundary" | "boundary-changing";
+    readonly childRunId?: string;
   }): Promise<void> => {
     if (!selectedRun || !deliveryCandidateView) return;
     setRunBusy(true);
@@ -3670,6 +3796,10 @@ export function ProjectDetailView({
             ? {
                 rework: {
                   scope: input.reworkScope ?? "same-boundary",
+                  ...(input.reworkScope === "boundary-changing" &&
+                  input.childRunId
+                    ? { childRunId: input.childRunId }
+                    : {}),
                   responsibility: {
                     kind: "aggregate" as const,
                     summary:
@@ -3683,6 +3813,43 @@ export function ProjectDetailView({
         },
       });
       setDeliveryCandidateView(decided);
+      const refreshed = await window.sandcastle.runtime.inspectRun(
+        selectedRun.run.id,
+      );
+      setSelectedRun(refreshed);
+      await refreshRuns();
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
+  const decideCriticalRiskEscalation = async (input: {
+    readonly decision: "authorize-gate-continuation" | "reject";
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+  }): Promise<void> => {
+    if (!selectedRun || !candidateQualityGateView) return;
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    try {
+      await window.sandcastle.runtime.executeCriticalRiskEscalationCommand({
+        commandId: globalThis.crypto.randomUUID(),
+        command: {
+          type: "quality-gate.critical-escalation.decide",
+          escalationId: globalThis.crypto.randomUUID(),
+          candidateInputId: candidateQualityGateView.candidateInput.id,
+          expectedCandidateInputHash:
+            candidateQualityGateView.candidateInput.manifestHash,
+          decision: input.decision,
+          reason: input.reason,
+          evidenceRefs: [...input.evidenceRefs],
+        },
+      });
+      await candidateQualityConnection.current?.resync();
       const refreshed = await window.sandcastle.runtime.inspectRun(
         selectedRun.run.id,
       );
@@ -4193,7 +4360,11 @@ export function ProjectDetailView({
             }
           />
           <CandidateQualityGatePanel
+            busy={runBusy}
             diagnostic={candidateQualityDiagnostic}
+            onCriticalEscalation={(input) =>
+              void decideCriticalRiskEscalation(input)
+            }
             view={candidateQualityGateView}
           />
           <DeliveryCandidatePanel

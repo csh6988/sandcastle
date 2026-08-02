@@ -7,6 +7,7 @@ import type {
 } from "../delivery/candidateInputRuntime.js";
 import type { RuntimeEvents } from "../events/subscription.js";
 import type { ActorRef } from "../interface.js";
+import type { PipelineRuntime } from "../pipeline/pipelineRuntime.js";
 
 export type CandidateGateKind = "security" | "operability";
 
@@ -296,6 +297,7 @@ export interface QualityGateRuntime {
   }) => CandidateGateExecutionView;
   readonly view: (candidateInputId: string) => {
     readonly candidateInput: DeliveryCandidateInputView;
+    readonly criticalEscalation: CriticalRiskEscalationDecision | null;
     readonly gateInputs: readonly CandidateGateInputView[];
     readonly gateResults: readonly CandidateGateResultView[];
     readonly authority: DeliveryCandidateInputGateAuthority | null;
@@ -610,6 +612,10 @@ export const openQualityGateRuntime = (
   database: DatabaseSync,
   options: {
     readonly candidates: Pick<CandidateInputRuntime, "inspect">;
+    readonly pipelineRuntime?: Pick<
+      PipelineRuntime,
+      "rejectCriticalRiskEscalationInTransaction"
+    >;
     readonly events?: Pick<RuntimeEvents, "append">;
     readonly clock?: () => Date;
   },
@@ -851,6 +857,20 @@ export const openQualityGateRuntime = (
           decisionHash,
           now,
         );
+      if (input.decision === "reject") {
+        if (!options.pipelineRuntime) {
+          throw new QualityGateRuntimeError(
+            "QUALITY_GATE_PIPELINE_RUNTIME_UNAVAILABLE",
+            "Critical-risk rejection requires the Pipeline Runtime transaction seam.",
+          );
+        }
+        options.pipelineRuntime.rejectCriticalRiskEscalationInTransaction({
+          runId: candidate.manifest.runId,
+          candidateInputId: candidate.id,
+          candidateInputNodeRunId: candidate.manifest.sourceNode.nodeRunId,
+          decidedAt: now,
+        });
+      }
       appendMutation({
         type:
           input.decision === "authorize-gate-continuation"
@@ -2435,6 +2455,7 @@ export const openQualityGateRuntime = (
     }
     return {
       candidateInput,
+      criticalEscalation: readCriticalEscalation(candidateInputId),
       gateInputs: gateInputIds.map(inspect),
       gateResults: resultIds.map(inspectResult),
       authority,

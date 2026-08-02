@@ -207,7 +207,7 @@ const readCandidateObservation = async () => {
   debuggerSession.attach("1.3");
   try {
     const result = await debuggerSession.sendCommand("Runtime.evaluate", {
-      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-candidate-quality-gates]");return panel?{candidateInputId:panel.getAttribute("data-candidate-input"),authorityId:panel.getAttribute("data-candidate-authority"),sync:panel.getAttribute("data-candidate-sync"),passGateCount:panel.querySelectorAll('[data-quality-gate-result="PASS"]').length,text:panel.textContent}:null})())`,
+      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-candidate-quality-gates]");return panel?{candidateInputId:panel.getAttribute("data-candidate-input"),authorityId:panel.getAttribute("data-candidate-authority"),sync:panel.getAttribute("data-candidate-sync"),criticalEscalationId:panel.querySelector("[data-critical-risk-escalation]")?.getAttribute("data-critical-risk-escalation")??null,authorizeCriticalVisible:Boolean(panel.querySelector("#authorize-critical-risk-continuation")),passGateCount:panel.querySelectorAll('[data-quality-gate-result="PASS"]').length,text:panel.textContent}:null})())`,
       returnByValue: true,
     });
     return JSON.parse(result.result.value);
@@ -402,7 +402,11 @@ const testScopeRiskFor = (seeded, operations) => {
         ),
       ].sort(),
     },
-    { id: "sandbox-boundary", present: false, evidenceRefs: [] },
+    {
+      id: "sandbox-boundary",
+      present: true,
+      evidenceRefs: ["test-capability:repository-boundary"],
+    },
     { id: "secret-environment-boundary", present: false, evidenceRefs: [] },
     {
       id: "user-visible-runtime",
@@ -495,6 +499,7 @@ const runInputFor = (seeded, caseRevisionHash, operations) => ({
     "main-ipc",
     "preload",
     "query-view",
+    "repository-boundary",
     "runtime-import-only",
     "runtime-child",
     "sqlite",
@@ -1093,6 +1098,63 @@ const run = async () => {
     type: "test-pass-authority.inspect",
     testRunId: route.testRunId,
   });
+  const candidateInputId = "fixture-delivery-candidate-input";
+  let candidateInspection;
+  for (let attempt = 0; attempt < 400 && !candidateInspection; attempt += 1) {
+    try {
+      candidateInspection = await query("fixture-candidate-input", {
+        type: "delivery-candidate-input.inspect",
+        candidateInputId,
+      });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  assert.ok(
+    candidateInspection,
+    `Critical Delivery Candidate Input was not materialized; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
+  );
+  const candidate = candidateInspection.view;
+  assert.equal(candidate.id, candidateInputId);
+  assert.equal(candidate.manifest.risk.tier, "critical");
+  assert.equal(
+    candidate.manifest.tests[0]?.passAuthorityHash,
+    downstream.view.passAuthorityHash,
+  );
+  const candidateRoute = {
+    ...route,
+    restoreOnLoad: true,
+    candidateInputId: candidate.id,
+  };
+  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
+  await waitForTitle("pass");
+  const awaitingCriticalEscalationObservation =
+    await waitForCandidateObservation(
+      (observation) =>
+        observation.candidateInputId === candidate.id &&
+        observation.criticalEscalationId === null &&
+        observation.authorizeCriticalVisible === true &&
+        observation.sync === "ready",
+    );
+  await clickElement("#authorize-critical-risk-continuation");
+  const authorizedCriticalEscalationObservation =
+    await waitForCandidateObservation(
+      (observation) =>
+        observation.criticalEscalationId ===
+          `${candidate.id}:critical-escalation` &&
+        observation.authorizeCriticalVisible === false &&
+        observation.sync === "ready",
+    );
+  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
+  await waitForTitle("pass");
+  const reloadedCriticalEscalationObservation =
+    await waitForCandidateObservation(
+      (observation) =>
+        observation.criticalEscalationId ===
+          `${candidate.id}:critical-escalation` &&
+        observation.authorizeCriticalVisible === false &&
+        observation.sync === "ready",
+    );
   const qualityReceiptPath = join(
     fixture.config.evidenceDirectory,
     "runtime",
@@ -1118,17 +1180,9 @@ const run = async () => {
     "electron-test-fixture",
     "Candidate fixture Lease worker must equal the authenticated Runtime connection principal.",
   );
-  const candidateInspection = await query("fixture-candidate-input", {
-    type: "delivery-candidate-input.inspect",
-    candidateInputId: qualityReceipt.candidateInputId,
-  });
-  const candidate = candidateInspection.view;
+  assert.equal(qualityReceipt.candidateInputId, candidate.id);
   assert.equal(candidate.manifestHash, qualityReceipt.candidateInputHash);
   assert.equal(candidate.manifest.risk.tier, qualityReceipt.candidateRiskTier);
-  assert.equal(
-    candidate.manifest.tests[0]?.passAuthorityHash,
-    downstream.view.passAuthorityHash,
-  );
   const gateResults = {
     security: { id: qualityReceipt.securityGateResultId },
     operability: { id: qualityReceipt.operabilityGateResultId },
@@ -1164,11 +1218,6 @@ const run = async () => {
   assert.equal(beforeAuthority.view.authority, null);
   assert.equal(beforeAuthority.view.gateResults.length, 2);
 
-  const candidateRoute = {
-    ...route,
-    restoreOnLoad: true,
-    candidateInputId: candidate.id,
-  };
   await window.loadURL(fixtureUrl(shell.url, candidateRoute));
   await waitForTitle("pass");
   const blockedCandidateObservation = await waitForCandidateObservation(
@@ -1207,6 +1256,10 @@ const run = async () => {
   assert.equal(
     finalQualityView.view.authority?.authorityHash,
     authority.authorityHash,
+  );
+  assert.equal(
+    finalQualityView.view.criticalEscalation?.id,
+    `${candidate.id}:critical-escalation`,
   );
   assert.equal(
     finalQualityView.view.gateResults.every((entry) => entry.result === "PASS"),
@@ -1309,6 +1362,14 @@ const run = async () => {
         acceptedCandidate.view.decision?.id,
   );
   assert.ok(acceptedEvent);
+  assert.equal(
+    finalEvents.some(
+      (event) =>
+        event.type === "quality-gate.critical-escalation.authorized" &&
+        event.payload?.deliveryCandidateInputId === candidate.id,
+    ),
+    true,
+  );
   const acceptedCommandId = `${deliveryCandidate.id}:human-release-command`;
   assert.equal(
     finalAudit.some(
@@ -1438,6 +1499,12 @@ const run = async () => {
       operabilityGateResultId: gateResults.operability.id,
       candidateAuthorityHash: authority.authorityHash,
       candidateRenderer: {
+        awaitingCriticalEscalation:
+          awaitingCriticalEscalationObservation.authorizeCriticalVisible,
+        authorizedCriticalEscalation:
+          authorizedCriticalEscalationObservation.criticalEscalationId,
+        reloadedCriticalEscalation:
+          reloadedCriticalEscalationObservation.criticalEscalationId,
         beforeAuthority: blockedCandidateObservation.authorityId,
         eventRefreshed: eventRefreshedCandidateObservation.authorityId,
         reloaded: reloadedCandidateObservation.authorityId,

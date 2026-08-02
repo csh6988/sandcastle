@@ -733,6 +733,7 @@ describe("Sandcastle preload bridge", () => {
       "inspectDeliveryCandidate",
       "listDeliveryCandidates",
       "inspectAcceptedDeliveryAuthority",
+      "executeCriticalRiskEscalationCommand",
       "executeDeliveryCommand",
       "executeReviewCommand",
       "updateProject",
@@ -1554,6 +1555,54 @@ describe("Sandcastle preload bridge", () => {
       assert.equal("principal" in payload, false);
       assert.equal("consumerId" in payload, false);
     }
+  });
+
+  it("routes a critical-risk escalation gesture through typed IPC without renderer-supplied actor authority", async () => {
+    const calls: unknown[] = [];
+    const decision = {
+      id: "critical-escalation-1",
+      candidateInputId: "candidate-input-critical-1",
+      candidateInputHash: "a".repeat(64),
+      decision: "reject" as const,
+      actor: {
+        type: "human" as const,
+        id: "verified-local-human",
+        authenticatedBy: "local-session" as const,
+      },
+      risk: { tier: "critical" },
+      riskHash: "b".repeat(64),
+      reason: "The immutable critical-risk evidence cannot continue.",
+      evidenceRefs: ["artifact-version:risk-evidence-1"],
+      decisionHash: "c".repeat(64),
+      createdAt: "2026-08-02T00:00:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      calls.push(payload);
+      return { status: "succeeded", value: decision, effectIds: ["audit-1"] };
+    });
+
+    assert.deepEqual(
+      await bridge.runtime.executeCriticalRiskEscalationCommand({
+        commandId: "critical-escalation-command-1",
+        command: {
+          type: "quality-gate.critical-escalation.decide",
+          escalationId: decision.id,
+          candidateInputId: decision.candidateInputId,
+          expectedCandidateInputHash: decision.candidateInputHash,
+          decision: "reject",
+          reason: decision.reason,
+          evidenceRefs: decision.evidenceRefs,
+        },
+      }),
+      decision,
+    );
+    assert.equal(calls.length, 1);
+    const payload = calls[0] as Record<string, unknown>;
+    assert.equal(payload.operation, "execute");
+    assert.equal("actor" in payload, false);
+    assert.equal("principal" in payload, false);
+    assert.equal("consumerId" in payload, false);
   });
 
   it("routes Work Package Query and Command envelopes through typed IPC", async () => {
