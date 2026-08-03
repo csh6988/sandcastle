@@ -1471,6 +1471,60 @@ describe("Sandcastle preload bridge", () => {
       supersededByCandidateId: null,
       createdAt: "2026-08-01T00:00:00.000Z",
     };
+    const activatedCandidate = {
+      ...candidate,
+      projection: "changes-requested" as const,
+      decision: {
+        id: "release-decision-rework-1",
+        candidateId: candidate.id,
+        candidateHash: candidate.manifestHash,
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        decision: "changes-requested" as const,
+        actor: {
+          type: "human" as const,
+          id: "local-release-owner",
+          authenticatedBy: "local-session" as const,
+        },
+        reason: "Recheck the complete Candidate evidence.",
+        comment: null,
+        evidenceRefs: ["artifact-version:artifact-version-1"],
+        rework: {
+          scope: "same-boundary" as const,
+          responsibility: {
+            kind: "aggregate" as const,
+            summary: "Recheck the complete Candidate evidence.",
+          },
+        },
+        childRunId: null,
+        decisionHash: "2".repeat(64),
+        createdAt: "2026-08-01T00:01:00.000Z",
+      },
+      recoveryActivation: {
+        id: "release-rework-activation-1",
+        decisionId: "release-decision-rework-1",
+        reworkRecordId: "release-rework-record-1",
+        candidateId: candidate.id,
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        targetNodeRunId: "candidate-input-node-1",
+        authority: {
+          kind: "candidate-input-recheck" as const,
+          id: "candidate-input-1",
+          hash: "3".repeat(64),
+          lineage: { candidateInputId: "candidate-input-1" },
+          lineageHash: "4".repeat(64),
+        },
+        actor: {
+          type: "human" as const,
+          id: "local-release-owner",
+          authenticatedBy: "local-session" as const,
+        },
+        commandId: "release-recovery-command-1",
+        createdAt: "2026-08-01T00:02:00.000Z",
+        activationHash: "5".repeat(64),
+      },
+    };
     const authority = {
       id: "accepted-authority-1",
       candidateId: candidate.id,
@@ -1511,14 +1565,19 @@ describe("Sandcastle preload bridge", () => {
             ? [candidate]
             : request.query?.type === "accepted-delivery-authority.inspect"
               ? authority
-              : candidate,
+              : activatedCandidate,
         asOfSequence: 50,
       };
     });
 
-    assert.equal(
-      (await bridge.runtime.inspectDeliveryCandidate(candidate.id)).id,
+    const inspected = await bridge.runtime.inspectDeliveryCandidate(
       candidate.id,
+    );
+    assert.equal(inspected.id, candidate.id);
+    assert.equal(inspected.projection, "changes-requested");
+    assert.equal(
+      inspected.recoveryActivation?.activationHash,
+      activatedCandidate.recoveryActivation.activationHash,
     );
     assert.equal(
       (await bridge.runtime.listDeliveryCandidates(authority.runId))[0]?.id,

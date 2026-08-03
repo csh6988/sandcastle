@@ -208,7 +208,7 @@ describe("Delivery Candidate quality", () => {
         view={
           {
             ...view,
-            projection: "rework-activated",
+            projection: "changes-requested",
             decision: {
               id: "release-decision-1",
               rework: { scope: "same-boundary" },
@@ -225,7 +225,7 @@ describe("Delivery Candidate quality", () => {
         }
       />,
     );
-    assert.match(activatedMarkup, /rework-activated/);
+    assert.match(activatedMarkup, /changes-requested/);
     assert.match(activatedMarkup, /work-package-version-2/);
     assert.match(activatedMarkup, new RegExp("d{64}"));
     assert.doesNotMatch(activatedMarkup, /activate-delivery-rework/);

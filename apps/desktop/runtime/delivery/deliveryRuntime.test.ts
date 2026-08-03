@@ -663,7 +663,7 @@ describe("Delivery Runtime", () => {
       commandId: "release-recovery-command-1",
     };
     const activated = runtime.recover(recoveryRequest);
-    assert.equal(activated.projection, "rework-activated");
+    assert.equal(activated.projection, "changes-requested");
     assert.equal(
       activated.recoveryActivation?.decisionId,
       recoveryRequest.decisionId,
@@ -1818,7 +1818,7 @@ describe("Delivery Runtime", () => {
       });
       assert.equal(recovered.status, "succeeded", JSON.stringify(recovered));
       if (recovered.status !== "succeeded") assert.fail("recovery failed");
-      assert.equal(recovered.value.projection, "rework-activated");
+      assert.equal(recovered.value.projection, "changes-requested");
       assert.equal(
         recovered.value.recoveryActivation?.commandId,
         "company-recovery-activation-command",
@@ -1838,7 +1838,7 @@ describe("Delivery Runtime", () => {
       const reopened = openCompanyDatabase(companyDir);
       try {
         const reloaded = reopened.delivery.inspect(assembled.value.id);
-        assert.equal(reloaded.projection, "rework-activated");
+        assert.equal(reloaded.projection, "changes-requested");
         assert.equal(
           reloaded.recoveryActivation?.activationHash,
           recovered.value.recoveryActivation?.activationHash,
