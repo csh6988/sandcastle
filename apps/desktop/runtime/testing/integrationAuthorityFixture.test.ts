@@ -28,6 +28,322 @@ afterEach(() => {
 });
 
 describe("Integration authority fixture", () => {
+  it("derives exact Candidate Gate observations from the scripted Reviewer terminal output", async () => {
+    const runtimeOptions = createIntegrationAuthorityFixtureRuntimeOptions({
+      companyDirectory: "/tmp/fixture-company",
+      companyDirectoryFingerprint: "company-fingerprint",
+      fixtureId: "integration-authority-gate-output-v1",
+      repositoryDirectory: "/tmp/fixture-repository",
+      worktreeDirectory: "/tmp/fixture-worktree",
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "integration-authority-gate-output-seed",
+    });
+
+    const result = await runtimeOptions.reviewerExecutionAdapter.execute({
+      operationKey: "node-attempt:security-1",
+      phase: "fresh-recheck",
+      manifest: {
+        supportingEvidenceRefs: [
+          "artifact-version:build-1",
+          "test-pass-authority:test-run-1:pass",
+        ],
+        candidateGate: {
+          gateInputId: "security-gate-input-1",
+          candidateInputId: "candidate-input-1",
+          checks: [
+            {
+              id: "startup-build",
+              requiredEvidenceKinds: ["artifact", "runtime-fact"],
+            },
+          ],
+        },
+      } as never,
+      workspaceRef: "project-1",
+      reviewNodeRunId: "security-node-1",
+      reviewer: {
+        participantId: "reviewer-participant-1",
+        aiMemberId: "reviewer-1",
+        positionId: "reviewer-position-1",
+        sessionId: "reviewer-session-1",
+      },
+      executionProfile: {
+        agentAdapterId: "scripted-execution",
+        model: "fixture-v1",
+        sandboxRef: "docker",
+        secretReferenceIds: [],
+        timeoutSeconds: 30,
+        maxIterations: 1,
+      },
+      findings: [],
+      revision: {
+        id: "security-review-revision-1",
+        subjectId: "security-gate-input-1",
+        subjectHash: "a".repeat(64),
+      },
+    });
+
+    assert.equal(result.status, "succeeded");
+    if (result.status !== "succeeded" || !("result" in result.output)) return;
+    assert.deepEqual(result.output.evidenceRefs, [
+      "artifact-version:build-1",
+      "test-pass-authority:test-run-1:pass",
+    ]);
+    assert.deepEqual(result.output.gateExecution, {
+      schemaVersion: 1,
+      gateInputId: "security-gate-input-1",
+      checks: [
+        {
+          checkId: "startup-build",
+          status: "passed",
+          evidence: [
+            { kind: "artifact", ref: "artifact-version:build-1" },
+            {
+              kind: "runtime-fact",
+              ref: "test-pass-authority:test-run-1:pass",
+            },
+          ],
+          responsibility: {
+            kind: "aggregate",
+            candidateIds: ["candidate-input-1"],
+          },
+        },
+      ],
+      resolutions: [],
+    });
+  });
+
+  it("fails closed when a Candidate Gate Reviewer terminal result omits exact check observations", () => {
+    const candidate = {
+      id: "candidate-input-1",
+      manifestHash: "a".repeat(64),
+      manifest: {
+        integration: {
+          manifest: {
+            packages: [
+              {
+                reviewContext: {
+                  acceptanceCriteria: ["The exact Candidate is reviewed."],
+                },
+              },
+            ],
+          },
+        },
+        artifacts: [{ id: "artifact-version:build-1" }],
+        product: { projectSpecRevisionId: "project-spec-1" },
+        technical: {
+          applicationSpecRevisions: [{ id: "application-spec-1" }],
+        },
+        tests: [{ fixture: { id: "fixture-1" } }],
+        producer: {
+          aiMemberId: "producer-1",
+          positionId: "producer-position-1",
+          sessionId: "producer-session-1",
+        },
+        evidence: [{ id: "artifact-version:build-1" }],
+        risk: { tier: "critical" },
+      },
+    };
+    const plan = createIntegrationAuthorityFixtureDeliveryQualityPlans({
+      fixtureId: "gate-plan-fixture-v1",
+      database: {
+        pipelineRuntime: {
+          inspectRun: () => ({
+            nodes: [{ id: "security-node-1", pipelineNodeId: "security" }],
+            snapshot: {
+              payload: {
+                pipelineVersion: {
+                  handlers: [
+                    {
+                      nodeId: "security",
+                      handlerKindId: "security-review@1",
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        },
+        candidateInputs: { inspect: () => candidate },
+      } as never,
+      seeded: {
+        projectId: "project-1",
+        gateReview: {
+          moderator: {
+            aiMemberId: "moderator-1",
+            positionId: "moderator-position-1",
+            sessionId: "moderator-session-1",
+          },
+          reviewer: {
+            aiMemberId: "reviewer-1",
+            positionId: "reviewer-position-1",
+            sessionId: "reviewer-session-1",
+            freshSessionId: "reviewer-session-2",
+          },
+        },
+      } as never,
+      tests: {} as never,
+      reviewerExecutionAdapter: {} as never,
+      executableHash: "b".repeat(64),
+    }).plan({
+      runId: "run-1",
+      nodeRunId: "security-node-1",
+      attempt: {
+        kind: "claimed",
+        attemptId: "security-attempt-1",
+        nodeRunId: "security-node-1",
+        snapshotRevisionId: "snapshot-1",
+        leaseId: "security-lease-1",
+        leaseOwner: "delivery-quality-node-handler",
+        leaseExpiresAt: "2026-07-29T00:05:00.000Z",
+        operationKey: "node-attempt:security-attempt-1",
+        executionEpoch: 1,
+        fenceToken: "security-fence-1",
+      },
+    });
+    const gateInput = {
+      id: "security-gate-input-1",
+      manifestHash: "c".repeat(64),
+      manifest: {
+        supportingEvidenceRefs: ["artifact-version:build-1"],
+        checkCatalog: {
+          checks: [
+            { id: "startup-build", requiredEvidenceKinds: ["artifact"] },
+          ],
+        },
+      },
+    };
+    const context = {
+      result: () => ({ command: {} as never, value: gateInput }),
+    };
+
+    assert.throws(
+      () =>
+        plan.review?.terminalCommands(
+          {
+            status: "succeeded",
+            providerId: "scripted-execution",
+            isolation: {
+              readOnlyFilesystem: true,
+              independentGitDatabase: true,
+              independentSessionStorage: true,
+              independentCredentialScope: true,
+              independentMutableCache: true,
+              inputAllowlist: true,
+              mechanism: "fixture",
+              mechanismVersion: "1",
+            },
+            isolationEvidence: ["artifact-version:build-1"],
+            output: {
+              result: "PASS",
+              conditions: [],
+              evidenceRefs: ["artifact-version:build-1"],
+            },
+            terminalExecutionFactId: "execution-fact-1",
+          },
+          context,
+        ),
+      /exact Candidate Gate execution observations/,
+    );
+
+    const gateExecution = {
+      schemaVersion: 1 as const,
+      gateInputId: gateInput.id,
+      checks: [
+        {
+          checkId: "startup-build",
+          status: "passed" as const,
+          evidence: [
+            { kind: "artifact" as const, ref: "artifact-version:build-1" },
+          ],
+          responsibility: {
+            kind: "aggregate" as const,
+            candidateIds: [candidate.id],
+          },
+        },
+      ],
+      resolutions: [],
+    };
+    assert.throws(
+      () =>
+        plan.review!.terminalCommands(
+          {
+            status: "succeeded",
+            providerId: "scripted-execution",
+            isolation: {
+              readOnlyFilesystem: true,
+              independentGitDatabase: true,
+              independentSessionStorage: true,
+              independentCredentialScope: true,
+              independentMutableCache: true,
+              inputAllowlist: true,
+              mechanism: "fixture",
+              mechanismVersion: "1",
+            },
+            isolationEvidence: ["artifact-version:build-1"],
+            output: {
+              result: "PASS",
+              conditions: [],
+              evidenceRefs: ["artifact-version:build-1"],
+              gateExecution: {
+                ...gateExecution,
+                gateInputId: "different-gate-input",
+              },
+            },
+            terminalExecutionFactId: "execution-fact-1",
+          },
+          context,
+        ),
+      /exact Candidate Gate execution observations/,
+    );
+    const commands = plan.review!.terminalCommands(
+      {
+        status: "succeeded",
+        providerId: "scripted-execution",
+        isolation: {
+          readOnlyFilesystem: true,
+          independentGitDatabase: true,
+          independentSessionStorage: true,
+          independentCredentialScope: true,
+          independentMutableCache: true,
+          inputAllowlist: true,
+          mechanism: "fixture",
+          mechanismVersion: "1",
+        },
+        isolationEvidence: ["artifact-version:build-1"],
+        output: {
+          result: "PASS",
+          conditions: [],
+          evidenceRefs: ["artifact-version:build-1"],
+          gateExecution,
+        },
+        terminalExecutionFactId: "execution-fact-1",
+      },
+      context,
+    );
+    const reconcile = commands.find(
+      (entry) =>
+        typeof entry !== "function" &&
+        entry.command.type === "quality-gate.execution.reconcile",
+    );
+    assert.ok(reconcile && typeof reconcile !== "function");
+    assert.deepEqual(
+      (
+        reconcile.command as {
+          readonly observation: { readonly fact: unknown };
+        }
+      ).observation.fact,
+      gateExecution,
+    );
+    assert.match(
+      (
+        reconcile.command as {
+          readonly observation: { readonly receiptHash: string };
+        }
+      ).observation.receiptHash,
+      /^[a-f0-9]{64}$/,
+    );
+  });
+
   it("continues from the exact renderer-confirmed Product Baseline and formal Run", async () => {
     const scriptRoot = mkdtempSync(
       join(tmpdir(), "sandcastle-integration-authority-product-scripts-"),

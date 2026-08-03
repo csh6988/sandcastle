@@ -384,6 +384,17 @@ const main = async (): Promise<void> => {
         },
         consumerId: "electron-test-fixture-human-release",
       },
+      {
+        token: requiredEnvironment(
+          "SANDCASTLE_ELECTRON_TEST_FIXTURE_DELIVERY_QUALITY_TOKEN",
+        ),
+        principal: {
+          type: "runtime-worker",
+          id: "delivery-quality-node-handler",
+          authenticatedBy: "runtime",
+        },
+        consumerId: "delivery-quality-node-handler",
+      },
     ],
     executionAdapter: fixtureRuntimeOptions.executionAdapter,
     reviewerExecutionAdapter: fixtureRuntimeOptions.reviewerExecutionAdapter,

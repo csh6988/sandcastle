@@ -13,6 +13,7 @@ import type {
 import type { CandidateGateInputView } from "../quality/qualityGateRuntime.js";
 import {
   createScriptedReviewerExecutionAdapter,
+  ReviewerRecheckOutputSchema,
   type ReviewerExecutionAdapter,
   type ReviewerExecutionInput,
 } from "../review/reviewerExecution.js";
@@ -155,27 +156,129 @@ export const createIntegrationAuthorityFixtureRuntimeOptions = (
       const integrationGenerationId = manifest.integrationGenerationId;
       const integrationManifestHash = manifest.integrationManifestHash;
       const repositoryCommits = manifest.repositoryCommits;
-      const evidenceRefs =
-        typeof integrationGenerationId === "string" &&
-        typeof integrationManifestHash === "string" &&
-        Array.isArray(repositoryCommits)
-          ? [
-              `integration-generation:${integrationGenerationId}`,
-              `integration-manifest:${integrationManifestHash}`,
-              ...repositoryCommits.map((entry) => {
-                const commit = entry as {
-                  readonly repositoryId: string;
-                  readonly commit: string;
+      const supportingEvidenceRefs = Array.isArray(
+        manifest.supportingEvidenceRefs,
+      )
+        ? manifest.supportingEvidenceRefs.filter(
+            (entry): entry is string =>
+              typeof entry === "string" &&
+              entry.trim() !== "" &&
+              entry !== "undefined",
+          )
+        : [];
+      const diffArtifactVersionId = manifest.diffArtifactVersionId;
+      const evidenceRefs = [
+        ...new Set(
+          supportingEvidenceRefs.length > 0
+            ? supportingEvidenceRefs
+            : typeof integrationGenerationId === "string" &&
+                typeof integrationManifestHash === "string" &&
+                Array.isArray(repositoryCommits)
+              ? [
+                  `integration-generation:${integrationGenerationId}`,
+                  `integration-manifest:${integrationManifestHash}`,
+                  ...repositoryCommits.map((entry) => {
+                    const commit = entry as {
+                      readonly repositoryId: string;
+                      readonly commit: string;
+                    };
+                    return `repository-commit:${commit.repositoryId}:${commit.commit}`;
+                  }),
+                ]
+              : typeof diffArtifactVersionId === "string" &&
+                  diffArtifactVersionId.trim() !== ""
+                ? [diffArtifactVersionId]
+                : [],
+        ),
+      ].sort();
+      if (evidenceRefs.length === 0) {
+        return {
+          status: "blocked" as const,
+          code: "REVIEWER_OUTPUT_INVALID" as const,
+          message:
+            "The scripted Reviewer received no authoritative evidence references.",
+          evidence: [],
+        };
+      }
+      const candidateGate = manifest.candidateGate as
+        | {
+            readonly gateInputId?: unknown;
+            readonly candidateInputId?: unknown;
+            readonly checks?: unknown;
+          }
+        | undefined;
+      const gateExecution = candidateGate
+        ? (() => {
+            if (
+              typeof candidateGate.gateInputId !== "string" ||
+              typeof candidateGate.candidateInputId !== "string" ||
+              !Array.isArray(candidateGate.checks)
+            ) {
+              throw new Error(
+                "The scripted Reviewer Candidate Gate manifest is invalid.",
+              );
+            }
+            const evidenceRefFor = (kind: string): string => {
+              const prefixes =
+                kind === "artifact" || kind === "static-analysis"
+                  ? ["artifact-version:"]
+                  : kind === "runtime-fact"
+                    ? ["test-pass-authority:", "integration-pass-authority:"]
+                    : kind === "dynamic-analysis"
+                      ? ["test-evidence:", "artifact-version:"]
+                      : [
+                          "test-evidence:",
+                          "test-pass-authority:",
+                          "integration-pass-authority:",
+                          "artifact-version:",
+                        ];
+              const reference = evidenceRefs.find((entry) =>
+                prefixes.some((prefix) => entry.startsWith(prefix)),
+              );
+              if (!reference) {
+                throw new Error(
+                  `The scripted Reviewer has no authoritative ${kind} evidence reference.`,
+                );
+              }
+              return reference;
+            };
+            return {
+              schemaVersion: 1 as const,
+              gateInputId: candidateGate.gateInputId,
+              checks: candidateGate.checks.map((entry) => {
+                const check = entry as {
+                  readonly id?: unknown;
+                  readonly requiredEvidenceKinds?: unknown;
                 };
-                return `repository-commit:${commit.repositoryId}:${commit.commit}`;
+                if (
+                  typeof check.id !== "string" ||
+                  !Array.isArray(check.requiredEvidenceKinds)
+                ) {
+                  throw new Error(
+                    "The scripted Reviewer Candidate Gate check catalog is invalid.",
+                  );
+                }
+                return {
+                  checkId: check.id,
+                  status: "passed" as const,
+                  evidence: check.requiredEvidenceKinds.map((kind) => {
+                    if (typeof kind !== "string") {
+                      throw new Error(
+                        "The scripted Reviewer Candidate Gate evidence kind is invalid.",
+                      );
+                    }
+                    return { kind, ref: evidenceRefFor(kind) };
+                  }),
+                  responsibility: {
+                    kind: "aggregate" as const,
+                    candidateIds: [candidateGate.candidateInputId],
+                  },
+                };
               }),
-            ]
-          : [
-              String(
-                (request.manifest as { diffArtifactVersionId: string })
-                  .diffArtifactVersionId,
-              ),
-            ];
+              resolutions: [],
+            };
+          })()
+        : undefined;
       return {
         status: "succeeded" as const,
         providerId: "scripted-execution",
@@ -212,7 +315,12 @@ export const createIntegrationAuthorityFixtureRuntimeOptions = (
                   },
                 ],
               }
-            : { result: "PASS" as const, conditions: [], evidenceRefs },
+            : ReviewerRecheckOutputSchema.parse({
+                result: "PASS",
+                conditions: [],
+                evidenceRefs,
+                ...(gateExecution ? { gateExecution } : {}),
+              }),
       };
     },
   });
@@ -589,45 +697,26 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
           };
         },
       ];
-      const evidenceRefFor = (
-        gateInput: CandidateGateInputView,
-        evidenceKind: string,
-      ): string => {
-        const prefixes =
-          evidenceKind === "artifact" || evidenceKind === "static-analysis"
-            ? ["artifact-version:"]
-            : evidenceKind === "runtime-fact"
-              ? ["test-pass-authority:", "integration-pass-authority:"]
-              : evidenceKind === "dynamic-analysis"
-                ? ["test-evidence:", "artifact-version:"]
-                : [
-                    "test-evidence:",
-                    "test-pass-authority:",
-                    "integration-pass-authority:",
-                    "artifact-version:",
-                  ];
-        const reference = gateInput.manifest.supportingEvidenceRefs.find(
-          (entry) => prefixes.some((prefix) => entry.startsWith(prefix)),
-        );
-        if (!reference) {
-          throw new Error(
-            `${kind} fixture Gate has no authoritative ${evidenceKind} evidence reference.`,
-          );
-        }
-        return reference;
-      };
       const reviewRequest = (
         context: PlannedDeliveryQualityCommandContext,
       ): ReviewerExecutionInput => {
         const gateInput = context.result(prepareCommandId)
           .value as CandidateGateInputView;
         return {
-          operationKey: `${input.fixtureId}:${kind}:reviewer`,
+          operationKey: attempt.operationKey,
           phase: "fresh-recheck",
           manifest: {
             ...topicManifest,
             deliveryCandidateInputId: candidate.id,
             supportingEvidenceRefs: gateInput.manifest.supportingEvidenceRefs,
+            candidateGate: {
+              gateInputId: gateInput.id,
+              candidateInputId: candidate.id,
+              checks: gateInput.manifest.checkCatalog.checks.map((check) => ({
+                id: check.id,
+                requiredEvidenceKinds: [...check.requiredEvidenceKinds],
+              })),
+            },
           } as unknown as ReviewerExecutionInput["manifest"],
           workspaceRef: input.seeded.projectId,
           reviewNodeRunId: nodeRunId,
@@ -659,14 +748,46 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
         review: {
           reviewerSessionId: reviewer.freshSessionId,
           reviewerAiMemberId: reviewer.aiMemberId,
-          operationKey: `${input.fixtureId}:${kind}:reviewer`,
           reconcileExisting: false,
           timeoutSeconds: 30,
           request: reviewRequest,
           adapter: input.reviewerExecutionAdapter,
-          terminalCommands: (_reviewerResult, context) => {
+          terminalCommands: (reviewerResult, context) => {
             const gateInput = context.result(prepareCommandId)
               .value as CandidateGateInputView;
+            const reviewerOutput = ReviewerRecheckOutputSchema.parse(
+              reviewerResult.output,
+            );
+            const gateExecution = reviewerOutput.gateExecution;
+            const terminalExecutionFactId =
+              reviewerResult.terminalExecutionFactId;
+            const expectedCheckIds = gateInput.manifest.checkCatalog.checks
+              .map((check) => check.id)
+              .sort();
+            const actualCheckIds = gateExecution?.checks
+              .map((check) => check.checkId)
+              .sort();
+            if (
+              !gateExecution ||
+              !terminalExecutionFactId ||
+              gateExecution.gateInputId !== gateInput.id ||
+              actualCheckIds?.join("\0") !== expectedCheckIds.join("\0") ||
+              gateExecution.checks.some(
+                (check) =>
+                  check.responsibility.candidateIds[0] !== candidate.id,
+              )
+            ) {
+              throw new Error(
+                `${kind} Reviewer terminal result requires exact Candidate Gate execution observations.`,
+              );
+            }
+            const gateReceiptHash = sha256(
+              canonicalJson({
+                schemaVersion: 1,
+                terminalExecutionFactId,
+                gateExecution,
+              }),
+            );
             return [
               {
                 commandId: `${input.fixtureId}:${kind}-review-pass`,
@@ -685,7 +806,7 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
                   reviewerSessionId: reviewer.freshSessionId,
                   result: "PASS",
                   conditions: [],
-                  evidenceRefs: [...gateInput.manifest.supportingEvidenceRefs],
+                  evidenceRefs: [...reviewerOutput.evidenceRefs],
                 },
               },
               {
@@ -699,6 +820,7 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
                     schemaVersion: 1,
                     gateInputId: gateInput.id,
                     gateInputHash: gateInput.manifestHash,
+                    reviewerTerminalExecutionFactId: terminalExecutionFactId,
                   },
                 },
               },
@@ -709,34 +831,8 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
                   executionId,
                   observation: {
                     state: "succeeded",
-                    fact: {
-                      schemaVersion: 1,
-                      gateInputId: gateInput.id,
-                      checks: gateInput.manifest.checkCatalog.checks.map(
-                        (check) => ({
-                          checkId: check.id,
-                          status: "passed" as const,
-                          evidence: check.requiredEvidenceKinds.map(
-                            (evidenceKind) => ({
-                              kind: evidenceKind,
-                              ref: evidenceRefFor(gateInput, evidenceKind),
-                            }),
-                          ),
-                          responsibility: {
-                            kind: "aggregate" as const,
-                            candidateIds: [candidate.id],
-                          },
-                        }),
-                      ),
-                      resolutions: [],
-                    },
-                    receiptHash: sha256(
-                      canonicalJson({
-                        schemaVersion: 1,
-                        executionId,
-                        state: "succeeded",
-                      }),
-                    ),
+                    fact: gateExecution,
+                    receiptHash: gateReceiptHash,
                   },
                 },
               },

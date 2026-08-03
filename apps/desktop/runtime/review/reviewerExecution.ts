@@ -2,6 +2,14 @@ import { z } from "zod";
 import type { CodeReviewManifest, ReviewTopicView } from "../interface.js";
 import type { ExecutionEventSink } from "../execution/contract.js";
 
+const ReviewerEvidenceRefSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => value !== "undefined", {
+    message: "Reviewer evidence references must resolve to authoritative IDs.",
+  });
+
 export const ReviewerFindingOutputSchema = z
   .object({
     findings: z
@@ -12,7 +20,7 @@ export const ReviewerFindingOutputSchema = z
             summary: z.string().trim().min(1),
             rationale: z.string().trim().min(1),
             impact: z.string().trim().min(1),
-            evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+            evidenceRefs: z.array(ReviewerEvidenceRefSchema).min(1),
             suggestedOwner: z.string().trim().min(1),
             blocking: z.boolean(),
             scopeImpact: z
@@ -25,11 +33,58 @@ export const ReviewerFindingOutputSchema = z
   })
   .strict();
 
+export const ReviewerGateExecutionOutputSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    gateInputId: z.string().trim().min(1),
+    checks: z
+      .array(
+        z
+          .object({
+            checkId: z.string().trim().min(1),
+            status: z.enum(["passed", "missing", "failed", "unknown"]),
+            evidence: z.array(
+              z
+                .object({
+                  kind: z.enum([
+                    "artifact",
+                    "runtime-fact",
+                    "static-analysis",
+                    "dynamic-analysis",
+                    "recovery",
+                  ]),
+                  ref: ReviewerEvidenceRefSchema,
+                })
+                .strict(),
+            ),
+            responsibility: z
+              .object({
+                kind: z.literal("aggregate"),
+                candidateIds: z.array(z.string().trim().min(1)).length(1),
+              })
+              .strict(),
+          })
+          .strict(),
+      )
+      .min(1),
+    resolutions: z.array(
+      z
+        .object({
+          subjectType: z.enum(["defect", "obligation"]),
+          subjectId: z.string().trim().min(1),
+          evidenceRefs: z.array(ReviewerEvidenceRefSchema).min(1),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
 export const ReviewerRecheckOutputSchema = z
   .object({
     result: z.enum(["PASS", "CONDITIONAL_PASS", "FAIL"]),
     conditions: z.array(z.string().trim().min(1)),
-    evidenceRefs: z.array(z.string().trim().min(1)).min(1),
+    evidenceRefs: z.array(ReviewerEvidenceRefSchema).min(1),
+    gateExecution: ReviewerGateExecutionOutputSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -51,6 +106,9 @@ export const ReviewerRecheckOutputSchema = z
 
 export type ReviewerFindingOutput = z.infer<typeof ReviewerFindingOutputSchema>;
 export type ReviewerRecheckOutput = z.infer<typeof ReviewerRecheckOutputSchema>;
+export type ReviewerGateExecutionOutput = z.infer<
+  typeof ReviewerGateExecutionOutputSchema
+>;
 
 export type ReviewerExecutionPhase = "initial-finding" | "fresh-recheck";
 

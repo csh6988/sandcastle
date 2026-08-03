@@ -89,6 +89,12 @@ const humanRuntimeClient = createCompanyRuntimeClient({
   token: humanRuntimeToken,
   timeoutMs: 500,
 });
+const deliveryQualityRuntimeToken = randomBytes(32).toString("base64url");
+const deliveryQualityRuntimeClient = createCompanyRuntimeClient({
+  address: companyRuntimeAddress(fixture.config.companyDirectory),
+  token: deliveryQualityRuntimeToken,
+  timeoutMs: 500,
+});
 
 let supervisor;
 let shell;
@@ -254,10 +260,10 @@ const typeElement = async (selector, value) => {
       code: "Backspace",
       windowsVirtualKeyCode: 8,
     });
+    await focusSession.sendCommand("Input.insertText", { text: value });
   } finally {
     focusSession.detach();
   }
-  await window.webContents.insertText(value);
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     const state = await readElementState(selector);
@@ -430,7 +436,7 @@ const readDeliveryCandidateObservation = async () => {
   debuggerSession.attach("1.3");
   try {
     const result = await debuggerSession.sendCommand("Runtime.evaluate", {
-      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-delivery-candidate]");return panel?{candidateId:panel.getAttribute("data-delivery-candidate-id"),projection:panel.getAttribute("data-delivery-candidate-projection"),sync:panel.getAttribute("data-delivery-candidate-sync"),decisionId:panel.querySelector("[data-human-release-decision]")?.getAttribute("data-human-release-decision")??null,acceptVisible:Boolean(panel.querySelector("#accept-delivery-candidate")),text:panel.textContent}:null})())`,
+      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-delivery-candidate]");return panel?{candidateId:panel.getAttribute("data-delivery-candidate-id"),manifestHash:panel.getAttribute("data-delivery-candidate-manifest-hash"),projection:panel.getAttribute("data-delivery-candidate-projection"),sync:panel.getAttribute("data-delivery-candidate-sync"),decisionId:panel.querySelector("[data-human-release-decision]")?.getAttribute("data-human-release-decision")??null,acceptVisible:Boolean(panel.querySelector("#accept-delivery-candidate")),text:panel.textContent}:null})())`,
       returnByValue: true,
     });
     return JSON.parse(result.result.value);
@@ -834,6 +840,8 @@ const run = async () => {
         SANDCASTLE_ELECTRON_TEST_FIXTURE_AUTHORIZATION: claim.authorization,
         SANDCASTLE_ELECTRON_TEST_FIXTURE_PACKAGED: app.isPackaged ? "1" : "0",
         SANDCASTLE_ELECTRON_TEST_FIXTURE_HUMAN_TOKEN: humanRuntimeToken,
+        SANDCASTLE_ELECTRON_TEST_FIXTURE_DELIVERY_QUALITY_TOKEN:
+          deliveryQualityRuntimeToken,
       };
     },
     onLog: (line) => runtimeLogs.push(line),
@@ -932,6 +940,14 @@ const run = async () => {
   };
   for (const [field, value] of Object.entries(proposalFields)) {
     await typeElement(`[data-product-proposal-field="${field}"]`, value);
+  }
+  for (const [field, value] of Object.entries(proposalFields)) {
+    assert.equal(
+      (await readElementState(`[data-product-proposal-field="${field}"]`))
+        ?.value,
+      value,
+      `Product proposal field ${field} changed before submission.`,
+    );
   }
   await clickElement("[data-product-proposal-revise]");
   try {
@@ -1568,14 +1584,63 @@ const run = async () => {
   assert.equal(deliveryCandidate.projection, "awaiting-decision");
   assert.equal(deliveryCandidate.decision, null);
 
-  await clickElement('[data-project-tab="reviews"]');
-  const awaitingDeliveryObservation = await waitForDeliveryCandidateObservation(
-    (observation) =>
-      observation.candidateId === deliveryCandidate.id &&
-      observation.projection === "awaiting-decision" &&
-      observation.sync === "ready" &&
-      observation.acceptVisible === true,
-  );
+  let awaitingDeliveryObservation;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await clickElement('[data-project-tab="reviews"]');
+    try {
+      awaitingDeliveryObservation = await waitForDeliveryCandidateObservation(
+        (observation) =>
+          observation.candidateId === deliveryCandidate.id &&
+          observation.manifestHash === deliveryCandidate.manifestHash &&
+          observation.projection === "awaiting-decision" &&
+          observation.sync === "ready" &&
+          observation.acceptVisible === true,
+        5_000,
+      );
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+      if (await readElementState("[data-integration-diagnostic] button")) {
+        await clickElement("[data-integration-diagnostic] button");
+        continue;
+      }
+      await window.reload();
+      await waitForElement('[data-nav="projects"]');
+      await clickElement('[data-nav="projects"]');
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`);
+      await clickElement(`[data-project-id="${seeded.projectId}"]`);
+      await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+    }
+  }
+  assert.ok(awaitingDeliveryObservation);
+  const reviewsCursorStates = (records) =>
+    records
+      .filter(
+        (record) =>
+          record.action === "runtime.events.acknowledged" &&
+          record.entityId === "electron-test-fixture-human-release",
+      )
+      .map((record) => record.after)
+      .filter(
+        (state) =>
+          state &&
+          Number.isInteger(state.sequence) &&
+          Number.isInteger(state.subscriptionGeneration),
+      )
+      .sort(
+        (left, right) =>
+          left.subscriptionGeneration - right.subscriptionGeneration ||
+          left.sequence - right.sequence,
+      );
+  const auditsBeforeRendererReload = await supervisor.audit({ limit: 1_000 });
+  const eventsBeforeRendererReload = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  const cursorBeforeRendererReload = reviewsCursorStates(
+    auditsBeforeRendererReload,
+  ).at(-1);
+  assert.ok(cursorBeforeRendererReload);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await window.reload();
     await waitForElement('[data-nav="projects"]');
@@ -1590,12 +1655,629 @@ const run = async () => {
   await clickElement(`[data-project-id="${seeded.projectId}"]`);
   await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
   await clickElement('[data-project-tab="reviews"]');
-  const reloadedDeliveryObservation = await waitForDeliveryCandidateObservation(
-    (observation) =>
-      observation.candidateId === deliveryCandidate.id &&
-      observation.projection === "awaiting-decision" &&
-      observation.decisionId === null,
+  let reloadedCandidateObservation;
+  let reloadedDeliveryObservation;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      reloadedCandidateObservation = await waitForCandidateObservation(
+        (observation) =>
+          observation.candidateInputId === candidate.id &&
+          observation.authorityId === finalQualityView.view.authority?.id &&
+          observation.sync === "ready",
+        3_000,
+      );
+      reloadedDeliveryObservation = await waitForDeliveryCandidateObservation(
+        (observation) =>
+          observation.candidateId === deliveryCandidate.id &&
+          observation.manifestHash === deliveryCandidate.manifestHash &&
+          observation.projection === "awaiting-decision" &&
+          observation.sync === "ready" &&
+          observation.decisionId === null,
+        3_000,
+      );
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+      if (await readElementState("[data-integration-diagnostic] button")) {
+        await clickElement("[data-integration-diagnostic] button");
+        continue;
+      }
+      await window.reload();
+      await waitForElement('[data-nav="projects"]');
+      await clickElement('[data-nav="projects"]');
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`);
+      await clickElement(`[data-project-id="${seeded.projectId}"]`);
+      await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+      await clickElement('[data-project-tab="reviews"]');
+    }
+  }
+  assert.ok(reloadedCandidateObservation);
+  assert.ok(reloadedDeliveryObservation);
+  const auditsAfterRendererReload = await supervisor.audit({ limit: 1_000 });
+  const eventsAfterRendererReload = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  const cursorAfterRendererReload = reviewsCursorStates(
+    auditsAfterRendererReload,
+  ).at(-1);
+  assert.ok(cursorAfterRendererReload);
+  assert.ok(
+    cursorAfterRendererReload.subscriptionGeneration >
+      cursorBeforeRendererReload.subscriptionGeneration,
   );
+  assert.ok(
+    cursorAfterRendererReload.sequence >= cursorBeforeRendererReload.sequence,
+  );
+  assert.equal(
+    eventsAfterRendererReload.length,
+    eventsBeforeRendererReload.length,
+  );
+
+  const productDiscovery = await query("fixture-product-final", {
+    type: "product.discovery.inspect",
+    projectId: seeded.projectId,
+  });
+  const productBaseline = productDiscovery.view.baselines.find(
+    (baseline) => baseline.runId === seeded.runId,
+  );
+  assert.ok(productBaseline);
+  assert.deepEqual(
+    productDiscovery.view.proposal?.currentRevision.content.scope,
+    ["T21 only"],
+  );
+  const technicalReview = await query("fixture-technical-lineage", {
+    type: "technical-review.inspect",
+    runId: seeded.runId,
+  });
+  const workPackages = await query("fixture-work-package-lineage", {
+    type: "work-packages.inspect",
+    runId: seeded.runId,
+  });
+  const codeReviews = await query("fixture-code-review-lineage", {
+    type: "code-reviews.inspect",
+    runId: seeded.runId,
+  });
+  const integrationGenerations = await query("fixture-integration-lineage", {
+    type: "integration-generations.inspect",
+    runId: seeded.runId,
+  });
+  const testPassAuthority = await query("fixture-test-lineage", {
+    type: "test-pass-authority.inspect",
+    testRunId: route.testRunId,
+  });
+  const productReview = await query("fixture-product-review-lineage", {
+    type: "product-review.inspect",
+    runId: seeded.runId,
+  });
+  const projectArtifacts = {
+    view: await humanRuntimeClient.query({
+      type: "artifacts.list",
+      projectId: seeded.projectId,
+    }),
+  };
+  const candidateManifest = candidate.manifest;
+  const deliveryManifest = deliveryCandidate.manifest;
+  const acceptedTechnicalBaseline = technicalReview.view.acceptedBaseline;
+  assert.ok(acceptedTechnicalBaseline);
+  assert.equal(candidateManifest.product.baselineId, productBaseline.id);
+  assert.equal(candidateManifest.product.baselineHash, productBaseline.hash);
+  assert.equal(
+    candidateManifest.product.sourceProposalRevisionId,
+    productBaseline.sourceProposalRevisionId,
+  );
+  assert.equal(
+    candidateManifest.product.sourceProposalHash,
+    productBaseline.sourceProposalHash,
+  );
+  const projectSpecRevision = productReview.view.specRevisions.find(
+    (revision) =>
+      revision.id === candidateManifest.product.projectSpecRevisionId,
+  );
+  assert.ok(projectSpecRevision);
+  assert.equal(
+    projectSpecRevision.hash,
+    candidateManifest.product.projectSpecHash,
+  );
+  assert.equal(
+    candidateManifest.technical.baselineId,
+    acceptedTechnicalBaseline.id,
+  );
+  assert.equal(
+    candidateManifest.technical.baselineHash,
+    acceptedTechnicalBaseline.hash,
+  );
+  assert.equal(
+    canonicalJson(candidateManifest.technical.manifest),
+    canonicalJson(acceptedTechnicalBaseline.manifest),
+  );
+  const queriedIntegrationGeneration = integrationGenerations.view.find(
+    (generation) => generation.id === candidateManifest.integration.id,
+  );
+  assert.ok(queriedIntegrationGeneration);
+  assert.equal(
+    canonicalJson(queriedIntegrationGeneration),
+    canonicalJson(candidateManifest.integration),
+  );
+  assert.equal(
+    canonicalJson(candidateManifest.tests),
+    canonicalJson([testPassAuthority.view]),
+  );
+  const queriedWorkPackageVersions = workPackages.view.packages
+    .flatMap((workPackage) => workPackage.versions)
+    .filter((version) =>
+      candidateManifest.codeReviewCoverage.some(
+        (coverage) => coverage.workPackageVersionId === version.id,
+      ),
+    )
+    .sort((left, right) => left.id.localeCompare(right.id));
+  assert.deepEqual(
+    queriedWorkPackageVersions.map((version) => version.id),
+    candidateManifest.codeReviewCoverage
+      .map((coverage) => coverage.workPackageVersionId)
+      .sort(),
+  );
+  const queriedCodeReviewLineage = candidateManifest.codeReviewCoverage
+    .map((coverage) => {
+      const review = codeReviews.view.find(
+        (entry) =>
+          entry.manifest.workPackageVersionId === coverage.workPackageVersionId,
+      );
+      assert.ok(review);
+      assert.ok(review.authority);
+      assert.ok(review.gateResult);
+      assert.equal(
+        review.manifestHash,
+        coverage.reviewContext.codeReviewManifestHash,
+      );
+      assert.equal(review.authority.id, coverage.authorityId);
+      assert.equal(
+        review.authority.qualityGateResultId,
+        coverage.qualityGateResultId,
+      );
+      assert.equal(review.authority.sourceCommit, coverage.sourceCommit);
+      assert.equal(review.authority.diffHash, coverage.diffHash);
+      return review;
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const queriedRepositoryCommits =
+    queriedIntegrationGeneration.repositoryResults
+      .map((result) => ({
+        repositoryReference: result.repositoryReference,
+        commit: result.integratedCommit,
+      }))
+      .sort((left, right) =>
+        left.repositoryReference.localeCompare(right.repositoryReference),
+      );
+  assert.equal(
+    queriedRepositoryCommits.every((entry) => entry.commit !== null),
+    true,
+  );
+  assert.equal(
+    canonicalJson(queriedRepositoryCommits),
+    canonicalJson(candidateManifest.repositoryCommits),
+  );
+  const queriedCandidateArtifacts = projectArtifacts.view
+    .filter((artifact) =>
+      candidateManifest.artifacts.some((entry) => entry.id === artifact.id),
+    )
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const queriedCandidateArtifactsWithAuthority = queriedCandidateArtifacts.map(
+    (artifact) =>
+      artifact.id === testPassAuthority.view.build.artifactVersionId
+        ? {
+            ...artifact,
+            producer: {
+              ...artifact.producer,
+              integrationAuthority: testPassAuthority.view.integrationAuthority,
+            },
+          }
+        : artifact,
+  );
+  assert.equal(
+    canonicalJson(queriedCandidateArtifactsWithAuthority),
+    canonicalJson(
+      [...candidateManifest.artifacts].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      ),
+    ),
+  );
+  assert.equal(
+    canonicalJson(deliveryManifest.candidateInput),
+    canonicalJson({
+      id: candidate.id,
+      hash: candidate.manifestHash,
+      manifest: candidate.manifest,
+    }),
+  );
+  assert.equal(
+    canonicalJson(deliveryManifest.gateAuthority),
+    canonicalJson(finalQualityView.view.authority),
+  );
+  for (const key of [
+    "product",
+    "technical",
+    "codeReviewCoverage",
+    "integration",
+    "repositoryCommits",
+    "contracts",
+    "tests",
+    "testCaseRevisions",
+    "artifacts",
+    "risk",
+    "evidence",
+    "environment",
+    "evidencePolicy",
+  ]) {
+    assert.equal(
+      canonicalJson(deliveryManifest[key]),
+      canonicalJson(candidateManifest[key]),
+      `Delivery Candidate ${key} lineage differs from its frozen Candidate Input.`,
+    );
+  }
+  const lineageReport = {
+    canonicalMatch: true,
+    technicalBaseline: {
+      id: acceptedTechnicalBaseline.id,
+      hash: acceptedTechnicalBaseline.hash,
+      proposalRevisionId: candidateManifest.technical.proposalRevisionId,
+      proposalRevisionHash: candidateManifest.technical.proposalRevisionHash,
+    },
+    workPackageVersions: queriedWorkPackageVersions.map((version) => ({
+      id: version.id,
+      manifestHash: version.manifestHash,
+    })),
+    codeReviews: queriedCodeReviewLineage.map((review) => ({
+      id: review.id,
+      manifestHash: review.manifestHash,
+      authorityId: review.authority.id,
+      qualityGateResultId: review.authority.qualityGateResultId,
+      qualityGateManifestHash: review.gateResult.manifestHash,
+    })),
+    repositories: candidateManifest.repositoryCommits,
+    artifacts: queriedCandidateArtifacts.map((artifact) => ({
+      id: artifact.id,
+      identityHash: artifact.identityHash,
+      contentHash: artifact.contentHash,
+    })),
+    testAuthorities: candidateManifest.tests.map((test) => ({
+      testRunId: test.testRunId,
+      manifestHash: test.manifestHash,
+      passAuthorityHash: test.passAuthorityHash,
+    })),
+    gateAuthority: {
+      id: finalQualityView.view.authority.id,
+      hash: finalQualityView.view.authority.authorityHash,
+      securityResultId: finalQualityView.view.authority.security.resultId,
+      securityResultHash: finalQualityView.view.authority.security.resultHash,
+      operabilityResultId: finalQualityView.view.authority.operability.resultId,
+      operabilityResultHash:
+        finalQualityView.view.authority.operability.resultHash,
+    },
+    candidateInput: { id: candidate.id, manifestHash: candidate.manifestHash },
+    candidate: {
+      id: deliveryCandidate.id,
+      manifestHash: deliveryCandidate.manifestHash,
+    },
+  };
+
+  const measureAuthorityCounts = async (label) => {
+    const [runs, discovery, artifacts, gates, candidates] = await Promise.all([
+      humanRuntimeClient
+        .query({
+          type: "runs.list",
+          projectId: seeded.projectId,
+        })
+        .then((view) => ({ view })),
+      query(`fixture-counts:${label}:product`, {
+        type: "product.discovery.inspect",
+        projectId: seeded.projectId,
+      }),
+      humanRuntimeClient
+        .query({
+          type: "artifacts.list",
+          projectId: seeded.projectId,
+        })
+        .then((view) => ({ view })),
+      query(`fixture-counts:${label}:gates`, {
+        type: "quality-gates.inspect",
+        candidateInputId: candidate.id,
+      }),
+      query(`fixture-counts:${label}:candidates`, {
+        type: "delivery-candidates.list",
+        runId: seeded.runId,
+      }),
+    ]);
+    const audits = await supervisor.audit({ limit: 1_000 });
+    const runtimeEvents = await supervisor.events({
+      afterSequence: 0,
+      limit: 1_000,
+    });
+    const snapshotRevisionOneIds = new Set(
+      discovery.view.baselines.flatMap((baseline) => {
+        const formalRun = discovery.view.formalRuns.find(
+          (run) => run.runId === baseline.runId,
+        );
+        const run = runs.view.find((entry) => entry.run.id === baseline.runId);
+        return formalRun?.productBaselineId === baseline.id &&
+          formalRun.snapshotRevisionId === run?.run.snapshotRevisionId &&
+          run?.run.productBaselineId === baseline.id
+          ? [baseline.snapshotRevisionId]
+          : [];
+      }),
+    );
+    assert.equal(
+      snapshotRevisionOneIds.size,
+      1,
+      `${label} replay measurement must resolve exactly one Product-confirmation r1 Snapshot.`,
+    );
+    assert.equal(
+      snapshotRevisionOneIds.has(productBaseline.snapshotRevisionId),
+      true,
+    );
+    return {
+      runs: runs.view.length,
+      baselines: discovery.view.baselines.length,
+      snapshotRevisionOne: snapshotRevisionOneIds.size,
+      attempts: runs.view.reduce(
+        (total, run) =>
+          total +
+          run.nodes.reduce(
+            (runTotal, node) => runTotal + node.attempts.length,
+            0,
+          ),
+        0,
+      ),
+      artifacts: artifacts.view.length,
+      gateInputs: gates.view.gateInputs.length,
+      gateResults: gates.view.gateResults.length,
+      gateAuthorities: gates.view.authority ? 1 : 0,
+      candidates: candidates.view.length,
+      audits: audits.length,
+      events: runtimeEvents.length,
+    };
+  };
+  const humanActor = {
+    type: "human",
+    id: "electron-test-fixture",
+    authenticatedBy: "local-session",
+  };
+  const deliveryQualityActor = {
+    type: "runtime-worker",
+    id: "delivery-quality-node-handler",
+    authenticatedBy: "runtime",
+  };
+  const replayEnvelope = (client, actor, consumerId, envelope) =>
+    client.executeEnvelope({
+      schemaVersion: 1,
+      actor,
+      consumerId,
+      ...envelope,
+    });
+  const authorityCountsBeforeReplay = await measureAuthorityCounts("before");
+  const productReplayEnvelope = {
+    commandId: productBaseline.confirmationCommandId,
+    expectedRevision: productDiscovery.view.proposal.revision,
+    command: {
+      type: "confirm-product-baseline",
+      projectId: seeded.projectId,
+      departmentId: preparation.departmentId,
+      proposalRevisionId: productBaseline.sourceProposalRevisionId,
+      proposalHash: productBaseline.sourceProposalHash,
+    },
+  };
+  const productReplay = await replayEnvelope(
+    humanRuntimeClient,
+    humanActor,
+    "electron-test-fixture-human-release",
+    productReplayEnvelope,
+  );
+  assert.equal(productReplay.status, "succeeded");
+  const replayedProductBaseline = productReplay.value.baselines.find(
+    (baseline) => baseline.id === productBaseline.id,
+  );
+  assert.equal(
+    canonicalJson(replayedProductBaseline),
+    canonicalJson(productBaseline),
+  );
+
+  const gateFinalizeReplays = [];
+  for (const gateResult of [securityGateResult, operabilityGateResult]) {
+    const kind = gateResult.id.includes(":security-")
+      ? "security"
+      : "operability";
+    const commandId = `${fixture.config.fixtureId}:${kind}-gate-result-finalize`;
+    const replay = await replayEnvelope(
+      deliveryQualityRuntimeClient,
+      deliveryQualityActor,
+      "delivery-quality-node-handler",
+      {
+        commandId,
+        command: {
+          type: "quality-gate.result.finalize",
+          candidateGateResultId: gateResult.id,
+          gateInputId: gateResult.gateInputId,
+          executionId: gateResult.manifest.execution.id,
+          qualityGateResultId: gateResult.qualityGateResultId,
+        },
+      },
+    );
+    assert.equal(replay.status, "succeeded");
+    assert.equal(canonicalJson(replay.value), canonicalJson(gateResult));
+    gateFinalizeReplays.push({ kind, commandId, result: replay });
+  }
+  const gateAuthorityReplay = await replayEnvelope(
+    deliveryQualityRuntimeClient,
+    deliveryQualityActor,
+    "delivery-quality-node-handler",
+    {
+      commandId: `${fixture.config.fixtureId}:candidate-input-authorize`,
+      command: {
+        type: "delivery.candidate-input.authorize",
+        authorityId: finalQualityView.view.authority.id,
+        candidateInputId: candidate.id,
+        expectedCandidateInputHash: candidate.manifestHash,
+        securityGateResultId: finalQualityView.view.authority.security.resultId,
+        operabilityGateResultId:
+          finalQualityView.view.authority.operability.resultId,
+      },
+    },
+  );
+  assert.equal(gateAuthorityReplay.status, "succeeded");
+  assert.equal(
+    canonicalJson(gateAuthorityReplay.value),
+    canonicalJson(finalQualityView.view.authority),
+  );
+  const candidateExecution = {
+    view: await humanRuntimeClient.query({
+      type: "execution.inspect",
+      targetKind: "node-attempt",
+      targetId: deliveryManifest.source.nodeAttemptId,
+    }),
+  };
+  const candidateLease = candidateExecution.view.leases.find(
+    (lease) =>
+      lease.leaseKind === "execution" &&
+      lease.workerId === "delivery-quality-node-handler",
+  );
+  assert.ok(candidateLease);
+  const candidateReplay = await replayEnvelope(
+    deliveryQualityRuntimeClient,
+    deliveryQualityActor,
+    "delivery-quality-node-handler",
+    {
+      commandId: `${fixture.config.fixtureId}:delivery-candidate-assemble`,
+      command: {
+        type: "delivery.candidate.assemble",
+        candidateId: deliveryCandidate.id,
+        requestId: deliveryCandidate.requestId,
+        candidateInputId: candidate.id,
+        expectedCandidateInputHash: candidate.manifestHash,
+        expectedGateAuthorityHash:
+          finalQualityView.view.authority.authorityHash,
+        nodeRunId: deliveryManifest.source.nodeRunId,
+        nodeAttemptId: deliveryManifest.source.nodeAttemptId,
+        leaseId: candidateLease.leaseId,
+        workerId: "delivery-quality-node-handler",
+      },
+    },
+  );
+  assert.equal(candidateReplay.status, "succeeded");
+  assert.equal(
+    canonicalJson(candidateReplay.value),
+    canonicalJson(deliveryCandidate),
+  );
+  const authorityCountsAfterReplay = await measureAuthorityCounts("after");
+  assert.equal(
+    canonicalJson(authorityCountsAfterReplay),
+    canonicalJson(authorityCountsBeforeReplay),
+  );
+  const duplicateReplayEvidence = {
+    counts: {
+      before: authorityCountsBeforeReplay,
+      after: authorityCountsAfterReplay,
+    },
+    commands: [
+      {
+        commandId: productReplayEnvelope.commandId,
+        identity: productBaseline.id,
+        authorityHash: productBaseline.hash,
+        resultHash: hashValue(productReplay),
+        effectIds: productReplay.effectIds,
+      },
+      ...gateFinalizeReplays.map(({ kind, commandId, result }) => ({
+        commandId,
+        identity: `${kind}:${result.value.id}`,
+        authorityHash: result.value.resultHash,
+        receiptHash: result.value.manifest.execution.receiptHash,
+        resultHash: hashValue(result),
+        effectIds: result.effectIds,
+      })),
+      {
+        commandId: `${fixture.config.fixtureId}:candidate-input-authorize`,
+        identity: gateAuthorityReplay.value.id,
+        authorityHash: gateAuthorityReplay.value.authorityHash,
+        resultHash: hashValue(gateAuthorityReplay),
+        effectIds: gateAuthorityReplay.effectIds,
+      },
+      {
+        commandId: `${fixture.config.fixtureId}:delivery-candidate-assemble`,
+        identity: candidateReplay.value.id,
+        authorityHash: candidateReplay.value.manifestHash,
+        resultHash: hashValue(candidateReplay),
+        effectIds: candidateReplay.effectIds,
+      },
+    ],
+  };
+
+  const ackQuery = await humanRuntimeClient.queryEnvelope({
+    schemaVersion: 1,
+    requestId: "fixture-duplicate-ack-query",
+    principal: humanActor,
+    consumerId: "electron-test-fixture-human-release",
+    query: {
+      type: "delivery-candidates.inspect",
+      candidateId: deliveryCandidate.id,
+    },
+  });
+  assert.ok(ackQuery.viewSyncToken);
+  const duplicateAckEnvelope = {
+    commandId: `${fixture.config.fixtureId}:duplicate-reviews-ack`,
+    command: {
+      type: "ack-runtime-events",
+      sequence: ackQuery.asOfSequence,
+      viewSyncToken: ackQuery.viewSyncToken,
+    },
+  };
+  const auditBeforeFirstAck = await supervisor.audit({ limit: 1_000 });
+  const eventsBeforeFirstAck = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  const firstAck = await replayEnvelope(
+    humanRuntimeClient,
+    humanActor,
+    "electron-test-fixture-human-release",
+    duplicateAckEnvelope,
+  );
+  assert.equal(firstAck.status, "succeeded");
+  const auditAfterFirstAck = await supervisor.audit({ limit: 1_000 });
+  const eventsAfterFirstAck = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  assert.equal(auditAfterFirstAck.length, auditBeforeFirstAck.length + 1);
+  assert.equal(eventsAfterFirstAck.length, eventsBeforeFirstAck.length);
+  const duplicateAck = await replayEnvelope(
+    humanRuntimeClient,
+    humanActor,
+    "electron-test-fixture-human-release",
+    duplicateAckEnvelope,
+  );
+  assert.equal(canonicalJson(duplicateAck), canonicalJson(firstAck));
+  const auditAfterDuplicateAck = await supervisor.audit({ limit: 1_000 });
+  const eventsAfterDuplicateAck = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  assert.equal(auditAfterDuplicateAck.length, auditAfterFirstAck.length);
+  assert.equal(eventsAfterDuplicateAck.length, eventsAfterFirstAck.length);
+  const duplicateAckEvidence = {
+    commandId: duplicateAckEnvelope.commandId,
+    subscriptionGeneration: duplicateAck.value.subscriptionGeneration,
+    barrierSequence: duplicateAck.value.barrierSequence,
+    resultHash: hashValue(duplicateAck),
+    auditCount: {
+      before: auditBeforeFirstAck.length,
+      afterFirst: auditAfterFirstAck.length,
+      afterDuplicate: auditAfterDuplicateAck.length,
+    },
+    runtimeEventCount: {
+      before: eventsBeforeFirstAck.length,
+      afterFirst: eventsAfterFirstAck.length,
+      afterDuplicate: eventsAfterDuplicateAck.length,
+    },
+  };
 
   const finalAudit = await supervisor.audit({
     runId: seeded.runId,
@@ -1654,10 +2336,12 @@ const run = async () => {
   assert.ok(restartHealth);
   assert.equal(restartHealth.schemaVersion, 50);
 
-  const recoveredInteraction = await query("fixture-interaction-recovered", {
-    type: "interaction.inspect",
-    sessionId: seeded.interactionSessionId,
-  });
+  const recoveredInteraction = {
+    view: await humanRuntimeClient.query({
+      type: "interaction.inspect",
+      sessionId: seeded.interactionSessionId,
+    }),
+  };
   const recoveredTurn = recoveredInteraction.view.turns.find(
     (turn) => turn.commandId === interactionCommandId,
   );
@@ -1773,18 +2457,6 @@ const run = async () => {
       registryVersion: source.registryVersion,
     }))
     .filter((event) => event.registryVersion !== 18);
-  const productDiscovery = await query("fixture-product-final", {
-    type: "product.discovery.inspect",
-    projectId: seeded.projectId,
-  });
-  const productBaseline = productDiscovery.view.baselines.find(
-    (baseline) => baseline.runId === seeded.runId,
-  );
-  assert.ok(productBaseline);
-  assert.deepEqual(
-    productDiscovery.view.proposal?.currentRevision.content.scope,
-    ["T21 only"],
-  );
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
@@ -1876,16 +2548,42 @@ const run = async () => {
         decision: deliveryCandidate.decision,
         rendererProjection: awaitingDeliveryObservation.projection,
       },
+      lineage: lineageReport,
+      duplicateReplay: duplicateReplayEvidence,
       resilience: {
-        rendererReloadProjection: reloadedDeliveryObservation.projection,
+        rendererReload: {
+          candidateQualitySync: reloadedCandidateObservation.sync,
+          deliveryCandidateSync: reloadedDeliveryObservation.sync,
+          candidateInputId: reloadedCandidateObservation.candidateInputId,
+          candidateId: reloadedDeliveryObservation.candidateId,
+          candidateManifestHash: reloadedDeliveryObservation.manifestHash,
+          projection: reloadedDeliveryObservation.projection,
+          before: cursorBeforeRendererReload,
+          after: cursorAfterRendererReload,
+          runtimeEventCount: {
+            before: eventsBeforeRendererReload.length,
+            after: eventsAfterRendererReload.length,
+          },
+        },
         runtimeRestartStage: "test-before-cleanup",
         runtimeRestartTestRunState: restartTestRunState,
         runtimeRestartElectronReceiptHash: restartElectronReceiptHash,
         runtimeRestartPid: restartHealth.pid,
         candidateCrossRuntimeRestart: false,
-        duplicateCommandCountStable: true,
-        duplicateCandidateInputFacts: 1,
-        duplicateCandidateFacts: 1,
+        duplicateCommandCountStable:
+          canonicalJson(authorityCountsBeforeReplay) ===
+          canonicalJson(authorityCountsAfterReplay),
+        duplicateCandidateInputFacts: finalEvents.filter(
+          (event) =>
+            event.type === "delivery.candidate-input.frozen" &&
+            event.payload?.deliveryCandidateInputId === candidate.id,
+        ).length,
+        duplicateCandidateFacts: finalEvents.filter(
+          (event) =>
+            event.type === "delivery.candidate.created" &&
+            event.payload?.deliveryCandidateId === deliveryCandidate.id,
+        ).length,
+        duplicateAck: duplicateAckEvidence,
         cursorRecoveredInteraction: true,
       },
       cleanup: {
