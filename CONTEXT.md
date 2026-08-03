@@ -702,9 +702,21 @@ _Avoid_: "done" (the human release decision is still pending), "release" (releas
 The explicit, single append-only action by a verified local-session human that accepts, rejects, or sends back a **Delivery candidate** after every declared Agent and quality gate has a `PASS` **Quality Gate Result**. Accepting completes the Run and exposes immutable downstream authority for a separate **Release operation**, but names no destination and performs no merge, export, branch update, or deployment. Rejecting terminates that Run's release path. Changes-requested durably blocks the release path with one exact responsibility; same-boundary work resumes only after fresh formal rework authority is bound by one immutable recovery activation, while a frozen-boundary change requires a confirmed child Run. No outcome rewrites historical evidence or adds a second decision to the same manifest.
 _Avoid_: "automatic release" (the decision is a separate gate), "approval button" without candidate evidence, treating all Agent PASS results as a release decision
 
+**Accepted Delivery Candidate Authority**:
+The destination-free immutable authority returned only by `DeliveryRuntime.acceptedAuthority(candidateId)` after a verified Human release decision accepts one exact **Delivery candidate**. It freezes the Candidate, decision, Candidate Input, Gate, Integration, Repository commit, Artifact Version, Run, and Snapshot identities and hashes. It is the sole upstream authority for a **Release operation** and can authorize multiple independently identified operations without becoming a mutable release checklist.
+_Avoid_: a copied Candidate manifest, generic Human Approval, an Agent assertion, treating a destination selection as part of acceptance
+
 **Release operation**:
-An independently authorized, idempotent post-decision operation with a discriminated kind. `merge` freezes each Repository's integrated source commit, **Release target branch**, and expected tip; `export` freezes Artifact Version IDs, destination reference, expected destination state, and overwrite policy without inventing a branch. Both record partial results and reconciliation evidence and are distinct from Integration and deployment.
+An independently authorized, idempotent post-decision operation rooted only in one **Accepted Delivery Candidate Authority**. `merge` freezes every authority Repository commit, **Release target branch**, and expected tip and may fast-forward only; `export` freezes an authorized Artifact subset, a pre-existing canonical local filesystem root, every exact relative path, expected destination state, and overwrite policy without inventing a branch. Its operation ID, canonical request hash, authority, ordered Items, and destinations are immutable. A changed request reusing the ID conflicts; destination drift requires a new operation.
 _Avoid_: **Integration operation** (writes only generation branches), automatic deployment, forcing an export to have a Git target, retrying against a changed destination without renewed human confirmation
+
+**Release operation item**:
+One deterministically serial merge or export destination inside a **Release operation**. Its state is `pending`, `running`, `reconciling`, `succeeded`, `failed`, `destination-conflict`, or `unknown`; failures and destination conflicts do not prevent later Items, but `unknown` blocks remaining work. Aggregate state is derived rather than independently edited.
+_Avoid_: a mutable batch row, parallel destination effects, silently retrying an Item after drift
+
+**Release receipt**:
+Safe, immutable evidence of one successful **Release operation item** effect. It records an `applied` or `no-op` disposition and the exact observed target tip or destination digest. A target already containing the source is a no-op receipt, not an inferred success; an unresolved observation remains `unknown` until a verified-human reconciliation command records evidence for an Adapter to evaluate.
+_Avoid_: raw agent output, a human assertion that directly permits an effect, a blind retry receipt
 
 **Harness**:
 The versioned set of standards that constrains how a role and pipeline node may produce and inspect work: principles, project or department constitution, explicit rules, and positive/negative cases. A Harness answers "according to what standards"; a **Spec** answers "how this requirement is produced". A Run snapshots the Harness references it used, and a Harness change requires review, an impact scope, and a validation result.

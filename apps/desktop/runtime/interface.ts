@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  ReleaseOperationCreateRequestSchema,
+  type ReleaseOperationView,
+} from "./release/releaseOperationContracts.js";
+
+export * from "./release/releaseOperationContracts.js";
 
 export const RuntimeHealthSchema = z.object({
   status: z.literal("ok"),
@@ -3735,6 +3741,31 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
 
 export type CompanyQuery = z.infer<typeof CompanyQuerySchema>;
 
+export const ReleaseOperationInspectQuerySchema = z
+  .object({
+    type: z.literal("release-operations.inspect"),
+    operationId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ReleaseOperationListQuerySchema = z
+  .object({
+    type: z.literal("release-operations.list"),
+    candidateId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export type ReleaseOperationQuery =
+  | z.infer<typeof ReleaseOperationInspectQuerySchema>
+  | z.infer<typeof ReleaseOperationListQuerySchema>;
+
+export type ReleaseOperationQueryResult<Query extends ReleaseOperationQuery> =
+  Query["type"] extends "release-operations.inspect"
+    ? ReleaseOperationView
+    : readonly ReleaseOperationView[];
+
+export type ReleaseOperationCommandResult = ReleaseOperationView;
+
 export const QueryEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
   requestId: z.string().trim().min(1),
@@ -5097,10 +5128,30 @@ export const HumanReleaseRecoverEnvelopeCommandSchema = z
   })
   .strict();
 
+export const ReleaseOperationCreateEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("delivery.release-operation.create"),
+    operation: ReleaseOperationCreateRequestSchema,
+  })
+  .strict();
+
+export const ReleaseOperationReconcileEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("delivery.release-operation.reconcile"),
+    operationId: z.string().trim().min(1),
+    itemId: z.string().trim().min(1),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+  })
+  .strict();
+
 export type DeliveryEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateAssembleEnvelopeCommandSchema>
   | z.infer<typeof HumanReleaseDecideEnvelopeCommandSchema>
   | z.infer<typeof HumanReleaseRecoverEnvelopeCommandSchema>;
+
+export type ReleaseOperationEnvelopeCommand =
+  | z.infer<typeof ReleaseOperationCreateEnvelopeCommandSchema>
+  | z.infer<typeof ReleaseOperationReconcileEnvelopeCommandSchema>;
 
 export type DeliveryQualityEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateInputFreezeEnvelopeCommandSchema>

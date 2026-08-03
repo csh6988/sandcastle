@@ -133,6 +133,7 @@ const agUiRegistryFixture = [
   "delivery.release.rejected@1:custom",
   "delivery.release.changes-requested@1:custom",
   "delivery.release.rework-activated@1:custom",
+  "delivery.release-operation.invalidated@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -178,7 +179,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 18);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 19);
 
     assert.deepEqual(
       registry
@@ -583,6 +584,32 @@ describe("Runtime Event registry", () => {
       (error: unknown) =>
         error instanceof RuntimeEventRegistryError &&
         error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+    );
+  });
+
+  it("adds v19 release-operation invalidation without publishing effect progress", () => {
+    const registry = createRuntimeEventRegistry();
+
+    assert.equal(registry.version, 19);
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "delivery.release-operation.invalidated",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          runId: "run-1",
+          deliveryCandidateId: "candidate-1",
+          releaseOperationId: "release-operation-1",
+        },
+        payload: {
+          releaseOperationId: "release-operation-1",
+          candidateId: "candidate-1",
+        },
+      }),
+    );
+    assert.equal(
+      registry.get("delivery.release-operation.item-running"),
+      undefined,
     );
   });
 

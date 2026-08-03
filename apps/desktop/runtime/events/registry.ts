@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 18;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 19;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -39,6 +39,7 @@ export interface RuntimeEventScope {
   readonly deliveryCandidateInputId?: string;
   readonly deliveryCandidateId?: string;
   readonly releaseDecisionId?: string;
+  readonly releaseOperationId?: string;
   readonly candidateGateInputId?: string;
   readonly defectId?: string;
   readonly permissionRequestId?: string;
@@ -691,6 +692,13 @@ const releaseReworkActivatedEventPayloadSchema = z
     authorityHash: z.string().regex(/^[a-f0-9]{64}$/),
     lineageHash: z.string().regex(/^[a-f0-9]{64}$/),
     activationHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const releaseOperationInvalidatedEventPayloadSchema = z
+  .object({
+    releaseOperationId: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
   })
   .strict();
 
@@ -1433,6 +1441,21 @@ const definitions = [
       "commandId",
     ],
     payloadSchema: releaseReworkActivatedEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "delivery.release-operation.invalidated",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "deliveryCandidateId",
+      "releaseOperationId",
+    ],
+    payloadSchema: releaseOperationInvalidatedEventPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",
