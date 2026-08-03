@@ -163,6 +163,93 @@ describe("Company Runtime command registry", () => {
       ).count,
       1,
     );
+    const receipt = sqlite
+      .prepare(
+        `SELECT status, result_hash AS resultHash,
+                effect_ids_json AS effectIdsJson
+           FROM command_deduplication
+          WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as {
+      readonly status: string;
+      readonly resultHash: string;
+      readonly effectIdsJson: string;
+    };
+    const restoreReceipt = () => {
+      sqlite
+        .prepare(
+          `UPDATE command_deduplication
+              SET status = ?, result_hash = ?, effect_ids_json = ?
+            WHERE command_id = ?`,
+        )
+        .run(
+          receipt.status,
+          receipt.resultHash,
+          receipt.effectIdsJson,
+          envelope.commandId,
+        );
+      sqlite
+        .prepare("DELETE FROM runtime_audit_records WHERE id = ?")
+        .run("tampered-release-audit");
+    };
+    for (const mutation of [
+      {
+        name: "status",
+        apply: () => {
+          sqlite.exec("PRAGMA ignore_check_constraints = ON");
+          try {
+            sqlite
+              .prepare(
+                "UPDATE command_deduplication SET status = 'pending' WHERE command_id = ?",
+              )
+              .run(envelope.commandId);
+          } finally {
+            sqlite.exec("PRAGMA ignore_check_constraints = OFF");
+          }
+        },
+      },
+      {
+        name: "result hash",
+        apply: () =>
+          sqlite
+            .prepare(
+              "UPDATE command_deduplication SET result_hash = ? WHERE command_id = ?",
+            )
+            .run("c".repeat(64), envelope.commandId),
+      },
+      {
+        name: "stored effect IDs",
+        apply: () =>
+          sqlite
+            .prepare(
+              "UPDATE command_deduplication SET effect_ids_json = ? WHERE command_id = ?",
+            )
+            .run('["tampered-effect"]', envelope.commandId),
+      },
+      {
+        name: "runtime audit IDs",
+        apply: () =>
+          sqlite
+            .prepare(
+              `INSERT INTO runtime_audit_records(
+                 id, action, entity_type, entity_id, run_id, node_run_id,
+                 before_json, after_json, created_at, command_id
+               ) VALUES (?, 'test.tampered', 'test', 'tampered', NULL, NULL,
+                 NULL, NULL, '2026-08-03T00:00:00.000Z', ?)`,
+            )
+            .run("tampered-release-audit", envelope.commandId),
+      },
+    ]) {
+      mutation.apply();
+      assert.throws(
+        () => registry.execute(envelope),
+        (error) =>
+          error instanceof CompanyCommandError &&
+          error.code === "COMMAND_RECEIPT_INVALID",
+        mutation.name,
+      );
+      restoreReceipt();
+    }
     const unknown = await releaseOperations.dispatch("release-operation-1");
     assert.equal(unknown.items[0]?.state, "unknown");
 

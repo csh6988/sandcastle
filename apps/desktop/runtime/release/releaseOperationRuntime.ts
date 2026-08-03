@@ -389,6 +389,15 @@ export const openReleaseOperationRuntime = (
   const create: ReleaseOperationRuntime["create"] = (input, actor) => {
     if (actor.type !== "human" || actor.authenticatedBy !== "local-session" || actor.id.trim() === "") throw new ReleaseOperationRuntimeError("RELEASE_OPERATION_BLOCKED", "Release operation creation requires a verified local-session human actor.");
     const parsed = ReleaseOperationCreateRequestSchema.parse({ ...input, authorization: { ...input.authorization, actor } });
+    if (
+      parsed.kind === "export" &&
+      options.adapter.normalizeCreateRequest === undefined
+    ) {
+      throw new ReleaseOperationRuntimeError(
+        "RELEASE_DESTINATION_INVALID",
+        "Export Release operations require a destination normalization adapter.",
+      );
+    }
     let request: ReleaseOperationCreateRequest;
     try {
       request = ReleaseOperationCreateRequestSchema.parse(

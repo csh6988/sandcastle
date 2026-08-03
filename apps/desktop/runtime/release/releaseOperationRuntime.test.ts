@@ -77,10 +77,58 @@ const exportRequest = (operationId: string, canonicalRoot: string) => ({
 });
 
 describe("ReleaseOperationRuntime", () => {
+  it("fails closed before intent when an export adapter cannot normalize its destination", () => {
+    const { database, runtime } = setup({
+      execute: async () => ({
+        state: "unknown",
+        unknown: {
+          code: "never",
+          message: "never",
+          observedAt: "2026-08-03T00:00:01.000Z",
+        },
+      }),
+      reconcile: async () => ({ state: "pending" }),
+    });
+    const input = exportRequest("release-operation-without-normalizer", "/tmp/release");
+
+    assert.throws(
+      () => runtime.create(input, input.authorization.actor),
+      (error: unknown) =>
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "RELEASE_DESTINATION_INVALID",
+    );
+    assert.equal(
+      (
+        database
+          .prepare("SELECT COUNT(*) AS count FROM release_operations")
+          .get() as { readonly count: number }
+      ).count,
+      0,
+    );
+    assert.equal(
+      (
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM release_operation_destination_claims",
+          )
+          .get() as { readonly count: number }
+      ).count,
+      0,
+    );
+
+    const merge = mergeRequest("release-operation-merge-without-normalizer");
+    assert.equal(
+      runtime.create(merge, merge.authorization.actor).id,
+      merge.operationId,
+    );
+  });
+
   it("durably fails an export whose Artifact preparation rejects before any effect", async () => {
     let executions = 0;
     const { runtime } = setup(
       {
+        normalizeCreateRequest: (request) => request,
         execute: async () => {
           executions += 1;
           return { state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } };

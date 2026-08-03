@@ -3566,7 +3566,9 @@ const executeReleaseOperationCommand = (
         `SELECT actor_type AS actorType, actor_id AS actorId,
                 authenticated_by AS authenticatedBy,
                 consumer_id AS consumerId, schema_version AS schemaVersion,
-                request_hash AS requestHash, result_json AS resultJson
+                request_hash AS requestHash, status,
+                result_json AS resultJson, result_hash AS resultHash,
+                effect_ids_json AS effectIdsJson
            FROM command_deduplication WHERE command_id = ?`,
       )
       .get(envelope.commandId) as
@@ -3577,13 +3579,13 @@ const executeReleaseOperationCommand = (
           readonly consumerId: string | null;
           readonly schemaVersion: number;
           readonly requestHash: string;
+          readonly status: string;
           readonly resultJson: string;
+          readonly resultHash: string;
+          readonly effectIdsJson: string;
         }
       | undefined;
     if (receipt) {
-      const priorResult = CommandResultSchema.parse(
-        JSON.parse(receipt.resultJson),
-      ) as CommandResult<unknown>;
       const sameRequest =
         receipt.actorType === envelope.actor.type &&
         receipt.actorId === envelope.actor.id &&
@@ -3591,9 +3593,54 @@ const executeReleaseOperationCommand = (
         receipt.consumerId === (envelope.consumerId ?? null) &&
         receipt.schemaVersion === envelope.schemaVersion &&
         receipt.requestHash === requestHash;
-      database.exec("COMMIT");
-      if (!sameRequest) return commandIdReuse(envelope.commandId);
-      return priorResult;
+      if (!sameRequest) {
+        database.exec("COMMIT");
+        return commandIdReuse(envelope.commandId);
+      }
+      try {
+        if (
+          receipt.status !== "completed" ||
+          sha256(receipt.resultJson) !== receipt.resultHash
+        ) {
+          throw new Error("receipt status or result hash is invalid");
+        }
+        const parsed = CommandResultSchema.parse(
+          JSON.parse(receipt.resultJson),
+        );
+        const replay = (
+          parsed.status === "succeeded"
+            ? {
+                ...parsed,
+                value: ReleaseOperationViewSchema.parse(parsed.value),
+              }
+            : parsed
+        ) as CommandResult<unknown>;
+        const storedEffectIds = JSON.parse(receipt.effectIdsJson) as unknown;
+        const actualEffectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        if (
+          canonicalJson(replay) !== receipt.resultJson ||
+          !Array.isArray(storedEffectIds) ||
+          !storedEffectIds.every((effectId) => typeof effectId === "string") ||
+          canonicalJson(replay.effectIds) !== canonicalJson(storedEffectIds) ||
+          canonicalJson(storedEffectIds) !== canonicalJson(actualEffectIds)
+        ) {
+          throw new Error("receipt effect IDs are invalid");
+        }
+        database.exec("COMMIT");
+        return replay;
+      } catch {
+        throw new CompanyCommandError(
+          "COMMAND_RECEIPT_INVALID",
+          `Command ${envelope.commandId} has an invalid completed receipt.`,
+        );
+      }
     }
     database
       .prepare(
