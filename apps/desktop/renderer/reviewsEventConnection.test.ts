@@ -17,6 +17,97 @@ const deferred = () => {
 };
 
 describe("Reviews Runtime event connection", () => {
+  it("hydrates accepted Release authority and operations before acknowledging and opening one event generation", async () => {
+    const steps: string[] = [];
+    let initial:
+      | Parameters<
+          Parameters<typeof connectReviewsEventStream>[0]["onInitialViews"]
+        >[0]
+      | undefined;
+    const bridge = {
+      query: async (query: { readonly type: string }) => {
+        steps.push(`query:${query.type}`);
+        const view =
+          query.type === "integration-generations.inspect"
+            ? []
+            : query.type === "delivery-candidates.inspect"
+              ? {
+                  id: "candidate-1",
+                  projection: "accepted",
+                  manifestHash: "a".repeat(64),
+                  decision: { id: "decision-1" },
+                }
+              : query.type === "accepted-delivery-authority.inspect"
+                ? {
+                    id: "authority-1",
+                    candidateId: "candidate-1",
+                    authorityHash: "b".repeat(64),
+                  }
+                : [{ id: "release-operation-1", aggregateState: "pending" }];
+        return {
+          view,
+          asOfSequence:
+            query.type === "accepted-delivery-authority.inspect" ? 8 : 7,
+          viewSyncToken: `token:${query.type}`,
+        };
+      },
+      execute: async (input: unknown) => {
+        steps.push("ack");
+        const command = (
+          input as { readonly command: { readonly sequence: number } }
+        ).command;
+        return {
+          status: "succeeded",
+          value: {
+            acknowledged: true,
+            subscriptionGeneration: 2,
+            barrierSequence: command.sequence,
+            auditId: "audit-1",
+          },
+          effectIds: [],
+        };
+      },
+      openEventStream: async () => {
+        steps.push("open");
+        return {
+          subscriptionId: "reviews-subscription-1",
+          subscriptionGeneration: 3,
+          barrierSequence: 7,
+        };
+      },
+      closeEventStream: async () => undefined,
+    } as unknown as Pick<
+      SandcastleBridge,
+      "query" | "execute" | "openEventStream" | "closeEventStream"
+    >;
+
+    const connection = await connectReviewsEventStream({
+      bridge,
+      runId: "run-1",
+      candidateInputId: null,
+      candidateId: "candidate-1",
+      onInitialViews: (views) => {
+        steps.push("apply");
+        initial = views;
+      },
+      onViews: () => undefined,
+      onDiagnostic: () => undefined,
+    });
+
+    assert.equal(initial?.acceptedDeliveryAuthority?.id, "authority-1");
+    assert.equal(initial?.releaseOperations[0]?.id, "release-operation-1");
+    assert.deepEqual(steps, [
+      "query:integration-generations.inspect",
+      "query:delivery-candidates.inspect",
+      "query:accepted-delivery-authority.inspect",
+      "query:release-operations.list",
+      "apply",
+      "ack",
+      "open",
+    ]);
+    await connection.close();
+  });
+
   it("applies all stage Queries atomically and replays every event after the earliest View token", async () => {
     let eventSink!: (frame: RuntimeEventFrame) => void | Promise<void>;
     let openCount = 0;

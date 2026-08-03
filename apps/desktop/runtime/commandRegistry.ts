@@ -46,6 +46,8 @@ import {
   type DeliveryQualityEnvelopeCommand,
   DeliveryCandidateViewSchema,
   type DeliveryEnvelopeCommand,
+  ReleaseOperationViewSchema,
+  type ReleaseOperationEnvelopeCommand,
   type MemoryEnvelopeCommand,
   MemoryCandidateViewSchema,
   MemoryDecisionViewSchema,
@@ -123,6 +125,10 @@ import {
   DeliveryRuntimeError,
   type DeliveryRuntime,
 } from "./delivery/deliveryRuntime.js";
+import {
+  ReleaseOperationRuntimeError,
+  type ReleaseOperationRuntime,
+} from "./release/releaseOperationRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -437,6 +443,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof DeliveryRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof ReleaseOperationRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof RuntimeMemoryError) {
@@ -3532,6 +3541,162 @@ const executeDeliveryCommand = (
   }
 };
 
+const executeReleaseOperationCommand = (
+  database: DatabaseSync,
+  releaseOperations: ReleaseOperationRuntime,
+  envelope: CommandEnvelope<ReleaseOperationEnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<unknown> => {
+  const validActor =
+    envelope.actor.type === "human" &&
+    envelope.actor.authenticatedBy === "local-session";
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const priorResult = CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<unknown>;
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      return priorResult;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<unknown>;
+    database.exec("SAVEPOINT release_operation_command");
+    if (!validActor) {
+      database.exec("ROLLBACK TO release_operation_command");
+      database.exec("RELEASE release_operation_command");
+      result = {
+        status: "rejected",
+        error: {
+          code: "RELEASE_OPERATION_BLOCKED",
+          message: "Release operations require a verified local-session human.",
+        },
+        effectIds: [],
+      };
+    } else {
+      try {
+        const command = envelope.command;
+        const actor = {
+          type: "human" as const,
+          id: envelope.actor.id,
+          authenticatedBy: "local-session" as const,
+        };
+        const value = ReleaseOperationViewSchema.parse(
+          command.type === "delivery.release-operation.create"
+            ? releaseOperations.create(command.operation, actor)
+            : releaseOperations.requestReconciliation(
+                {
+                  operationId: command.operationId,
+                  itemId: command.itemId,
+                  expectedOperationHash: command.expectedOperationHash,
+                  evidenceRefs: command.evidenceRefs,
+                },
+                actor,
+              ),
+        );
+        database.exec("RELEASE release_operation_command");
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = { status: "succeeded", value, effectIds };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        database.exec("ROLLBACK TO release_operation_command");
+        database.exec("RELEASE release_operation_command");
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    if (validActor) {
+      database
+        .prepare(
+          `INSERT INTO command_deduplication(
+             command_id, actor_type, actor_id, authenticated_by, consumer_id,
+             schema_version, request_hash, status, result_json, result_hash,
+             effect_ids_json, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+        )
+        .run(
+          envelope.commandId,
+          envelope.actor.type,
+          envelope.actor.id,
+          envelope.actor.authenticatedBy,
+          envelope.consumerId ?? null,
+          envelope.schemaVersion,
+          requestHash,
+          resultJson,
+          sha256(resultJson),
+          canonicalJson(result.effectIds),
+          clock().toISOString(),
+        );
+    }
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
 export const openCompanyCommandRegistry = (
   database: DatabaseSync,
   projectConfiguration: ProjectConfiguration,
@@ -3559,11 +3724,26 @@ export const openCompanyCommandRegistry = (
   candidateInputs?: CandidateInputRuntime,
   qualityGates?: QualityGateRuntime,
   delivery?: DeliveryRuntime,
+  releaseOperations?: ReleaseOperationRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
       input,
     ) as CommandEnvelope<EnvelopeCommand>;
+    if (envelope.command.type.startsWith("delivery.release-operation.")) {
+      if (!releaseOperations) {
+        throw new CompanyCommandError(
+          "RELEASE_OPERATION_RUNTIME_UNAVAILABLE",
+          "Release Operation Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeReleaseOperationCommand(
+        database,
+        releaseOperations,
+        envelope as CommandEnvelope<ReleaseOperationEnvelopeCommand>,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
     if (
       envelope.command.type === "delivery.candidate.assemble" ||
       envelope.command.type === "delivery.release.decide" ||

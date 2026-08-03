@@ -21,6 +21,7 @@ import type {
 import { openIntegrationRuntime } from "./integration/integrationRuntime.js";
 import { openRuntimeEvents } from "./events/subscription.js";
 import { openTestRuntime, type TestRunView } from "./testing/testRuntime.js";
+import { openReleaseOperationRuntime } from "./release/releaseOperationRuntime.js";
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-command-registry-"));
@@ -47,6 +48,147 @@ const canonicalHash = (value: unknown): string =>
     .digest("hex");
 
 describe("Company Runtime command registry", () => {
+  it("commits immutable Release intent and verified-human reconciliation without running effects inside the command unit of work", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    migrateCompanyDatabase(sqlite);
+    sqlite.exec("PRAGMA foreign_keys = OFF");
+    let executions = 0;
+    const releaseOperations = openReleaseOperationRuntime(sqlite, {
+      acceptedAuthority: () => ({
+        id: "accepted-authority-1",
+        candidateId: "candidate-1",
+        candidateHash: "a".repeat(64),
+        releaseDecisionId: "decision-1",
+        releaseDecisionHash: "a".repeat(64),
+        candidateInputId: "candidate-input-1",
+        candidateInputHash: "a".repeat(64),
+        gateAuthorityId: "gate-authority-1",
+        gateAuthorityHash: "a".repeat(64),
+        integrationGenerationId: "generation-1",
+        integrationAuthorityHash: "a".repeat(64),
+        repositoryCommits: [
+          {
+            repositoryReference: "repository:api",
+            commit: "b".repeat(40),
+          },
+        ],
+        artifactVersionIds: [],
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        authorityHash: "a".repeat(64),
+        createdAt: "2026-08-03T00:00:00.000Z",
+      }),
+      artifacts: {
+        metadata: () => ({
+          contentKind: "managed-file",
+          integrityStatus: "verified",
+          digest: "a".repeat(64),
+        }),
+      },
+      adapter: {
+        execute: async () => {
+          executions += 1;
+          return {
+            state: "unknown",
+            unknown: {
+              code: "not-run",
+              message: "not run",
+              observedAt: "2026-08-03T00:00:00.000Z",
+            },
+          };
+        },
+        reconcile: async () => ({ state: "pending" }),
+      },
+      clock: () => new Date("2026-08-03T00:00:00.000Z"),
+    });
+    const args = [
+      sqlite,
+      openProjectConfiguration(sqlite),
+      undefined,
+      () => new Date("2026-08-03T00:00:00.000Z"),
+      ...Array.from({ length: 20 }, () => undefined),
+      releaseOperations,
+    ] as unknown as Parameters<typeof openCompanyCommandRegistry>;
+    const registry = openCompanyCommandRegistry(...args);
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "release-command-1",
+      actor: {
+        type: "human" as const,
+        id: "human-1",
+        authenticatedBy: "local-session" as const,
+      },
+      consumerId: "desktop-window-1",
+      command: {
+        type: "delivery.release-operation.create" as const,
+        operation: {
+          operationId: "release-operation-1",
+          candidateId: "candidate-1",
+          expectedAcceptedAuthorityHash: "a".repeat(64),
+          kind: "merge" as const,
+          authorization: {
+            reason: "Release accepted authority.",
+            evidenceRefs: ["checklist-1"],
+          },
+          items: [
+            {
+              id: "repository:api",
+              repositoryReference: "repository:api",
+              sourceCommit: "b".repeat(40),
+              destination: {
+                targetBranch: "main",
+                expectedTargetTip: "c".repeat(40),
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    const first = registry.execute(envelope);
+    const replay = registry.execute(envelope);
+
+    assert.equal(first.status, "succeeded");
+    assert.deepEqual(replay, first);
+    assert.equal(executions, 0);
+    assert.equal(
+      releaseOperations.inspect("release-operation-1").aggregateState,
+      "pending",
+    );
+    assert.equal(
+      (
+        sqlite
+          .prepare("SELECT COUNT(*) AS count FROM release_operations")
+          .get() as { readonly count: number }
+      ).count,
+      1,
+    );
+    const unknown = await releaseOperations.dispatch("release-operation-1");
+    assert.equal(unknown.items[0]?.state, "unknown");
+
+    const reconciliation = registry.execute({
+      schemaVersion: 1,
+      commandId: "release-reconciliation-command-1",
+      actor: envelope.actor,
+      consumerId: envelope.consumerId,
+      command: {
+        type: "delivery.release-operation.reconcile",
+        operationId: "release-operation-1",
+        itemId: "repository:api",
+        expectedOperationHash: unknown.canonicalRequestHash,
+        evidenceRefs: ["operator-observation-1"],
+      },
+    });
+
+    assert.equal(reconciliation.status, "succeeded");
+    if (reconciliation.status === "succeeded") {
+      assert.equal(reconciliation.value.aggregateState, "reconciling");
+      assert.equal(reconciliation.value.items[0]?.state, "reconciling");
+    }
+    assert.equal(executions, 1);
+    sqlite.close();
+  });
+
   it("persists Test Case revision, audit, outbox, trigger context, and replay receipt in one unit of work", () => {
     const database = openCompanyDatabase(tempCompanyDir());
     try {
@@ -132,7 +274,7 @@ describe("Company Runtime command registry", () => {
         .readAfter(0, 100)
         .find((entry) => entry.type === "test.case.revised");
       assert.equal(event?.testCaseRevisionId, "test-case-1-r1");
-      assert.equal(event?.registryVersion, 18);
+      assert.equal(event?.registryVersion, RUNTIME_EVENT_REGISTRY_VERSION);
 
       const inspected = new DatabaseSync(database.path);
       try {

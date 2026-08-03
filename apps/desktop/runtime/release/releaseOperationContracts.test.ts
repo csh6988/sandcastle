@@ -7,6 +7,8 @@ import {
   ReleaseOperationViewSchema,
 } from "./releaseOperationContracts.js";
 import {
+  CompanyQuerySchema,
+  EnvelopeCommandSchema,
   ReleaseOperationCreateEnvelopeCommandSchema,
   ReleaseOperationInspectQuerySchema,
   ReleaseOperationListQuerySchema,
@@ -109,8 +111,7 @@ describe("Release operation contracts", () => {
   });
 
   it("keeps human actor injection separate from command inputs and freezes expected hashes", () => {
-    assert.doesNotThrow(() =>
-      ReleaseOperationCreateEnvelopeCommandSchema.parse({
+    const createCommand = {
         type: "delivery.release-operation.create",
         operation: {
           operationId: "release-operation-1",
@@ -134,17 +135,18 @@ describe("Release operation contracts", () => {
             },
           ],
         },
-      }),
-    );
-    assert.doesNotThrow(() =>
-      ReleaseOperationReconcileEnvelopeCommandSchema.parse({
+      } as const;
+    const reconcileCommand = {
         type: "delivery.release-operation.reconcile",
         operationId: "release-operation-1",
         itemId: "artifact:release-notes",
         expectedOperationHash: hash,
         evidenceRefs: ["filesystem-observation:1"],
-      }),
-    );
+      } as const;
+    assert.doesNotThrow(() => ReleaseOperationCreateEnvelopeCommandSchema.parse(createCommand));
+    assert.doesNotThrow(() => ReleaseOperationReconcileEnvelopeCommandSchema.parse(reconcileCommand));
+    assert.doesNotThrow(() => EnvelopeCommandSchema.parse(createCommand));
+    assert.doesNotThrow(() => EnvelopeCommandSchema.parse(reconcileCommand));
     assert.doesNotThrow(() =>
       ReleaseOperationInspectQuerySchema.parse({
         type: "release-operations.inspect",
@@ -153,6 +155,18 @@ describe("Release operation contracts", () => {
     );
     assert.doesNotThrow(() =>
       ReleaseOperationListQuerySchema.parse({
+        type: "release-operations.list",
+        candidateId: "candidate-1",
+      }),
+    );
+    assert.doesNotThrow(() =>
+      CompanyQuerySchema.parse({
+        type: "release-operations.inspect",
+        operationId: "release-operation-1",
+      }),
+    );
+    assert.doesNotThrow(() =>
+      CompanyQuerySchema.parse({
         type: "release-operations.list",
         candidateId: "candidate-1",
       }),

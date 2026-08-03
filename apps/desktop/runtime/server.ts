@@ -44,6 +44,8 @@ import { CandidateInputRuntimeError } from "./delivery/candidateInputRuntime.js"
 import { QualityGateRuntimeError } from "./quality/qualityGateRuntime.js";
 import { DeliveryRuntimeError } from "./delivery/deliveryRuntime.js";
 import type { DeliveryQualityNodePlanProvider } from "./quality/qualityGateNodeHandler.js";
+import { ReleaseOperationRuntimeError } from "./release/releaseOperationRuntime.js";
+import type { ReleaseOperationEffectAdapter } from "./release/releaseOperationContracts.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -54,6 +56,10 @@ export interface CompanyRuntimeServerOptions {
   readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
   readonly integrationValidationProvider?: IntegrationValidationProvider;
   readonly deliveryQualityPlans?: DeliveryQualityNodePlanProvider;
+  readonly releaseOperationAdapter?: ReleaseOperationEffectAdapter;
+  readonly releaseOperationFailureInjection?: (
+    point: "after-intent" | "after-effect-before-finalize",
+  ) => void;
   readonly testExecutionAdapterFactory?: (input: {
     readonly database: import("node:sqlite").DatabaseSync;
     readonly tests: import("./testing/testRuntime.js").TestRuntime;
@@ -90,6 +96,7 @@ export const reconcileCompanyRuntimeStartup = async (
     | "codeReviewNodeHandler"
     | "integrationNodeHandler"
     | "testNodeHandler"
+    | "releaseOperations"
   >,
 ): Promise<void> => {
   await database.pipelineRuntime.reconcilePendingExecutions();
@@ -97,6 +104,7 @@ export const reconcileCompanyRuntimeStartup = async (
   await database.codeReviewNodeHandler.reconcilePending();
   await database.integrationNodeHandler.reconcilePending();
   await database.testNodeHandler.reconcilePending();
+  await database.releaseOperations.reconcilePending();
 };
 
 export const prepareCompanyRuntimeStartup = async (
@@ -202,6 +210,21 @@ export const startCompanyRuntimeServer = async (
             },
           }
         : {}),
+      ...(options.releaseOperationAdapter ||
+      options.releaseOperationFailureInjection
+        ? {
+            releaseOperationRuntime: {
+              ...(options.releaseOperationAdapter
+                ? { adapter: options.releaseOperationAdapter }
+                : {}),
+              ...(options.releaseOperationFailureInjection
+                ? {
+                    failureInjection: options.releaseOperationFailureInjection,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     });
   } catch (error) {
     releaseLock();
@@ -261,6 +284,7 @@ export const startCompanyRuntimeServer = async (
     closing = (async () => {
       let closeError: Error | undefined;
       try {
+        await database.releaseOperations.prepareForShutdown();
         await Promise.all([
           database.pipelineRuntime.prepareForShutdown(),
           database.interaction.prepareForShutdown(),
@@ -416,6 +440,20 @@ export const startCompanyRuntimeServer = async (
               if (result.status === "succeeded") {
                 if (
                   request.envelope.command.type ===
+                    "delivery.release-operation.create" ||
+                  request.envelope.command.type ===
+                    "delivery.release-operation.reconcile"
+                ) {
+                  const operationId =
+                    request.envelope.command.type ===
+                    "delivery.release-operation.create"
+                      ? request.envelope.command.operation.operationId
+                      : request.envelope.command.operationId;
+                  void database.releaseOperations
+                    .dispatch(operationId)
+                    .catch(() => undefined);
+                } else if (
+                  request.envelope.command.type ===
                   "workspace-allocation.provision"
                 ) {
                   database.workspaces.executeProvision(
@@ -541,6 +579,12 @@ export const startCompanyRuntimeServer = async (
                     return database.delivery.acceptedAuthority(
                       query.candidateId,
                     );
+                  case "release-operations.inspect":
+                    return database.releaseOperations.inspect(
+                      query.operationId,
+                    );
+                  case "release-operations.list":
+                    return database.releaseOperations.list(query.candidateId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -641,6 +685,14 @@ export const startCompanyRuntimeServer = async (
                   return database.delivery.inspectRun(request.query.runId);
                 case "accepted-delivery-authority.inspect":
                   return database.delivery.acceptedAuthority(
+                    request.query.candidateId,
+                  );
+                case "release-operations.inspect":
+                  return database.releaseOperations.inspect(
+                    request.query.operationId,
+                  );
+                case "release-operations.list":
+                  return database.releaseOperations.list(
                     request.query.candidateId,
                   );
                 case "departments.list":
@@ -1275,6 +1327,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof CandidateInputRuntimeError ||
                 error instanceof QualityGateRuntimeError ||
                 error instanceof DeliveryRuntimeError ||
+                error instanceof ReleaseOperationRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -1295,6 +1348,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof CandidateInputRuntimeError ||
                 error instanceof QualityGateRuntimeError ||
                 error instanceof DeliveryRuntimeError ||
+                error instanceof ReleaseOperationRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

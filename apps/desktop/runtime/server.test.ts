@@ -176,6 +176,12 @@ describe("Company Runtime server startup", () => {
       testNodeHandler: {
         reconcilePending: async () => calls.push("test"),
       },
+      releaseOperations: {
+        reconcilePending: async () => {
+          calls.push("release");
+          return [];
+        },
+      },
     } as unknown as CompanyDatabase;
 
     await prepareCompanyRuntimeStartup(database, () => {
@@ -189,6 +195,7 @@ describe("Company Runtime server startup", () => {
       "code-review",
       "integration",
       "test",
+      "release",
     ]);
   });
 
@@ -327,6 +334,73 @@ describe("Company Runtime server startup", () => {
           error instanceof RuntimeClientError &&
           error.code === "ACCEPTED_DELIVERY_AUTHORITY_NOT_FOUND",
       );
+      assert.deepEqual(
+        (
+          await client.queryEnvelope({
+            schemaVersion: 1,
+            requestId: "query-release-operations-empty",
+            principal,
+            consumerId: "quality-server-test",
+            query: {
+              type: "release-operations.list",
+              candidateId: "missing-delivery-candidate",
+            },
+          })
+        ).view,
+        [],
+      );
+      await assert.rejects(
+        client.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "query-release-operation-missing",
+          principal,
+          consumerId: "quality-server-test",
+          query: {
+            type: "release-operations.inspect",
+            operationId: "missing-release-operation",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError &&
+          error.code === "RELEASE_OPERATION_NOT_FOUND",
+      );
+      const releaseOperation = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "release-operation-invalid-actor",
+        actor: principal,
+        consumerId: "quality-server-test",
+        command: {
+          type: "delivery.release-operation.create",
+          operation: {
+            operationId: "release-operation-1",
+            candidateId: "missing-delivery-candidate",
+            expectedAcceptedAuthorityHash: "a".repeat(64),
+            kind: "merge",
+            authorization: {
+              reason: "Release accepted authority.",
+              evidenceRefs: ["checklist-1"],
+            },
+            items: [
+              {
+                id: "repository:api",
+                repositoryReference: "/tmp/disposable-repository",
+                sourceCommit: "b".repeat(40),
+                destination: {
+                  targetBranch: "main",
+                  expectedTargetTip: "c".repeat(40),
+                },
+              },
+            ],
+          },
+        },
+      });
+      assert.equal(releaseOperation.status, "rejected");
+      if (releaseOperation.status === "rejected") {
+        assert.equal(
+          releaseOperation.error.code,
+          "ACCEPTED_DELIVERY_AUTHORITY_NOT_FOUND",
+        );
+      }
       const reconciled = await client.executeEnvelope({
         schemaVersion: 1,
         commandId: "quality-reconcile-missing",

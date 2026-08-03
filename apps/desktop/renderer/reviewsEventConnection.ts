@@ -1,7 +1,9 @@
 import type {
+  AcceptedDeliveryCandidateAuthorityView,
   CandidateQualityGateView,
   DeliveryCandidateView,
   IntegrationGenerationView,
+  ReleaseOperationView,
   RuntimeSubscriptionHandle,
 } from "../runtime/interface.js";
 import type { RuntimeEventFrame, SandcastleBridge } from "../preload/bridge.js";
@@ -16,6 +18,8 @@ export type ReviewsStageViews = {
   readonly integrationGenerations: readonly IntegrationGenerationView[];
   readonly candidateQuality: CandidateQualityGateView | null;
   readonly deliveryCandidate: DeliveryCandidateView | null;
+  readonly acceptedDeliveryAuthority: AcceptedDeliveryCandidateAuthorityView | null;
+  readonly releaseOperations: readonly ReleaseOperationView[];
 };
 
 export type ReviewsStageSnapshot = Omit<ReviewsStageViews, "generation">;
@@ -45,6 +49,8 @@ export const connectReviewsEventStream = async (input: {
     integrationGenerations: [],
     candidateQuality: null,
     deliveryCandidate: null,
+    acceptedDeliveryAuthority: null,
+    releaseOperations: [],
   };
 
   const closeActive = async (): Promise<void> => {
@@ -82,6 +88,22 @@ export const connectReviewsEventStream = async (input: {
           candidateId: input.candidateId,
         })
       : Promise.resolve(null);
+  const queryRelease = async (candidate: DeliveryCandidateView | null) => {
+    if (!candidate || candidate.projection !== "accepted") {
+      return { authority: null, operations: null };
+    }
+    const [authority, operations] = await Promise.all([
+      input.bridge.query({
+        type: "accepted-delivery-authority.inspect" as const,
+        candidateId: candidate.id,
+      }),
+      input.bridge.query({
+        type: "release-operations.list" as const,
+        candidateId: candidate.id,
+      }),
+    ]);
+    return { authority, operations };
+  };
 
   const refreshViews = async (
     frameGeneration: number,
@@ -97,6 +119,13 @@ export const connectReviewsEventStream = async (input: {
         stages.candidateQuality ? queryCandidateQuality() : null,
         stages.deliveryCandidate ? queryDeliveryCandidate() : null,
       ]);
+    const nextDeliveryCandidate =
+      deliveryCandidate === null
+        ? latest.deliveryCandidate
+        : (deliveryCandidate?.view ?? null);
+    const release = stages.deliveryCandidate
+      ? await queryRelease(nextDeliveryCandidate)
+      : { authority: null, operations: null };
     if (closed || frameGeneration !== generation || !handle) return;
     latest = {
       integrationGenerations:
@@ -109,6 +138,18 @@ export const connectReviewsEventStream = async (input: {
         deliveryCandidate === null
           ? latest.deliveryCandidate
           : deliveryCandidate.view,
+      acceptedDeliveryAuthority:
+        release.authority === null
+          ? stages.deliveryCandidate
+            ? null
+            : latest.acceptedDeliveryAuthority
+          : release.authority.view,
+      releaseOperations:
+        release.operations === null
+          ? stages.deliveryCandidate
+            ? []
+            : latest.releaseOperations
+          : release.operations.view,
     };
     input.onViews({ generation: frameGeneration, ...latest });
   };
@@ -198,8 +239,15 @@ export const connectReviewsEventStream = async (input: {
         queryCandidateQuality(),
         queryDeliveryCandidate(),
       ]);
+    const release = await queryRelease(deliveryCandidate?.view ?? null);
     if (closed) return;
-    const snapshots = [integration, candidateQuality, deliveryCandidate].filter(
+    const snapshots = [
+      integration,
+      candidateQuality,
+      deliveryCandidate,
+      release.authority,
+      release.operations,
+    ].filter(
       (snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== null,
     );
     const anchor = snapshots.reduce((earliest, snapshot) =>
@@ -214,6 +262,8 @@ export const connectReviewsEventStream = async (input: {
       integrationGenerations: integration.view,
       candidateQuality: candidateQuality?.view ?? null,
       deliveryCandidate: deliveryCandidate?.view ?? null,
+      acceptedDeliveryAuthority: release.authority?.view ?? null,
+      releaseOperations: release.operations?.view ?? [],
     };
     input.onInitialViews(latest);
     const acknowledgement = await input.bridge.execute({

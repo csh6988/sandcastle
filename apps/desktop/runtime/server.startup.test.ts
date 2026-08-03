@@ -41,6 +41,12 @@ describe("Company Runtime startup reconciliation", () => {
           return 1;
         },
       },
+      releaseOperations: {
+        reconcilePending: async () => {
+          order.push("release");
+          return 1;
+        },
+      },
     } as unknown as CompanyDatabase;
     let settled = false;
     const startup = reconcileCompanyRuntimeStartup(database).then(() => {
@@ -57,7 +63,11 @@ describe("Company Runtime startup reconciliation", () => {
     integration.resolve();
     await startup;
     assert.equal(settled, true);
-    assert.deepEqual(order.slice(-2), ["integration-complete", "test"]);
+    assert.deepEqual(order.slice(-3), [
+      "integration-complete",
+      "test",
+      "release",
+    ]);
   });
 
   it("propagates Integration reconciliation rejection instead of racing database close", async () => {

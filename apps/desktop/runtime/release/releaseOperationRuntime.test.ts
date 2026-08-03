@@ -82,6 +82,23 @@ describe("ReleaseOperationRuntime", () => {
     assert.deepEqual(calls, ["repository:api"]);
   });
 
+  it("joins an existing Command transaction without committing it", () => {
+    const { database, runtime } = setup({
+      execute: async () => ({ state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } }),
+      reconcile: async () => ({ state: "pending" }),
+    });
+    const request = mergeRequest();
+
+    database.exec("BEGIN IMMEDIATE");
+    runtime.create(request, request.authorization.actor);
+    database.exec("ROLLBACK");
+
+    assert.throws(
+      () => runtime.inspect(request.operationId),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "RELEASE_OPERATION_NOT_FOUND",
+    );
+  });
+
   it("rejects changed authority or changed input under an existing operation identity", () => {
     const { runtime } = setup({
       execute: async () => ({ state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } }),
@@ -102,13 +119,27 @@ describe("ReleaseOperationRuntime", () => {
 
   it("stops at unknown, stores append-only evidence in the view, and requires human reconciliation", async () => {
     let executions = 0;
-    const { runtime } = setup({
+    let database!: DatabaseSync;
+    const configured = setup({
       execute: async () => {
         executions += 1;
         return { state: "unknown", unknown: { code: "TIMEOUT", message: "write outcome is not known", observedAt: "2026-08-03T00:00:01.000Z" } };
       },
-      reconcile: async () => ({ state: "succeeded", receipt: { kind: "merge", disposition: "no-op", resultingTargetTip: commit("b"), observedAt: "2026-08-03T00:00:02.000Z" } }),
+      reconcile: async () => {
+        const intent = database.prepare(
+          "SELECT observation_json AS observationJson FROM release_operation_reconciliations ORDER BY created_at, id LIMIT 1",
+        ).get() as { readonly observationJson: string } | undefined;
+        assert.deepEqual(JSON.parse(intent?.observationJson ?? "null"), {
+          phase: "intent",
+          evidenceRefs: ["filesystem-observation:1"],
+        });
+        database.exec("BEGIN IMMEDIATE");
+        database.exec("ROLLBACK");
+        return { state: "succeeded", receipt: { kind: "merge", disposition: "no-op", resultingTargetTip: commit("b"), observedAt: "2026-08-03T00:00:02.000Z" } };
+      },
     });
+    database = configured.database;
+    const { runtime } = configured;
     const request = mergeRequest();
     await runtime.dispatch(runtime.create(request, request.authorization.actor).id);
     const unknown = runtime.inspect(request.operationId);
@@ -117,6 +148,10 @@ describe("ReleaseOperationRuntime", () => {
     await runtime.reconcile({ operationId: request.operationId, itemId: "repository:api", expectedOperationHash: unknown.canonicalRequestHash, evidenceRefs: ["filesystem-observation:1"] }, request.authorization.actor);
     assert.equal(runtime.inspect(request.operationId).aggregateState, "succeeded");
     assert.equal(executions, 1);
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM release_operation_reconciliations").get() as { readonly count: number }).count,
+      2,
+    );
   });
 
   it("retains committed intent across a crash before dispatch and does not duplicate an effect after an effect-before-finalize crash", async () => {

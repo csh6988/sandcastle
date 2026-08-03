@@ -32,6 +32,7 @@ export interface ReleaseOperationAuditEvent {
   readonly operationId: string;
   readonly candidateId: string;
   readonly aggregateState: ReleaseOperationView["aggregateState"];
+  readonly acceptedAuthority: AcceptedDeliveryCandidateAuthoritySnapshot;
 }
 
 export interface ReleaseOperationRuntimeOptions {
@@ -60,6 +61,10 @@ export interface ReleaseOperationRuntime {
     input: Omit<ReleaseOperationReconcileRequest, "actor">,
     actor: { readonly type: "human"; readonly id: string; readonly authenticatedBy: "local-session" },
   ) => Promise<ReleaseOperationView>;
+  readonly requestReconciliation: (
+    input: Omit<ReleaseOperationReconcileRequest, "actor">,
+    actor: { readonly type: "human"; readonly id: string; readonly authenticatedBy: "local-session" },
+  ) => ReleaseOperationView;
   readonly reconcilePending: () => Promise<readonly ReleaseOperationView[]>;
   readonly prepareForShutdown: () => Promise<void>;
 }
@@ -139,15 +144,22 @@ export const openReleaseOperationRuntime = (
   const nextId = options.id ?? randomUUID;
   const active = new Map<string, Promise<ReleaseOperationView>>();
   let stopping = false;
+  let savepointSequence = 0;
 
   const transaction = <Value>(work: () => Value): Value => {
-    database.exec("BEGIN IMMEDIATE");
+    const savepoint = `release_operation_${++savepointSequence}`;
+    database.exec(`SAVEPOINT ${savepoint}`);
     try {
       const value = work();
-      database.exec("COMMIT");
+      database.exec(`RELEASE ${savepoint}`);
       return value;
     } catch (error) {
-      try { database.exec("ROLLBACK"); } catch { /* the commit may already have completed */ }
+      try {
+        database.exec(`ROLLBACK TO ${savepoint}`);
+        database.exec(`RELEASE ${savepoint}`);
+      } catch {
+        // The outer transaction owner is responsible for its final rollback.
+      }
       throw error;
     }
   };
@@ -223,7 +235,12 @@ export const openReleaseOperationRuntime = (
 
   const invalidate = (operationId: string): void => {
     const view = inspect(operationId);
-    options.invalidate?.({ operationId, candidateId: view.request.candidateId, aggregateState: view.aggregateState });
+    options.invalidate?.({
+      operationId,
+      candidateId: view.request.candidateId,
+      aggregateState: view.aggregateState,
+      acceptedAuthority: view.acceptedAuthority,
+    });
   };
 
   const appendObservation = (input: { readonly operationId: string; readonly itemDatabaseId: string; readonly kind: "execution" | "receipt" | "failure" | "destination-conflict" | "unknown" | "reconcile"; readonly observation: unknown; readonly at: string }): void => {
@@ -252,7 +269,67 @@ export const openReleaseOperationRuntime = (
     }
   };
 
-  const setItem = (input: { readonly operationId: string; readonly item: ItemRow; readonly state: string; readonly kind: "execution" | "receipt" | "failure" | "destination-conflict" | "unknown" | "reconcile"; readonly observation: unknown; readonly receipt?: unknown | null; readonly release?: boolean }): ReleaseOperationView => transaction(() => {
+  type ReconciliationIntent = {
+    readonly id: string;
+    readonly actorId: string;
+    readonly evidenceRefs: readonly string[];
+  };
+
+  const appendReconciliation = (input: {
+    readonly operationId: string;
+    readonly itemDatabaseId: string;
+    readonly actorId: string;
+    readonly evidenceRefs: readonly string[];
+    readonly observation: unknown;
+    readonly at: string;
+  }): string => {
+    const id = nextId();
+    database.prepare(
+      `INSERT INTO release_operation_reconciliations(id, operation_id, item_id, actor_id, authenticated_by, evidence_refs_json, observation_json, observation_hash, created_at)
+       VALUES (?, ?, ?, ?, 'local-session', ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.operationId,
+      input.itemDatabaseId,
+      input.actorId,
+      canonicalJson(input.evidenceRefs),
+      canonicalJson(bounded(input.observation)),
+      digest(bounded(input.observation)),
+      input.at,
+    );
+    return id;
+  };
+
+  const pendingReconciliationIntent = (itemDatabaseId: string): ReconciliationIntent | null => {
+    const rows = database.prepare(
+      `SELECT id, actor_id AS actorId, evidence_refs_json AS evidenceRefsJson,
+              observation_json AS observationJson
+         FROM release_operation_reconciliations
+        WHERE item_id = ? ORDER BY created_at, id`,
+    ).all(itemDatabaseId) as Array<{
+      readonly id: string;
+      readonly actorId: string;
+      readonly evidenceRefsJson: string;
+      readonly observationJson: string;
+    }>;
+    const completed = new Set<string>();
+    const intents: ReconciliationIntent[] = [];
+    for (const row of rows) {
+      const observation = parseJson<Record<string, unknown>>(row.observationJson, `Release reconciliation ${row.id}`);
+      if (observation.phase === "observation" && typeof observation.intentId === "string") {
+        completed.add(observation.intentId);
+      } else if (observation.phase === "intent") {
+        intents.push({
+          id: row.id,
+          actorId: row.actorId,
+          evidenceRefs: parseJson<string[]>(row.evidenceRefsJson, `Release reconciliation evidence ${row.id}`),
+        });
+      }
+    }
+    return [...intents].reverse().find((intent) => !completed.has(intent.id)) ?? null;
+  };
+
+  const setItemInTransaction = (input: { readonly operationId: string; readonly item: ItemRow; readonly state: string; readonly kind: "execution" | "receipt" | "failure" | "destination-conflict" | "unknown" | "reconcile"; readonly observation: unknown; readonly receipt?: unknown | null; readonly release?: boolean; readonly reconciliation?: ReconciliationIntent }): ReleaseOperationView => {
     const at = now();
     const current = database.prepare("SELECT evidence_json AS evidenceJson FROM release_operation_items WHERE id = ?").get(input.item.databaseId) as { readonly evidenceJson: string } | undefined;
     if (!current) throw new ReleaseOperationRuntimeError("RELEASE_OPERATION_NOT_FOUND", `Release item ${input.item.itemKey} was not found.`);
@@ -264,17 +341,34 @@ export const openReleaseOperationRuntime = (
         WHERE id = ?`,
     ).run(input.state, input.receipt ? canonicalJson(bounded(input.receipt)) : null, input.receipt ? digest(bounded(input.receipt)) : null, canonicalJson(evidence), at, input.item.databaseId);
     appendObservation({ operationId: input.operationId, itemDatabaseId: input.item.databaseId, kind: input.kind, observation: input.observation, at });
+    if (input.reconciliation) {
+      appendReconciliation({
+        operationId: input.operationId,
+        itemDatabaseId: input.item.databaseId,
+        actorId: input.reconciliation.actorId,
+        evidenceRefs: input.reconciliation.evidenceRefs,
+        observation: {
+          phase: "observation",
+          intentId: input.reconciliation.id,
+          result: bounded(input.observation),
+        },
+        at,
+      });
+    }
     if (input.release) releaseClaim(input.operationId, input.item.databaseId, at);
     updateAggregate(input.operationId, at);
     invalidate(input.operationId);
     return inspect(input.operationId);
-  });
+  };
 
-  const finalize = (operationId: string, item: ItemRow, result: ReleaseOperationItemFinalize): ReleaseOperationView => {
-    if (result.state === "succeeded") return setItem({ operationId, item, state: "succeeded", kind: "receipt", observation: result.receipt, receipt: result.receipt, release: true });
-    if (result.state === "destination-conflict") return setItem({ operationId, item, state: "destination-conflict", kind: "destination-conflict", observation: result.conflict, release: true });
-    if (result.state === "failed") return setItem({ operationId, item, state: "failed", kind: "failure", observation: result.failure, release: true });
-    return setItem({ operationId, item, state: "unknown", kind: "unknown", observation: result.unknown, release: false });
+  const setItem = (input: Parameters<typeof setItemInTransaction>[0]): ReleaseOperationView =>
+    transaction(() => setItemInTransaction(input));
+
+  const finalize = (operationId: string, item: ItemRow, result: ReleaseOperationItemFinalize, reconciliation?: ReconciliationIntent): ReleaseOperationView => {
+    if (result.state === "succeeded") return setItem({ operationId, item, state: "succeeded", kind: "receipt", observation: result.receipt, receipt: result.receipt, release: true, ...(reconciliation ? { reconciliation } : {}) });
+    if (result.state === "destination-conflict") return setItem({ operationId, item, state: "destination-conflict", kind: "destination-conflict", observation: result.conflict, release: true, ...(reconciliation ? { reconciliation } : {}) });
+    if (result.state === "failed") return setItem({ operationId, item, state: "failed", kind: "failure", observation: result.failure, release: true, ...(reconciliation ? { reconciliation } : {}) });
+    return setItem({ operationId, item, state: "unknown", kind: "unknown", observation: result.unknown, release: false, ...(reconciliation ? { reconciliation } : {}) });
   };
 
   const validateAuthority = (request: ReleaseOperationCreateRequest): AcceptedDeliveryCandidateAuthoritySnapshot => {
@@ -339,12 +433,12 @@ export const openReleaseOperationRuntime = (
     return created;
   };
 
-  const resolveReconciliation = (operationId: string, item: ItemRow, observation: ReleaseOperationReconcileObservation): ReleaseOperationView => {
-    if (observation.state === "succeeded") return finalize(operationId, item, { state: "succeeded", receipt: observation.receipt });
-    if (observation.state === "failed") return finalize(operationId, item, { state: "failed", failure: observation.failure });
-    if (observation.state === "destination-conflict") return finalize(operationId, item, { state: "destination-conflict", conflict: observation.conflict });
-    if (observation.state === "unknown") return finalize(operationId, item, { state: "unknown", unknown: observation.unknown });
-    return setItem({ operationId, item, state: observation.state, kind: "reconcile", observation, release: false });
+  const resolveReconciliation = (operationId: string, item: ItemRow, observation: ReleaseOperationReconcileObservation, reconciliation?: ReconciliationIntent): ReleaseOperationView => {
+    if (observation.state === "succeeded") return finalize(operationId, item, { state: "succeeded", receipt: observation.receipt }, reconciliation);
+    if (observation.state === "failed") return finalize(operationId, item, { state: "failed", failure: observation.failure }, reconciliation);
+    if (observation.state === "destination-conflict") return finalize(operationId, item, { state: "destination-conflict", conflict: observation.conflict }, reconciliation);
+    if (observation.state === "unknown") return finalize(operationId, item, { state: "unknown", unknown: observation.unknown }, reconciliation);
+    return setItem({ operationId, item, state: observation.state, kind: "reconcile", observation, release: false, ...(reconciliation ? { reconciliation } : {}) });
   };
 
   const worker = async (operationId: string): Promise<ReleaseOperationView> => {
@@ -363,10 +457,13 @@ export const openReleaseOperationRuntime = (
       const current = inspect(operationId);
       const effect = itemEffect(current, requestItem);
       if (row.state === "running" || row.state === "reconciling") {
-        setItem({ operationId, item: row, state: "reconciling", kind: "reconcile", observation: { state: "reconciling" }, release: false });
+        const reconciliation = row.state === "reconciling" ? pendingReconciliationIntent(row.databaseId) : null;
+        if (row.state === "running") {
+          setItem({ operationId, item: row, state: "reconciling", kind: "reconcile", observation: { state: "reconciling" }, release: false });
+        }
         let observation: ReleaseOperationReconcileObservation;
-        try { observation = await options.adapter.reconcile(effect, []); } catch (error) { observation = { state: "unknown", unknown: { code: "RECONCILE_ERROR", message: String(error), observedAt: now() } }; }
-        view = resolveReconciliation(operationId, row, observation);
+        try { observation = await options.adapter.reconcile(effect, reconciliation?.evidenceRefs ?? []); } catch (error) { observation = { state: "unknown", unknown: { code: "RECONCILE_ERROR", message: String(error), observedAt: now() } }; }
+        view = resolveReconciliation(operationId, row, observation, reconciliation ?? undefined);
         if (observation.state === "unknown") break;
         if (observation.state !== "pending") continue;
       }
@@ -398,7 +495,7 @@ export const openReleaseOperationRuntime = (
     return run;
   };
 
-  const reconcile: ReleaseOperationRuntime["reconcile"] = async (input, actor) => {
+  const requestReconciliation: ReleaseOperationRuntime["requestReconciliation"] = (input, actor) => {
     const request = ReleaseOperationReconcileRequestSchema.parse({ ...input, actor });
     if (actor.type !== "human" || actor.authenticatedBy !== "local-session") throw new ReleaseOperationRuntimeError("RELEASE_RECONCILIATION_INVALID", "Release reconciliation requires a verified local-session human actor.");
     const view = inspect(request.operationId);
@@ -408,17 +505,37 @@ export const openReleaseOperationRuntime = (
          FROM release_operation_items WHERE operation_id = ? AND item_key = ?`,
     ).get(request.operationId, request.itemId) as ItemRow | undefined;
     if (!row || (row.state !== "unknown" && row.state !== "reconciling")) throw new ReleaseOperationRuntimeError("RELEASE_RECONCILIATION_INVALID", "Only unknown or reconciling Release operation items may be reconciled.");
-    const effect = itemEffect(view, parseJson<ReleaseOperationCreateRequest["items"][number]>(row.requestJson, `Release item ${row.itemKey}`));
-    let observation: ReleaseOperationReconcileObservation;
-    try { observation = await options.adapter.reconcile(effect, request.evidenceRefs); } catch (error) { observation = { state: "unknown", unknown: { code: "RECONCILE_ERROR", message: String(error), observedAt: now() } }; }
-    transaction(() => {
+    if (pendingReconciliationIntent(row.databaseId)) {
+      throw new ReleaseOperationRuntimeError("RELEASE_RECONCILIATION_INVALID", "Release operation item already has a pending verified-human reconciliation intent.");
+    }
+    return transaction(() => {
       const at = now();
-      database.prepare(
-        `INSERT INTO release_operation_reconciliations(id, operation_id, item_id, actor_id, authenticated_by, evidence_refs_json, observation_json, observation_hash, created_at)
-         VALUES (?, ?, ?, ?, 'local-session', ?, ?, ?, ?)`,
-      ).run(nextId(), request.operationId, row.databaseId, actor.id, canonicalJson(request.evidenceRefs.map((ref) => ref.trim())), canonicalJson(bounded(observation)), digest(bounded(observation)), at);
+      appendReconciliation({
+        operationId: request.operationId,
+        itemDatabaseId: row.databaseId,
+        actorId: actor.id,
+        evidenceRefs: request.evidenceRefs.map((ref) => ref.trim()),
+        observation: {
+          phase: "intent",
+          evidenceRefs: request.evidenceRefs.map((ref) => ref.trim()),
+        },
+        at,
+      });
+      const requested = setItemInTransaction({
+        operationId: request.operationId,
+        item: row,
+        state: "reconciling",
+        kind: "reconcile",
+        observation: { state: "reconciling", authority: "verified-human" },
+        release: false,
+      });
+      return requested;
     });
-    return resolveReconciliation(request.operationId, row, observation);
+  };
+
+  const reconcile: ReleaseOperationRuntime["reconcile"] = async (input, actor) => {
+    const requested = requestReconciliation(input, actor);
+    return dispatch(requested.id);
   };
 
   const reconcilePending: ReleaseOperationRuntime["reconcilePending"] = async () => {
@@ -450,5 +567,5 @@ export const openReleaseOperationRuntime = (
     await Promise.all([...active.values()]);
   };
 
-  return { create, inspect, list: (candidateId) => (database.prepare("SELECT id FROM release_operations WHERE candidate_id = ? ORDER BY created_at, id").all(candidateId) as Array<{ readonly id: string }>).map((row) => inspect(row.id)), dispatch, reconcile, reconcilePending, prepareForShutdown };
+  return { create, inspect, list: (candidateId) => (database.prepare("SELECT id FROM release_operations WHERE candidate_id = ? ORDER BY created_at, id").all(candidateId) as Array<{ readonly id: string }>).map((row) => inspect(row.id)), dispatch, reconcile, requestReconciliation, reconcilePending, prepareForShutdown };
 };

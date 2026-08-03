@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -157,6 +157,13 @@ import {
   type DeliveryRuntime,
 } from "../delivery/deliveryRuntime.js";
 import {
+  openReleaseOperationRuntime,
+  type ReleaseOperationRuntime,
+} from "../release/releaseOperationRuntime.js";
+import { openLocalGitReleaseAdapter } from "../release/gitReleaseAdapter.js";
+import { createArtifactExportAdapter } from "../release/artifactExportAdapter.js";
+import type { ReleaseOperationEffectAdapter } from "../release/releaseOperationContracts.js";
+import {
   openQualityGateNodeHandler,
   type DeliveryQualityNodePlanProvider,
   type QualityGateNodeHandler,
@@ -191,6 +198,7 @@ export interface CompanyDatabase {
   readonly candidateInputs: CandidateInputRuntime;
   readonly qualityGates: QualityGateRuntime;
   readonly delivery: DeliveryRuntime;
+  readonly releaseOperations: ReleaseOperationRuntime;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -337,6 +345,12 @@ export const openCompanyDatabase = (
     readonly deliveryQualityRuntime?: {
       readonly plans?: DeliveryQualityNodePlanProvider;
       readonly leaseDurationMs?: number;
+    };
+    readonly releaseOperationRuntime?: {
+      readonly adapter?: ReleaseOperationEffectAdapter;
+      readonly failureInjection?: (
+        point: "after-intent" | "after-effect-before-finalize",
+      ) => void;
     };
     readonly productReviewRuntime?: {
       readonly promotionFailure?: (
@@ -547,6 +561,110 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const gitReleaseAdapter = openLocalGitReleaseAdapter();
+  const artifactExportAdapter = createArtifactExportAdapter({
+    artifacts: artifactRegistry,
+    ...(options.clock ? { now: options.clock } : {}),
+  });
+  const releaseAdapter: ReleaseOperationEffectAdapter = options
+    .releaseOperationRuntime?.adapter ?? {
+    execute: (request) =>
+      request.kind === "merge"
+        ? gitReleaseAdapter.execute(request)
+        : artifactExportAdapter.execute(request),
+    reconcile: (request, evidenceRefs) =>
+      request.kind === "merge"
+        ? gitReleaseAdapter.reconcile(request, evidenceRefs)
+        : artifactExportAdapter.reconcile(request, evidenceRefs),
+  };
+  const releaseOperations = openReleaseOperationRuntime(database, {
+    acceptedAuthority: (candidateId) => {
+      const authority = delivery.acceptedAuthority(candidateId);
+      return {
+        ...authority,
+        repositoryCommits: authority.repositoryCommits.map((entry) => ({
+          repositoryReference: entry.repositoryReference,
+          commit: entry.commit,
+        })),
+        artifactVersionIds: [...authority.artifactVersionIds],
+      };
+    },
+    artifacts: {
+      metadata: (artifactVersionId) => {
+        const version = artifactRegistry.inspect(artifactVersionId).version;
+        return {
+          contentKind: version.contentKind,
+          integrityStatus: artifactRegistry.verify(artifactVersionId),
+          digest: version.contentHash,
+        };
+      },
+      read: artifactRegistry.readContent,
+    },
+    adapter: releaseAdapter,
+    ...(options.clock ? { clock: options.clock } : {}),
+    ...(options.releaseOperationRuntime?.failureInjection
+      ? { failureInjection: options.releaseOperationRuntime.failureInjection }
+      : {}),
+    invalidate: (invalidation) => {
+      const candidate = delivery.inspect(invalidation.candidateId);
+      const timestamp = (options.clock ?? (() => new Date()))().toISOString();
+      const context = database
+        .prepare(
+          `SELECT command_id AS commandId, actor_type AS actorType,
+                  actor_id AS actorId, authenticated_by AS authenticatedBy,
+                  consumer_id AS consumerId
+             FROM runtime_unit_of_work_context WHERE slot = 1`,
+        )
+        .get() as
+        | {
+            readonly commandId: string;
+            readonly actorType: string;
+            readonly actorId: string;
+            readonly authenticatedBy: string;
+            readonly consumerId: string | null;
+          }
+        | undefined;
+      const commandId = context?.commandId ?? `release-runtime:${randomUUID()}`;
+      database
+        .prepare(
+          `INSERT INTO runtime_audit_records(
+             id, action, entity_type, entity_id, run_id, node_run_id,
+             before_json, after_json, created_at, command_id, actor_type,
+             actor_id, authenticated_by, consumer_id
+           ) VALUES (?, 'delivery.release-operation.invalidated',
+                     'release-operation', ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          invalidation.operationId,
+          invalidation.acceptedAuthority.runId,
+          JSON.stringify({ aggregateState: invalidation.aggregateState }),
+          timestamp,
+          commandId,
+          context?.actorType ?? "runtime-worker",
+          context?.actorId ?? "release-operation-runtime",
+          context?.authenticatedBy ?? "runtime",
+          context?.consumerId ?? null,
+        );
+      events.append({
+        type: "delivery.release-operation.invalidated",
+        scope: {
+          companyId: "company",
+          projectId: candidate.manifest.projectId,
+          runId: invalidation.acceptedAuthority.runId,
+          snapshotRevisionId: invalidation.acceptedAuthority.snapshotRevisionId,
+          deliveryCandidateId: invalidation.candidateId,
+          releaseOperationId: invalidation.operationId,
+          ...(context ? { commandId: context.commandId } : {}),
+        },
+        payload: {
+          releaseOperationId: invalidation.operationId,
+          candidateId: invalidation.candidateId,
+        },
+        timestamp,
+      });
+    },
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -579,6 +697,7 @@ export const openCompanyDatabase = (
     candidateInputs,
     qualityGates,
     delivery,
+    releaseOperations,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -697,6 +816,7 @@ export const openCompanyDatabase = (
     candidateInputs,
     qualityGates,
     delivery,
+    releaseOperations,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

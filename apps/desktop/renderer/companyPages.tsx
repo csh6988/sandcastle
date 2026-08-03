@@ -33,6 +33,9 @@ import type {
   SkillCatalogView,
   CandidateQualityGateView,
   DeliveryCandidateView,
+  AcceptedDeliveryCandidateAuthorityView,
+  ReleaseOperationEnvelopeCommand,
+  ReleaseOperationView,
 } from "../runtime/interface.js";
 import { WorkPackageGraphPanel } from "./workPackageView.js";
 import {
@@ -59,6 +62,7 @@ import {
   type ReviewsEventConnection,
 } from "./reviewsEventConnection.js";
 import { createRuntimeViewConnectionCoordinator } from "./runtimeViewConnectionCoordinator.js";
+import { ReleaseOperationPanel } from "./releaseOperationPanel.js";
 
 type ProjectRuntimeViewConnection =
   | {
@@ -3086,6 +3090,11 @@ export function ProjectDetailView({
     useState<DeliveryCandidateView | null>(null);
   const [deliveryCandidateDiagnostic, setDeliveryCandidateDiagnostic] =
     useState<string | null>(null);
+  const [acceptedDeliveryAuthority, setAcceptedDeliveryAuthority] =
+    useState<AcceptedDeliveryCandidateAuthorityView | null>(null);
+  const [releaseOperations, setReleaseOperations] = useState<
+    readonly ReleaseOperationView[]
+  >([]);
   const runtimeViewConnectionCoordinator = useRef(
     createRuntimeViewConnectionCoordinator<ProjectRuntimeViewConnection>(),
   ).current;
@@ -3233,6 +3242,8 @@ export function ProjectDetailView({
         setIntegrationGenerationState({ generation: 0, view: [] });
         setCandidateQualityGateView(null);
         setDeliveryCandidateView(null);
+        setAcceptedDeliveryAuthority(null);
+        setReleaseOperations([]);
         setIntegrationDiagnostic("Synchronizing Reviews…");
         setCandidateQualityDiagnostic(
           candidateInputId ? "Synchronizing Reviews…" : null,
@@ -3244,6 +3255,8 @@ export function ProjectDetailView({
           readonly integrationGenerations: readonly IntegrationGenerationView[];
           readonly candidateQuality: CandidateQualityGateView | null;
           readonly deliveryCandidate: DeliveryCandidateView | null;
+          readonly acceptedDeliveryAuthority: AcceptedDeliveryCandidateAuthorityView | null;
+          readonly releaseOperations: readonly ReleaseOperationView[];
           readonly generation?: number;
         }): void => {
           if (!canApply()) return;
@@ -3253,6 +3266,8 @@ export function ProjectDetailView({
           });
           setCandidateQualityGateView(views.candidateQuality);
           setDeliveryCandidateView(views.deliveryCandidate);
+          setAcceptedDeliveryAuthority(views.acceptedDeliveryAuthority);
+          setReleaseOperations(views.releaseOperations);
           setIntegrationDiagnostic(null);
           setCandidateQualityDiagnostic(null);
           setDeliveryCandidateDiagnostic(null);
@@ -3923,6 +3938,35 @@ export function ProjectDetailView({
     }
   };
 
+  const executeReleaseOperation = async (
+    command: ReleaseOperationEnvelopeCommand,
+  ): Promise<void> => {
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    try {
+      const result = await window.sandcastle.execute({
+        commandId: globalThis.crypto.randomUUID(),
+        command,
+      });
+      if (result.status === "rejected") {
+        throw Object.assign(new Error(result.error.message), {
+          code: result.error.code,
+        });
+      }
+      setReleaseOperations((current) => [
+        ...current.filter((operation) => operation.id !== result.value.id),
+        result.value,
+      ]);
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+      throw nextError;
+    } finally {
+      setRunBusy(false);
+    }
+  };
+
   const decideCriticalRiskEscalation = async (input: {
     readonly decision: "authorize-gate-continuation" | "reject";
     readonly reason: string;
@@ -4476,6 +4520,12 @@ export function ProjectDetailView({
             onDecision={(input) => void decideHumanRelease(input)}
             onRecovery={(input) => void recoverHumanRelease(input)}
             view={deliveryCandidateView}
+          />
+          <ReleaseOperationPanel
+            candidate={deliveryCandidateView}
+            authority={acceptedDeliveryAuthority}
+            operations={releaseOperations}
+            onCommand={executeReleaseOperation}
           />
           <ReviewTopicsPanel topics={reviewTopics} />
         </>
