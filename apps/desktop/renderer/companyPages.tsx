@@ -2813,6 +2813,21 @@ export function DeliveryCandidatePanel({
           {view.decision.reason}
         </p>
       ) : null}
+      {view.recoveryActivation ? (
+        <dl data-human-release-recovery-activation={view.recoveryActivation.id}>
+          <div>
+            <dt>Recovery authority</dt>
+            <dd>
+              {view.recoveryActivation.authority.kind}:{" "}
+              {view.recoveryActivation.authority.id}
+            </dd>
+          </div>
+          <div>
+            <dt>Activation hash</dt>
+            <dd>{view.recoveryActivation.activationHash}</dd>
+          </div>
+        </dl>
+      ) : null}
       {diagnostic ? <p>{diagnostic}</p> : null}
       {awaiting ? (
         <div className="form" data-human-release-controls>
@@ -2914,6 +2929,7 @@ export function DeliveryCandidatePanel({
       ) : null}
       {view.projection === "changes-requested" &&
       view.decision?.rework?.scope === "same-boundary" &&
+      !view.recoveryActivation &&
       onRecovery ? (
         <div className="form" data-human-release-recovery-controls>
           <label htmlFor={`delivery-release-authority-kind-${view.id}`}>

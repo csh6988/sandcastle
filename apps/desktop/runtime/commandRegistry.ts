@@ -3473,7 +3473,11 @@ const executeDeliveryCommand = (
             ? delivery.assemble(command)
             : command.type === "delivery.release.decide"
               ? delivery.decide({ ...command, actor: envelope.actor })
-              : delivery.recover({ ...command, actor: envelope.actor }),
+              : delivery.recover({
+                  ...command,
+                  actor: envelope.actor,
+                  commandId: envelope.commandId,
+                }),
         );
         database.exec("RELEASE delivery_command");
         const effectIds = (

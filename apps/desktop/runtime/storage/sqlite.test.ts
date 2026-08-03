@@ -2697,6 +2697,7 @@ describe("Test authority schema migration", () => {
       join(forwardDir, ".sandcastle", "company.sqlite"),
     );
     forward.exec(`
+      DROP TABLE delivery_release_rework_activations;
       DROP TABLE accepted_delivery_candidate_authorities;
       DROP TABLE delivery_release_rework_records;
       DROP TABLE human_release_decisions;
@@ -2717,6 +2718,7 @@ describe("Test authority schema migration", () => {
                 'delivery_candidates',
                 'human_release_decisions',
                 'delivery_release_rework_records',
+                'delivery_release_rework_activations',
                 'accepted_delivery_candidate_authorities'
               )
             ORDER BY name`,
@@ -2727,6 +2729,7 @@ describe("Test authority schema migration", () => {
         "accepted_delivery_candidate_authorities",
         "candidate_critical_escalations",
         "delivery_candidates",
+        "delivery_release_rework_activations",
         "delivery_release_rework_records",
         "human_release_decisions",
       ],
@@ -2752,14 +2755,14 @@ describe("Test authority schema migration", () => {
       join(partialDir, ".sandcastle", "company.sqlite"),
     );
     partial.exec(`
-      DROP TRIGGER human_release_decisions_immutable_delete;
+      DROP TRIGGER delivery_release_rework_activations_immutable_delete;
       UPDATE schema_metadata SET value = '49' WHERE key = 'schema_version';
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
     assert.throws(
       () => migrateCompanyDatabase(partial),
-      /Existing Delivery v50 schema is incompatible: human_release_decisions_immutable_delete/,
+      /Existing Delivery v50 schema is incompatible: delivery_release_rework_activations_immutable_delete/,
     );
     assert.equal(
       (

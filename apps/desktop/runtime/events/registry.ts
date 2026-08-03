@@ -675,6 +675,25 @@ const humanReleaseEventPayloadSchema = z
   })
   .passthrough();
 
+const releaseReworkActivatedEventPayloadSchema = z
+  .object({
+    releaseDecisionId: z.string().trim().min(1),
+    deliveryCandidateId: z.string().trim().min(1),
+    deliveryCandidateInputId: z.string().trim().min(1),
+    activationId: z.string().trim().min(1),
+    targetNodeRunId: z.string().trim().min(1),
+    authorityKind: z.enum([
+      "work-package-version",
+      "test-rework-run",
+      "candidate-input-recheck",
+    ]),
+    authorityId: z.string().trim().min(1),
+    authorityHash: z.string().regex(/^[a-f0-9]{64}$/),
+    lineageHash: z.string().regex(/^[a-f0-9]{64}$/),
+    activationHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
 const pipelineEventDefinitions = [
   "run.created",
   "run.started",
@@ -682,6 +701,7 @@ const pipelineEventDefinitions = [
   "run.paused",
   "run.resumed",
   "run.blocked",
+  "run.recovering",
   "run.waiting-human-release",
   "run.completed",
   "run.release-rejected",
@@ -1398,6 +1418,25 @@ const definitions = [
         acpMapping: "custom",
       }) satisfies RuntimeEventDefinition,
   ),
+  {
+    type: "delivery.release.rework-activated",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "runId",
+      "snapshotRevisionId",
+      "nodeRunId",
+      "deliveryCandidateInputId",
+      "deliveryCandidateId",
+      "releaseDecisionId",
+      "commandId",
+    ],
+    payloadSchema: releaseReworkActivatedEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
   ...[
     "interaction.turn.started",
     "interaction.turn.reconciling",

@@ -1467,6 +1467,7 @@ describe("Sandcastle preload bridge", () => {
       manifestHash: "a".repeat(64),
       projection: "awaiting-decision" as const,
       decision: null,
+      recoveryActivation: null,
       supersededByCandidateId: null,
       createdAt: "2026-08-01T00:00:00.000Z",
     };

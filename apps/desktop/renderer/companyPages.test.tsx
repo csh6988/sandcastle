@@ -198,6 +198,37 @@ describe("Delivery Candidate quality", () => {
       />,
     );
     assert.doesNotMatch(acceptedMarkup, /accept-delivery-candidate/);
+
+    const activatedMarkup = renderToStaticMarkup(
+      <DeliveryCandidatePanel
+        busy={false}
+        diagnostic={null}
+        onDecision={() => undefined}
+        onRecovery={() => undefined}
+        view={
+          {
+            ...view,
+            projection: "rework-activated",
+            decision: {
+              id: "release-decision-1",
+              rework: { scope: "same-boundary" },
+            },
+            recoveryActivation: {
+              id: "release-rework-activation-1",
+              authority: {
+                kind: "work-package-version",
+                id: "work-package-version-2",
+              },
+              activationHash: "d".repeat(64),
+            },
+          } as DeliveryCandidateView
+        }
+      />,
+    );
+    assert.match(activatedMarkup, /rework-activated/);
+    assert.match(activatedMarkup, /work-package-version-2/);
+    assert.match(activatedMarkup, new RegExp("d{64}"));
+    assert.doesNotMatch(activatedMarkup, /activate-delivery-rework/);
   });
 
   it("requires and submits an exact child Run for boundary-changing release rework", async () => {

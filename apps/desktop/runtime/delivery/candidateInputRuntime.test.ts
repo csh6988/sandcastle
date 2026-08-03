@@ -2,8 +2,18 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { createScriptedExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
+import { openCompanyCommandRegistry } from "../commandRegistry.js";
 import type { ArtifactVersionView } from "../artifactRegistry.js";
+import { openRuntimeEvents } from "../events/subscription.js";
 import type { IntegrationGenerationView } from "../integration/integrationRuntime.js";
+import { openPipelineRuntime } from "../pipeline/pipelineRuntime.js";
+import {
+  canonicalPipelineJson,
+  pipelineHash,
+} from "../pipeline/canonicalPipeline.js";
+import { openProjectConfiguration } from "../project/projectConfiguration.js";
+import { openQualityGateRuntime } from "../quality/qualityGateRuntime.js";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import type {
   TestCaseRevisionView,
@@ -12,7 +22,9 @@ import type {
 import {
   CandidateInputRuntimeError,
   openCandidateInputRuntime,
+  type DeliveryCandidateInputView,
 } from "./candidateInputRuntime.js";
+import { openDeliveryRuntime } from "./deliveryRuntime.js";
 
 const hash = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
@@ -357,23 +369,102 @@ const seedLineage = (database: DatabaseSync): void => {
     INSERT INTO projects(id, company_id, name, goal, status, created_at)
     VALUES ('project-1', 'company', 'Project', 'Candidate test', 'active', '2026-07-30T00:00:00.000Z');
     INSERT INTO department_runs(
-      id, project_id, department_id, status, created_at,
+      id, project_id, department_id, pipeline_version_id, status, created_at,
       snapshot_revision_id, updated_at
     ) VALUES (
-      'run-1', 'project-1', 'software-rnd', 'running',
+      'run-1', 'project-1', 'software-rnd', 'pipeline-1', 'running',
       '2026-07-30T00:00:00.000Z', 'snapshot-technical',
       '2026-07-30T00:00:00.000Z'
     );
   `);
   const snapshotPayload = {
     schemaVersion: 1,
+    project: {
+      id: "project-1",
+      revision: 0,
+      name: "Project",
+      goal: "Candidate test",
+      sharedContext: "",
+      repositoryReferences: ["repository-a"],
+    },
+    department: {
+      id: "software-rnd",
+      revision: 0,
+      name: "Software R&D",
+      description: "Delivery fixture",
+      inputArtifactContracts: [],
+      outputArtifactContracts: [],
+      defaultExecutionProfileId: null,
+    },
     pipelineVersion: {
       id: "pipeline-1",
       version: 1,
       hash: hash("pipeline"),
-      handlerRegistryVersion: 1,
-      handlerRegistryHash: hash("handler-registry"),
+      handlerRegistry: {
+        version: 1,
+        hash: hash("handler-registry"),
+      },
+      graph: {
+        nodes: [
+          {
+            id: "candidate-input-pipeline-node",
+            type: "ai-task",
+            name: "Delivery Candidate Input",
+            handlerKindId: "delivery-candidate-input@1",
+          },
+          {
+            id: "security-pipeline-node",
+            type: "ai-task",
+            name: "Security",
+            handlerKindId: "security-review@1",
+          },
+          {
+            id: "operability-pipeline-node",
+            type: "ai-task",
+            name: "Operability",
+            handlerKindId: "operability-review@1",
+          },
+          {
+            id: "delivery-candidate-pipeline-node",
+            type: "ai-task",
+            name: "Delivery Candidate",
+            handlerKindId: "delivery-candidate@1",
+          },
+          {
+            id: "human-release-pipeline-node",
+            type: "human-approval",
+            name: "Human release",
+            handlerKindId: "human-release@1",
+          },
+          {
+            id: "complete-pipeline-node",
+            type: "complete",
+            name: "Complete",
+            handlerKindId: "run-complete@1",
+          },
+        ],
+        edges: [
+          {
+            from: "candidate-input-pipeline-node",
+            to: "security-pipeline-node",
+          },
+          { from: "security-pipeline-node", to: "operability-pipeline-node" },
+          {
+            from: "operability-pipeline-node",
+            to: "delivery-candidate-pipeline-node",
+          },
+          {
+            from: "delivery-candidate-pipeline-node",
+            to: "human-release-pipeline-node",
+          },
+          { from: "human-release-pipeline-node", to: "complete-pipeline-node" },
+        ],
+      },
     },
+    skillFlows: [],
+    positions: [],
+    executionProfiles: [],
+    runLimits: { maxActiveNodes: 1 },
   };
   const technicalBaselineManifest = {
     applicationSpecRevisions: [
@@ -382,6 +473,8 @@ const seedLineage = (database: DatabaseSync): void => {
     contractVersions: integrationAuthority.manifest.contractVersions,
     riskPolicy: ["runtime-owned"],
   };
+  const snapshotCanonical = canonicalPipelineJson(snapshotPayload);
+  const snapshotHash = pipelineHash(snapshotPayload);
   const technicalBaselineHash = hash(canonicalJson(technicalBaselineManifest));
   database
     .prepare(
@@ -392,8 +485,8 @@ const seedLineage = (database: DatabaseSync): void => {
     .run(
       "snapshot-technical",
       "run-1",
-      canonicalJson(snapshotPayload),
-      hash(canonicalJson(snapshotPayload)),
+      snapshotCanonical,
+      snapshotHash,
       "2026-07-30T00:00:00.000Z",
     );
   database
@@ -555,7 +648,7 @@ const seedLineage = (database: DatabaseSync): void => {
       hash("technical-proposal-r1"),
       "snapshot-product",
       "snapshot-technical",
-      hash(canonicalJson(snapshotPayload)),
+      snapshotHash,
       "2026-07-30T00:00:00.000Z",
     );
   database
@@ -665,6 +758,29 @@ const seedLineage = (database: DatabaseSync): void => {
       "2026-07-30T00:00:00.000Z",
       "delivery-candidate-input@1",
     );
+  database.exec(`
+    INSERT INTO node_runs(
+      id, run_id, pipeline_node_id, node_type, handler_kind_id, status,
+      attempt_count, required_dependency_ids_json, created_at, updated_at
+    ) VALUES
+      ('security-node-1', 'run-1', 'security-pipeline-node', 'ai-task',
+       'security-review@1', 'queued', 0, '["candidate-input-pipeline-node"]',
+       '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'),
+      ('operability-node-1', 'run-1', 'operability-pipeline-node', 'ai-task',
+       'operability-review@1', 'queued', 0, '["security-pipeline-node"]',
+       '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z'),
+      ('delivery-candidate-node-1', 'run-1', 'delivery-candidate-pipeline-node',
+       'ai-task', 'delivery-candidate@1', 'queued', 0,
+       '["operability-pipeline-node"]', '2026-07-30T00:00:00.000Z',
+       '2026-07-30T00:00:00.000Z'),
+      ('human-release-node-1', 'run-1', 'human-release-pipeline-node',
+       'human-approval', 'human-release@1', 'queued', 0,
+       '["delivery-candidate-pipeline-node"]', '2026-07-30T00:00:00.000Z',
+       '2026-07-30T00:00:00.000Z'),
+      ('complete-node-1', 'run-1', 'complete-pipeline-node', 'complete',
+       'run-complete@1', 'queued', 0, '["human-release-pipeline-node"]',
+       '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z');
+  `);
   database
     .prepare(
       `INSERT INTO node_attempts(
@@ -795,6 +911,138 @@ const freezeInput = {
     maxItemBytes: 1_000_000,
     maxTotalBytes: 10_000_000,
   },
+};
+
+const seedCandidateGateReview = (
+  database: DatabaseSync,
+  subject: DeliveryCandidateInputView,
+  kind: "security" | "operability",
+  generation: number,
+) => {
+  const topicId = `${kind}-topic-recovery-${generation}`;
+  const participantId = `${kind}-participant-recovery-${generation}`;
+  const reviewerSessionId = `${kind}-session-recovery-${generation}`;
+  const manifest = {
+    scope: "verification",
+    topicId,
+    supportingArtifactVersionIds: subject.manifest.artifacts.map(
+      (artifact) => artifact.id,
+    ),
+    supportingSpecRevisionIds: [
+      subject.manifest.product.projectSpecRevisionId,
+      ...subject.manifest.technical.applicationSpecRevisions.map(
+        (revision) => revision.id,
+      ),
+    ],
+    harnessSnapshotIds: subject.manifest.tests.flatMap((test) =>
+      "fixture" in test && test.fixture ? [test.fixture.id] : [],
+    ),
+    acceptanceCriteria: ["requirement-1"],
+    excludedContext: [
+      "hidden-prompts",
+      "prior-reviewer-opinions",
+      "private-transcripts",
+      "provider-session-history",
+      "credential-values",
+    ],
+    verificationSubject: {
+      kind: "candidate-final",
+      deliveryCandidateInputId: subject.id,
+      deliveryCandidateInputHash: subject.manifestHash,
+    },
+  };
+  database
+    .prepare(
+      `INSERT INTO review_topics(
+         id, project_id, run_id, title, kind, status, revision, manifest_json,
+         manifest_hash, producer_ai_member_id, producer_position_id,
+         producer_session_id, quorum, budget_json, stop_condition,
+         escalation_policy, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'verification', 'independent-review', 1, ?, ?, ?, ?, ?, 1,
+                 ?, 'blocking-findings-dispositioned', 'fail-with-evidence', ?, ?)`,
+    )
+    .run(
+      topicId,
+      subject.manifest.projectId,
+      subject.manifest.runId,
+      `${kind} recovery review ${generation}`,
+      canonicalJson(manifest),
+      hash(canonicalJson(manifest)),
+      subject.manifest.producer.aiMemberId,
+      subject.manifest.producer.positionId,
+      subject.manifest.producer.sessionId,
+      canonicalJson({ maxRounds: 1 }),
+      subject.createdAt,
+      subject.createdAt,
+    );
+  const eligibility = {
+    topicId,
+    participantId,
+    role: "reviewer-participant",
+    aiMemberId: `${kind}-reviewer-member`,
+    positionId: `${kind}-reviewer`,
+    sessionId: reviewerSessionId,
+    producer: subject.manifest.producer,
+    projectId: subject.manifest.projectId,
+    eligible: true,
+    reasons: [],
+  };
+  database
+    .prepare(
+      `INSERT INTO review_participants(
+         id, topic_id, role, ai_member_id, position_id, session_id, eligible,
+         eligibility_reasons_json, eligibility_snapshot_json,
+         eligibility_snapshot_hash, created_at
+       ) VALUES (?, ?, 'reviewer-participant', ?, ?, ?, 1, '[]', ?, ?, ?)`,
+    )
+    .run(
+      participantId,
+      topicId,
+      eligibility.aiMemberId,
+      eligibility.positionId,
+      reviewerSessionId,
+      canonicalJson(eligibility),
+      hash(canonicalJson(eligibility)),
+      subject.createdAt,
+    );
+  return { topicId, participantId };
+};
+
+const seedGenericCandidateGatePass = (
+  database: DatabaseSync,
+  topicId: string,
+  qualityGateResultId: string,
+  createdAt: string,
+): void => {
+  const topic = database
+    .prepare(
+      `SELECT manifest_json AS manifestJson, manifest_hash AS manifestHash
+         FROM review_topics WHERE id = ?`,
+    )
+    .get(topicId) as {
+    readonly manifestJson: string;
+    readonly manifestHash: string;
+  };
+  database
+    .prepare(
+      "UPDATE review_topics SET status = 'PASS', updated_at = ? WHERE id = ?",
+    )
+    .run(createdAt, topicId);
+  database
+    .prepare(
+      `INSERT INTO quality_gate_results(
+         id, topic_id, kind, manifest_json, manifest_hash, revision_id, result,
+         conditions_json, recheck_ids_json, evidence_refs_json, created_at
+       ) VALUES (?, ?, 'verification', ?, ?, NULL, 'PASS', '[]', '[]', ?, ?)`,
+    )
+    .run(
+      qualityGateResultId,
+      topicId,
+      topic.manifestJson,
+      topic.manifestHash,
+      canonicalJson([`review-evidence:${topicId}`]),
+      createdAt,
+    );
 };
 
 describe("Delivery Candidate Input Runtime", () => {
@@ -1060,6 +1308,433 @@ describe("Delivery Candidate Input Runtime", () => {
         error instanceof CandidateInputRuntimeError &&
         error.code === "CANDIDATE_TEST_AUTHORITY_SET_INVALID",
     );
+    fixture.database.close();
+  });
+
+  it("rebuilds a superseding Candidate through formal recovery, fresh Input, required Gates, and Pipeline seams", () => {
+    const fixture = openFixture();
+    const workerId = "delivery-quality-node-handler";
+    const events = openRuntimeEvents(fixture.database, {
+      clock: () => new Date("2026-07-30T00:00:00.000Z"),
+    });
+    const pipeline = openPipelineRuntime(
+      fixture.database,
+      createScriptedExecutionAdapter(),
+      { clock: () => new Date("2026-07-30T00:00:00.000Z") },
+    );
+    const quality = openQualityGateRuntime(fixture.database, {
+      candidates: fixture.runtime,
+      pipelineRuntime: pipeline,
+      events,
+      clock: () => new Date("2026-07-30T00:00:00.000Z"),
+    });
+    const delivery = openDeliveryRuntime(fixture.database, {
+      candidateInputs: fixture.runtime,
+      qualityGates: quality,
+      pipelineRuntime: pipeline,
+      events,
+      clock: () => new Date("2026-07-30T00:00:00.000Z"),
+    });
+    const registry = openCompanyCommandRegistry(
+      fixture.database,
+      openProjectConfiguration(fixture.database),
+      undefined,
+      () => new Date("2026-07-30T00:00:00.000Z"),
+      undefined,
+      undefined,
+      undefined,
+      pipeline,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fixture.runtime,
+      quality,
+      delivery,
+    );
+    fixture.database.exec(`
+      UPDATE node_attempts
+         SET status = 'interrupted', completed_at = '2026-07-30T00:00:00.000Z'
+       WHERE id = 'candidate-input-attempt-1';
+      UPDATE node_runs SET status = 'ready', attempt_count = 1
+       WHERE id = 'candidate-input-node-1';
+    `);
+
+    const execute = <Value>(
+      envelope: Parameters<typeof registry.execute>[0],
+    ) => {
+      const result = registry.execute(envelope);
+      assert.equal(result.status, "succeeded", JSON.stringify(result));
+      if (result.status !== "succeeded") assert.fail(JSON.stringify(result));
+      return result.value as Value;
+    };
+    const claim = (nodeRunId: string) => {
+      const readyAttempt = fixture.database
+        .prepare(
+          `SELECT id FROM node_attempts
+            WHERE node_run_id = ? AND status = 'ready'
+            ORDER BY attempt_number DESC LIMIT 1`,
+        )
+        .get(nodeRunId) as { readonly id: string } | undefined;
+      if (!readyAttempt) {
+        const nextAttempt = (
+          fixture.database
+            .prepare(
+              "SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attemptNumber FROM node_attempts WHERE node_run_id = ?",
+            )
+            .get(nodeRunId) as { readonly attemptNumber: number }
+        ).attemptNumber;
+        fixture.database
+          .prepare(
+            `INSERT INTO node_attempts(
+               id, node_run_id, attempt_number, snapshot_revision_id, reason,
+               status, created_at
+             ) VALUES (?, ?, ?, 'snapshot-technical', 'retry', 'ready', ?)`,
+          )
+          .run(
+            `${nodeRunId}:attempt:${nextAttempt}`,
+            nodeRunId,
+            nextAttempt,
+            "2026-07-30T00:00:00.000Z",
+          );
+        fixture.database
+          .prepare(
+            "UPDATE node_runs SET attempt_count = ? WHERE id = ? AND status = 'ready'",
+          )
+          .run(nextAttempt, nodeRunId);
+      }
+      const claimed = pipeline.claimReadyAttempt({
+        runId: "run-1",
+        nodeRunId,
+        workerId,
+        leaseDurationMs: 300_000,
+      });
+      assert.equal(
+        claimed.kind,
+        "claimed",
+        claimed.kind === "no-work"
+          ? `claim ${nodeRunId}: ${claimed.kind}/${claimed.reason}`
+          : `claim ${nodeRunId}: ${claimed.kind}`,
+      );
+      if (claimed.kind !== "claimed") assert.fail("expected claimed Attempt");
+      return claimed;
+    };
+    const complete = (
+      nodeRunId: string,
+      attempt: ReturnType<typeof claim>,
+      result: unknown,
+    ) =>
+      pipeline.completeClaimedAttempt({
+        runId: "run-1",
+        nodeRunId,
+        attemptId: attempt.attemptId,
+        leaseId: attempt.leaseId,
+        workerId,
+        result,
+      });
+    const produceGate = (
+      subject: DeliveryCandidateInputView,
+      kind: "security" | "operability",
+      generation: number,
+    ) => {
+      const nodeRunId = `${kind}-node-1`;
+      const attempt = claim(nodeRunId);
+      const review = seedCandidateGateReview(
+        fixture.database,
+        subject,
+        kind,
+        generation,
+      );
+      const gateInput = execute<{
+        readonly id: string;
+        readonly manifestHash: string;
+        readonly manifest: {
+          readonly checkCatalog: {
+            readonly checks: readonly {
+              readonly id: string;
+              readonly requiredEvidenceKinds: readonly string[];
+            }[];
+          };
+        };
+      }>({
+        schemaVersion: 1,
+        commandId: `${kind}-prepare-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "quality-gate.input.prepare",
+          gateInputId: `${kind}-gate-input-${generation}`,
+          requestId: `${kind}-gate-request-${generation}`,
+          kind,
+          candidateInputId: subject.id,
+          expectedCandidateInputHash: subject.manifestHash,
+          expectedRiskTier: subject.manifest.risk.tier,
+          nodeRunId,
+          nodeAttemptId: attempt.attemptId,
+          reviewTopicId: review.topicId,
+          reviewerParticipantId: review.participantId,
+        },
+      });
+      const executionId = `${kind}-gate-execution-${generation}`;
+      execute({
+        schemaVersion: 1,
+        commandId: `${kind}-accept-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "quality-gate.execution.accept",
+          executionId,
+          gateInputId: gateInput.id,
+          operationKey: `${kind}-gate:${subject.id}`,
+          request: { gateInputId: gateInput.id },
+        },
+      });
+      const checks = gateInput.manifest.checkCatalog.checks.map((check) => ({
+        checkId: check.id,
+        status: "passed" as const,
+        evidence: check.requiredEvidenceKinds.map((evidenceKind) => ({
+          kind: evidenceKind,
+          ref:
+            evidenceKind === "artifact" || evidenceKind === "static-analysis"
+              ? "artifact-version:artifact-build-1"
+              : evidenceKind === "runtime-fact"
+                ? "test-pass-authority:test-run-1"
+                : "test-evidence:test-evidence-ui",
+        })),
+        responsibility: {
+          kind: "aggregate" as const,
+          candidateIds: [subject.id],
+        },
+      }));
+      execute({
+        schemaVersion: 1,
+        commandId: `${kind}-reconcile-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "quality-gate.execution.reconcile",
+          executionId,
+          observation: {
+            state: "succeeded",
+            fact: {
+              schemaVersion: 1,
+              gateInputId: gateInput.id,
+              checks,
+              resolutions: [],
+            },
+            receiptHash: hash(`${kind}-receipt-${generation}`),
+          },
+        },
+      });
+      const qualityGateResultId = `${kind}-review-pass-${generation}`;
+      seedGenericCandidateGatePass(
+        fixture.database,
+        review.topicId,
+        qualityGateResultId,
+        subject.createdAt,
+      );
+      const gateResult = execute<{
+        readonly id: string;
+        readonly result: "PASS";
+        readonly resultHash: string;
+      }>({
+        schemaVersion: 1,
+        commandId: `${kind}-finalize-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "quality-gate.result.finalize",
+          candidateGateResultId: `${kind}-candidate-gate-result-${generation}`,
+          gateInputId: gateInput.id,
+          executionId,
+          qualityGateResultId,
+        },
+      });
+      complete(nodeRunId, attempt, {
+        candidateGateResultId: gateResult.id,
+        result: gateResult.result,
+        resultHash: gateResult.resultHash,
+      });
+      return gateResult;
+    };
+    const produceCandidate = (generation: number) => {
+      const inputAttempt = claim("candidate-input-node-1");
+      const input = execute<DeliveryCandidateInputView>({
+        schemaVersion: 1,
+        commandId: `candidate-input-freeze-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "delivery.candidate-input.freeze",
+          ...freezeInput,
+          candidateInputId: `candidate-input-recovery-${generation}`,
+          requestId: `candidate-input-recovery-request-${generation}`,
+          nodeAttemptId: inputAttempt.attemptId,
+        },
+      });
+      complete("candidate-input-node-1", inputAttempt, {
+        deliveryCandidateInputId: input.id,
+        manifestHash: input.manifestHash,
+      });
+      const security = produceGate(input, "security", generation);
+      const operability = produceGate(input, "operability", generation);
+      const authority = execute<{ readonly authorityHash: string }>({
+        schemaVersion: 1,
+        commandId: `candidate-input-authorize-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "delivery.candidate-input.authorize",
+          authorityId: `candidate-input-authority-${generation}`,
+          candidateInputId: input.id,
+          expectedCandidateInputHash: input.manifestHash,
+          securityGateResultId: security.id,
+          operabilityGateResultId: operability.id,
+        },
+      });
+      const candidateAttempt = claim("delivery-candidate-node-1");
+      const candidate = execute<ReturnType<typeof delivery.inspect>>({
+        schemaVersion: 1,
+        commandId: `delivery-candidate-assemble-command-${generation}`,
+        actor: {
+          type: "runtime-worker",
+          id: workerId,
+          authenticatedBy: "runtime",
+        },
+        consumerId: workerId,
+        command: {
+          type: "delivery.candidate.assemble",
+          candidateId: `delivery-candidate-recovery-${generation}`,
+          requestId: `delivery-candidate-recovery-request-${generation}`,
+          candidateInputId: input.id,
+          expectedCandidateInputHash: input.manifestHash,
+          expectedGateAuthorityHash: authority.authorityHash,
+          nodeRunId: "delivery-candidate-node-1",
+          nodeAttemptId: candidateAttempt.attemptId,
+          leaseId: candidateAttempt.leaseId,
+          workerId,
+        },
+      });
+      return { input, candidate };
+    };
+
+    const first = produceCandidate(1);
+    assert.equal(
+      pipeline.inspectRun("run-1").run.status,
+      "waiting-human-release",
+    );
+    execute({
+      schemaVersion: 1,
+      commandId: "release-changes-requested-command",
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      consumerId: "desktop-human-release",
+      command: {
+        type: "delivery.release.decide",
+        decisionId: "release-changes-requested-decision",
+        candidateId: first.candidate.id,
+        expectedCandidateHash: first.candidate.manifestHash,
+        decision: "changes-requested",
+        reason: "Repeat the complete frozen Candidate verification flow.",
+        evidenceRefs: ["artifact-version:artifact-build-1"],
+        rework: {
+          scope: "same-boundary",
+          responsibility: {
+            kind: "aggregate",
+            summary:
+              "Rebuild the exact Candidate evidence under the same boundary.",
+          },
+        },
+      },
+    });
+    assert.equal(pipeline.inspectRun("run-1").run.status, "blocked");
+    const activated = execute<ReturnType<typeof delivery.inspect>>({
+      schemaVersion: 1,
+      commandId: "release-recovery-activation-command",
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      consumerId: "desktop-human-release",
+      command: {
+        type: "delivery.release.recover",
+        decisionId: "release-changes-requested-decision",
+        candidateId: first.candidate.id,
+        expectedCandidateHash: first.candidate.manifestHash,
+        authority: {
+          kind: "candidate-input-recheck",
+          id: first.input.id,
+        },
+      },
+    });
+    assert.equal(activated.projection, "rework-activated");
+    assert.equal(pipeline.inspectRun("run-1").run.status, "recovering");
+
+    const second = produceCandidate(2);
+    assert.equal(delivery.inspect(first.candidate.id).projection, "superseded");
+    assert.equal(
+      delivery.inspect(first.candidate.id).supersededByCandidateId,
+      second.candidate.id,
+    );
+    const accepted = execute<ReturnType<typeof delivery.inspect>>({
+      schemaVersion: 1,
+      commandId: "release-accepted-command",
+      actor: {
+        type: "human",
+        id: "local-release-owner",
+        authenticatedBy: "local-session",
+      },
+      consumerId: "desktop-human-release",
+      command: {
+        type: "delivery.release.decide",
+        decisionId: "release-accepted-decision",
+        candidateId: second.candidate.id,
+        expectedCandidateHash: second.candidate.manifestHash,
+        decision: "accepted",
+        reason: "The fresh immutable Candidate and both required Gates pass.",
+        evidenceRefs: ["artifact-version:artifact-build-1"],
+      },
+    });
+    assert.equal(accepted.projection, "accepted");
+    assert.equal(delivery.inspect(second.candidate.id).projection, "accepted");
+    assert.equal(pipeline.inspectRun("run-1").run.status, "completed");
     fixture.database.close();
   });
 });

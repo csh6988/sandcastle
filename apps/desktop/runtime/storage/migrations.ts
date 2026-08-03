@@ -6075,6 +6075,36 @@ const migrations: readonly CompanyMigration[] = [
             BEFORE DELETE ON delivery_release_rework_records
             BEGIN SELECT RAISE(ABORT, 'Release rework record is immutable'); END;
 
+          CREATE TABLE delivery_release_rework_activations (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL UNIQUE REFERENCES human_release_decisions(id),
+            rework_record_id TEXT NOT NULL UNIQUE REFERENCES delivery_release_rework_records(id),
+            candidate_id TEXT NOT NULL REFERENCES delivery_candidates(id),
+            run_id TEXT NOT NULL REFERENCES department_runs(id),
+            snapshot_revision_id TEXT NOT NULL REFERENCES run_snapshot_revisions(id),
+            target_node_run_id TEXT NOT NULL REFERENCES node_runs(id),
+            authority_kind TEXT NOT NULL CHECK (authority_kind IN ('work-package-version', 'test-rework-run', 'candidate-input-recheck')),
+            authority_id TEXT NOT NULL,
+            authority_hash TEXT NOT NULL CHECK (length(authority_hash) = 64),
+            lineage_json TEXT NOT NULL,
+            lineage_hash TEXT NOT NULL CHECK (length(lineage_hash) = 64),
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            command_id TEXT NOT NULL UNIQUE,
+            activation_json TEXT NOT NULL,
+            activation_hash TEXT NOT NULL CHECK (length(activation_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX delivery_release_rework_activations_run_idx
+            ON delivery_release_rework_activations(run_id, created_at, id);
+          CREATE TRIGGER delivery_release_rework_activations_immutable_update
+            BEFORE UPDATE ON delivery_release_rework_activations
+            BEGIN SELECT RAISE(ABORT, 'Release rework activation is immutable'); END;
+          CREATE TRIGGER delivery_release_rework_activations_immutable_delete
+            BEFORE DELETE ON delivery_release_rework_activations
+            BEGIN SELECT RAISE(ABORT, 'Release rework activation is immutable'); END;
+
           CREATE TABLE accepted_delivery_candidate_authorities (
             id TEXT PRIMARY KEY,
             candidate_id TEXT NOT NULL UNIQUE REFERENCES delivery_candidates(id),
