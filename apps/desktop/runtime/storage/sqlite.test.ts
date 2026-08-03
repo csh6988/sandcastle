@@ -488,6 +488,10 @@ describe("Company database migrations", () => {
               version: 50,
               name: "delivery_candidates_and_human_release",
             },
+            {
+              version: 51,
+              name: "idempotent_release_operations",
+            },
           ],
         );
         assert.deepEqual(
@@ -2446,8 +2450,8 @@ describe("Test authority schema migration", () => {
   it("upgrades through the historical v47 contract to the complete immutable v48 Test schema", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 50);
-    assert.equal(opened.schemaVersion(), 50);
+    assert.equal(CURRENT_SCHEMA_VERSION, 51);
+    assert.equal(opened.schemaVersion(), 51);
     opened.close();
 
     const database = new DatabaseSync(
@@ -2542,11 +2546,11 @@ describe("Test authority schema migration", () => {
     const historical = new DatabaseSync(path);
     restoreHistoricalV47Contract(historical);
 
-    assert.equal(migrateCompanyDatabase(historical), 50);
+    assert.equal(migrateCompanyDatabase(historical), 51);
     assert.deepEqual(
       historical
         .prepare(
-          "SELECT version, name FROM schema_migrations WHERE version IN (47, 48, 49, 50) ORDER BY version",
+          "SELECT version, name FROM schema_migrations WHERE version IN (47, 48, 49, 50, 51) ORDER BY version",
         )
         .all()
         .map((row) => ({ ...row })),
@@ -2555,6 +2559,7 @@ describe("Test authority schema migration", () => {
         { version: 48, name: "test_rework_resolution_authority" },
         { version: 49, name: "frozen_delivery_candidate_quality_gates" },
         { version: 50, name: "delivery_candidates_and_human_release" },
+        { version: 51, name: "idempotent_release_operations" },
       ],
     );
     assert.equal(
@@ -2589,7 +2594,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 48;
       PRAGMA user_version = 47;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 50);
+    assert.equal(migrateCompanyDatabase(compatible), 51);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2659,7 +2664,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 49;
       PRAGMA user_version = 48;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 50);
+    assert.equal(migrateCompanyDatabase(compatible), 51);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2707,7 +2712,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(forward), 50);
+    assert.equal(migrateCompanyDatabase(forward), 51);
     assert.deepEqual(
       forward
         .prepare(
@@ -2746,7 +2751,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 50);
+    assert.equal(migrateCompanyDatabase(compatible), 51);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2777,6 +2782,142 @@ describe("Test authority schema migration", () => {
     partial.close();
   });
 
+  it("adds the immutable v51 release-operation claim and observation schema", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+    assert.equal(CURRENT_SCHEMA_VERSION, 51);
+    assert.equal(database.schemaVersion(), 51);
+    database.close();
+
+    const sqlite = new DatabaseSync(
+      join(companyDir, ".sandcastle", "company.sqlite"),
+    );
+    assert.deepEqual(
+      sqlite
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE type = 'table'
+              AND name IN (
+                'release_operations',
+                'release_operation_items',
+                'release_operation_reconciliations',
+                'release_operation_destination_claims',
+                'release_operation_destination_claim_events',
+                'release_operation_item_observations'
+              )
+            ORDER BY name`,
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      [
+        "release_operation_destination_claim_events",
+        "release_operation_destination_claims",
+        "release_operation_item_observations",
+        "release_operation_items",
+        "release_operation_reconciliations",
+        "release_operations",
+      ],
+    );
+    assert.deepEqual(
+      sqlite
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE type = 'trigger' AND name LIKE 'release_operation%immutable%'
+            ORDER BY name`,
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      [
+        "release_operation_destination_claim_events_immutable_delete",
+        "release_operation_destination_claim_events_immutable_update",
+        "release_operation_destination_claims_immutable_delete",
+        "release_operation_item_observations_immutable_delete",
+        "release_operation_item_observations_immutable_update",
+        "release_operation_items_immutable_delete",
+        "release_operation_reconciliations_immutable_delete",
+        "release_operation_reconciliations_immutable_update",
+        "release_operations_immutable_delete",
+      ],
+    );
+    assert.deepEqual(
+      sqlite
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'release_operation_destination_claims_active_destination_idx'",
+        )
+        .all()
+        .map((row) => (row as { readonly name: string }).name),
+      ["release_operation_destination_claims_active_destination_idx"],
+    );
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      INSERT INTO release_operations(
+        id, idempotency_key, candidate_id, accepted_authority_id, kind,
+        authorization_json, authorization_hash, request_json, canonical_request_hash,
+        aggregate_state, created_at, updated_at
+      ) VALUES (
+        'release-operation-1', 'release-operation-1', 'candidate-1', 'authority-1', 'merge',
+        '{}', '${"a".repeat(64)}', '{}', '${"a".repeat(64)}',
+        'pending', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z'
+      );
+      INSERT INTO release_operation_items(
+        id, operation_id, item_key, ordinal, kind, request_json, request_hash, state,
+        evidence_json, created_at, updated_at
+      ) VALUES (
+        'release-item-1', 'release-operation-1', 'repository:api', 0, 'merge', '{}',
+        '${"a".repeat(64)}', 'pending', '[]',
+        '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z'
+      );
+      INSERT INTO release_operation_destination_claims(
+        id, operation_id, item_id, destination_key, fence_token, is_active, created_at
+      ) VALUES (
+        'claim-1', 'release-operation-1', 'release-item-1', 'git:repository:api:main',
+        'fence-1', 1, '2026-08-03T00:00:00.000Z'
+      );
+      INSERT INTO release_operation_item_observations(
+        id, operation_id, item_id, kind, observation_json, observation_hash, created_at
+      ) VALUES (
+        'observation-1', 'release-operation-1', 'release-item-1', 'execution', '{}',
+        '${"a".repeat(64)}', '2026-08-03T00:00:00.000Z'
+      );
+    `);
+    assert.throws(
+      () =>
+        sqlite
+          .prepare(
+            "INSERT INTO release_operation_destination_claims(id, operation_id, item_id, destination_key, fence_token, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            "claim-2",
+            "release-operation-1",
+            "release-item-1",
+            "git:repository:api:main",
+            "fence-2",
+            1,
+            "2026-08-03T00:00:00.000Z",
+          ),
+      /UNIQUE constraint failed/,
+    );
+    assert.throws(
+      () =>
+        sqlite
+          .prepare(
+            "UPDATE release_operation_item_observations SET kind = ? WHERE id = ?",
+          )
+          .run("receipt", "observation-1"),
+      /Release operation item observation is immutable/,
+    );
+    assert.throws(
+      () =>
+        sqlite
+          .prepare(
+            "DELETE FROM release_operation_item_observations WHERE id = ?",
+          )
+          .run("observation-1"),
+      /Release operation item observation is immutable/,
+    );
+    sqlite.close();
+  });
+
   it("rejects a future Test authority schema without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const initialized = openCompanyDatabase(companyDir);
@@ -2784,12 +2925,12 @@ describe("Test authority schema migration", () => {
     initialized.close();
     const future = new DatabaseSync(path);
     future.exec(`
-      UPDATE schema_metadata SET value = '51' WHERE key = 'schema_version';
-      PRAGMA user_version = 51;
+      UPDATE schema_metadata SET value = '52' WHERE key = 'schema_version';
+      PRAGMA user_version = 52;
     `);
     assert.throws(
       () => migrateCompanyDatabase(future),
-      /Unsupported company database schema version 51/,
+      /Unsupported company database schema version 52/,
     );
     assert.equal(
       (
@@ -2799,7 +2940,7 @@ describe("Test authority schema migration", () => {
           )
           .get() as { readonly value: string }
       ).value,
-      "51",
+      "52",
     );
     future.close();
   });

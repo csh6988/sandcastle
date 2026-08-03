@@ -6,7 +6,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 50;
+export const CURRENT_SCHEMA_VERSION = 51;
 
 interface CompanyMigration {
   readonly version: number;
@@ -6174,6 +6174,224 @@ const migrations: readonly CompanyMigration[] = [
           if (incompatible.length > 0) {
             throw new Error(
               `Existing Delivery v50 schema is incompatible: ${[
+                ...new Set(incompatible),
+              ]
+                .sort()
+                .join(", ")}`,
+            );
+          }
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
+  {
+    version: 51,
+    name: "idempotent_release_operations",
+    migrate: (database) => {
+      const createSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE release_operations (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL REFERENCES delivery_candidates(id),
+            accepted_authority_id TEXT NOT NULL REFERENCES accepted_delivery_candidate_authorities(id),
+            kind TEXT NOT NULL CHECK (kind IN ('merge', 'export')),
+            authorization_json TEXT NOT NULL,
+            authorization_hash TEXT NOT NULL CHECK (length(authorization_hash) = 64),
+            request_json TEXT NOT NULL,
+            canonical_request_hash TEXT NOT NULL CHECK (length(canonical_request_hash) = 64),
+            aggregate_state TEXT NOT NULL CHECK (aggregate_state IN ('pending', 'running', 'reconciling', 'succeeded', 'partially-succeeded', 'failed', 'blocked')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operations_candidate_idx
+            ON release_operations(candidate_id, created_at, id);
+          CREATE TRIGGER release_operations_identity_update
+            BEFORE UPDATE ON release_operations
+            WHEN NEW.id <> OLD.id
+              OR NEW.idempotency_key <> OLD.idempotency_key
+              OR NEW.candidate_id <> OLD.candidate_id
+              OR NEW.accepted_authority_id <> OLD.accepted_authority_id
+              OR NEW.kind <> OLD.kind
+              OR NEW.authorization_json <> OLD.authorization_json
+              OR NEW.authorization_hash <> OLD.authorization_hash
+              OR NEW.request_json <> OLD.request_json
+              OR NEW.canonical_request_hash <> OLD.canonical_request_hash
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Release operation identity is immutable'); END;
+          CREATE TRIGGER release_operations_immutable_delete
+            BEFORE DELETE ON release_operations
+            BEGIN SELECT RAISE(ABORT, 'Release operation is immutable'); END;
+
+          CREATE TABLE release_operation_items (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_key TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            kind TEXT NOT NULL CHECK (kind IN ('merge', 'export')),
+            request_json TEXT NOT NULL,
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'reconciling', 'succeeded', 'failed', 'destination-conflict', 'unknown')),
+            receipt_json TEXT,
+            receipt_hash TEXT CHECK (receipt_hash IS NULL OR length(receipt_hash) = 64),
+            failure_code TEXT,
+            failure_message TEXT,
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(operation_id, item_key),
+            UNIQUE(operation_id, ordinal)
+          ) STRICT;
+          CREATE INDEX release_operation_items_operation_idx
+            ON release_operation_items(operation_id, ordinal, id);
+          CREATE TRIGGER release_operation_items_identity_update
+            BEFORE UPDATE ON release_operation_items
+            WHEN NEW.id <> OLD.id
+              OR NEW.operation_id <> OLD.operation_id
+              OR NEW.item_key <> OLD.item_key
+              OR NEW.ordinal <> OLD.ordinal
+              OR NEW.kind <> OLD.kind
+              OR NEW.request_json <> OLD.request_json
+              OR NEW.request_hash <> OLD.request_hash
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Release operation item identity is immutable'); END;
+          CREATE TRIGGER release_operation_items_immutable_delete
+            BEFORE DELETE ON release_operation_items
+            BEGIN SELECT RAISE(ABORT, 'Release operation item is immutable'); END;
+
+          CREATE TABLE release_operation_destination_claims (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_id TEXT NOT NULL REFERENCES release_operation_items(id),
+            destination_key TEXT NOT NULL,
+            fence_token TEXT NOT NULL,
+            is_active INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            released_at TEXT
+          ) STRICT;
+          CREATE UNIQUE INDEX release_operation_destination_claims_active_destination_idx
+            ON release_operation_destination_claims(destination_key)
+            WHERE is_active = 1;
+          CREATE INDEX release_operation_destination_claims_item_idx
+            ON release_operation_destination_claims(item_id, created_at, id);
+          CREATE TRIGGER release_operation_destination_claims_identity_update
+            BEFORE UPDATE ON release_operation_destination_claims
+            WHEN NEW.id <> OLD.id
+              OR NEW.operation_id <> OLD.operation_id
+              OR NEW.item_id <> OLD.item_id
+              OR NEW.destination_key <> OLD.destination_key
+              OR NEW.fence_token <> OLD.fence_token
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim identity is immutable'); END;
+          CREATE TRIGGER release_operation_destination_claims_immutable_delete
+            BEFORE DELETE ON release_operation_destination_claims
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim is immutable'); END;
+
+          CREATE TABLE release_operation_destination_claim_events (
+            id TEXT PRIMARY KEY,
+            claim_id TEXT NOT NULL REFERENCES release_operation_destination_claims(id),
+            action TEXT NOT NULL CHECK (action IN ('acquired', 'released')),
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operation_destination_claim_events_claim_idx
+            ON release_operation_destination_claim_events(claim_id, created_at, id);
+          CREATE TRIGGER release_operation_destination_claim_events_immutable_update
+            BEFORE UPDATE ON release_operation_destination_claim_events
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim event is immutable'); END;
+          CREATE TRIGGER release_operation_destination_claim_events_immutable_delete
+            BEFORE DELETE ON release_operation_destination_claim_events
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim event is immutable'); END;
+
+          CREATE TABLE release_operation_item_observations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_id TEXT NOT NULL REFERENCES release_operation_items(id),
+            kind TEXT NOT NULL CHECK (kind IN ('execution', 'receipt', 'failure', 'destination-conflict', 'unknown', 'reconcile')),
+            observation_json TEXT NOT NULL,
+            observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operation_item_observations_item_idx
+            ON release_operation_item_observations(item_id, created_at, id);
+          CREATE TRIGGER release_operation_item_observations_immutable_update
+            BEFORE UPDATE ON release_operation_item_observations
+            BEGIN SELECT RAISE(ABORT, 'Release operation item observation is immutable'); END;
+          CREATE TRIGGER release_operation_item_observations_immutable_delete
+            BEFORE DELETE ON release_operation_item_observations
+            BEGIN SELECT RAISE(ABORT, 'Release operation item observation is immutable'); END;
+
+          CREATE TABLE release_operation_reconciliations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_id TEXT NOT NULL REFERENCES release_operation_items(id),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            evidence_refs_json TEXT NOT NULL,
+            observation_json TEXT NOT NULL,
+            observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operation_reconciliations_item_idx
+            ON release_operation_reconciliations(item_id, created_at, id);
+          CREATE TRIGGER release_operation_reconciliations_immutable_update
+            BEFORE UPDATE ON release_operation_reconciliations
+            BEGIN SELECT RAISE(ABORT, 'Release operation reconciliation is immutable'); END;
+          CREATE TRIGGER release_operation_reconciliations_immutable_delete
+            BEFORE DELETE ON release_operation_reconciliations
+            BEGIN SELECT RAISE(ABORT, 'Release operation reconciliation is immutable'); END;
+        `);
+
+      const objects = (target: DatabaseSync) =>
+        target
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'release_operation%'
+              ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createSchema(reference);
+        const expected = objects(reference);
+        const actual = objects(database);
+        if (actual.length === 0) {
+          createSchema(database);
+        } else {
+          const actualByName = new Map(
+            actual.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(expected.map((entry) => entry.name));
+          const incompatible = expected
+            .filter((entry) => {
+              const found = actualByName.get(entry.name);
+              return (
+                !found ||
+                found.type !== entry.type ||
+                normalizeSql(found.sql) !== normalizeSql(entry.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actual
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Release operation v51 schema is incompatible: ${[
                 ...new Set(incompatible),
               ]
                 .sort()
