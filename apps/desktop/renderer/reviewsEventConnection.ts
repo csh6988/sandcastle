@@ -36,6 +36,7 @@ export const connectReviewsEventStream = async (input: {
   let acknowledgedSequence = 0;
   let handle: RuntimeSubscriptionHandle | null = null;
   let eventQueue = Promise.resolve();
+  let openingFrames: RuntimeEventFrame[] | null = null;
   let latest: Omit<ReviewsStageViews, "generation"> = {
     integrationGenerations: [],
     candidateQuality: null,
@@ -175,72 +176,87 @@ export const connectReviewsEventStream = async (input: {
   };
 
   const handleEventFrame = (frame: RuntimeEventFrame): Promise<void> => {
+    if (openingFrames !== null && handle === null) {
+      openingFrames.push(frame);
+      return Promise.resolve();
+    }
     eventQueue = eventQueue.then(() => applyEventFrame(frame));
     return eventQueue;
   };
 
   const synchronize = async (): Promise<void> => {
     await closeActive();
+    await eventQueue;
     if (closed) return;
-    const anchorStage = input.candidateId
-      ? "delivery-candidate"
-      : input.candidateInputId
-        ? "candidate-quality"
-        : "integration";
-    const anchor =
-      anchorStage === "delivery-candidate"
-        ? await queryDeliveryCandidate()
-        : anchorStage === "candidate-quality"
-          ? await queryCandidateQuality()
-          : await queryIntegration();
-    if (closed || anchor === null) return;
-    if (anchor.viewSyncToken) {
-      const acknowledgement = await input.bridge.execute({
-        commandId: globalThis.crypto.randomUUID(),
-        command: {
-          type: "ack-runtime-events",
-          sequence: anchor.asOfSequence,
-          viewSyncToken: anchor.viewSyncToken,
-        },
-      });
-      if (acknowledgement.status === "rejected") {
-        throw new Error(acknowledgement.error.message);
-      }
-      generation = acknowledgement.value.subscriptionGeneration;
-    } else {
-      generation += 1;
+    const [integration, candidateQuality, deliveryCandidate] =
+      await Promise.all([
+        queryIntegration(),
+        queryCandidateQuality(),
+        queryDeliveryCandidate(),
+      ]);
+    if (closed) return;
+    const snapshots = [integration, candidateQuality, deliveryCandidate].filter(
+      (snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== null,
+    );
+    const anchor = snapshots.reduce((earliest, snapshot) =>
+      snapshot.asOfSequence < earliest.asOfSequence ? snapshot : earliest,
+    );
+    if (!anchor.viewSyncToken) {
+      throw new Error(
+        "Reviews synchronization requires a View token for the earliest stage Query.",
+      );
     }
-    const opened = await input.bridge.openEventStream(handleEventFrame);
+    latest = {
+      integrationGenerations: integration.view,
+      candidateQuality: candidateQuality?.view ?? null,
+      deliveryCandidate: deliveryCandidate?.view ?? null,
+    };
+    const acknowledgement = await input.bridge.execute({
+      commandId: globalThis.crypto.randomUUID(),
+      command: {
+        type: "ack-runtime-events",
+        sequence: anchor.asOfSequence,
+        viewSyncToken: anchor.viewSyncToken,
+      },
+    });
+    if (acknowledgement.status === "rejected") {
+      throw new Error(acknowledgement.error.message);
+    }
+    const acknowledgedGeneration = acknowledgement.value.subscriptionGeneration;
+    acknowledgedSequence = acknowledgement.value.barrierSequence;
+    openingFrames = [];
+    let opened: RuntimeSubscriptionHandle;
+    try {
+      opened = await input.bridge.openEventStream(handleEventFrame);
+    } finally {
+      if (closed) openingFrames = null;
+    }
     if (closed) {
       await input.bridge.closeEventStream(opened);
       return;
     }
+    if (
+      opened.subscriptionGeneration !== acknowledgedGeneration + 1 ||
+      opened.barrierSequence !== acknowledgedSequence
+    ) {
+      openingFrames = null;
+      await input.bridge.closeEventStream(opened);
+      throw new Error(
+        `Reviews event stream opened at generation ${opened.subscriptionGeneration} / barrier ${opened.barrierSequence} after View acknowledgement generation ${acknowledgedGeneration} / barrier ${acknowledgedSequence}.`,
+      );
+    }
     handle = opened;
     generation = opened.subscriptionGeneration;
-    acknowledgedSequence = opened.barrierSequence;
-    latest =
-      anchorStage === "delivery-candidate"
-        ? {
-            ...latest,
-            deliveryCandidate: anchor.view as DeliveryCandidateView,
-          }
-        : anchorStage === "candidate-quality"
-          ? {
-              ...latest,
-              candidateQuality: anchor.view as CandidateQualityGateView,
-            }
-          : {
-              ...latest,
-              integrationGenerations:
-                anchor.view as readonly IntegrationGenerationView[],
-            };
-    await refreshViews(generation, {
-      integration: anchorStage !== "integration",
-      candidateQuality:
-        input.candidateInputId !== null && anchorStage !== "candidate-quality",
-      deliveryCandidate:
-        input.candidateId !== null && anchorStage !== "delivery-candidate",
-    });
+    if (openingFrames === null) {
+      throw new Error(
+        "Reviews event stream opening buffer was unavailable after open.",
+      );
+    }
+    const bufferedFrames = openingFrames;
+    openingFrames = null;
+    input.onViews({ generation, ...latest });
+    for (const frame of bufferedFrames) void handleEventFrame(frame);
+    await eventQueue;
     input.onDiagnostic(null);
   };
 

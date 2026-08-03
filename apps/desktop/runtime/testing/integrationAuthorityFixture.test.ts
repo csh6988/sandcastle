@@ -263,6 +263,58 @@ describe("Integration authority fixture", () => {
       ],
       resolutions: [],
     };
+    const reviewerResult = (output: unknown) =>
+      ({
+        status: "succeeded",
+        providerId: "scripted-execution",
+        isolation: {
+          readOnlyFilesystem: true,
+          independentGitDatabase: true,
+          independentSessionStorage: true,
+          independentCredentialScope: true,
+          independentMutableCache: true,
+          inputAllowlist: true,
+          mechanism: "fixture",
+          mechanismVersion: "1",
+        },
+        isolationEvidence: ["artifact-version:build-1"],
+        output,
+        terminalExecutionFactId: "execution-fact-1",
+      }) as never;
+    for (const result of ["FAIL", "CONDITIONAL_PASS"] as const) {
+      assert.throws(
+        () =>
+          plan.review!.terminalCommands(
+            reviewerResult({
+              result,
+              conditions: result === "FAIL" ? [] : ["condition-1"],
+              evidenceRefs: ["artifact-version:build-1"],
+              gateExecution,
+            }),
+            context,
+          ),
+        /unconditional PASS with every Candidate Gate check passed/,
+      );
+    }
+    assert.throws(
+      () =>
+        plan.review!.terminalCommands(
+          reviewerResult({
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: ["artifact-version:build-1"],
+            gateExecution: {
+              ...gateExecution,
+              checks: gateExecution.checks.map((check) => ({
+                ...check,
+                status: "failed",
+              })),
+            },
+          }),
+          context,
+        ),
+      /unconditional PASS with every Candidate Gate check passed/,
+    );
     assert.throws(
       () =>
         plan.review!.terminalCommands(

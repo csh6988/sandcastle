@@ -2326,7 +2326,7 @@ describe("Project detail", () => {
         openCount += 1;
         return {
           subscriptionId: "subscription-1",
-          subscriptionGeneration: 1,
+          subscriptionGeneration: 2,
           barrierSequence: 1,
         };
       },
