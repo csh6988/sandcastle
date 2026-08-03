@@ -475,6 +475,15 @@ export interface PipelineRuntime {
     readonly humanReleaseNodeRunId: string;
     readonly decisionId: string;
     readonly targetNodeRunId: string;
+    readonly authority: {
+      readonly kind:
+        | "work-package-version"
+        | "test-rework-run"
+        | "candidate-input-recheck";
+      readonly id: string;
+      readonly hash: string;
+      readonly lineageHash: string;
+    };
     readonly activatedAt: string;
   }) => void;
   readonly validateReleaseBoundaryChildInTransaction: (input: {
@@ -3268,6 +3277,7 @@ export const openPipelineRuntime = (
           status: "recovering",
           decisionId: input.decisionId,
           targetNodeRunId: target.id,
+          authority: input.authority,
         },
         createdAt: input.activatedAt,
       });

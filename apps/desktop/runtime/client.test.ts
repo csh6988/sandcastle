@@ -894,6 +894,7 @@ describe("Company Runtime client", () => {
       manifestHash: "a".repeat(64),
       projection: "accepted" as const,
       decision: null,
+      recoveryActivation: null,
       supersededByCandidateId: null,
       createdAt: "2026-08-01T00:00:00.000Z",
     };

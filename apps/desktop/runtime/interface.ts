@@ -1896,6 +1896,38 @@ export const HumanReleaseDecisionViewSchema = z
   })
   .strict();
 
+export const ReleaseReworkActivationViewSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    decisionId: z.string().trim().min(1),
+    reworkRecordId: z.string().trim().min(1),
+    candidateId: z.string().trim().min(1),
+    runId: z.string().trim().min(1),
+    snapshotRevisionId: z.string().trim().min(1),
+    targetNodeRunId: z.string().trim().min(1),
+    authority: z
+      .object({
+        kind: z.enum([
+          "work-package-version",
+          "test-rework-run",
+          "candidate-input-recheck",
+        ]),
+        id: z.string().trim().min(1),
+        hash: Sha256Schema,
+        lineage: z.unknown(),
+        lineageHash: Sha256Schema,
+      })
+      .strict(),
+    actor: ActorRefSchema.extend({
+      type: z.literal("human"),
+      authenticatedBy: z.literal("local-session"),
+    }),
+    commandId: z.string().trim().min(1),
+    createdAt: z.string().datetime(),
+    activationHash: Sha256Schema,
+  })
+  .strict();
+
 export const DeliveryCandidateViewSchema = z
   .object({
     id: z.string().trim().min(1),
@@ -1907,9 +1939,11 @@ export const DeliveryCandidateViewSchema = z
       "accepted",
       "rejected",
       "changes-requested",
+      "rework-activated",
       "superseded",
     ]),
     decision: HumanReleaseDecisionViewSchema.nullable(),
+    recoveryActivation: ReleaseReworkActivationViewSchema.nullable(),
     supersededByCandidateId: z.string().trim().min(1).nullable(),
     createdAt: z.string().datetime(),
   })
@@ -1946,6 +1980,9 @@ export const AcceptedDeliveryCandidateAuthoritySchema = z
 
 export type HumanReleaseDecisionView = z.infer<
   typeof HumanReleaseDecisionViewSchema
+>;
+export type ReleaseReworkActivationView = z.infer<
+  typeof ReleaseReworkActivationViewSchema
 >;
 export type DeliveryCandidateView = z.infer<typeof DeliveryCandidateViewSchema>;
 export type AcceptedDeliveryCandidateAuthorityView = z.infer<

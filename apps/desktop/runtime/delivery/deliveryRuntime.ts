@@ -65,6 +65,7 @@ export type DeliveryCandidateProjection =
   | "accepted"
   | "rejected"
   | "changes-requested"
+  | "rework-activated"
   | "superseded";
 
 export type HumanReleaseDecisionKind =
@@ -99,6 +100,28 @@ export type ReleaseReworkAuthority = {
   readonly id: string;
 };
 
+export type ReleaseReworkActivation = {
+  readonly id: string;
+  readonly decisionId: string;
+  readonly reworkRecordId: string;
+  readonly candidateId: string;
+  readonly runId: string;
+  readonly snapshotRevisionId: string;
+  readonly targetNodeRunId: string;
+  readonly authority: ReleaseReworkAuthority & {
+    readonly hash: string;
+    readonly lineage: unknown;
+    readonly lineageHash: string;
+  };
+  readonly actor: ActorRef & {
+    readonly type: "human";
+    readonly authenticatedBy: "local-session";
+  };
+  readonly commandId: string;
+  readonly createdAt: string;
+  readonly activationHash: string;
+};
+
 export type HumanReleaseDecision = {
   readonly id: string;
   readonly candidateId: string;
@@ -126,6 +149,7 @@ export type DeliveryCandidateView = {
   readonly manifestHash: string;
   readonly projection: DeliveryCandidateProjection;
   readonly decision: HumanReleaseDecision | null;
+  readonly recoveryActivation: ReleaseReworkActivation | null;
   readonly supersededByCandidateId: string | null;
   readonly createdAt: string;
 };
@@ -190,6 +214,7 @@ export interface DeliveryRuntime {
     readonly expectedCandidateHash: string;
     readonly decisionId: string;
     readonly authority: ReleaseReworkAuthority;
+    readonly commandId?: string;
   }) => DeliveryCandidateView;
   readonly acceptedAuthority: (
     candidateId: string,
@@ -394,6 +419,50 @@ export const openDeliveryRuntime = (
     return { ...decision, decisionHash: row.decisionHash };
   };
 
+  const readRecoveryActivation = (
+    candidateId: string,
+  ): ReleaseReworkActivation | null => {
+    const row = database
+      .prepare(
+        `SELECT activation_json AS activationJson,
+                activation_hash AS activationHash,
+                authority_hash AS authorityHash,
+                lineage_json AS lineageJson,
+                lineage_hash AS lineageHash
+           FROM delivery_release_rework_activations
+          WHERE candidate_id = ?`,
+      )
+      .get(candidateId) as
+      | {
+          readonly activationJson: string;
+          readonly activationHash: string;
+          readonly authorityHash: string;
+          readonly lineageJson: string;
+          readonly lineageHash: string;
+        }
+      | undefined;
+    if (!row) return null;
+    const activation = parseJson<
+      Omit<ReleaseReworkActivation, "activationHash">
+    >(
+      row.activationJson,
+      `Release rework activation for Delivery Candidate ${candidateId}`,
+    );
+    if (
+      sha256(activation) !== row.activationHash ||
+      activation.authority.hash !== row.authorityHash ||
+      canonicalJson(activation.authority.lineage) !== row.lineageJson ||
+      activation.authority.lineageHash !== row.lineageHash ||
+      sha256(activation.authority.lineage) !== row.lineageHash
+    ) {
+      throw new DeliveryRuntimeError(
+        "RELEASE_REWORK_ACTIVATION_INTEGRITY_FAILED",
+        `Release rework activation for Delivery Candidate ${candidateId} failed immutable integrity validation.`,
+      );
+    }
+    return { ...activation, activationHash: row.activationHash };
+  };
+
   const inspect = (candidateId: string): DeliveryCandidateView => {
     const row = database
       .prepare(
@@ -427,6 +496,7 @@ export const openDeliveryRuntime = (
       );
     }
     const decision = readDecision(candidateId);
+    const recoveryActivation = readRecoveryActivation(candidateId);
     const successor = database
       .prepare(
         `SELECT id FROM delivery_candidates
@@ -438,9 +508,11 @@ export const openDeliveryRuntime = (
         ? "accepted"
         : successor
           ? "superseded"
-          : decision
-            ? decision.decision
-            : "awaiting-decision";
+          : recoveryActivation
+            ? "rework-activated"
+            : decision
+              ? decision.decision
+              : "awaiting-decision";
     return {
       id: row.id,
       requestId: row.requestId,
@@ -448,6 +520,7 @@ export const openDeliveryRuntime = (
       manifestHash: row.manifestHash,
       projection,
       decision,
+      recoveryActivation,
       supersededByCandidateId: successor?.id ?? null,
       createdAt: row.createdAt,
     };
@@ -976,6 +1049,24 @@ export const openDeliveryRuntime = (
         `Human release decision ${input.decisionId} is not awaiting same-boundary rework.`,
       );
     }
+    const existingActivation = readRecoveryActivation(candidate.id);
+    if (existingActivation) {
+      const exactReplay =
+        existingActivation.decisionId === input.decisionId &&
+        existingActivation.authority.kind === input.authority.kind &&
+        existingActivation.authority.id === input.authority.id &&
+        existingActivation.actor.id === input.actor.id &&
+        existingActivation.actor.type === input.actor.type &&
+        existingActivation.actor.authenticatedBy ===
+          input.actor.authenticatedBy;
+      if (!exactReplay) {
+        throw new DeliveryRuntimeError(
+          "RELEASE_REWORK_ACTIVATION_EXISTS",
+          `Human release decision ${input.decisionId} already has a different immutable recovery activation.`,
+        );
+      }
+      return inspect(candidate.id);
+    }
     const responsibility = decision.rework.responsibility;
     if (responsibility.kind === "unknown") {
       throw new DeliveryRuntimeError(
@@ -986,6 +1077,8 @@ export const openDeliveryRuntime = (
     let effectiveKind = responsibility.kind;
     let effectiveId = responsibility.id?.trim();
     let targetNodeRunId: string | undefined;
+    let authorityLineage: unknown;
+    let exactTestDefectId: string | undefined;
     const requireCandidateInputRecheck = (): void => {
       if (
         input.authority.kind !== "candidate-input-recheck" ||
@@ -998,6 +1091,13 @@ export const openDeliveryRuntime = (
       }
       targetNodeRunId =
         candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
+      authorityLineage = {
+        candidateInputId: candidate.manifest.candidateInput.id,
+        candidateInputHash: candidate.manifest.candidateInput.hash,
+        gateAuthorityId: candidate.manifest.gateAuthority.id,
+        gateAuthorityHash: candidate.manifest.gateAuthority.authorityHash,
+        sourceNodeRunId: targetNodeRunId,
+      };
     };
     if (responsibility.kind === "aggregate") {
       requireCandidateInputRecheck();
@@ -1083,6 +1183,7 @@ export const openDeliveryRuntime = (
         if (testDefect) {
           effectiveKind = "test";
           effectiveId = testDefect.testRunId;
+          exactTestDefectId = responsibility.id;
         } else {
           if (input.authority.kind !== "work-package-version") {
             throw new DeliveryRuntimeError(
@@ -1168,7 +1269,12 @@ export const openDeliveryRuntime = (
       }
       const fresh = database
         .prepare(
-          `SELECT fresh.node_run_id AS nodeRunId
+          `SELECT fresh.node_run_id AS nodeRunId,
+                  fresh.id AS freshVersionId,
+                  fresh.version AS freshVersion,
+                  fresh.work_package_id AS workPackageId,
+                  prior.id AS priorVersionId,
+                  audit.command_id AS reworkCommandId
              FROM work_package_versions AS fresh
              JOIN work_package_versions AS prior ON prior.id = ?
              JOIN work_package_assignments AS assignment
@@ -1189,6 +1295,7 @@ export const openDeliveryRuntime = (
               AND audit.node_run_id = fresh.node_run_id
               AND audit.actor_type = 'runtime-worker'
               AND audit.authenticated_by = 'runtime'
+              AND json_extract(audit.after_json, '$.workPackageVersionId') = fresh.id
              JOIN command_deduplication AS receipt
                ON receipt.command_id = audit.command_id
               AND receipt.status = 'completed'
@@ -1204,7 +1311,14 @@ export const openDeliveryRuntime = (
             LIMIT 1`,
         )
         .get(prior.id, candidate.manifest.runId, input.authority.id) as
-        | { readonly nodeRunId: string }
+        | {
+            readonly nodeRunId: string;
+            readonly freshVersionId: string;
+            readonly freshVersion: number;
+            readonly workPackageId: string;
+            readonly priorVersionId: string;
+            readonly reworkCommandId: string;
+          }
         | undefined;
       if (!fresh) {
         throw new DeliveryRuntimeError(
@@ -1213,6 +1327,14 @@ export const openDeliveryRuntime = (
         );
       }
       targetNodeRunId = fresh.nodeRunId;
+      authorityLineage = {
+        workPackageId: fresh.workPackageId,
+        priorVersionId: fresh.priorVersionId,
+        freshVersionId: fresh.freshVersionId,
+        freshVersion: fresh.freshVersion,
+        nodeRunId: fresh.nodeRunId,
+        reworkCommandId: fresh.reworkCommandId,
+      };
     } else if (!targetNodeRunId && effectiveKind === "test") {
       if (input.authority.kind !== "test-rework-run") {
         throw new DeliveryRuntimeError(
@@ -1231,9 +1353,19 @@ export const openDeliveryRuntime = (
       const rework = database
         .prepare(
           `SELECT fresh.run_id AS runId,
-                  fresh.snapshot_revision_id AS snapshotRevisionId
+                  fresh.snapshot_revision_id AS snapshotRevisionId,
+                  rework.id AS reworkId,
+                  rework.defect_id AS defectId,
+                  rework.lineage_hash AS reworkLineageHash,
+                  resolutions.id AS resolutionId,
+                  resolutions.resolution_hash AS resolutionHash,
+                  fresh.pass_authority_hash AS passAuthorityHash
              FROM test_rework_runs AS rework
              JOIN test_runs AS fresh ON fresh.id = rework.fresh_test_run_id
+             JOIN test_defect_resolutions AS resolutions
+               ON resolutions.defect_id = rework.defect_id
+              AND json_extract(resolutions.resolution_json, '$.resolvedByTestRunId') = fresh.id
+              AND json_extract(resolutions.resolution_json, '$.passAuthorityHash') = fresh.pass_authority_hash
              JOIN runtime_audit_records AS accepted
                ON accepted.action = 'test.run.accepted'
               AND accepted.entity_type = 'test-run'
@@ -1256,12 +1388,27 @@ export const openDeliveryRuntime = (
               AND completed_receipt.authenticated_by = completed.authenticated_by
             WHERE rework.prior_test_run_id = ?
               AND rework.fresh_test_run_id = ?
+              AND (? IS NULL OR rework.defect_id = ?)
               AND fresh.state = 'passed'
               AND fresh.pass_authority_hash IS NOT NULL
             LIMIT 1`,
         )
-        .get(effectiveId!, input.authority.id) as
-        | { readonly runId: string; readonly snapshotRevisionId: string }
+        .get(
+          effectiveId!,
+          input.authority.id,
+          exactTestDefectId ?? null,
+          exactTestDefectId ?? null,
+        ) as
+        | {
+            readonly runId: string;
+            readonly snapshotRevisionId: string;
+            readonly reworkId: string;
+            readonly defectId: string;
+            readonly reworkLineageHash: string;
+            readonly resolutionId: string;
+            readonly resolutionHash: string;
+            readonly passAuthorityHash: string;
+          }
         | undefined;
       if (
         !rework ||
@@ -1284,6 +1431,18 @@ export const openDeliveryRuntime = (
       }
       targetNodeRunId =
         candidate.manifest.candidateInput.manifest.sourceNode.nodeRunId;
+      authorityLineage = {
+        reworkId: rework.reworkId,
+        defectId: rework.defectId,
+        priorTestRunId: effectiveId!,
+        freshTestRunId: input.authority.id,
+        reworkLineageHash: rework.reworkLineageHash,
+        resolutionId: rework.resolutionId,
+        resolutionHash: rework.resolutionHash,
+        passAuthorityHash: rework.passAuthorityHash,
+        runId: rework.runId,
+        snapshotRevisionId: rework.snapshotRevisionId,
+      };
     } else if (!targetNodeRunId) {
       throw new DeliveryRuntimeError(
         "RELEASE_REWORK_AUTHORITY_UNSUPPORTED",
@@ -1291,12 +1450,111 @@ export const openDeliveryRuntime = (
       );
     }
     const now = clock().toISOString();
+    const commandContext = database
+      .prepare(
+        `SELECT command_id AS commandId
+           FROM runtime_unit_of_work_context WHERE slot = 1`,
+      )
+      .get() as { readonly commandId: string } | undefined;
+    const lineageHash = sha256(authorityLineage);
+    const activation = {
+      id: `release-rework-activation:${decision.id}`,
+      decisionId: decision.id,
+      reworkRecordId: `release-rework:${decision.id}`,
+      candidateId: candidate.id,
+      runId: candidate.manifest.runId,
+      snapshotRevisionId: candidate.manifest.snapshot.id,
+      targetNodeRunId: targetNodeRunId!,
+      authority: {
+        kind: input.authority.kind,
+        id: input.authority.id,
+        hash: sha256({
+          kind: input.authority.kind,
+          id: input.authority.id,
+          lineageHash,
+        }),
+        lineage: authorityLineage,
+        lineageHash,
+      },
+      actor: {
+        type: "human" as const,
+        id: input.actor.id,
+        authenticatedBy: "local-session" as const,
+      },
+      commandId:
+        input.commandId ??
+        commandContext?.commandId ??
+        `direct-release-recovery:${decision.id}`,
+      createdAt: now,
+    } satisfies Omit<ReleaseReworkActivation, "activationHash">;
+    const activationHash = sha256(activation);
     options.pipelineRuntime.activateHumanReleaseReworkInTransaction({
       runId: candidate.manifest.runId,
       humanReleaseNodeRunId: candidate.manifest.source.humanReleaseNodeRunId,
       decisionId: decision.id,
       targetNodeRunId: targetNodeRunId!,
+      authority: {
+        kind: activation.authority.kind,
+        id: activation.authority.id,
+        hash: activation.authority.hash,
+        lineageHash: activation.authority.lineageHash,
+      },
       activatedAt: now,
+    });
+    database
+      .prepare(
+        `INSERT INTO delivery_release_rework_activations(
+           id, decision_id, rework_record_id, candidate_id, run_id,
+           snapshot_revision_id, target_node_run_id, authority_kind,
+           authority_id, authority_hash, lineage_json, lineage_hash,
+           actor_type, actor_id, authenticated_by, command_id,
+           activation_json, activation_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'human', ?,
+                   'local-session', ?, ?, ?, ?)`,
+      )
+      .run(
+        activation.id,
+        activation.decisionId,
+        activation.reworkRecordId,
+        activation.candidateId,
+        activation.runId,
+        activation.snapshotRevisionId,
+        activation.targetNodeRunId,
+        activation.authority.kind,
+        activation.authority.id,
+        activation.authority.hash,
+        canonicalJson(activation.authority.lineage),
+        activation.authority.lineageHash,
+        activation.actor.id,
+        activation.commandId,
+        canonicalJson(activation),
+        activationHash,
+        activation.createdAt,
+      );
+    appendMutation({
+      type: "delivery.release.rework-activated",
+      entityType: "release-rework-activation",
+      entityId: activation.id,
+      releaseDecisionId: decision.id,
+      candidateId: candidate.id,
+      candidateInputId: candidate.manifest.candidateInput.id,
+      projectId: candidate.manifest.projectId,
+      runId: candidate.manifest.runId,
+      snapshotRevisionId: candidate.manifest.snapshot.id,
+      nodeRunId: activation.targetNodeRunId,
+      payload: {
+        releaseDecisionId: decision.id,
+        deliveryCandidateId: candidate.id,
+        deliveryCandidateInputId: candidate.manifest.candidateInput.id,
+        activationId: activation.id,
+        targetNodeRunId: activation.targetNodeRunId,
+        authorityKind: activation.authority.kind,
+        authorityId: activation.authority.id,
+        authorityHash: activation.authority.hash,
+        lineageHash: activation.authority.lineageHash,
+        activationHash,
+      },
+      timestamp: now,
     });
     return inspect(candidate.id);
   };

@@ -1132,6 +1132,12 @@ describe("Pipeline Runtime", () => {
         humanReleaseNodeRunId: sameBoundaryHumanRelease.id,
         decisionId: `decision:${sameBoundary.run.id}`,
         targetNodeRunId: sameBoundaryCandidate.id,
+        authority: {
+          kind: "candidate-input-recheck",
+          id: "candidate-input-1",
+          hash: "a".repeat(64),
+          lineageHash: "b".repeat(64),
+        },
         activatedAt: fixedNow,
       });
       raw.exec("COMMIT");
