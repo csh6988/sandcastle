@@ -192,7 +192,7 @@ describe("Company Runtime command registry", () => {
         .prepare("DELETE FROM runtime_audit_records WHERE id = ?")
         .run("tampered-release-audit");
     };
-    for (const mutation of [
+    for (const [index, mutation] of [
       {
         name: "status",
         apply: () => {
@@ -239,7 +239,7 @@ describe("Company Runtime command registry", () => {
             )
             .run("tampered-release-audit", envelope.commandId),
       },
-    ]) {
+    ].entries()) {
       mutation.apply();
       assert.throws(
         () => registry.execute(envelope),
@@ -248,6 +248,25 @@ describe("Company Runtime command registry", () => {
           error.code === "COMMAND_RECEIPT_INVALID",
         mutation.name,
       );
+      const followUp = registry.execute({
+        ...envelope,
+        commandId: `release-command-after-corrupt-${index}`,
+        command: {
+          ...envelope.command,
+          operation: {
+            ...envelope.command.operation,
+            operationId: `release-operation-after-corrupt-${index}`,
+            items: envelope.command.operation.items.map((item) => ({
+              ...item,
+              destination: {
+                ...item.destination,
+                targetBranch: `release-after-corrupt-${index}`,
+              },
+            })),
+          },
+        },
+      });
+      assert.equal(followUp.status, "succeeded", mutation.name);
       restoreReceipt();
     }
     const unknown = await releaseOperations.dispatch("release-operation-1");

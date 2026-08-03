@@ -3559,7 +3559,9 @@ const executeReleaseOperationCommand = (
       command: envelope.command,
     }),
   );
+  let transactionActive = false;
   database.exec("BEGIN IMMEDIATE");
+  transactionActive = true;
   try {
     const receipt = database
       .prepare(
@@ -3595,6 +3597,7 @@ const executeReleaseOperationCommand = (
         receipt.requestHash === requestHash;
       if (!sameRequest) {
         database.exec("COMMIT");
+        transactionActive = false;
         return commandIdReuse(envelope.commandId);
       }
       try {
@@ -3634,8 +3637,11 @@ const executeReleaseOperationCommand = (
           throw new Error("receipt effect IDs are invalid");
         }
         database.exec("COMMIT");
+        transactionActive = false;
         return replay;
       } catch {
+        database.exec("ROLLBACK");
+        transactionActive = false;
         throw new CompanyCommandError(
           "COMMAND_RECEIPT_INVALID",
           `Command ${envelope.commandId} has an invalid completed receipt.`,
@@ -3737,9 +3743,12 @@ const executeReleaseOperationCommand = (
         );
     }
     database.exec("COMMIT");
+    transactionActive = false;
     return result;
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (transactionActive) {
+      database.exec("ROLLBACK");
+    }
     throw error;
   }
 };
