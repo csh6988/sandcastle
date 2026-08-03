@@ -6261,6 +6261,68 @@ const migrations: readonly CompanyMigration[] = [
             BEFORE DELETE ON release_operation_items
             BEGIN SELECT RAISE(ABORT, 'Release operation item is immutable'); END;
 
+          CREATE TABLE release_operation_destination_claims (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_id TEXT NOT NULL REFERENCES release_operation_items(id),
+            destination_key TEXT NOT NULL,
+            fence_token TEXT NOT NULL,
+            is_active INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            released_at TEXT
+          ) STRICT;
+          CREATE UNIQUE INDEX release_operation_destination_claims_active_destination_idx
+            ON release_operation_destination_claims(destination_key)
+            WHERE is_active = 1;
+          CREATE INDEX release_operation_destination_claims_item_idx
+            ON release_operation_destination_claims(item_id, created_at, id);
+          CREATE TRIGGER release_operation_destination_claims_identity_update
+            BEFORE UPDATE ON release_operation_destination_claims
+            WHEN NEW.id <> OLD.id
+              OR NEW.operation_id <> OLD.operation_id
+              OR NEW.item_id <> OLD.item_id
+              OR NEW.destination_key <> OLD.destination_key
+              OR NEW.fence_token <> OLD.fence_token
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim identity is immutable'); END;
+          CREATE TRIGGER release_operation_destination_claims_immutable_delete
+            BEFORE DELETE ON release_operation_destination_claims
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim is immutable'); END;
+
+          CREATE TABLE release_operation_destination_claim_events (
+            id TEXT PRIMARY KEY,
+            claim_id TEXT NOT NULL REFERENCES release_operation_destination_claims(id),
+            action TEXT NOT NULL CHECK (action IN ('acquired', 'released')),
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operation_destination_claim_events_claim_idx
+            ON release_operation_destination_claim_events(claim_id, created_at, id);
+          CREATE TRIGGER release_operation_destination_claim_events_immutable_update
+            BEFORE UPDATE ON release_operation_destination_claim_events
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim event is immutable'); END;
+          CREATE TRIGGER release_operation_destination_claim_events_immutable_delete
+            BEFORE DELETE ON release_operation_destination_claim_events
+            BEGIN SELECT RAISE(ABORT, 'Release operation destination claim event is immutable'); END;
+
+          CREATE TABLE release_operation_item_observations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES release_operations(id),
+            item_id TEXT NOT NULL REFERENCES release_operation_items(id),
+            kind TEXT NOT NULL CHECK (kind IN ('execution', 'receipt', 'failure', 'destination-conflict', 'unknown', 'reconcile')),
+            observation_json TEXT NOT NULL,
+            observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX release_operation_item_observations_item_idx
+            ON release_operation_item_observations(item_id, created_at, id);
+          CREATE TRIGGER release_operation_item_observations_immutable_update
+            BEFORE UPDATE ON release_operation_item_observations
+            BEGIN SELECT RAISE(ABORT, 'Release operation item observation is immutable'); END;
+          CREATE TRIGGER release_operation_item_observations_immutable_delete
+            BEFORE DELETE ON release_operation_item_observations
+            BEGIN SELECT RAISE(ABORT, 'Release operation item observation is immutable'); END;
+
           CREATE TABLE release_operation_reconciliations (
             id TEXT PRIMARY KEY,
             operation_id TEXT NOT NULL REFERENCES release_operations(id),

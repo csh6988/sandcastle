@@ -116,6 +116,13 @@ export const ReleaseOperationAuthorizationSchema = z
   })
   .strict();
 
+export const ReleaseOperationAuthorizationInputSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(4_000),
+    evidenceRefs: z.array(IdSchema.max(512)).min(1).max(64),
+  })
+  .strict();
+
 const sortedDistinctIds = <Item extends { readonly id: string }>(
   items: readonly Item[],
   context: z.RefinementCtx,
@@ -133,6 +140,7 @@ export const MergeReleaseOperationCreateRequestSchema = z
   .object({
     operationId: IdSchema,
     candidateId: IdSchema,
+    expectedAcceptedAuthorityHash: Sha256Schema,
     kind: z.literal("merge"),
     authorization: ReleaseOperationAuthorizationSchema,
     items: z.array(MergeReleaseOperationItemSchema).min(1),
@@ -144,6 +152,7 @@ export const ExportReleaseOperationCreateRequestSchema = z
   .object({
     operationId: IdSchema,
     candidateId: IdSchema,
+    expectedAcceptedAuthorityHash: Sha256Schema,
     kind: z.literal("export"),
     authorization: ReleaseOperationAuthorizationSchema,
     items: z.array(ExportReleaseOperationItemSchema).min(1),
@@ -157,6 +166,34 @@ export const ReleaseOperationCreateRequestSchema = z.union([
 ]);
 export type ReleaseOperationCreateRequest = z.infer<
   typeof ReleaseOperationCreateRequestSchema
+>;
+
+export const ReleaseOperationCreateCommandInputSchema = z.union([
+  z
+    .object({
+      operationId: IdSchema,
+      candidateId: IdSchema,
+      expectedAcceptedAuthorityHash: Sha256Schema,
+      kind: z.literal("merge"),
+      authorization: ReleaseOperationAuthorizationInputSchema,
+      items: z.array(MergeReleaseOperationItemSchema).min(1),
+    })
+    .strict()
+    .superRefine((value, context) => sortedDistinctIds(value.items, context)),
+  z
+    .object({
+      operationId: IdSchema,
+      candidateId: IdSchema,
+      expectedAcceptedAuthorityHash: Sha256Schema,
+      kind: z.literal("export"),
+      authorization: ReleaseOperationAuthorizationInputSchema,
+      items: z.array(ExportReleaseOperationItemSchema).min(1),
+    })
+    .strict()
+    .superRefine((value, context) => sortedDistinctIds(value.items, context)),
+]);
+export type ReleaseOperationCreateCommandInput = z.infer<
+  typeof ReleaseOperationCreateCommandInputSchema
 >;
 
 export const AcceptedDeliveryCandidateAuthoritySnapshotSchema = z
@@ -294,6 +331,7 @@ export const ReleaseOperationReconcileRequestSchema = z
   .object({
     operationId: IdSchema,
     itemId: IdSchema,
+    expectedOperationHash: Sha256Schema,
     actor: VerifiedLocalSessionHumanSchema,
     evidenceRefs: z.array(IdSchema.max(512)).min(1).max(64),
   })
@@ -327,12 +365,21 @@ const ReleaseOperationItemViewSchema = z
   })
   .passthrough();
 
+export const ReleaseOperationNextActionSchema = z.enum([
+  "reconcile",
+  "create-new-operation",
+]);
+export type ReleaseOperationNextAction = z.infer<
+  typeof ReleaseOperationNextActionSchema
+>;
+
 export const ReleaseOperationViewSchema = z
   .object({
     id: IdSchema,
     request: ReleaseOperationCreateRequestSchema,
     acceptedAuthority: AcceptedDeliveryCandidateAuthoritySnapshotSchema,
     canonicalRequestHash: Sha256Schema,
+    nextActions: z.array(ReleaseOperationNextActionSchema),
     aggregateState: ReleaseOperationAggregateStateSchema,
     counts: z
       .object({
@@ -355,7 +402,7 @@ export type ReleaseOperationView = z.infer<typeof ReleaseOperationViewSchema>;
 export interface ReleaseOperationPersistence {
   readonly createIntent: (input: ReleaseOperationView) => ReleaseOperationView;
   readonly inspect: (operationId: string) => ReleaseOperationView;
-  readonly list: (candidateId?: string) => readonly ReleaseOperationView[];
+  readonly list: (candidateId: string) => readonly ReleaseOperationView[];
   readonly finalize: (
     input: ReleaseOperationPartialFinalize,
   ) => ReleaseOperationView;

@@ -707,7 +707,7 @@ The destination-free immutable authority returned only by `DeliveryRuntime.accep
 _Avoid_: a copied Candidate manifest, generic Human Approval, an Agent assertion, treating a destination selection as part of acceptance
 
 **Release operation**:
-An independently authorized, idempotent post-decision operation rooted only in one **Accepted Delivery Candidate Authority**. `merge` freezes every authority Repository commit, **Release target branch**, and expected tip and may fast-forward only; `export` freezes an authorized Artifact subset, a pre-existing canonical local filesystem root, every exact relative path, expected destination state, and overwrite policy without inventing a branch. Its operation ID, canonical request hash, authority, ordered Items, and destinations are immutable. A changed request reusing the ID conflicts; destination drift requires a new operation.
+An independently authorized, idempotent post-decision operation rooted only in one **Accepted Delivery Candidate Authority**. A Renderer supplies only reason/evidence and the expected authority hash; Runtime injects the verified local-session human actor into the frozen authorization. `merge` freezes every authority Repository commit, **Release target branch**, and expected tip and may fast-forward only; `export` freezes an authorized Artifact subset, a pre-existing canonical local filesystem root, every exact relative path, expected destination state, and overwrite policy without inventing a branch. Durable per-destination claims fence concurrent work across restart, and a changed request reusing the ID conflicts; destination drift requires a new operation.
 _Avoid_: **Integration operation** (writes only generation branches), automatic deployment, forcing an export to have a Git target, retrying against a changed destination without renewed human confirmation
 
 **Release operation item**:
@@ -715,7 +715,7 @@ One deterministically serial merge or export destination inside a **Release oper
 _Avoid_: a mutable batch row, parallel destination effects, silently retrying an Item after drift
 
 **Release receipt**:
-Safe, immutable evidence of one successful **Release operation item** effect. It records an `applied` or `no-op` disposition and the exact observed target tip or destination digest. A target already containing the source is a no-op receipt, not an inferred success; an unresolved observation remains `unknown` until a verified-human reconciliation command records evidence for an Adapter to evaluate.
+Safe, append-only evidence of one **Release operation item** effect or observation. A successful receipt records an `applied` or `no-op` disposition and the exact observed target tip or destination digest. A target already containing the source is a no-op receipt, not an inferred success; an unresolved observation remains `unknown` until a verified-human reconciliation command, bound to the expected operation hash, records evidence for an Adapter to evaluate.
 _Avoid_: raw agent output, a human assertion that directly permits an effect, a blind retry receipt
 
 **Harness**:

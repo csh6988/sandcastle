@@ -20,6 +20,7 @@ describe("Release operation contracts", () => {
     const request = ReleaseOperationCreateRequestSchema.parse({
       operationId: "release-operation-1",
       candidateId: "candidate-1",
+      expectedAcceptedAuthorityHash: hash,
       kind: "merge",
       authorization: {
         actor: {
@@ -83,6 +84,7 @@ describe("Release operation contracts", () => {
           createdAt: "2026-08-03T00:00:00.000Z",
         },
         canonicalRequestHash: hash,
+        nextActions: [],
         aggregateState: "pending",
         counts: {
           pending: 2,
@@ -106,20 +108,16 @@ describe("Release operation contracts", () => {
     );
   });
 
-  it("exposes only release-operation create, reconcile, inspect, and list contracts", () => {
+  it("keeps human actor injection separate from command inputs and freezes expected hashes", () => {
     assert.doesNotThrow(() =>
       ReleaseOperationCreateEnvelopeCommandSchema.parse({
         type: "delivery.release-operation.create",
         operation: {
           operationId: "release-operation-1",
           candidateId: "candidate-1",
+          expectedAcceptedAuthorityHash: hash,
           kind: "export",
           authorization: {
-            actor: {
-              type: "human",
-              id: "human-1",
-              authenticatedBy: "local-session",
-            },
             reason: "Export the accepted artifact.",
             evidenceRefs: ["release-checklist:1"],
           },
@@ -143,6 +141,7 @@ describe("Release operation contracts", () => {
         type: "delivery.release-operation.reconcile",
         operationId: "release-operation-1",
         itemId: "artifact:release-notes",
+        expectedOperationHash: hash,
         evidenceRefs: ["filesystem-observation:1"],
       }),
     );
@@ -158,6 +157,7 @@ describe("Release operation contracts", () => {
         candidateId: "candidate-1",
       }),
     );
+    assert.throws(() => ReleaseOperationListQuerySchema.parse({ type: "release-operations.list" }));
     assert.doesNotThrow(() =>
       ReleaseOperationEffectRequestSchema.parse({
         operationId: "release-operation-1",
@@ -202,6 +202,31 @@ describe("Release operation contracts", () => {
     assert.equal(
       ReleaseOperationErrorCodeSchema.parse("RELEASE_OPERATION_ID_REUSE"),
       "RELEASE_OPERATION_ID_REUSE",
+    );
+    assert.doesNotThrow(() =>
+      ReleaseOperationViewSchema.parse({
+        id: "release-operation-next-actions",
+        request: ReleaseOperationCreateRequestSchema.parse({
+          operationId: "release-operation-next-actions",
+          candidateId: "candidate-1",
+          expectedAcceptedAuthorityHash: hash,
+          kind: "merge",
+          authorization: {
+            actor: { type: "human", id: "human-1", authenticatedBy: "local-session" },
+            reason: "Retry after destination drift.",
+            evidenceRefs: ["release-checklist:2"],
+          },
+          items: [{ id: "repository:api", repositoryReference: "repository:api", sourceCommit: "b".repeat(40), destination: { targetBranch: "main", expectedTargetTip: "c".repeat(40) } }],
+        }),
+        acceptedAuthority: { id: "authority-1", candidateId: "candidate-1", candidateHash: hash, releaseDecisionId: "decision-1", releaseDecisionHash: hash, candidateInputId: "candidate-input-1", candidateInputHash: hash, gateAuthorityId: "gate-authority-1", gateAuthorityHash: hash, integrationGenerationId: "generation-1", integrationAuthorityHash: hash, repositoryCommits: [], artifactVersionIds: [], runId: "run-1", snapshotRevisionId: "snapshot-1", authorityHash: hash, createdAt: "2026-08-03T00:00:00.000Z" },
+        canonicalRequestHash: hash,
+        aggregateState: "blocked",
+        counts: { pending: 0, running: 0, reconciling: 0, succeeded: 0, failed: 0, destinationConflict: 0, unknown: 1 },
+        items: [],
+        nextActions: ["reconcile", "create-new-operation"],
+        createdAt: "2026-08-03T00:00:00.000Z",
+        updatedAt: "2026-08-03T00:00:00.000Z",
+      }),
     );
   });
 });

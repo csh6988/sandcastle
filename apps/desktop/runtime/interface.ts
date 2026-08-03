@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  ReleaseOperationCreateRequestSchema,
+  ReleaseOperationCreateCommandInputSchema,
   type ReleaseOperationView,
 } from "./release/releaseOperationContracts.js";
 
@@ -3751,7 +3751,7 @@ export const ReleaseOperationInspectQuerySchema = z
 export const ReleaseOperationListQuerySchema = z
   .object({
     type: z.literal("release-operations.list"),
-    candidateId: z.string().trim().min(1).optional(),
+    candidateId: z.string().trim().min(1),
   })
   .strict();
 
@@ -5131,7 +5131,7 @@ export const HumanReleaseRecoverEnvelopeCommandSchema = z
 export const ReleaseOperationCreateEnvelopeCommandSchema = z
   .object({
     type: z.literal("delivery.release-operation.create"),
-    operation: ReleaseOperationCreateRequestSchema,
+    operation: ReleaseOperationCreateCommandInputSchema,
   })
   .strict();
 
@@ -5140,6 +5140,7 @@ export const ReleaseOperationReconcileEnvelopeCommandSchema = z
     type: z.literal("delivery.release-operation.reconcile"),
     operationId: z.string().trim().min(1),
     itemId: z.string().trim().min(1),
+    expectedOperationHash: Sha256Schema,
     evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
   })
   .strict();
