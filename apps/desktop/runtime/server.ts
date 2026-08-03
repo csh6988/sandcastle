@@ -43,6 +43,7 @@ import { WorkPackageRuntimeError } from "./workspaces/workPackages.js";
 import { CandidateInputRuntimeError } from "./delivery/candidateInputRuntime.js";
 import { QualityGateRuntimeError } from "./quality/qualityGateRuntime.js";
 import { DeliveryRuntimeError } from "./delivery/deliveryRuntime.js";
+import type { DeliveryQualityNodePlanProvider } from "./quality/qualityGateNodeHandler.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -52,6 +53,7 @@ export interface CompanyRuntimeServerOptions {
   readonly interactionExecutionAdapter?: ModelOnlyInteractionExecutionAdapter;
   readonly reviewerExecutionAdapter?: ReviewerExecutionAdapter;
   readonly integrationValidationProvider?: IntegrationValidationProvider;
+  readonly deliveryQualityPlans?: DeliveryQualityNodePlanProvider;
   readonly testExecutionAdapterFactory?: (input: {
     readonly database: import("node:sqlite").DatabaseSync;
     readonly tests: import("./testing/testRuntime.js").TestRuntime;
@@ -183,6 +185,13 @@ export const startCompanyRuntimeServer = async (
         ? {
             integrationRuntime: {
               validationProvider: options.integrationValidationProvider,
+            },
+          }
+        : {}),
+      ...(options.deliveryQualityPlans
+        ? {
+            deliveryQualityRuntime: {
+              plans: options.deliveryQualityPlans,
             },
           }
         : {}),

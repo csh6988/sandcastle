@@ -13,12 +13,8 @@ import type { AdapterExecutionFact } from "../execution/contract.js";
 import { MODEL_ONLY_CONTEXT_SCHEMA_HASH } from "../execution/contract.js";
 import type { ArtifactVersionView } from "../artifactRegistry.js";
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
-import type { DeliveryCandidateInputView } from "../delivery/candidateInputRuntime.js";
 import type { RuntimeInteraction } from "../interaction.js";
-import type {
-  CandidateGateInputView,
-  CandidateGateResultView,
-} from "../quality/qualityGateRuntime.js";
+import type { DeliveryQualityNodePlanProvider } from "../quality/qualityGateNodeHandler.js";
 
 import {
   electronTestFixtureRuntimePrincipal,
@@ -33,7 +29,10 @@ import {
 } from "./electronTestExecutionAdapter.js";
 import {
   createIntegrationAuthorityFixture,
+  createIntegrationAuthorityFixtureDeliveryQualityPlans,
+  createIntegrationAuthorityFixturePreparation,
   createIntegrationAuthorityFixtureRuntimeOptions,
+  type IntegrationAuthorityFixturePreparation,
   type IntegrationAuthorityFixtureResult,
 } from "./integrationAuthorityFixture.js";
 import type {
@@ -313,568 +312,6 @@ const registerEvidence = (input: {
   };
 };
 
-const materializeCandidateQualityGates = (input: {
-  readonly database: import("node:sqlite").DatabaseSync;
-  readonly config: ReturnType<typeof loadElectronTestFixtureConfig>;
-  readonly tests: TestRuntime;
-  readonly commandRegistry: CompanyCommandRegistry;
-  readonly seeded: IntegrationAuthorityFixtureResult;
-}): boolean => {
-  const receiptPath = join(
-    input.config.evidenceDirectory,
-    "runtime",
-    "candidate-quality-gates.json",
-  );
-  if (existsSync(receiptPath)) return true;
-  const testRunId = `test:${input.seeded.runId}:${input.seeded.testNodeRunId}`;
-  const testAuthority = input.tests.downstreamAuthority(testRunId);
-  const execute = <Value>(
-    commandId: string,
-    actor: {
-      readonly type: "runtime-worker";
-      readonly id: string;
-      readonly authenticatedBy: "runtime";
-    },
-    command: Parameters<CompanyCommandRegistry["execute"]>[0]["command"],
-    expectedRevision?: number,
-  ): Value =>
-    requireSucceeded(
-      input.commandRegistry.execute({
-        schemaVersion: 1,
-        commandId,
-        actor,
-        consumerId: "electron-test-fixture-quality-setup",
-        ...(expectedRevision === undefined ? {} : { expectedRevision }),
-        command,
-      }),
-    ) as Value;
-  const runtimeActor = (id: string) => ({
-    type: "runtime-worker" as const,
-    id,
-    authenticatedBy: "runtime" as const,
-  });
-  const candidateInputId = "fixture-delivery-candidate-input";
-  const candidateNodeRunId = `${candidateInputId}:node`;
-  const candidateNodeAttemptId = `${candidateInputId}:attempt`;
-  const candidateSessionId = `${candidateInputId}:session`;
-  input.database
-    .prepare(
-      `INSERT OR IGNORE INTO node_runs(
-         id, run_id, pipeline_node_id, node_type, status, attempt_count,
-         required_dependency_ids_json, created_at, updated_at, handler_kind_id
-       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, 'delivery-candidate-input@1')`,
-    )
-    .run(
-      candidateNodeRunId,
-      input.seeded.runId,
-      candidateNodeRunId,
-      input.config.fakeClock,
-      input.config.fakeClock,
-    );
-  input.database
-    .prepare(
-      `INSERT OR IGNORE INTO node_attempts(
-         id, node_run_id, attempt_number, snapshot_revision_id, reason,
-         status, created_at, started_at
-       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?)`,
-    )
-    .run(
-      candidateNodeAttemptId,
-      candidateNodeRunId,
-      input.seeded.snapshotRevisionId,
-      input.config.fakeClock,
-      input.config.fakeClock,
-    );
-  input.database
-    .prepare(
-      `INSERT OR IGNORE INTO interaction_sessions(
-         id, mode, project_id, run_id, node_run_id, status, created_at
-       ) VALUES (?, 'run-collaboration', ?, ?, ?, 'active', ?)`,
-    )
-    .run(
-      candidateSessionId,
-      input.seeded.projectId,
-      input.seeded.runId,
-      candidateNodeRunId,
-      input.config.fakeClock,
-    );
-  input.database
-    .prepare(
-      `INSERT OR IGNORE INTO session_participants(
-         id, session_id, participant_type, participant_ref, role, created_at
-       ) VALUES (?, ?, 'ai-member', ?, 'delivery-coordinator', ?)`,
-    )
-    .run(
-      `${candidateInputId}:participant`,
-      candidateSessionId,
-      input.seeded.testOwnerAiMemberId,
-      input.config.fakeClock,
-    );
-  const candidate = execute<DeliveryCandidateInputView>(
-    "fixture-candidate-input-freeze",
-    runtimeActor(input.seeded.testOwnerAiMemberId),
-    {
-      type: "delivery.candidate-input.freeze",
-      candidateInputId,
-      requestId: "fixture-candidate-input-request",
-      projectId: input.seeded.projectId,
-      runId: input.seeded.runId,
-      snapshotRevisionId: input.seeded.snapshotRevisionId,
-      nodeRunId: candidateNodeRunId,
-      nodeAttemptId: candidateNodeAttemptId,
-      producer: {
-        aiMemberId: input.seeded.testOwnerAiMemberId,
-        positionId: input.seeded.testOwnerPositionId,
-        sessionId: candidateSessionId,
-      },
-      requiredTestRunIds: [testRunId],
-      environment: {
-        platform: process.platform,
-        architecture: process.arch,
-        electronVersion: process.versions.electron ?? process.version,
-        executableHash: sha256(readFileSync(process.execPath)),
-        capabilityProfileHash: sha256(
-          canonicalJson(testAuthority.capabilities),
-        ),
-      },
-      evidencePolicy: {
-        revisionId: "electron-test-fixture-evidence@1",
-        redactionProfile: "fixture-redacted",
-        retentionClass: "durable",
-        maxItemBytes: 20 * 1024 * 1024,
-        maxTotalBytes: 40 * 1024 * 1024,
-      },
-    },
-  );
-  input.database
-    .prepare(
-      "UPDATE node_runs SET status = 'succeeded', updated_at = ? WHERE id = ?",
-    )
-    .run(input.config.fakeClock, candidateNodeRunId);
-  input.database
-    .prepare(
-      "UPDATE node_attempts SET status = 'succeeded', completed_at = ? WHERE id = ?",
-    )
-    .run(input.config.fakeClock, candidateNodeAttemptId);
-  if (
-    candidate.manifest.risk.tier === "critical" &&
-    !input.database
-      .prepare(
-        "SELECT 1 FROM candidate_critical_escalations WHERE candidate_input_id = ?",
-      )
-      .get(candidate.id)
-  ) {
-    return false;
-  }
-  const gateResultIds: Record<"security" | "operability", string> = {
-    security: "",
-    operability: "",
-  };
-  for (const kind of ["security", "operability"] as const) {
-    const topicId = `fixture-${kind}-review-topic`;
-    const ownerParticipantId = `${topicId}:owner`;
-    const reviewerParticipantId = `${topicId}:reviewer`;
-    const gateInputId = `fixture-${kind}-gate-input`;
-    const sourceNodeRunId = `${gateInputId}:node`;
-    const sourceNodeAttemptId = `${gateInputId}:attempt`;
-    const sourceSessionId = `${gateInputId}:session`;
-    const sourceWorker = runtimeActor(input.seeded.testOwnerAiMemberId);
-    input.database
-      .prepare(
-        `INSERT OR IGNORE INTO node_runs(
-           id, run_id, pipeline_node_id, node_type, status, attempt_count,
-           required_dependency_ids_json, created_at, updated_at, handler_kind_id
-         ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, ?)`,
-      )
-      .run(
-        sourceNodeRunId,
-        input.seeded.runId,
-        sourceNodeRunId,
-        input.config.fakeClock,
-        input.config.fakeClock,
-        `${kind}-review@1`,
-      );
-    input.database
-      .prepare(
-        `INSERT OR IGNORE INTO node_attempts(
-           id, node_run_id, attempt_number, snapshot_revision_id, reason,
-           status, created_at, started_at, lease_id, lease_owner,
-           lease_expires_at
-         ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        sourceNodeAttemptId,
-        sourceNodeRunId,
-        input.seeded.snapshotRevisionId,
-        input.config.fakeClock,
-        input.config.fakeClock,
-        `${sourceNodeAttemptId}:lease`,
-        sourceWorker.id,
-        new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
-      );
-    input.database
-      .prepare(
-        `INSERT OR IGNORE INTO interaction_sessions(
-           id, mode, project_id, run_id, node_run_id, status, created_at
-         ) VALUES (?, 'run-collaboration', ?, ?, ?, 'active', ?)`,
-      )
-      .run(
-        sourceSessionId,
-        input.seeded.projectId,
-        input.seeded.runId,
-        sourceNodeRunId,
-        input.config.fakeClock,
-      );
-    const acceptanceCriteria = [
-      ...new Set(
-        candidate.manifest.integration.manifest.packages.flatMap(
-          (entry) => entry.reviewContext.acceptanceCriteria,
-        ),
-      ),
-    ].sort();
-    execute(
-      `fixture-${kind}-review-topic-create`,
-      sourceWorker,
-      {
-        type: "review.topic.create",
-        topicId,
-        projectId: input.seeded.projectId,
-        runId: input.seeded.runId,
-        title: `${kind} review for the frozen Delivery Candidate Input`,
-        manifest: {
-          topicId,
-          supportingArtifactVersionIds: candidate.manifest.artifacts.map(
-            (entry) => entry.id,
-          ),
-          supportingSpecRevisionIds: [
-            candidate.manifest.product.projectSpecRevisionId,
-            ...candidate.manifest.technical.applicationSpecRevisions.map(
-              (entry) => entry.id,
-            ),
-          ],
-          harnessSnapshotIds: candidate.manifest.tests.map(
-            (entry) => entry.fixture.id,
-          ),
-          acceptanceCriteria,
-          excludedContext: [
-            "hidden-prompts",
-            "prior-reviewer-opinions",
-            "private-transcripts",
-            "provider-session-history",
-            "credential-values",
-          ],
-          scope: "verification",
-          verificationSubject: {
-            kind: "candidate-final",
-            deliveryCandidateInputId: candidate.id,
-            deliveryCandidateInputHash: candidate.manifestHash,
-          },
-          evidenceIds: candidate.manifest.evidence.map((entry) => entry.id),
-        },
-        producer: candidate.manifest.producer,
-        participants: [
-          {
-            id: ownerParticipantId,
-            role: "owner-participant",
-            aiMemberId: input.seeded.testOwnerAiMemberId,
-            positionId: input.seeded.testOwnerPositionId,
-            sessionId: input.seeded.testSessionId,
-          },
-          {
-            id: `${topicId}:moderator`,
-            role: "moderator",
-            ...input.seeded.gateReview.moderator,
-          },
-          {
-            id: reviewerParticipantId,
-            role: "reviewer-participant",
-            aiMemberId: input.seeded.gateReview.reviewer.aiMemberId,
-            positionId: input.seeded.gateReview.reviewer.positionId,
-            sessionId: input.seeded.gateReview.reviewer.sessionId,
-          },
-        ],
-        quorum: 1,
-        budget: {
-          maxRounds: 1,
-          maxDurationSeconds: 60,
-          maxTokens: 0,
-          maxCostCents: 0,
-        },
-        stopCondition: "blocking-findings-dispositioned",
-        escalationPolicy: "fail-with-evidence",
-      },
-      0,
-    );
-    const gateInput = execute<CandidateGateInputView>(
-      `fixture-${kind}-gate-input-prepare`,
-      sourceWorker,
-      {
-        type: "quality-gate.input.prepare",
-        gateInputId,
-        requestId: `fixture-${kind}-gate-input-request`,
-        kind,
-        candidateInputId: candidate.id,
-        expectedCandidateInputHash: candidate.manifestHash,
-        expectedRiskTier: candidate.manifest.risk.tier,
-        nodeRunId: sourceNodeRunId,
-        nodeAttemptId: sourceNodeAttemptId,
-        reviewTopicId: topicId,
-        reviewerParticipantId,
-      },
-    );
-    const reviewRevisionId = `${topicId}:revision`;
-    execute(
-      `fixture-${kind}-review-revision`,
-      runtimeActor(input.seeded.testOwnerAiMemberId),
-      {
-        type: "review.revision.submit",
-        topicId,
-        revisionId: reviewRevisionId,
-        ownerParticipantId,
-        subjectKind: `${kind}-gate-input`,
-        subjectId: gateInput.id,
-        subjectHash: gateInput.manifestHash,
-        producerAiMemberId: input.seeded.testOwnerAiMemberId,
-        producerPositionId: input.seeded.testOwnerPositionId,
-        producerSessionId: input.seeded.testSessionId,
-        evidenceRefs: [...gateInput.manifest.supportingEvidenceRefs],
-      },
-      1,
-    );
-    const qualityGateResultId = `quality-gate-${topicId}`;
-    execute(
-      `fixture-${kind}-review-pass`,
-      runtimeActor(input.seeded.gateReview.reviewer.aiMemberId),
-      {
-        type: "review.recheck.submit",
-        topicId,
-        recheckId: `${topicId}:recheck`,
-        revisionId: reviewRevisionId,
-        reviewerParticipantId,
-        reviewerSessionId: input.seeded.gateReview.reviewer.freshSessionId,
-        result: "PASS",
-        conditions: [],
-        evidenceRefs: [...gateInput.manifest.supportingEvidenceRefs],
-      },
-      2,
-    );
-    const executionId = `fixture-${kind}-gate-execution`;
-    const evidenceRefFor = (evidenceKind: string): string => {
-      const prefixes =
-        evidenceKind === "artifact" || evidenceKind === "static-analysis"
-          ? ["artifact-version:"]
-          : evidenceKind === "runtime-fact"
-            ? ["test-pass-authority:", "integration-pass-authority:"]
-            : evidenceKind === "dynamic-analysis"
-              ? ["test-evidence:", "artifact-version:"]
-              : [
-                  "test-evidence:",
-                  "test-pass-authority:",
-                  "integration-pass-authority:",
-                  "artifact-version:",
-                ];
-      const reference = gateInput.manifest.supportingEvidenceRefs.find((item) =>
-        prefixes.some((prefix) => item.startsWith(prefix)),
-      );
-      if (!reference) {
-        throw new Error(
-          `${kind} fixture Gate has no authoritative ${evidenceKind} evidence reference.`,
-        );
-      }
-      return reference;
-    };
-    execute(
-      `fixture-${kind}-gate-execution-accept`,
-      runtimeActor(input.seeded.gateReview.reviewer.aiMemberId),
-      {
-        type: "quality-gate.execution.accept",
-        executionId,
-        gateInputId: gateInput.id,
-        operationKey: `fixture:${kind}:gate-review`,
-        request: {
-          schemaVersion: 1,
-          gateInputId: gateInput.id,
-          gateInputHash: gateInput.manifestHash,
-        },
-      },
-    );
-    execute(
-      `fixture-${kind}-gate-execution-reconcile`,
-      runtimeActor(input.seeded.gateReview.reviewer.aiMemberId),
-      {
-        type: "quality-gate.execution.reconcile",
-        executionId,
-        observation: {
-          state: "succeeded",
-          fact: {
-            schemaVersion: 1,
-            gateInputId: gateInput.id,
-            checks: gateInput.manifest.checkCatalog.checks.map((check) => ({
-              checkId: check.id,
-              status: "passed",
-              evidence: check.requiredEvidenceKinds.map((evidenceKind) => ({
-                kind: evidenceKind,
-                ref: evidenceRefFor(evidenceKind),
-              })),
-              responsibility: {
-                kind: "aggregate",
-                candidateIds: [candidate.id],
-              },
-            })),
-            resolutions: [],
-          },
-          receiptHash: sha256(
-            canonicalJson({
-              schemaVersion: 1,
-              executionId,
-              state: "succeeded",
-            }),
-          ),
-        },
-      },
-    );
-    const candidateGateResult = execute<CandidateGateResultView>(
-      `fixture-${kind}-gate-result-finalize`,
-      runtimeActor(input.seeded.gateReview.reviewer.aiMemberId),
-      {
-        type: "quality-gate.result.finalize",
-        candidateGateResultId: `fixture-${kind}-gate-result`,
-        gateInputId: gateInput.id,
-        executionId,
-        qualityGateResultId,
-      },
-    );
-    if (candidateGateResult.result !== "PASS") {
-      throw new Error(`${kind} fixture Gate did not produce PASS.`);
-    }
-    input.database
-      .prepare(
-        "UPDATE node_runs SET status = 'succeeded', updated_at = ? WHERE id = ?",
-      )
-      .run(input.config.fakeClock, sourceNodeRunId);
-    input.database
-      .prepare(
-        "UPDATE node_attempts SET status = 'succeeded', completed_at = ? WHERE id = ?",
-      )
-      .run(input.config.fakeClock, sourceNodeAttemptId);
-    gateResultIds[kind] = candidateGateResult.id;
-  }
-  const deliveryCandidateId = "fixture-delivery-candidate";
-  const deliveryCandidateNodeRunId = `${deliveryCandidateId}:node`;
-  const deliveryCandidateNodeAttemptId = `${deliveryCandidateId}:attempt`;
-  const deliveryCandidateLeaseId = `${deliveryCandidateId}:lease`;
-  const deliveryCandidateWorkerId = electronTestFixtureRuntimePrincipal.id;
-  const humanReleaseNodeRunId = `${deliveryCandidateId}:human-release-node`;
-  input.database
-    .prepare(
-      `UPDATE department_runs
-          SET status = 'running', revision = revision + 1, updated_at = ?
-        WHERE id = ?`,
-    )
-    .run(input.config.fakeClock, input.seeded.runId);
-  input.database
-    .prepare(
-      `INSERT INTO node_runs(
-         id, run_id, pipeline_node_id, node_type, status, attempt_count,
-         required_dependency_ids_json, created_at, updated_at, handler_kind_id
-       ) VALUES (?, ?, ?, 'ai-task', 'running', 1, '[]', ?, ?, 'delivery-candidate@1')`,
-    )
-    .run(
-      deliveryCandidateNodeRunId,
-      input.seeded.runId,
-      deliveryCandidateNodeRunId,
-      input.config.fakeClock,
-      input.config.fakeClock,
-    );
-  input.database
-    .prepare(
-      `INSERT INTO node_runs(
-         id, run_id, pipeline_node_id, node_type, status, attempt_count,
-         required_dependency_ids_json, created_at, updated_at, handler_kind_id
-       ) VALUES (?, ?, ?, 'human-approval', 'queued', 0, ?, ?, ?, 'human-release@1')`,
-    )
-    .run(
-      humanReleaseNodeRunId,
-      input.seeded.runId,
-      humanReleaseNodeRunId,
-      canonicalJson([deliveryCandidateNodeRunId]),
-      input.config.fakeClock,
-      input.config.fakeClock,
-    );
-  input.database
-    .prepare(
-      `UPDATE node_runs
-          SET status = 'queued', result_json = NULL, failure_code = NULL,
-              failure_message = NULL, required_dependency_ids_json = ?,
-              updated_at = ?
-        WHERE run_id = ? AND handler_kind_id = 'run-complete@1'`,
-    )
-    .run(
-      canonicalJson([humanReleaseNodeRunId]),
-      input.config.fakeClock,
-      input.seeded.runId,
-    );
-  input.database
-    .prepare(
-      `INSERT INTO node_attempts(
-         id, node_run_id, attempt_number, snapshot_revision_id, reason,
-         status, created_at, started_at, lease_id, lease_owner,
-         lease_expires_at
-       ) VALUES (?, ?, 1, ?, 'initial', 'running', ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      deliveryCandidateNodeAttemptId,
-      deliveryCandidateNodeRunId,
-      input.seeded.snapshotRevisionId,
-      input.config.fakeClock,
-      input.config.fakeClock,
-      deliveryCandidateLeaseId,
-      deliveryCandidateWorkerId,
-      new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
-    );
-  input.database
-    .prepare(
-      `INSERT INTO execution_leases(
-         id, target_kind, target_id, lease_kind, operation_key,
-         execution_epoch, fence_token, worker_id, issued_at, expires_at,
-         renewed_at, released_at, cancel_requested
-       ) VALUES (?, 'node-attempt', ?, 'execution', ?, 1, ?, ?, ?, ?, NULL, NULL, 0)`,
-    )
-    .run(
-      deliveryCandidateLeaseId,
-      deliveryCandidateNodeAttemptId,
-      `node-attempt:${deliveryCandidateNodeAttemptId}`,
-      `${deliveryCandidateNodeAttemptId}:fence:1`,
-      deliveryCandidateWorkerId,
-      input.config.fakeClock,
-      new Date(Date.parse(input.config.fakeClock) + 300_000).toISOString(),
-    );
-  writeFileSync(
-    receiptPath,
-    JSON.stringify({
-      schemaVersion: 1,
-      candidateInputId: candidate.id,
-      candidateInputHash: candidate.manifestHash,
-      candidateRiskTier: candidate.manifest.risk.tier,
-      securityGateResultId: gateResultIds.security,
-      operabilityGateResultId: gateResultIds.operability,
-      deliveryCandidateId,
-      deliveryCandidateNodeRunId,
-      deliveryCandidateNodeAttemptId,
-      deliveryCandidateLeaseId,
-      deliveryCandidateWorkerId,
-      humanReleaseNodeRunId,
-    }),
-    { flag: "wx", mode: 0o600 },
-  );
-  if ((statSync(receiptPath).mode & 0o777) !== 0o600) {
-    throw new Error(
-      "Candidate Quality Gate fixture receipt must be mode 0600.",
-    );
-  }
-  return true;
-};
-
 const main = async (): Promise<void> => {
   const config = loadElectronTestFixtureConfig({
     configPath: requiredEnvironment("SANDCASTLE_ELECTRON_TEST_FIXTURE_CONFIG"),
@@ -910,12 +347,19 @@ const main = async (): Promise<void> => {
     "runtime",
     "setup-authority.json",
   );
+  const downstreamReceiptPath = join(
+    config.evidenceDirectory,
+    "runtime",
+    "downstream-authority.json",
+  );
+  let preparation: IntegrationAuthorityFixturePreparation | undefined;
   let seeded: IntegrationAuthorityFixtureResult | undefined;
+  let deliveryQualityPlans: DeliveryQualityNodePlanProvider | undefined;
   let interactionRuntime: RuntimeInteraction | undefined;
   const cleanupReceipts = new Map<string, unknown>();
-  let candidateQualitySetupScheduled = false;
-  let candidateQualitySetupClosed = false;
-  let candidateQualitySetupTimer: ReturnType<typeof setTimeout> | undefined;
+  let productAuthorityClosed = false;
+  let productAuthorityTimer: ReturnType<typeof setTimeout> | undefined;
+  let productAuthorityInitialization: Promise<void> | undefined;
   const requireSeeded = (): IntegrationAuthorityFixtureResult => {
     if (!seeded) {
       throw new Error("Electron Test Runtime setup authority is unavailable.");
@@ -948,6 +392,16 @@ const main = async (): Promise<void> => {
     interactionExecutionAdapter: scriptedInteractionAdapter(
       interactionScript.response ?? "fixture interaction completed",
     ),
+    deliveryQualityPlans: {
+      plan: (input) => {
+        if (!deliveryQualityPlans) {
+          throw new Error(
+            "Electron Test Delivery quality plans are not bound to renderer-confirmed Product authority.",
+          );
+        }
+        return deliveryQualityPlans.plan(input);
+      },
+    },
     testBuildFixture: {
       clock: fixtureRuntimeOptions.clock,
       nextId: repeatableIdFactory(config.repeatableIdSeed),
@@ -968,6 +422,10 @@ const main = async (): Promise<void> => {
       },
       setup: async (database) => {
         interactionRuntime = database.interaction;
+        mkdirSync(join(config.evidenceDirectory, "runtime"), {
+          recursive: true,
+          mode: 0o700,
+        });
         if (existsSync(setupReceiptPath)) {
           const receipt = JSON.parse(
             readFileSync(setupReceiptPath, "utf8"),
@@ -976,7 +434,7 @@ const main = async (): Promise<void> => {
             readonly fixtureId: string;
             readonly rootFingerprint: string;
             readonly companyDirectoryFingerprint: string;
-            readonly seeded: IntegrationAuthorityFixtureResult;
+            readonly preparation: IntegrationAuthorityFixturePreparation;
           };
           if (
             receipt.schemaVersion !== 1 ||
@@ -987,6 +445,62 @@ const main = async (): Promise<void> => {
           ) {
             throw new Error("Electron Test setup receipt identity is invalid.");
           }
+          const project = database.projectConfiguration.inspect(
+            receipt.preparation.projectId,
+          );
+          const department = database.catalog.inspectDepartment(
+            receipt.preparation.departmentId,
+          );
+          const productSession = database.interaction.inspectSession(
+            receipt.preparation.productSessionId,
+          );
+          if (
+            project.id !== receipt.preparation.projectId ||
+            department.id !== receipt.preparation.departmentId ||
+            productSession.session.projectId !== project.id
+          ) {
+            throw new Error(
+              "Electron Test preparation receipt does not match Runtime authority.",
+            );
+          }
+          preparation = receipt.preparation;
+        } else {
+          preparation = createIntegrationAuthorityFixturePreparation({
+            ...fixtureInput,
+            database,
+          });
+          writeFileSync(
+            setupReceiptPath,
+            JSON.stringify({
+              schemaVersion: 1,
+              fixtureId: config.fixtureId,
+              rootFingerprint: config.rootFingerprint,
+              companyDirectoryFingerprint: config.companyDirectoryFingerprint,
+              preparation,
+            }),
+            { flag: "wx", mode: 0o600 },
+          );
+          if ((statSync(setupReceiptPath).mode & 0o777) !== 0o600) {
+            throw new Error("Electron Test setup receipt must be mode 0600.");
+          }
+        }
+
+        if (existsSync(downstreamReceiptPath)) {
+          const receipt = JSON.parse(
+            readFileSync(downstreamReceiptPath, "utf8"),
+          ) as {
+            readonly schemaVersion: number;
+            readonly fixtureId: string;
+            readonly seeded: IntegrationAuthorityFixtureResult;
+          };
+          if (
+            receipt.schemaVersion !== 1 ||
+            receipt.fixtureId !== config.fixtureId
+          ) {
+            throw new Error(
+              "Electron Test downstream receipt identity is invalid.",
+            );
+          }
           const authority = database.integrations.readPassAuthority(
             receipt.seeded.integrationAuthority.id,
           );
@@ -995,75 +509,88 @@ const main = async (): Promise<void> => {
             canonicalJson(receipt.seeded.integrationAuthority)
           ) {
             throw new Error(
-              "Electron Test setup receipt does not match Runtime authority.",
+              "Electron Test downstream receipt does not match Runtime authority.",
             );
           }
           seeded = receipt.seeded;
+          deliveryQualityPlans =
+            createIntegrationAuthorityFixtureDeliveryQualityPlans({
+              fixtureId: config.fixtureId,
+              database,
+              seeded,
+              tests: database.testRuns,
+              reviewerExecutionAdapter:
+                fixtureRuntimeOptions.reviewerExecutionAdapter,
+              executableHash: sha256(readFileSync(process.execPath)),
+            });
           return;
         }
-        seeded = await createIntegrationAuthorityFixture({
-          ...fixtureInput,
-          database,
-        });
-        mkdirSync(join(config.evidenceDirectory, "runtime"), {
-          recursive: true,
-          mode: 0o700,
-        });
-        writeFileSync(
-          setupReceiptPath,
-          JSON.stringify({
-            schemaVersion: 1,
-            fixtureId: config.fixtureId,
-            rootFingerprint: config.rootFingerprint,
-            companyDirectoryFingerprint: config.companyDirectoryFingerprint,
-            seeded,
-          }),
-          { flag: "wx", mode: 0o600 },
-        );
-        if ((statSync(setupReceiptPath).mode & 0o777) !== 0o600) {
-          throw new Error("Electron Test setup receipt must be mode 0600.");
-        }
-      },
-    },
-    testExecutionAdapterFactory: ({ database, tests, commandRegistry }) => {
-      const scheduleCandidateQualitySetup = (): void => {
-        if (candidateQualitySetupScheduled) return;
-        candidateQualitySetupScheduled = true;
-        let attempts = 0;
-        const poll = (): void => {
-          if (candidateQualitySetupClosed) return;
-          attempts += 1;
-          try {
-            const currentSeed = requireSeeded();
-            const testRunId = `test:${currentSeed.runId}:${currentSeed.testNodeRunId}`;
-            if (tests.inspect(testRunId).state === "passed") {
-              const complete = materializeCandidateQualityGates({
+
+        const pollForConfirmedProduct = (): void => {
+          if (
+            productAuthorityClosed ||
+            seeded ||
+            productAuthorityInitialization
+          )
+            return;
+          const currentPreparation = preparation;
+          if (!currentPreparation) return;
+          const baseline = database.product
+            .inspect(currentPreparation.projectId)
+            .baselines.at(-1);
+          if (!baseline) {
+            productAuthorityTimer = setTimeout(pollForConfirmedProduct, 25);
+            return;
+          }
+          productAuthorityInitialization = (async () => {
+            const created = await createIntegrationAuthorityFixture({
+              ...fixtureInput,
+              database,
+              preparation: currentPreparation,
+              confirmedProduct: {
+                productBaselineId: baseline.id,
+                productBaselineHash: baseline.hash,
+                runId: baseline.runId,
+                snapshotRevisionId: baseline.snapshotRevisionId,
+              },
+            });
+            seeded = created;
+            deliveryQualityPlans =
+              createIntegrationAuthorityFixtureDeliveryQualityPlans({
+                fixtureId: config.fixtureId,
                 database,
-                config,
-                tests,
-                commandRegistry,
-                seeded: currentSeed,
+                seeded: created,
+                tests: database.testRuns,
+                reviewerExecutionAdapter:
+                  fixtureRuntimeOptions.reviewerExecutionAdapter,
+                executableHash: sha256(readFileSync(process.execPath)),
               });
-              if (complete) return;
+            writeFileSync(
+              downstreamReceiptPath,
+              JSON.stringify({
+                schemaVersion: 1,
+                fixtureId: config.fixtureId,
+                seeded: created,
+              }),
+              { flag: "wx", mode: 0o600 },
+            );
+            if ((statSync(downstreamReceiptPath).mode & 0o777) !== 0o600) {
+              throw new Error(
+                "Electron Test downstream receipt must be mode 0600.",
+              );
             }
-          } catch (error) {
+          })().catch((error) => {
             process.stderr.write(
-              `[electron-test-fixture-runtime:candidate-quality-setup] ${
+              `[electron-test-fixture-runtime:product-authority] ${
                 error instanceof Error ? error.stack : String(error)
               }\n`,
             );
-            return;
-          }
-          if (attempts >= 400) {
-            process.stderr.write(
-              "[electron-test-fixture-runtime:candidate-quality-setup] Timed out waiting for exact PASS Test authority.\n",
-            );
-            return;
-          }
-          candidateQualitySetupTimer = setTimeout(poll, 25);
+          });
         };
-        candidateQualitySetupTimer = setTimeout(poll, 0);
-      };
+        productAuthorityTimer = setTimeout(pollForConfirmedProduct, 0);
+      },
+    },
+    testExecutionAdapterFactory: ({ database, tests, commandRegistry }) => {
       return [
         createElectronTestExecutionAdapter({
           fixtureId: config.fixtureId,
@@ -1294,7 +821,6 @@ const main = async (): Promise<void> => {
           },
           terminalReceipt: (request) => {
             const cleanupReceipt = cleanupReceipts.get(request.operationKey);
-            if (cleanupReceipt) scheduleCandidateQualitySetup();
             return (
               cleanupReceipt ?? {
                 schemaVersion: 1,
@@ -1309,8 +835,8 @@ const main = async (): Promise<void> => {
     },
   });
   const close = (): void => {
-    candidateQualitySetupClosed = true;
-    if (candidateQualitySetupTimer) clearTimeout(candidateQualitySetupTimer);
+    productAuthorityClosed = true;
+    if (productAuthorityTimer) clearTimeout(productAuthorityTimer);
     void runtime.close();
   };
   process.once("SIGINT", close);

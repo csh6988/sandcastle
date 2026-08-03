@@ -1,5 +1,5 @@
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
-import type { EnvelopeCommand, EnvelopeCommandResult } from "../interface.js";
+import type { ActorRef, EnvelopeCommand } from "../interface.js";
 import type {
   PipelineRuntime,
   ReadyAttemptClaim,
@@ -18,26 +18,49 @@ export type DeliveryQualityHandlerKind =
 
 export type PlannedDeliveryQualityCommand = {
   readonly commandId: string;
+  readonly expectedRevision?: number;
+  readonly actor?: ActorRef;
   readonly command: EnvelopeCommand;
 };
 
+export type PlannedDeliveryQualityCommandResult = {
+  readonly command: EnvelopeCommand;
+  readonly value: unknown;
+};
+
+export interface PlannedDeliveryQualityCommandContext {
+  readonly result: (commandId: string) => PlannedDeliveryQualityCommandResult;
+}
+
+export type PlannedDeliveryQualityCommandStep =
+  | PlannedDeliveryQualityCommand
+  | ((
+      context: PlannedDeliveryQualityCommandContext,
+    ) => PlannedDeliveryQualityCommand);
+
 export type DeliveryQualityNodePlan = {
   readonly handlerKindId: DeliveryQualityHandlerKind;
-  readonly initialCommands: readonly PlannedDeliveryQualityCommand[];
+  readonly initialCommands: readonly PlannedDeliveryQualityCommandStep[];
+  readonly afterPassCommands?: readonly PlannedDeliveryQualityCommandStep[];
   readonly review?: {
     readonly reviewerSessionId: string;
     readonly reviewerAiMemberId: string;
     readonly operationKey: string;
     readonly reconcileExisting: boolean;
     readonly timeoutSeconds: number;
-    readonly request: ReviewerExecutionInput;
+    readonly request:
+      | ReviewerExecutionInput
+      | ((
+          context: PlannedDeliveryQualityCommandContext,
+        ) => ReviewerExecutionInput);
     readonly adapter: ReviewerExecutionAdapter;
     readonly terminalCommands: (
       result: Extract<
         ReviewerExecutionResult,
         { readonly status: "succeeded" }
       >,
-    ) => readonly PlannedDeliveryQualityCommand[];
+      context: PlannedDeliveryQualityCommandContext,
+    ) => readonly PlannedDeliveryQualityCommandStep[];
   };
 };
 
@@ -87,38 +110,6 @@ export const openQualityGateNodeHandler = (options: {
     });
   };
 
-  const executeCommands = (
-    commands: readonly PlannedDeliveryQualityCommand[],
-  ) => {
-    let last:
-      | {
-          readonly command: EnvelopeCommand;
-          readonly value: EnvelopeCommandResult<EnvelopeCommand>;
-        }
-      | undefined;
-    for (const planned of commands) {
-      const result = options.commandRegistry.execute({
-        schemaVersion: 1,
-        commandId: planned.commandId,
-        actor: {
-          type: "runtime-worker",
-          id: workerId,
-          authenticatedBy: "runtime",
-        },
-        consumerId: workerId,
-        command: planned.command,
-      });
-      if (result.status === "rejected") {
-        return { ok: false as const, error: result.error };
-      }
-      last = {
-        command: planned.command,
-        value: result.value as EnvelopeCommandResult<EnvelopeCommand>,
-      };
-    }
-    return { ok: true as const, last };
-  };
-
   const executeReady: QualityGateNodeHandler["executeReady"] = async (
     input,
   ) => {
@@ -136,6 +127,54 @@ export const openQualityGateNodeHandler = (options: {
       });
       return;
     }
+
+    const commandResults = new Map<
+      string,
+      PlannedDeliveryQualityCommandResult
+    >();
+    const commandContext: PlannedDeliveryQualityCommandContext = {
+      result: (commandId) => {
+        const result = commandResults.get(commandId);
+        if (!result) {
+          throw new Error(
+            `Delivery/Quality plan requires unavailable Command result ${commandId}.`,
+          );
+        }
+        return result;
+      },
+    };
+    const executeCommands = (
+      commands: readonly PlannedDeliveryQualityCommandStep[],
+    ) => {
+      let last: PlannedDeliveryQualityCommandResult | undefined;
+      for (const step of commands) {
+        const planned =
+          typeof step === "function" ? step(commandContext) : step;
+        const result = options.commandRegistry.execute({
+          schemaVersion: 1,
+          commandId: planned.commandId,
+          ...(planned.expectedRevision === undefined
+            ? {}
+            : { expectedRevision: planned.expectedRevision }),
+          actor: planned.actor ?? {
+            type: "runtime-worker",
+            id: workerId,
+            authenticatedBy: "runtime",
+          },
+          consumerId: workerId,
+          command: planned.command,
+        });
+        if (result.status === "rejected") {
+          return { ok: false as const, error: result.error };
+        }
+        last = {
+          command: planned.command,
+          value: result.value,
+        };
+        commandResults.set(planned.commandId, last);
+      }
+      return { ok: true as const, last };
+    };
 
     const plan = options.plans.plan({ ...input, attempt });
     const initial = executeCommands(plan.initialCommands);
@@ -189,17 +228,29 @@ export const openQualityGateNodeHandler = (options: {
       return;
     }
 
+    const reviewRequest =
+      typeof plan.review.request === "function"
+        ? plan.review.request(commandContext)
+        : plan.review.request;
     const reviewer = await options.pipelineRuntime.executeQualityReviewStage({
       runId: input.runId,
       nodeRunId: input.nodeRunId,
       handlerKindId: plan.handlerKindId,
       reviewerSessionId: plan.review.reviewerSessionId,
       reviewerAiMemberId: plan.review.reviewerAiMemberId,
-      operationKey: plan.review.operationKey,
+      operationKey: attempt.operationKey,
       reconcileExisting: plan.review.reconcileExisting,
       timeoutSeconds: plan.review.timeoutSeconds,
-      request: plan.review.request,
+      request: { ...reviewRequest, operationKey: attempt.operationKey },
       adapter: plan.review.adapter,
+      executionLease: {
+        leaseId: attempt.leaseId,
+        leaseKind: "execution",
+        operationKey: attempt.operationKey,
+        target: { kind: "node-attempt", id: attempt.attemptId },
+        executionEpoch: attempt.executionEpoch,
+        fenceToken: attempt.fenceToken,
+      },
     });
     if (reviewer.status !== "succeeded") {
       block(
@@ -221,7 +272,9 @@ export const openQualityGateNodeHandler = (options: {
       );
       return;
     }
-    const terminal = executeCommands(plan.review.terminalCommands(reviewer));
+    const terminal = executeCommands(
+      plan.review.terminalCommands(reviewer, commandContext),
+    );
     if (!terminal.ok) {
       block(
         attempt,
@@ -246,6 +299,16 @@ export const openQualityGateNodeHandler = (options: {
           code: "QUALITY_GATE_NOT_PASS",
           message: `${plan.handlerKindId} did not produce immutable PASS authority.`,
         },
+        reviewer.terminalExecutionFactId,
+      );
+      return;
+    }
+    const afterPass = executeCommands(plan.afterPassCommands ?? []);
+    if (!afterPass.ok) {
+      block(
+        attempt,
+        input.runId,
+        afterPass.error,
         reviewer.terminalExecutionFactId,
       );
       return;

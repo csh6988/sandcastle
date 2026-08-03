@@ -1986,6 +1986,34 @@ describe("Project detail", () => {
     assert.match(recoveringMarkup, /data-run-control="pause"/);
     assert.match(recoveringMarkup, /data-run-control="cancel"/);
     assert.match(recoveringMarkup, />Continue run</);
+
+    const readyWithoutAttempt: DepartmentRunView = {
+      ...recoveringRun,
+      run: { ...recoveringRun.run, status: "running", revision: 4 },
+      nodes: recoveringRun.nodes.map((node) =>
+        node.id === "node-run-implement"
+          ? {
+              ...node,
+              status: "ready",
+              attemptCount: 0,
+              attempts: [],
+            }
+          : node,
+      ),
+    };
+    const readyWithoutAttemptMarkup = renderToStaticMarkup(
+      <DepartmentRunDetail
+        busy={false}
+        onContinue={() => undefined}
+        onControl={() => undefined}
+        onRecover={() => undefined}
+        onDecision={() => undefined}
+        onRetry={() => undefined}
+        run={readyWithoutAttempt}
+        t={messages.en}
+      />,
+    );
+    assert.match(readyWithoutAttemptMarkup, /data-run-continue/);
   });
 
   it("renders the Runtime-backed Project configuration editor", () => {

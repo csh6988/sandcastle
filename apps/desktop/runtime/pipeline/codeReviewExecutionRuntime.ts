@@ -35,6 +35,12 @@ export interface CodeReviewStageExecutionInput {
   readonly timeoutSeconds: number;
   readonly request: ReviewerExecutionInput;
   readonly adapter: ReviewerExecutionAdapter;
+  readonly executionLease?: ExecutionLeaseContext & {
+    readonly target: {
+      readonly kind: "node-attempt";
+      readonly id: string;
+    };
+  };
   readonly handlerKindId:
     | "code-review@1"
     | "integration@1"
@@ -110,6 +116,28 @@ export const openCodeReviewExecutionRuntime = (options: {
     const existing = inspectExecution(database, {
       operationKey: input.operationKey,
     });
+    if (input.executionLease) {
+      const lease = existing.leases.find(
+        (candidate) => candidate.leaseId === input.executionLease?.leaseId,
+      );
+      if (
+        input.executionLease.operationKey !== input.operationKey ||
+        input.executionLease.target.id !== attempt.attemptId ||
+        existing.target.kind !== "node-attempt" ||
+        existing.target.id !== attempt.attemptId ||
+        !lease ||
+        lease.leaseKind !== "execution" ||
+        lease.executionEpoch !== input.executionLease.executionEpoch ||
+        lease.fenceToken !== input.executionLease.fenceToken ||
+        lease.releasedAt !== null ||
+        Date.parse(lease.expiresAt) <= clock().getTime()
+      ) {
+        throw runtimeError(
+          "CODE_REVIEW_EXECUTION_STATE_INVALID",
+          `Node ${input.nodeRunId} cannot reuse an invalid Reviewer execution Lease.`,
+        );
+      }
+    }
     const existingTerminal = existing.facts.find(
       (fact) =>
         fact.status === "accepted" &&
@@ -125,7 +153,10 @@ export const openCodeReviewExecutionRuntime = (options: {
     }
 
     const reconciliation =
-      input.reconcileExisting || existing.leases.length > 0;
+      input.reconcileExisting ||
+      existing.leases.some(
+        (lease) => lease.leaseId !== input.executionLease?.leaseId,
+      );
     const providerExecutionRef = [...existing.facts]
       .reverse()
       .filter(
@@ -159,7 +190,9 @@ export const openCodeReviewExecutionRuntime = (options: {
         lease.releasedAt === null &&
         Date.parse(lease.expiresAt) > clock().getTime(),
     );
-    if (activeLease) return busyResult();
+    if (activeLease && activeLease.leaseId !== input.executionLease?.leaseId) {
+      return busyResult();
+    }
 
     const issueLease = (
       leaseKind: "execution" | "reconciliation",
@@ -261,6 +294,7 @@ export const openCodeReviewExecutionRuntime = (options: {
         sink: ExecutionEventSink,
         signal: AbortSignal,
       ) => Promise<ReviewerExecutionResult>,
+      releaseLease = true,
     ): Promise<ReviewerExecutionResult> => {
       const controller = new AbortController();
       let resolveDone!: () => void;
@@ -457,12 +491,14 @@ export const openCodeReviewExecutionRuntime = (options: {
       } finally {
         if (timeout) clearTimeout(timeout);
         clearInterval(renewal);
-        database
-          .prepare(
-            `UPDATE execution_leases SET released_at = COALESCE(released_at, ?)
-              WHERE id = ?`,
-          )
-          .run(clock().toISOString(), lease.leaseId);
+        if (releaseLease) {
+          database
+            .prepare(
+              `UPDATE execution_leases SET released_at = COALESCE(released_at, ?)
+                WHERE id = ?`,
+            )
+            .run(clock().toISOString(), lease.leaseId);
+        }
         if (
           activeExecutions.get(attempt.attemptId)?.operationKey ===
           input.operationKey
@@ -968,7 +1004,7 @@ export const openCodeReviewExecutionRuntime = (options: {
       const result = acceptedCompletedResult({
         executionFactId: existingTerminal.id,
       });
-      if (result.status === "succeeded") {
+      if (result.status === "succeeded" && !input.executionLease) {
         continueAfterTerminalReconciliation({
           terminalExecutionFactId: existingTerminal.id,
         });
@@ -1064,10 +1100,12 @@ export const openCodeReviewExecutionRuntime = (options: {
         ),
       );
     }
-    const executionLease = issueLease("execution");
+    const executionLease = input.executionLease ?? issueLease("execution");
     if (!executionLease) return busyResult();
-    return runWithLease(executionLease, (sink, signal) =>
-      input.adapter.execute(input.request, sink, signal),
+    return runWithLease(
+      executionLease,
+      (sink, signal) => input.adapter.execute(input.request, sink, signal),
+      input.executionLease === undefined,
     );
   };
 };
