@@ -555,6 +555,36 @@ describe("Integration authority fixture", () => {
       assert.equal(created.projectId, preparation.projectId);
       assert.equal(created.runId, baseline.runId);
       assert.equal(created.integrationAuthority.repositoryResults.length, 2);
+      const expectedCoverage = database.workPackages
+        .inspect(created.runId)
+        .packages.map((workPackage) => {
+          const version = workPackage.versions.at(-1);
+          assert.ok(version);
+          return {
+            workPackageId: workPackage.id,
+            workPackageVersionId: version.id,
+            manifestHash: version.manifestHash,
+            riskTier: version.manifest.riskTier,
+          };
+        })
+        .sort((left, right) =>
+          left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+        );
+      assert.equal(created.workPackageCoverage.length, 2);
+      assert.deepEqual(
+        [...created.workPackageCoverage].sort((left, right) =>
+          left.workPackageVersionId.localeCompare(right.workPackageVersionId),
+        ),
+        expectedCoverage,
+      );
+      assert.deepEqual(
+        created.workPackageCoverage
+          .map((coverage) => coverage.workPackageVersionId)
+          .sort(),
+        created.integrationAuthority.manifest.packages
+          .map((workPackage) => workPackage.workPackageVersionId)
+          .sort(),
+      );
       assert.equal(
         database.pipelineRuntime.inspectRun(created.runId).snapshot.payload
           .productBaseline?.id,

@@ -3400,6 +3400,9 @@ const cleanup = async () => {
 app.whenReady().then(async () => {
   let exitCode = 0;
   try {
+    if (process.env.SANDCASTLE_ELECTRON_TEST_FORCE_FAILURE === "1") {
+      throw new Error("Electron test fixture forced failure.");
+    }
     await run();
   } catch (error) {
     process.stderr.write(
@@ -3408,6 +3411,6 @@ app.whenReady().then(async () => {
     exitCode = 1;
   } finally {
     await cleanup();
-    applyElectronTestFixtureExitCode(process, exitCode);
+    applyElectronTestFixtureExitCode(app, exitCode);
   }
 });

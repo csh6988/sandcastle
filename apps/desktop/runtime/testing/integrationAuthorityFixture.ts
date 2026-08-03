@@ -1967,7 +1967,6 @@ export const createIntegrationAuthorityFixture = async (
   const primaryAssignment = assignments[0]!;
   const formalAssignment = primaryAssignment.formalAssignment;
   const workPackageId = primaryAssignment.workPackageId;
-  const workPackageVersionId = `${workPackageId}:v1`;
   const importedCommit = database.workspaces
     .inspect(formalAssignment.allocationId)
     .imports.find((entry) => entry.state === "succeeded")?.resultCommit;
@@ -2382,13 +2381,24 @@ export const createIntegrationAuthorityFixture = async (
   );
   if (!frozenProfile)
     throw new Error("Fixture Execution Profile was not frozen.");
-  const frozenWorkPackageVersion = database.workPackages
-    .inspect(testing.run.id)
-    .packages.find((entry) => entry.id === workPackageId)
-    ?.versions.find((entry) => entry.id === workPackageVersionId);
-  if (!frozenWorkPackageVersion) {
-    throw new Error("Fixture Work Package Version was not frozen.");
-  }
+  const frozenWorkPackageCoverage = repositoryDescriptors.map((repository) => {
+    const workPackageVersionId = `${repository.workPackageId}:v1`;
+    const frozenWorkPackageVersion = database.workPackages
+      .inspect(testing.run.id)
+      .packages.find((entry) => entry.id === repository.workPackageId)
+      ?.versions.find((entry) => entry.id === workPackageVersionId);
+    if (!frozenWorkPackageVersion) {
+      throw new Error(
+        `Fixture Work Package Version ${workPackageVersionId} was not frozen.`,
+      );
+    }
+    return {
+      workPackageId: repository.workPackageId,
+      workPackageVersionId,
+      manifestHash: frozenWorkPackageVersion.manifestHash,
+      riskTier: frozenWorkPackageVersion.manifest.riskTier,
+    };
+  });
 
   return {
     projectId: project.id,
@@ -2416,14 +2426,7 @@ export const createIntegrationAuthorityFixture = async (
         freshSessionId: gateReviewerFreshSession,
       },
     },
-    workPackageCoverage: [
-      {
-        workPackageId,
-        workPackageVersionId,
-        manifestHash: frozenWorkPackageVersion.manifestHash,
-        riskTier: manifest.riskTier,
-      },
-    ],
+    workPackageCoverage: frozenWorkPackageCoverage,
     testExecutionProfile: {
       id: profile.id,
       hash: sha256(canonicalJson(frozenProfile)),
