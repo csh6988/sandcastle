@@ -185,6 +185,10 @@ describe("Delivery Candidate quality", () => {
     assert.match(markup, /accept-delivery-candidate/);
     assert.match(markup, /reject-delivery-candidate/);
     assert.match(markup, /request-delivery-changes/);
+    assert.match(
+      markup,
+      new RegExp(`data-delivery-candidate-manifest-hash="${"c".repeat(64)}"`),
+    );
     assert.match(markup, /Exact responsibility kind/);
     assert.match(markup, /Exact responsibility ID/);
     assert.match(markup, /1 immutable evidence reference/);

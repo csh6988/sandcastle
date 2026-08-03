@@ -45,7 +45,6 @@ export type DeliveryQualityNodePlan = {
   readonly review?: {
     readonly reviewerSessionId: string;
     readonly reviewerAiMemberId: string;
-    readonly operationKey: string;
     readonly reconcileExisting: boolean;
     readonly timeoutSeconds: number;
     readonly request:
@@ -272,9 +271,22 @@ export const openQualityGateNodeHandler = (options: {
       );
       return;
     }
-    const terminal = executeCommands(
-      plan.review.terminalCommands(reviewer, commandContext),
-    );
+    let terminalCommands: readonly PlannedDeliveryQualityCommandStep[];
+    try {
+      terminalCommands = plan.review.terminalCommands(reviewer, commandContext);
+    } catch (error) {
+      block(
+        attempt,
+        input.runId,
+        {
+          code: "DELIVERY_QUALITY_REVIEW_OUTPUT_INVALID",
+          message: error instanceof Error ? error.message : String(error),
+        },
+        reviewer.terminalExecutionFactId,
+      );
+      return;
+    }
+    const terminal = executeCommands(terminalCommands);
     if (!terminal.ok) {
       block(
         attempt,

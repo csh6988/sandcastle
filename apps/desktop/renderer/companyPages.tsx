@@ -55,18 +55,22 @@ import {
   type RunSupervisionConnection,
 } from "./runSupervision.js";
 import {
-  applyIntegrationGenerationFrame,
-  connectIntegrationGenerations,
-  type IntegrationGenerationConnection,
-} from "./integrationGenerationView.js";
-import {
-  connectCandidateQualityGates,
-  type CandidateQualityGateConnection,
-} from "./candidateQualityGateView.js";
-import {
-  connectDeliveryCandidate,
-  type DeliveryCandidateConnection,
-} from "./deliveryCandidateView.js";
+  connectReviewsEventStream,
+  type ReviewsEventConnection,
+} from "./reviewsEventConnection.js";
+import { createRuntimeViewConnectionCoordinator } from "./runtimeViewConnectionCoordinator.js";
+
+type ProjectRuntimeViewConnection =
+  | {
+      readonly kind: "runs";
+      readonly connection: RunSupervisionConnection;
+      readonly close: () => Promise<void>;
+    }
+  | {
+      readonly kind: "reviews";
+      readonly connection: ReviewsEventConnection;
+      readonly close: () => Promise<void>;
+    };
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -2791,6 +2795,7 @@ export function DeliveryCandidatePanel({
       className="create-panel"
       data-delivery-candidate
       data-delivery-candidate-id={view.id}
+      data-delivery-candidate-manifest-hash={view.manifestHash}
       data-delivery-candidate-projection={view.projection}
       data-delivery-candidate-sync={diagnostic ?? "ready"}
     >
@@ -3077,25 +3082,13 @@ export function ProjectDetailView({
   const [candidateQualityDiagnostic, setCandidateQualityDiagnostic] = useState<
     string | null
   >(null);
-  const candidateQualityConnection =
-    useRef<CandidateQualityGateConnection | null>(null);
   const [deliveryCandidateView, setDeliveryCandidateView] =
     useState<DeliveryCandidateView | null>(null);
   const [deliveryCandidateDiagnostic, setDeliveryCandidateDiagnostic] =
     useState<string | null>(null);
-  const deliveryCandidateConnection =
-    useRef<DeliveryCandidateConnection | null>(null);
-  const runtimeViewConnection = useRef<
-    | {
-        readonly kind: "runs";
-        readonly connection: RunSupervisionConnection;
-      }
-    | {
-        readonly kind: "reviews";
-        readonly connection: IntegrationGenerationConnection;
-      }
-    | null
-  >(null);
+  const runtimeViewConnectionCoordinator = useRef(
+    createRuntimeViewConnectionCoordinator<ProjectRuntimeViewConnection>(),
+  ).current;
   const [runDepartmentId, setRunDepartmentId] = useState("");
   const [runAgents, setRunAgents] = useState<AgentCatalogView["agents"]>([]);
   const [agentOverrideId, setAgentOverrideId] = useState("");
@@ -3209,160 +3202,89 @@ export function ProjectDetailView({
 
   useEffect(() => {
     let active = true;
-    const synchronize = async (): Promise<void> => {
-      const previous = runtimeViewConnection.current;
-      runtimeViewConnection.current = null;
-      if (previous) await previous.connection.close();
-      if (!active || !selectedRun) return;
-      if (activeTab === "runs") {
-        setRunSupervisionState({ generation: 0, view: null });
-        setRunSupervisionDiagnostic("Synchronizing Runtime supervision…");
-        const connection = await connectRunSupervision({
-          bridge: window.sandcastle,
-          runId: selectedRun.run.id,
-          onFrame: (frame) => {
-            if (active) {
-              setRunSupervisionState((current) =>
-                applyRunSupervisionFrame(current, frame),
-              );
-            }
-          },
-          onDiagnostic: (diagnostic) => {
-            if (active) setRunSupervisionDiagnostic(diagnostic);
-          },
-        });
-        if (!active) {
-          await connection.close();
-          return;
+    if (!selectedRun || (activeTab !== "runs" && activeTab !== "reviews")) {
+      void runtimeViewConnectionCoordinator.clear();
+      return () => {
+        active = false;
+      };
+    }
+    const request = runtimeViewConnectionCoordinator.replace(
+      async (isCurrent) => {
+        const canApply = (): boolean => active && isCurrent();
+        if (activeTab === "runs") {
+          setRunSupervisionState({ generation: 0, view: null });
+          setRunSupervisionDiagnostic("Synchronizing Runtime supervision…");
+          const connection = await connectRunSupervision({
+            bridge: window.sandcastle,
+            runId: selectedRun.run.id,
+            onFrame: (frame) => {
+              if (canApply()) {
+                setRunSupervisionState((current) =>
+                  applyRunSupervisionFrame(current, frame),
+                );
+              }
+            },
+            onDiagnostic: (diagnostic) => {
+              if (canApply()) setRunSupervisionDiagnostic(diagnostic);
+            },
+          });
+          return { kind: "runs", connection, close: connection.close };
         }
-        runtimeViewConnection.current = { kind: "runs", connection };
-        return;
-      }
-      if (activeTab === "reviews") {
         setIntegrationGenerationState({ generation: 0, view: [] });
-        setIntegrationDiagnostic("Synchronizing Integration Generations…");
-        const connection = await connectIntegrationGenerations({
+        setCandidateQualityGateView(null);
+        setDeliveryCandidateView(null);
+        setIntegrationDiagnostic("Synchronizing Reviews…");
+        setCandidateQualityDiagnostic(
+          candidateInputId ? "Synchronizing Reviews…" : null,
+        );
+        setDeliveryCandidateDiagnostic(
+          deliveryCandidateId ? "Synchronizing Reviews…" : null,
+        );
+        const connection = await connectReviewsEventStream({
           bridge: window.sandcastle,
           runId: selectedRun.run.id,
-          onFrame: (frame) => {
-            if (active) {
-              setIntegrationGenerationState((current) =>
-                applyIntegrationGenerationFrame(current, frame),
-              );
+          candidateInputId,
+          candidateId: deliveryCandidateId,
+          onViews: (views) => {
+            if (canApply()) {
+              setIntegrationGenerationState({
+                generation: views.generation,
+                view: views.integrationGenerations,
+              });
+              setCandidateQualityGateView(views.candidateQuality);
+              setDeliveryCandidateView(views.deliveryCandidate);
+              setIntegrationDiagnostic(null);
+              setCandidateQualityDiagnostic(null);
+              setDeliveryCandidateDiagnostic(null);
             }
           },
           onDiagnostic: (diagnostic) => {
-            if (active) setIntegrationDiagnostic(diagnostic);
+            if (canApply()) {
+              setIntegrationDiagnostic(diagnostic);
+              if (candidateInputId) setCandidateQualityDiagnostic(diagnostic);
+              if (deliveryCandidateId)
+                setDeliveryCandidateDiagnostic(diagnostic);
+            }
           },
         });
-        if (!active) {
-          await connection.close();
-          return;
-        }
-        runtimeViewConnection.current = { kind: "reviews", connection };
-      }
-    };
-    void synchronize().catch((nextError: unknown) => {
+        return { kind: "reviews", connection, close: connection.close };
+      },
+    );
+    void request.done.catch((nextError: unknown) => {
       if (!active) return;
       const message = `Runtime unavailable; resync required: ${errorMessage(nextError)}`;
-      if (activeTab === "reviews") setIntegrationDiagnostic(message);
+      if (activeTab === "reviews") {
+        setIntegrationDiagnostic(message);
+        if (candidateInputId) setCandidateQualityDiagnostic(message);
+        if (deliveryCandidateId) setDeliveryCandidateDiagnostic(message);
+      }
       if (activeTab === "runs") setRunSupervisionDiagnostic(message);
     });
     return () => {
       active = false;
-      const current = runtimeViewConnection.current;
-      runtimeViewConnection.current = null;
-      if (current) void current.connection.close();
+      request.cancel();
     };
-  }, [activeTab, selectedRun?.run.id]);
-
-  useEffect(() => {
-    let active = true;
-    const synchronize = async (): Promise<void> => {
-      const previous = candidateQualityConnection.current;
-      candidateQualityConnection.current = null;
-      if (previous) await previous.close();
-      setCandidateQualityGateView(null);
-      setCandidateQualityDiagnostic(null);
-      if (!active || activeTab !== "reviews" || !candidateInputId) return;
-      setCandidateQualityDiagnostic("Synchronizing Candidate Quality Gates…");
-      const connection = await connectCandidateQualityGates({
-        bridge: window.sandcastle,
-        candidateInputId,
-        onView: (view) => {
-          if (active) {
-            setCandidateQualityGateView(view);
-            setCandidateQualityDiagnostic(null);
-          }
-        },
-        onDiagnostic: (diagnostic) => {
-          if (active) setCandidateQualityDiagnostic(diagnostic);
-        },
-      });
-      if (!active) {
-        await connection.close();
-        return;
-      }
-      candidateQualityConnection.current = connection;
-    };
-    void synchronize().catch((nextError: unknown) => {
-      if (active) {
-        setCandidateQualityDiagnostic(
-          `Candidate Quality Gates unavailable; resync required: ${errorMessage(nextError)}`,
-        );
-      }
-    });
-    return () => {
-      active = false;
-      const current = candidateQualityConnection.current;
-      candidateQualityConnection.current = null;
-      if (current) void current.close();
-    };
-  }, [activeTab, candidateInputId]);
-
-  useEffect(() => {
-    let active = true;
-    const synchronize = async (): Promise<void> => {
-      const previous = deliveryCandidateConnection.current;
-      deliveryCandidateConnection.current = null;
-      if (previous) await previous.close();
-      setDeliveryCandidateView(null);
-      setDeliveryCandidateDiagnostic(null);
-      if (!active || activeTab !== "reviews" || !deliveryCandidateId) return;
-      setDeliveryCandidateDiagnostic("Synchronizing Delivery Candidate…");
-      const connection = await connectDeliveryCandidate({
-        bridge: window.sandcastle,
-        candidateId: deliveryCandidateId,
-        onView: (view) => {
-          if (active) {
-            setDeliveryCandidateView(view);
-            setDeliveryCandidateDiagnostic(null);
-          }
-        },
-        onDiagnostic: (diagnostic) => {
-          if (active) setDeliveryCandidateDiagnostic(diagnostic);
-        },
-      });
-      if (!active) {
-        await connection.close();
-        return;
-      }
-      deliveryCandidateConnection.current = connection;
-    };
-    void synchronize().catch((nextError: unknown) => {
-      if (active) {
-        setDeliveryCandidateDiagnostic(
-          `Delivery Candidate unavailable; resync required: ${errorMessage(nextError)}`,
-        );
-      }
-    });
-    return () => {
-      active = false;
-      const current = deliveryCandidateConnection.current;
-      deliveryCandidateConnection.current = null;
-      if (current) void current.close();
-    };
-  }, [activeTab, deliveryCandidateId]);
+  }, [activeTab, selectedRun?.run.id, candidateInputId, deliveryCandidateId]);
 
   useEffect(() => {
     let active = true;
@@ -4018,7 +3940,10 @@ export function ProjectDetailView({
           evidenceRefs: [...input.evidenceRefs],
         },
       });
-      await candidateQualityConnection.current?.resync();
+      const connection = runtimeViewConnectionCoordinator.current();
+      if (connection?.kind === "reviews") {
+        await connection.connection.resync();
+      }
       const refreshed = await window.sandcastle.runtime.inspectRun(
         selectedRun.run.id,
       );
@@ -4523,8 +4448,11 @@ export function ProjectDetailView({
             diagnostic={integrationDiagnostic}
             generations={integrationGenerationState.view}
             onResync={() =>
-              void (runtimeViewConnection.current?.kind === "reviews"
-                ? runtimeViewConnection.current.connection.resync()
+              void (runtimeViewConnectionCoordinator.current()?.kind ===
+              "reviews"
+                ? runtimeViewConnectionCoordinator
+                    .current()
+                    ?.connection.resync()
                 : undefined)
             }
           />
@@ -4757,8 +4685,11 @@ export function ProjectDetailView({
                       }
                       onPause={() => void controlRun("pause")}
                       onResync={() =>
-                        void (runtimeViewConnection.current?.kind === "runs"
-                          ? runtimeViewConnection.current.connection.resync()
+                        void (runtimeViewConnectionCoordinator.current()
+                          ?.kind === "runs"
+                          ? runtimeViewConnectionCoordinator
+                              .current()
+                              ?.connection.resync()
                           : undefined)
                       }
                       onResume={() => void controlRun("resume")}

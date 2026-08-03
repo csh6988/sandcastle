@@ -155,7 +155,6 @@ describe("Quality Gate Node Handler", () => {
       review: {
         reviewerSessionId: "security-session-1",
         reviewerAiMemberId: "security-reviewer-1",
-        operationKey: "security-review:gate-1",
         reconcileExisting: false,
         timeoutSeconds: 60,
         request: reviewRequest,
@@ -290,7 +289,6 @@ describe("Quality Gate Node Handler", () => {
           review: {
             reviewerSessionId: "reviewer-session-1",
             reviewerAiMemberId: "reviewer-1",
-            operationKey: "operability-review-1",
             reconcileExisting: false,
             timeoutSeconds: 60,
             request: reviewRequest,
@@ -322,6 +320,83 @@ describe("Quality Gate Node Handler", () => {
       "quality-gate.result.finalize",
       "delivery.candidate-input.authorize",
     ]);
+  });
+
+  it("blocks the claimed Attempt when the Reviewer terminal output cannot build exact Gate Commands", async () => {
+    const blocked: unknown[] = [];
+    const handler = openQualityGateNodeHandler({
+      pipelineRuntime: {
+        claimReadyAttempt: () => attempt,
+        blockClaimedAttempt: (input) => {
+          blocked.push(input);
+          return {} as never;
+        },
+        completeClaimedAttempt: () => {
+          throw new Error("invalid Reviewer output must not complete");
+        },
+        executeQualityReviewStage: async () => ({
+          status: "succeeded",
+          providerId: "scripted-reviewer",
+          isolation: {
+            readOnlyFilesystem: true,
+            independentGitDatabase: true,
+            independentSessionStorage: true,
+            independentCredentialScope: true,
+            independentMutableCache: true,
+            inputAllowlist: true,
+            mechanism: "fixture",
+            mechanismVersion: "1",
+          },
+          isolationEvidence: ["artifact-version:review-isolation"],
+          output: {
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: ["artifact-version:review-evidence"],
+          },
+          terminalExecutionFactId: "execution-fact-1",
+        }),
+      },
+      commandRegistry: {
+        execute: () =>
+          ({ status: "succeeded", value: {}, effectIds: [] }) as never,
+      },
+      plans: {
+        plan: () => ({
+          handlerKindId: "security-review@1",
+          initialCommands: [],
+          review: {
+            reviewerSessionId: "reviewer-session-1",
+            reviewerAiMemberId: "reviewer-1",
+            reconcileExisting: false,
+            timeoutSeconds: 60,
+            request: reviewRequest,
+            adapter: reviewerAdapter,
+            terminalCommands: () => {
+              throw new Error(
+                "Reviewer terminal result requires exact Candidate Gate execution observations.",
+              );
+            },
+          },
+        }),
+      },
+    });
+
+    await handler.executeReady({ runId: "run-1", nodeRunId: "node-1" });
+
+    assert.equal(blocked.length, 1);
+    assert.deepEqual(blocked[0], {
+      runId: "run-1",
+      nodeRunId: "node-1",
+      attemptId: "attempt-1",
+      leaseId: "lease-1",
+      workerId: "delivery-quality-node-handler",
+      terminalExecutionFactId: "execution-fact-1",
+      failure: {
+        code: "DELIVERY_QUALITY_REVIEW_OUTPUT_INVALID",
+        message:
+          "Reviewer terminal result requires exact Candidate Gate execution observations.",
+      },
+    });
   });
 
   it("builds later Commands and the Reviewer request from an earlier authoritative Command result", async () => {
@@ -423,7 +498,6 @@ describe("Quality Gate Node Handler", () => {
           review: {
             reviewerSessionId: "reviewer-session-1",
             reviewerAiMemberId: "reviewer-1",
-            operationKey: "security-review-1",
             reconcileExisting: false,
             timeoutSeconds: 60,
             request: (context) => {
