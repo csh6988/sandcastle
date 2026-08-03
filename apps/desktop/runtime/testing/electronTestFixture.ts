@@ -721,6 +721,8 @@ export const createElectronTestFixture = (input: {
   const evidenceDirectory = join(root, "evidence");
   const repositoryDirectory = join(root, "repository");
   const worktreeDirectory = join(root, "worktree");
+  const executionRepositoryDirectory = join(root, "execution-repository");
+  const executionWorktreeDirectory = join(root, "execution-worktree");
   for (const directory of [
     companyDirectory,
     evidenceDirectory,
@@ -752,6 +754,19 @@ export const createElectronTestFixture = (input: {
     "add",
     "--detach",
     worktreeDirectory,
+    repositoryCommit,
+  ]);
+  git(root, [
+    "clone",
+    "--no-hardlinks",
+    repositoryDirectory,
+    executionRepositoryDirectory,
+  ]);
+  git(executionRepositoryDirectory, [
+    "worktree",
+    "add",
+    "--detach",
+    executionWorktreeDirectory,
     repositoryCommit,
   ]);
   const marker = JSON.stringify({
@@ -789,13 +804,13 @@ export const createElectronTestFixture = (input: {
   const cleanupTargets = [
     {
       kind: "repository" as const,
-      path: repositoryDirectory,
-      pathFingerprint: cleanupPathFingerprint(repositoryDirectory),
+      path: executionRepositoryDirectory,
+      pathFingerprint: cleanupPathFingerprint(executionRepositoryDirectory),
     },
     {
       kind: "worktree" as const,
-      path: worktreeDirectory,
-      pathFingerprint: cleanupPathFingerprint(worktreeDirectory),
+      path: executionWorktreeDirectory,
+      pathFingerprint: cleanupPathFingerprint(executionWorktreeDirectory),
     },
   ];
   const initialConfig: Omit<ElectronTestFixtureConfig, "configHash"> = {

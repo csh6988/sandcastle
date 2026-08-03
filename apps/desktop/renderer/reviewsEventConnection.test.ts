@@ -9,25 +9,68 @@ import type {
 import { connectReviewsEventStream } from "./reviewsEventConnection.js";
 
 describe("Reviews Runtime event connection", () => {
-  it("uses one stage-aware stream and acknowledges each Runtime event sequence once", async () => {
+  it("applies all stage Queries atomically and replays every event after the earliest View token", async () => {
     let eventSink!: (frame: RuntimeEventFrame) => void | Promise<void>;
     let openCount = 0;
     const queries: string[] = [];
     const acknowledgements: unknown[] = [];
+    const steps: string[] = [];
+    let integrationQueryCount = 0;
+    let deliveryQueryCount = 0;
     const views: Array<{
       readonly generation: number;
       readonly integrationGenerations: readonly IntegrationGenerationView[];
       readonly candidateQuality: CandidateQualityGateView | null;
       readonly deliveryCandidate: DeliveryCandidateView | null;
     }> = [];
+    const frame = (
+      sequence: number,
+      type: "integration.generation.completed" | "delivery.candidate.created",
+    ) =>
+      ({
+        subscriptionId: "reviews-subscription-1",
+        subscriptionGeneration: 7,
+        barrierSequence: 10,
+        value: {
+          kind: "event" as const,
+          event: {
+            registryVersion: 18,
+            schemaVersion: 1 as const,
+            sequence,
+            eventId: `reviews-event-${sequence}`,
+            type,
+            companyId: "company-1",
+            projectId: "project-1",
+            runId: "run-1",
+            ...(type === "delivery.candidate.created"
+              ? {
+                  deliveryCandidateInputId: "candidate-input-1",
+                  deliveryCandidateId: "candidate-1",
+                }
+              : {}),
+            payload: {},
+            timestamp: "2026-08-03T00:00:00.000Z",
+          },
+        },
+      }) satisfies RuntimeEventFrame;
     const bridge = {
       query: async (query: { readonly type: string }) => {
         queries.push(query.type);
+        steps.push(`query:${query.type}`);
         if (query.type === "integration-generations.inspect") {
+          integrationQueryCount += 1;
           return {
-            view: [{ id: "generation-1", state: "passed" }],
-            asOfSequence: 12,
-            viewSyncToken: "integration-token-12",
+            view: [
+              {
+                id: "generation-1",
+                state: integrationQueryCount === 1 ? "running" : "passed",
+              },
+            ],
+            asOfSequence: integrationQueryCount === 1 ? 10 : 12,
+            viewSyncToken:
+              integrationQueryCount === 1
+                ? "integration-token-10"
+                : "integration-token-12",
           };
         }
         if (query.type === "quality-gates.inspect") {
@@ -39,29 +82,42 @@ describe("Reviews Runtime event connection", () => {
               gateResults: [],
               authority: { id: "candidate-authority-1" },
             },
-            asOfSequence: 12,
-            viewSyncToken: "quality-token-12",
+            asOfSequence: 11,
+            viewSyncToken: "quality-token-11",
           };
         }
+        deliveryQueryCount += 1;
         return {
           view: {
             id: "candidate-1",
-            manifestHash: "a".repeat(64),
-            projection: "awaiting-decision",
+            manifestHash: (deliveryQueryCount === 1 ? "a" : "b").repeat(64),
+            projection:
+              deliveryQueryCount === 1 ? "assembling" : "awaiting-decision",
             decision: null,
           },
-          asOfSequence: 12,
-          viewSyncToken: "delivery-token-12",
+          asOfSequence: deliveryQueryCount === 1 ? 11 : 12,
+          viewSyncToken:
+            deliveryQueryCount === 1
+              ? "delivery-token-11"
+              : "delivery-token-12",
         };
       },
       execute: async (input: unknown) => {
         acknowledgements.push(input);
+        const command = (
+          input as { readonly command: { readonly sequence: number } }
+        ).command;
+        steps.push(
+          "viewSyncToken" in command
+            ? `ack-view:${command.sequence}`
+            : `ack-event:${command.sequence}`,
+        );
         return {
           status: "succeeded",
           value: {
             acknowledged: true,
-            subscriptionGeneration: 7,
-            barrierSequence: 12,
+            subscriptionGeneration: "viewSyncToken" in command ? 6 : 7,
+            barrierSequence: command.sequence,
             auditId: `audit-${acknowledgements.length}`,
           },
           effectIds: [],
@@ -71,11 +127,14 @@ describe("Reviews Runtime event connection", () => {
         sink: (frame: RuntimeEventFrame) => void | Promise<void>,
       ) => {
         openCount += 1;
+        steps.push("open");
         eventSink = sink;
+        await sink(frame(11, "integration.generation.completed"));
+        await sink(frame(12, "delivery.candidate.created"));
         return {
           subscriptionId: "reviews-subscription-1",
           subscriptionGeneration: 7,
-          barrierSequence: 12,
+          barrierSequence: 10,
         };
       },
       closeEventStream: async () => undefined,
@@ -94,61 +153,49 @@ describe("Reviews Runtime event connection", () => {
     });
 
     assert.equal(openCount, 1);
+    assert.equal(views[0]?.integrationGenerations[0]?.state, "running");
     assert.equal(
-      views.at(-1)?.candidateQuality?.authority?.id,
+      views[0]?.candidateQuality?.authority?.id,
       "candidate-authority-1",
     );
-    assert.equal(
-      views.at(-1)?.deliveryCandidate?.projection,
-      "awaiting-decision",
-    );
+    assert.equal(views[0]?.deliveryCandidate?.projection, "assembling");
     assert.deepEqual(
       (acknowledgements[0] as { readonly command: unknown }).command,
       {
         type: "ack-runtime-events",
-        sequence: 12,
-        viewSyncToken: "delivery-token-12",
+        sequence: 10,
+        viewSyncToken: "integration-token-10",
       },
     );
-
-    const frame = {
-      subscriptionId: "reviews-subscription-1",
-      subscriptionGeneration: 7,
-      barrierSequence: 12,
-      value: {
-        kind: "event" as const,
-        event: {
-          registryVersion: 18,
-          schemaVersion: 1 as const,
-          sequence: 13,
-          eventId: "candidate-event-13",
-          type: "delivery.candidate.created",
-          companyId: "company-1",
-          projectId: "project-1",
-          runId: "run-1",
-          deliveryCandidateInputId: "candidate-input-1",
-          deliveryCandidateId: "candidate-1",
-          payload: {},
-          timestamp: "2026-08-03T00:00:00.000Z",
-        },
-      },
-    } satisfies RuntimeEventFrame;
-    await eventSink(frame);
-    await eventSink(frame);
-
+    assert.equal(views.at(-1)?.integrationGenerations[0]?.state, "passed");
+    assert.equal(views.at(-1)?.deliveryCandidate?.manifestHash, "b".repeat(64));
+    assert.equal(
+      views.at(-1)?.deliveryCandidate?.projection,
+      "awaiting-decision",
+    );
+    assert.deepEqual(steps.slice(0, 5), [
+      "query:integration-generations.inspect",
+      "query:quality-gates.inspect",
+      "query:delivery-candidates.inspect",
+      "ack-view:10",
+      "open",
+    ]);
+    assert.deepEqual(
+      acknowledgements
+        .slice(1)
+        .map(
+          (entry) =>
+            (entry as { readonly command: { readonly sequence: number } })
+              .command.sequence,
+        ),
+      [11, 12],
+    );
+    await eventSink(frame(12, "delivery.candidate.created"));
     assert.equal(
       queries.filter((type) => type === "delivery-candidates.inspect").length,
       2,
     );
-    assert.equal(acknowledgements.length, 2);
-    assert.deepEqual(
-      (acknowledgements[1] as { readonly command: unknown }).command,
-      {
-        type: "ack-runtime-events",
-        sequence: 13,
-        subscriptionGeneration: 7,
-      },
-    );
+    assert.equal(acknowledgements.length, 3);
     await connection.close();
   });
 
@@ -157,36 +204,40 @@ describe("Reviews Runtime event connection", () => {
       (frame: RuntimeEventFrame) => void | Promise<void>
     > = [];
     const acknowledgements: unknown[] = [];
+    const steps: string[] = [];
     let generation = 4;
     const bridge = {
-      query: async (query: { readonly type: string }) => ({
-        view:
-          query.type === "integration-generations.inspect"
-            ? []
-            : query.type === "quality-gates.inspect"
-              ? {
-                  candidateInput: { id: "candidate-input-1" },
-                  criticalEscalation: null,
-                  gateInputs: [],
-                  gateResults: [],
-                  authority: null,
-                }
-              : {
-                  id: "candidate-1",
-                  manifestHash: "a".repeat(64),
-                  projection: "awaiting-decision",
-                  decision: null,
-                },
-        asOfSequence: 20,
-        viewSyncToken: `view-token-${generation}`,
-      }),
+      query: async (query: { readonly type: string }) => {
+        steps.push(`query:${query.type}:${generation}`);
+        return {
+          view:
+            query.type === "integration-generations.inspect"
+              ? []
+              : query.type === "quality-gates.inspect"
+                ? {
+                    candidateInput: { id: "candidate-input-1" },
+                    criticalEscalation: null,
+                    gateInputs: [],
+                    gateResults: [],
+                    authority: null,
+                  }
+                : {
+                    id: "candidate-1",
+                    manifestHash: "a".repeat(64),
+                    projection: "awaiting-decision",
+                    decision: null,
+                  },
+          asOfSequence: 20,
+          viewSyncToken: `view-token-${generation}`,
+        };
+      },
       execute: async (input: unknown) => {
         acknowledgements.push(input);
         return {
           status: "succeeded",
           value: {
             acknowledged: true,
-            subscriptionGeneration: generation,
+            subscriptionGeneration: generation - 1,
             barrierSequence: 20,
             auditId: `audit-${acknowledgements.length}`,
           },
@@ -203,7 +254,11 @@ describe("Reviews Runtime event connection", () => {
           barrierSequence: 20,
         };
       },
-      closeEventStream: async () => undefined,
+      closeEventStream: async (handle: {
+        readonly subscriptionGeneration: number;
+      }) => {
+        steps.push(`close:${handle.subscriptionGeneration}`);
+      },
     } as unknown as Pick<
       SandcastleBridge,
       "query" | "execute" | "openEventStream" | "closeEventStream"
@@ -217,6 +272,7 @@ describe("Reviews Runtime event connection", () => {
       onViews: () => undefined,
       onDiagnostic: () => undefined,
     });
+    steps.length = 0;
     generation = 5;
     await connection.resync();
 
@@ -246,6 +302,11 @@ describe("Reviews Runtime event connection", () => {
 
     assert.equal(eventSinks.length, 2);
     assert.equal(acknowledgements.length, 2);
+    assert.equal(steps[0], "close:4");
+    assert.equal(
+      steps.slice(1, 4).every((step) => step.endsWith(":5")),
+      true,
+    );
     await connection.close();
   });
 });

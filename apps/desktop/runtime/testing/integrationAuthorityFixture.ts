@@ -770,15 +770,17 @@ export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
             if (
               !gateExecution ||
               !terminalExecutionFactId ||
+              reviewerOutput.result !== "PASS" ||
               gateExecution.gateInputId !== gateInput.id ||
               actualCheckIds?.join("\0") !== expectedCheckIds.join("\0") ||
               gateExecution.checks.some(
                 (check) =>
+                  check.status !== "passed" ||
                   check.responsibility.candidateIds[0] !== candidate.id,
               )
             ) {
               throw new Error(
-                `${kind} Reviewer terminal result requires exact Candidate Gate execution observations.`,
+                `${kind} Reviewer terminal result requires an unconditional PASS with every Candidate Gate check passed and exact Candidate Gate execution observations.`,
               );
             }
             const gateReceiptHash = sha256(

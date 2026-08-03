@@ -116,6 +116,17 @@ const scripts = () => {
   ] as const;
 };
 
+const cleanupTargetPath = (
+  fixture: ReturnType<typeof createElectronTestFixture>,
+  kind: "repository" | "worktree",
+): string => {
+  const target = fixture.config.cleanupTargets.find(
+    (candidate) => candidate.kind === kind,
+  );
+  assert.ok(target);
+  return target.path;
+};
+
 describe("Electron Test fixture", () => {
   it("authenticates fixture Runtime commands as a Runtime worker", () => {
     assert.deepEqual(electronTestFixtureRuntimePrincipal, {
@@ -239,7 +250,7 @@ describe("Electron Test fixture", () => {
     fixture.cleanup();
   });
 
-  it("removes frozen Repository and Worktree targets before PASS and verifies their post-delete absence idempotently", () => {
+  it("removes only frozen execution Repository and Worktree targets before PASS and preserves catalog resources until final cleanup", () => {
     const fixture = createElectronTestFixture({
       fixtureId: "fixture-cleanup",
       testRunId: "test-run-cleanup",
@@ -252,12 +263,25 @@ describe("Electron Test fixture", () => {
       entrypoint: "electron-test-fixture",
     });
 
+    const executionRepository = fixture.config.cleanupTargets.find(
+      (target) => target.kind === "repository",
+    );
+    const executionWorktree = fixture.config.cleanupTargets.find(
+      (target) => target.kind === "worktree",
+    );
+    assert.ok(executionRepository);
+    assert.ok(executionWorktree);
+    assert.notEqual(
+      executionRepository.path,
+      fixture.config.repositoryDirectory,
+    );
+    assert.notEqual(executionWorktree.path, fixture.config.worktreeDirectory);
     writeFileSync(
-      join(fixture.config.repositoryDirectory, "runtime-created.txt"),
+      join(executionRepository.path, "runtime-created.txt"),
       "temporary Runtime output\n",
     );
     writeFileSync(
-      join(fixture.config.worktreeDirectory, "agent-created.txt"),
+      join(executionWorktree.path, "agent-created.txt"),
       "temporary Agent output\n",
     );
     const receipt = fixture.cleanupExecutionResources();
@@ -268,10 +292,13 @@ describe("Electron Test fixture", () => {
         ["worktree", "absent"],
       ],
     );
-    assert.equal(existsSync(fixture.config.repositoryDirectory), false);
-    assert.equal(existsSync(fixture.config.worktreeDirectory), false);
+    assert.equal(existsSync(executionRepository.path), false);
+    assert.equal(existsSync(executionWorktree.path), false);
+    assert.equal(existsSync(fixture.config.repositoryDirectory), true);
+    assert.equal(existsSync(fixture.config.worktreeDirectory), true);
     assert.deepEqual(fixture.cleanupExecutionResources(), receipt);
     fixture.cleanup();
+    assert.equal(existsSync(fixture.root), false);
   });
 
   it("refuses an initially missing cleanup target without caching an absent receipt", () => {
@@ -286,7 +313,7 @@ describe("Electron Test fixture", () => {
       packaged: false,
       entrypoint: "electron-test-fixture",
     });
-    rmSync(fixture.config.worktreeDirectory, { recursive: true });
+    rmSync(cleanupTargetPath(fixture, "worktree"), { recursive: true });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       assert.throws(
@@ -312,14 +339,12 @@ describe("Electron Test fixture", () => {
         packaged: false,
         entrypoint: "electron-test-fixture",
       });
-      rmSync(fixture.config.worktreeDirectory, { recursive: true });
+      const cleanupWorktree = cleanupTargetPath(fixture, "worktree");
+      rmSync(cleanupWorktree, { recursive: true });
       if (replacement === "directory") {
-        mkdirSync(fixture.config.worktreeDirectory);
+        mkdirSync(cleanupWorktree);
       } else {
-        symlinkSync(
-          fixture.config.repositoryDirectory,
-          fixture.config.worktreeDirectory,
-        );
+        symlinkSync(cleanupTargetPath(fixture, "repository"), cleanupWorktree);
       }
       assert.throws(
         () => fixture.cleanupExecutionResources(),
@@ -346,16 +371,17 @@ describe("Electron Test fixture", () => {
     });
     for (let index = 0; index < 2_000; index += 1) {
       writeFileSync(
-        join(fixture.config.worktreeDirectory, `slow-delete-${index}.txt`),
+        join(
+          cleanupTargetPath(fixture, "worktree"),
+          `slow-delete-${index}.txt`,
+        ),
         "fixture cleanup race\n",
       );
     }
-    const replacementMarker = join(
-      fixture.config.worktreeDirectory,
-      "replacement.txt",
-    );
+    const cleanupWorktree = cleanupTargetPath(fixture, "worktree");
+    const replacementMarker = join(cleanupWorktree, "replacement.txt");
     const replacement = await startReplacementAfterRename(
-      fixture.config.worktreeDirectory,
+      cleanupWorktree,
       replacementMarker,
     );
 

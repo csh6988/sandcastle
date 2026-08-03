@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, MessageChannelMain, ipcMain } from "electron";
 import { createCompanyRuntimeSupervisor } from "../dist-electron/main/companyRuntimeSupervisor.js";
@@ -868,6 +868,9 @@ const run = async () => {
     ...supervisor,
     executeEnvelope: humanRuntimeClient.executeEnvelope,
     queryEnvelope: humanRuntimeClient.queryEnvelope,
+    openSubscription: humanRuntimeClient.openSubscription,
+    readSubscription: humanRuntimeClient.readSubscription,
+    closeSubscription: humanRuntimeClient.closeSubscription,
   };
   runtimeIpc = registerRuntimeIpc(ipcMain, () => rendererRuntime, {
     getWindow: () => window,
@@ -2037,6 +2040,199 @@ const run = async () => {
       events: runtimeEvents.length,
     };
   };
+  const measureCandidateRestartState = async () => {
+    const [runs, candidateInput, gates, candidates] = await Promise.all([
+      humanRuntimeClient.query({
+        type: "runs.list",
+        projectId: seeded.projectId,
+      }),
+      humanRuntimeClient.query({
+        type: "delivery-candidate-input.inspect",
+        candidateInputId: candidate.id,
+      }),
+      humanRuntimeClient.query({
+        type: "quality-gates.inspect",
+        candidateInputId: candidate.id,
+      }),
+      humanRuntimeClient.query({
+        type: "delivery-candidates.list",
+        runId: seeded.runId,
+      }),
+    ]);
+    const run = runs.find((entry) => entry.run.id === seeded.runId);
+    const restartedCandidate = candidates.find(
+      (entry) => entry.id === deliveryCandidate.id,
+    );
+    assert.ok(run);
+    assert.ok(restartedCandidate);
+    const formalAudits = await supervisor.audit({
+      runId: seeded.runId,
+      limit: 1_000,
+    });
+    const runtimeEvents = await supervisor.events({
+      afterSequence: 0,
+      limit: 1_000,
+    });
+    return {
+      run: {
+        id: run.run.id,
+        hash: hashValue(run),
+        snapshotRevisionId: run.run.snapshotRevisionId,
+        productBaselineId: run.run.productBaselineId,
+        status: run.run.status,
+      },
+      candidateInput: {
+        id: candidateInput.id,
+        manifestHash: candidateInput.manifestHash,
+        entityHash: hashValue(candidateInput),
+      },
+      gates: {
+        entityHash: hashValue(gates),
+        inputIds: gates.gateInputs.map((entry) => entry.id).sort(),
+        resultHashes: gates.gateResults
+          .map((entry) => [entry.id, entry.resultHash])
+          .sort(([left], [right]) => left.localeCompare(right)),
+        authorityId: gates.authority?.id,
+        authorityHash: gates.authority?.authorityHash,
+      },
+      candidate: {
+        id: restartedCandidate.id,
+        manifestHash: restartedCandidate.manifestHash,
+        entityHash: hashValue(restartedCandidate),
+      },
+      counts: {
+        runs: runs.length,
+        nodes: run.nodes.length,
+        attempts: run.nodes.reduce(
+          (total, node) => total + node.attempts.length,
+          0,
+        ),
+        gateInputs: gates.gateInputs.length,
+        gateResults: gates.gateResults.length,
+        gateAuthorities: gates.authority ? 1 : 0,
+        candidates: candidates.length,
+        formalAudits: formalAudits.length,
+        runtimeEvents: runtimeEvents.length,
+      },
+      formalAuditHash: hashValue(formalAudits),
+      runtimeEventHash: hashValue(runtimeEvents),
+    };
+  };
+
+  const candidateRestartPidBefore = restartHealth.pid;
+  const candidateRestartClaimBefore = basename(fixture.authorizationClaimPath);
+  const candidateRestartAuthorityCountsBefore = await measureAuthorityCounts(
+    "candidate-restart-before",
+  );
+  const candidateRestartStateBefore = await measureCandidateRestartState();
+  const cursorBeforeCandidateRestart = reviewsCursorStates(
+    await supervisor.audit({ limit: 1_000 }),
+  ).at(-1);
+  assert.ok(cursorBeforeCandidateRestart);
+  await supervisor.stop();
+  const candidateRestartHealth = await supervisor.start(
+    fixture.config.companyDirectory,
+  );
+  const candidateRestartClaimAfter = basename(fixture.authorizationClaimPath);
+  assert.equal(candidateRestartHealth.schemaVersion, 50);
+  assert.notEqual(candidateRestartHealth.pid, candidateRestartPidBefore);
+  assert.notEqual(candidateRestartClaimAfter, candidateRestartClaimBefore);
+  const candidateRestartAuthorityCountsAfter = await measureAuthorityCounts(
+    "candidate-restart-after",
+  );
+  const candidateRestartStateAfter = await measureCandidateRestartState();
+  assert.equal(
+    canonicalJson(candidateRestartAuthorityCountsAfter),
+    canonicalJson(candidateRestartAuthorityCountsBefore),
+  );
+  assert.equal(
+    canonicalJson(candidateRestartStateAfter),
+    canonicalJson(candidateRestartStateBefore),
+  );
+  const eventsBeforeCandidateRestartReconnect = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await window.reload();
+    await waitForElement('[data-nav="projects"]');
+    await clickElement('[data-nav="projects"]');
+    try {
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
+  await clickElement(`[data-project-id="${seeded.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+  await clickElement('[data-project-tab="reviews"]');
+  const restartedCandidateObservation = await waitForCandidateObservation(
+    (observation) =>
+      observation.candidateInputId === candidate.id &&
+      observation.authorityId === finalQualityView.view.authority?.id &&
+      observation.sync === "ready",
+  );
+  const restartedDeliveryObservation =
+    await waitForDeliveryCandidateObservation(
+      (observation) =>
+        observation.candidateId === deliveryCandidate.id &&
+        observation.manifestHash === deliveryCandidate.manifestHash &&
+        observation.projection === "awaiting-decision" &&
+        observation.sync === "ready" &&
+        observation.decisionId === null,
+    );
+  const candidateRestartAudits = await supervisor.audit({ limit: 1_000 });
+  const cursorAfterCandidateRestart = reviewsCursorStates(
+    candidateRestartAudits,
+  ).at(-1);
+  assert.ok(cursorAfterCandidateRestart);
+  assert.ok(
+    cursorAfterCandidateRestart.subscriptionGeneration >
+      cursorBeforeCandidateRestart.subscriptionGeneration,
+  );
+  assert.ok(
+    cursorAfterCandidateRestart.sequence >=
+      cursorBeforeCandidateRestart.sequence,
+  );
+  const eventsAfterCandidateRestartReconnect = await supervisor.events({
+    afterSequence: 0,
+    limit: 1_000,
+  });
+  assert.equal(
+    canonicalJson(eventsAfterCandidateRestartReconnect),
+    canonicalJson(eventsBeforeCandidateRestartReconnect),
+  );
+  const candidateRestartEvidence = {
+    before: candidateRestartStateBefore,
+    after: candidateRestartStateAfter,
+    runtime: {
+      before: {
+        pid: candidateRestartPidBefore,
+        authorizationClaim: candidateRestartClaimBefore,
+      },
+      after: {
+        pid: candidateRestartHealth.pid,
+        authorizationClaim: candidateRestartClaimAfter,
+      },
+    },
+    authorityCounts: {
+      before: candidateRestartAuthorityCountsBefore,
+      after: candidateRestartAuthorityCountsAfter,
+    },
+    renderer: {
+      candidateInputId: restartedCandidateObservation.candidateInputId,
+      candidateId: restartedDeliveryObservation.candidateId,
+      candidateManifestHash: restartedDeliveryObservation.manifestHash,
+      sync: restartedDeliveryObservation.sync,
+      before: cursorBeforeCandidateRestart,
+      after: cursorAfterCandidateRestart,
+      runtimeEventCount: {
+        before: eventsBeforeCandidateRestartReconnect.length,
+        after: eventsAfterCandidateRestartReconnect.length,
+      },
+    },
+  };
   const humanActor = {
     type: "human",
     id: "electron-test-fixture",
@@ -2569,7 +2765,8 @@ const run = async () => {
         runtimeRestartTestRunState: restartTestRunState,
         runtimeRestartElectronReceiptHash: restartElectronReceiptHash,
         runtimeRestartPid: restartHealth.pid,
-        candidateCrossRuntimeRestart: false,
+        candidateCrossRuntimeRestart: true,
+        candidateRestart: candidateRestartEvidence,
         duplicateCommandCountStable:
           canonicalJson(authorityCountsBeforeReplay) ===
           canonicalJson(authorityCountsAfterReplay),
