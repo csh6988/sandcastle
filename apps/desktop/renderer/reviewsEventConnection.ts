@@ -18,6 +18,8 @@ export type ReviewsStageViews = {
   readonly deliveryCandidate: DeliveryCandidateView | null;
 };
 
+export type ReviewsStageSnapshot = Omit<ReviewsStageViews, "generation">;
+
 export interface ReviewsEventConnection {
   readonly resync: () => Promise<void>;
   readonly close: () => Promise<void>;
@@ -28,6 +30,7 @@ export const connectReviewsEventStream = async (input: {
   readonly runId: string;
   readonly candidateInputId: string | null;
   readonly candidateId: string | null;
+  readonly onInitialViews: (views: ReviewsStageSnapshot) => void;
   readonly onViews: (views: ReviewsStageViews) => void;
   readonly onDiagnostic: (diagnostic: string | null) => void;
 }): Promise<ReviewsEventConnection> => {
@@ -36,6 +39,7 @@ export const connectReviewsEventStream = async (input: {
   let acknowledgedSequence = 0;
   let handle: RuntimeSubscriptionHandle | null = null;
   let eventQueue = Promise.resolve();
+  let synchronizationQueue = Promise.resolve();
   let openingFrames: RuntimeEventFrame[] | null = null;
   let latest: Omit<ReviewsStageViews, "generation"> = {
     integrationGenerations: [],
@@ -211,6 +215,7 @@ export const connectReviewsEventStream = async (input: {
       candidateQuality: candidateQuality?.view ?? null,
       deliveryCandidate: deliveryCandidate?.view ?? null,
     };
+    input.onInitialViews(latest);
     const acknowledgement = await input.bridge.execute({
       commandId: globalThis.crypto.randomUUID(),
       command: {
@@ -254,24 +259,31 @@ export const connectReviewsEventStream = async (input: {
     }
     const bufferedFrames = openingFrames;
     openingFrames = null;
-    input.onViews({ generation, ...latest });
     for (const frame of bufferedFrames) void handleEventFrame(frame);
     await eventQueue;
     input.onDiagnostic(null);
   };
 
-  await synchronize();
+  const queueSynchronization = (): Promise<void> => {
+    const result = synchronizationQueue.then(synchronize);
+    synchronizationQueue = result.catch(() => undefined);
+    return result;
+  };
+
+  await queueSynchronization();
   return {
     resync: async () => {
       try {
-        await synchronize();
+        await queueSynchronization();
       } catch (error) {
         await fail(error);
       }
     },
     close: async () => {
       closed = true;
+      await synchronizationQueue;
       await closeActive();
+      await eventQueue;
     },
   };
 };
