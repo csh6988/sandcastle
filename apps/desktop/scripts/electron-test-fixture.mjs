@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -87,19 +91,20 @@ const humanRuntimeToken = randomBytes(32).toString("base64url");
 const humanRuntimeClient = createCompanyRuntimeClient({
   address: companyRuntimeAddress(fixture.config.companyDirectory),
   token: humanRuntimeToken,
-  timeoutMs: 500,
+  timeoutMs: 2_000,
 });
 const deliveryQualityRuntimeToken = randomBytes(32).toString("base64url");
 const deliveryQualityRuntimeClient = createCompanyRuntimeClient({
   address: companyRuntimeAddress(fixture.config.companyDirectory),
   token: deliveryQualityRuntimeToken,
-  timeoutMs: 500,
+  timeoutMs: 2_000,
 });
 
 let supervisor;
 let shell;
 let window;
 let runtimeIpc;
+let releaseFailurePoint = null;
 const runtimeLogs = [];
 app.commandLine.appendSwitch("disable-gpu");
 
@@ -457,6 +462,35 @@ const waitForDeliveryCandidateObservation = async (
   }
   throw new Error(
     `Timed out waiting for Delivery Candidate renderer observation; found ${JSON.stringify(await readDeliveryCandidateObservation())}.`,
+  );
+};
+
+const readReleaseOperationObservation = async () => {
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `JSON.stringify((()=>{const panel=document.querySelector("[data-release-operation-panel]");return panel?{authority:panel.querySelector("[data-release-authority-hash]")?.textContent??null,operations:[...panel.querySelectorAll("[data-release-operation]")].map((operation)=>({id:operation.getAttribute("data-release-operation"),text:operation.textContent,items:[...operation.querySelectorAll("[data-release-item]")].map((item)=>({id:item.getAttribute("data-release-item"),text:item.textContent}))}))}:null})())`,
+      returnByValue: true,
+    });
+    return JSON.parse(result.result.value);
+  } finally {
+    debuggerSession.detach();
+  }
+};
+
+const waitForReleaseOperationObservation = async (
+  predicate,
+  timeoutMs = 20_000,
+) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const observation = await readReleaseOperationObservation();
+    if (observation && predicate(observation)) return observation;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Release operation renderer observation; found ${JSON.stringify(await readReleaseOperationObservation())}.`,
   );
 };
 
@@ -842,6 +876,12 @@ const run = async () => {
         SANDCASTLE_ELECTRON_TEST_FIXTURE_HUMAN_TOKEN: humanRuntimeToken,
         SANDCASTLE_ELECTRON_TEST_FIXTURE_DELIVERY_QUALITY_TOKEN:
           deliveryQualityRuntimeToken,
+        ...(releaseFailurePoint
+          ? {
+              SANDCASTLE_ELECTRON_TEST_FIXTURE_RELEASE_FAILURE_POINT:
+                releaseFailurePoint,
+            }
+          : {}),
       };
     },
     onLog: (line) => runtimeLogs.push(line),
@@ -931,13 +971,12 @@ const run = async () => {
   const proposalFields = {
     goal: "Verify the real Product-to-Candidate authority chain.",
     users: "Electron Test fixture",
-    scope: "T21 only",
-    nonGoals:
-      "T22\nT26\nT27\nRelease decision acceptance\nDestination/ref update\nExport\nDeployment\nNetwork",
+    scope: "T21 Product-to-Candidate plus T22 Release operations",
+    nonGoals: "T26\nT27\nDeployment\nNetwork\nRemote Release effects",
     acceptanceCriteria:
-      "The exact frozen Diff is independently reviewed.\nThe formal Candidate reaches awaiting decision without release acceptance.",
+      "The exact frozen Diff is independently reviewed.\nThe formal Candidate is accepted by a verified human.\nMerge and export Release operations use exact destination authority, durable receipts, and restart reconciliation.",
     constraints:
-      "Use only the temporary fixture Repository.\nUse schema v50 and Event Registry v18.",
+      "Use only temporary fixture Repositories and export destinations.\nUse schema v51 and Event Registry v19.",
     risks: "Fixture evidence must remain inside its temporary root.",
     openQuestions: "",
   };
@@ -1320,7 +1359,7 @@ const run = async () => {
   let restartTestRunState;
   let restartElectronReceiptHash;
   let terminalView;
-  for (let gesture = 1; gesture <= 12; gesture += 1) {
+  for (let gesture = 1; gesture <= 30; gesture += 1) {
     await clickFixtureButton();
     const afterGesture = await waitForTitle(["working", "ready", "pass"]);
     if (afterGesture === "working") {
@@ -1328,7 +1367,7 @@ const run = async () => {
     }
     let view = await inspectTestRun(`gesture-${gesture}`);
     if (view.executions.some((entry) => entry.state === "reconciling")) {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 400; attempt += 1) {
         const reconciled = await inspectTestRun(
           `gesture-${gesture}-reconcile-${attempt}`,
         );
@@ -1727,7 +1766,7 @@ const run = async () => {
   assert.ok(productBaseline);
   assert.deepEqual(
     productDiscovery.view.proposal?.currentRevision.content.scope,
-    ["T21 only"],
+    ["T21 Product-to-Candidate plus T22 Release operations"],
   );
   const technicalReview = await query("fixture-technical-lineage", {
     type: "technical-review.inspect",
@@ -2134,7 +2173,7 @@ const run = async () => {
     fixture.config.companyDirectory,
   );
   const candidateRestartClaimAfter = basename(fixture.authorizationClaimPath);
-  assert.equal(candidateRestartHealth.schemaVersion, 50);
+  assert.equal(candidateRestartHealth.schemaVersion, 51);
   assert.notEqual(candidateRestartHealth.pid, candidateRestartPidBefore);
   assert.notEqual(candidateRestartClaimAfter, candidateRestartClaimBefore);
   const candidateRestartAuthorityCountsAfter = await measureAuthorityCounts(
@@ -2475,6 +2514,442 @@ const run = async () => {
     },
   };
 
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await window.reload();
+    await waitForElement('[data-nav="projects"]');
+    await clickElement('[data-nav="projects"]');
+    try {
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
+  await clickElement(`[data-project-id="${seeded.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+  await clickElement('[data-project-tab="reviews"]');
+  await waitForDeliveryCandidateObservation(
+    (observation) =>
+      observation.candidateId === deliveryCandidate.id &&
+      observation.projection === "awaiting-decision" &&
+      observation.sync === "ready" &&
+      observation.acceptVisible === true,
+  );
+  await clickElement("#accept-delivery-candidate");
+  const acceptedDeliveryObservation = await waitForDeliveryCandidateObservation(
+    (observation) =>
+      observation.candidateId === deliveryCandidate.id &&
+      observation.manifestHash === deliveryCandidate.manifestHash &&
+      observation.projection === "accepted" &&
+      observation.sync === "ready" &&
+      typeof observation.decisionId === "string" &&
+      observation.acceptVisible === false,
+  );
+  await waitForElement("[data-release-operation-panel]");
+  const acceptedAuthorityInspection = await query(
+    "fixture-accepted-delivery-authority",
+    {
+      type: "accepted-delivery-authority.inspect",
+      candidateId: deliveryCandidate.id,
+    },
+  );
+  const acceptedAuthority = acceptedAuthorityInspection.view;
+  assert.equal(acceptedAuthority.candidateId, deliveryCandidate.id);
+  assert.equal(acceptedAuthority.candidateHash, deliveryCandidate.manifestHash);
+  assert.equal(
+    acceptedAuthority.repositoryCommits.length,
+    deliveryManifest.repositoryCommits.length,
+  );
+  assert.ok(acceptedAuthority.artifactVersionIds.length >= 2);
+
+  const git = (...args) =>
+    execFileSync("git", ["-C", fixture.config.repositoryDirectory, ...args], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    }).trim();
+  const repositoryAuthority = acceptedAuthority.repositoryCommits[0];
+  assert.ok(repositoryAuthority);
+  assert.equal(
+    repositoryAuthority.repositoryReference,
+    fixture.config.repositoryDirectory,
+  );
+  const releaseBaseCommit = fixture.config.repositoryCommit;
+  assert.doesNotThrow(() =>
+    git(
+      "merge-base",
+      "--is-ancestor",
+      releaseBaseCommit,
+      repositoryAuthority.commit,
+    ),
+  );
+  const createReleaseTarget = (branch, tip = releaseBaseCommit) => {
+    const ref = `refs/heads/${branch}`;
+    git("update-ref", ref, tip);
+    assert.equal(git("rev-parse", `${ref}^{commit}`), tip);
+    assert.equal(
+      git("worktree", "list", "--porcelain")
+        .split("\n")
+        .some((line) => line === `branch ${ref}`),
+      false,
+    );
+    return ref;
+  };
+  const reloadProjectReviews = async () => {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await window.reload();
+      await waitForElement('[data-nav="projects"]');
+      await clickElement('[data-nav="projects"]');
+      try {
+        await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+        break;
+      } catch (error) {
+        if (attempt === 3) throw error;
+      }
+    }
+    await clickElement(`[data-project-id="${seeded.projectId}"]`);
+    await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+    await clickElement('[data-project-tab="reviews"]');
+    await waitForDeliveryCandidateObservation(
+      (observation) =>
+        observation.candidateId === deliveryCandidate.id &&
+        observation.projection === "accepted" &&
+        observation.sync === "ready",
+    );
+    await waitForElement("[data-release-operation-panel]");
+  };
+  const releaseOperationsForCandidate = async (stage) =>
+    (
+      await query(`fixture-release-operations:${stage}`, {
+        type: "release-operations.list",
+        candidateId: deliveryCandidate.id,
+      })
+    ).view;
+  const waitForReleaseOperation = async (stage, predicate) => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const operations = await releaseOperationsForCandidate(stage);
+      const operation = operations.find(predicate);
+      if (operation) return operation;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(
+      `Timed out waiting for Release operation ${stage}: ${JSON.stringify(await releaseOperationsForCandidate(`${stage}:timeout`))}.`,
+    );
+  };
+  const fillReleaseAuthorization = async (reason) => {
+    await typeElement("[data-release-reason]", reason);
+    await typeElement(
+      "[data-release-evidence]",
+      `delivery-candidate:${deliveryCandidate.id}`,
+    );
+    await clickElement("[data-release-confirm]");
+    await waitForElementState(
+      "[data-release-create]",
+      (state) => state.disabled === false,
+    );
+  };
+  const submitMerge = async ({ branch, expectedTip, reason }) => {
+    await typeElement(
+      `[data-merge-target="${fixture.config.repositoryDirectory}"]`,
+      branch,
+    );
+    await typeElement(
+      `[data-merge-tip="${fixture.config.repositoryDirectory}"]`,
+      expectedTip,
+    );
+    await fillReleaseAuthorization(reason);
+    await clickElement("[data-release-create]");
+    await clickElement("[data-release-create]");
+  };
+  const submitExport = async ({ root, items, reason }) => {
+    await clickElement('[data-release-kind="export"]');
+    await typeElement("[data-export-root]", root);
+    for (const item of items) {
+      await clickElement(`[data-export-artifact="${item.artifactVersionId}"]`);
+      await typeElement(
+        `[data-export-path="${item.artifactVersionId}"]`,
+        item.relativePath,
+      );
+    }
+    await fillReleaseAuthorization(reason);
+    await clickElement("[data-release-create]");
+  };
+
+  const mergeTargetBranch = "release/t22-electron";
+  const mergeTargetRef = createReleaseTarget(mergeTargetBranch);
+  const operationsBeforeMerge =
+    await releaseOperationsForCandidate("before-merge");
+  await submitMerge({
+    branch: mergeTargetBranch,
+    expectedTip: releaseBaseCommit,
+    reason: "Verified the exact accepted Repository commit and target tip.",
+  });
+  const mergeOperation = await waitForReleaseOperation(
+    "merge-succeeded",
+    (operation) =>
+      operation.request.kind === "merge" &&
+      operation.request.items[0]?.destination.targetBranch ===
+        mergeTargetBranch &&
+      operation.aggregateState === "succeeded",
+  );
+  assert.equal(
+    (await releaseOperationsForCandidate("after-duplicate-merge-gesture"))
+      .length,
+    operationsBeforeMerge.length + 1,
+  );
+  assert.equal(
+    git("rev-parse", `${mergeTargetRef}^{commit}`),
+    repositoryAuthority.commit,
+  );
+  assert.equal(mergeOperation.items[0]?.state, "succeeded");
+  assert.equal(mergeOperation.items[0]?.receipt?.kind, "merge");
+  assert.equal(
+    mergeOperation.items[0]?.receipt?.resultingTargetTip,
+    repositoryAuthority.commit,
+  );
+  await waitForReleaseOperationObservation((observation) =>
+    observation.operations.some(
+      (operation) =>
+        operation.id === mergeOperation.id &&
+        operation.text.includes("succeeded"),
+    ),
+  );
+  await reloadProjectReviews();
+  await waitForReleaseOperationObservation((observation) =>
+    observation.operations.some(
+      (operation) =>
+        operation.id === mergeOperation.id &&
+        operation.text.includes("succeeded"),
+    ),
+  );
+
+  const conflictTargetBranch = "release/t22-drift";
+  const conflictTargetRef = createReleaseTarget(conflictTargetBranch);
+  const releaseBaseTree = git("rev-parse", `${releaseBaseCommit}^{tree}`);
+  const driftCommit = execFileSync(
+    "git",
+    [
+      "-C",
+      fixture.config.repositoryDirectory,
+      "commit-tree",
+      releaseBaseTree,
+      "-p",
+      releaseBaseCommit,
+    ],
+    {
+      input: "fixture release destination drift\n",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Sandcastle Electron Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+        GIT_COMMITTER_NAME: "Sandcastle Electron Fixture",
+        GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      },
+    },
+  ).trim();
+  git("update-ref", conflictTargetRef, driftCommit, releaseBaseCommit);
+  await reloadProjectReviews();
+  await submitMerge({
+    branch: conflictTargetBranch,
+    expectedTip: releaseBaseCommit,
+    reason:
+      "Verify destination compare-and-swap rejects unrelated target drift.",
+  });
+  const conflictOperation = await waitForReleaseOperation(
+    "merge-destination-conflict",
+    (operation) =>
+      operation.request.kind === "merge" &&
+      operation.request.items[0]?.destination.targetBranch ===
+        conflictTargetBranch &&
+      operation.items[0]?.state === "destination-conflict",
+  );
+  assert.equal(git("rev-parse", `${conflictTargetRef}^{commit}`), driftCommit);
+  assert.equal(conflictOperation.aggregateState, "failed");
+  assert.equal(
+    conflictOperation.nextActions.includes("create-new-operation"),
+    true,
+  );
+
+  const exportRoot = join(fixture.root, "release-exports");
+  mkdirSync(exportRoot, { mode: 0o700 });
+  const exportedArtifactId = acceptedAuthority.artifactVersionIds[0];
+  const exportedArtifact = projectArtifacts.view.find(
+    (artifact) => artifact.id === exportedArtifactId,
+  );
+  assert.ok(exportedArtifact);
+  await reloadProjectReviews();
+  await submitExport({
+    root: exportRoot,
+    items: [
+      {
+        artifactVersionId: exportedArtifactId,
+        relativePath: "applied/artifact.bin",
+      },
+    ],
+    reason:
+      "Export the exact accepted Artifact Version with create-only authority.",
+  });
+  const exportOperation = await waitForReleaseOperation(
+    "export-succeeded",
+    (operation) =>
+      operation.request.kind === "export" &&
+      operation.request.items.some(
+        (item) => item.destination.relativePath === "applied/artifact.bin",
+      ) &&
+      operation.aggregateState === "succeeded",
+  );
+  const exportedPath = join(exportRoot, "applied", "artifact.bin");
+  assert.equal(
+    sha256(readFileSync(exportedPath)),
+    exportedArtifact.contentHash,
+  );
+  assert.equal(
+    exportOperation.items[0]?.receipt?.destinationDigest,
+    exportedArtifact.contentHash,
+  );
+  assert.equal(
+    exportOperation.request.items[0]?.destination.overwrite.kind,
+    "create-only",
+  );
+
+  const partialArtifactIds = acceptedAuthority.artifactVersionIds.slice(0, 2);
+  const partialSuccessPath = "partial/succeeded.bin";
+  const partialConflictPath = "partial/conflict.bin";
+  mkdirSync(join(exportRoot, "partial"), { mode: 0o700 });
+  writeFileSync(join(exportRoot, partialConflictPath), "preexisting-conflict", {
+    mode: 0o600,
+  });
+  await reloadProjectReviews();
+  await submitExport({
+    root: exportRoot,
+    items: [
+      {
+        artifactVersionId: partialArtifactIds[0],
+        relativePath: partialSuccessPath,
+      },
+      {
+        artifactVersionId: partialArtifactIds[1],
+        relativePath: partialConflictPath,
+      },
+    ],
+    reason: "Verify durable per-item partial export results.",
+  });
+  const partialExportOperation = await waitForReleaseOperation(
+    "export-partial",
+    (operation) =>
+      operation.request.kind === "export" &&
+      operation.request.items.some(
+        (item) => item.destination.relativePath === partialSuccessPath,
+      ) &&
+      operation.aggregateState === "partially-succeeded",
+  );
+  assert.equal(partialExportOperation.counts.succeeded, 1);
+  assert.equal(partialExportOperation.counts.destinationConflict, 1);
+  assert.equal(
+    readFileSync(join(exportRoot, partialConflictPath), "utf8"),
+    "preexisting-conflict",
+  );
+  assert.equal(
+    sha256(readFileSync(join(exportRoot, partialSuccessPath))),
+    projectArtifacts.view.find(
+      (artifact) => artifact.id === partialArtifactIds[0],
+    )?.contentHash,
+  );
+
+  const reconcileRoot = join(fixture.root, "release-reconcile");
+  const parkedReconcileRoot = join(fixture.root, "release-reconcile-parked");
+  const reconcileRelativePath = "crash/recovered.bin";
+  mkdirSync(reconcileRoot, { mode: 0o700 });
+  releaseFailurePoint = "after-effect-before-finalize";
+  await supervisor.stop();
+  const releaseCrashHealth = await supervisor.start(
+    fixture.config.companyDirectory,
+  );
+  releaseFailurePoint = null;
+  await reloadProjectReviews();
+  await submitExport({
+    root: reconcileRoot,
+    items: [
+      {
+        artifactVersionId: exportedArtifactId,
+        relativePath: reconcileRelativePath,
+      },
+    ],
+    reason:
+      "Exercise crash recovery after the external effect and before finalization.",
+  });
+  const reconcileExportPath = join(reconcileRoot, reconcileRelativePath);
+  await waitForFile(reconcileExportPath);
+  const runningReleaseOperation = await waitForReleaseOperation(
+    "effect-before-finalize",
+    (operation) =>
+      operation.request.kind === "export" &&
+      operation.request.items.some(
+        (item) => item.destination.relativePath === reconcileRelativePath,
+      ) &&
+      operation.items[0]?.state === "running",
+  );
+  renameSync(reconcileRoot, parkedReconcileRoot);
+  symlinkSync(parkedReconcileRoot, reconcileRoot, "dir");
+  await supervisor.stop();
+  const releaseReconcileHealth = await supervisor.start(
+    fixture.config.companyDirectory,
+  );
+  assert.notEqual(releaseReconcileHealth.pid, releaseCrashHealth.pid);
+  const unknownReleaseOperation = await waitForReleaseOperation(
+    "restart-unknown",
+    (operation) =>
+      operation.id === runningReleaseOperation.id &&
+      operation.items[0]?.state === "unknown",
+  );
+  assert.equal(unknownReleaseOperation.aggregateState, "blocked");
+  assert.equal(unknownReleaseOperation.nextActions.includes("reconcile"), true);
+  await reloadProjectReviews();
+  await waitForReleaseOperationObservation((observation) =>
+    observation.operations.some(
+      (operation) =>
+        operation.id === unknownReleaseOperation.id &&
+        operation.text.includes("unknown"),
+    ),
+  );
+  unlinkSync(reconcileRoot);
+  renameSync(parkedReconcileRoot, reconcileRoot);
+  await typeElement(
+    `[data-release-operation="${unknownReleaseOperation.id}"] [data-release-reconcile-evidence]`,
+    `filesystem-observation:${unknownReleaseOperation.id}`,
+  );
+  await clickElement(
+    `[data-release-operation="${unknownReleaseOperation.id}"] [data-release-reconcile]`,
+  );
+  const reconciledReleaseOperation = await waitForReleaseOperation(
+    "human-reconciled",
+    (operation) =>
+      operation.id === unknownReleaseOperation.id &&
+      operation.aggregateState === "succeeded",
+  );
+  assert.equal(reconciledReleaseOperation.items[0]?.state, "succeeded");
+  assert.equal(
+    reconciledReleaseOperation.items[0]?.receipt?.destinationDigest,
+    exportedArtifact.contentHash,
+  );
+  await reloadProjectReviews();
+  const reloadedReleaseObservation = await waitForReleaseOperationObservation(
+    (observation) =>
+      observation.operations.some(
+        (operation) =>
+          operation.id === reconciledReleaseOperation.id &&
+          operation.text.includes("succeeded"),
+      ),
+  );
+
   const finalAudit = await supervisor.audit({
     runId: seeded.runId,
     limit: 1_000,
@@ -2526,11 +3001,15 @@ const run = async () => {
     1,
   );
   assert.equal(
-    finalEvents.some((event) => event.type === "delivery.release.accepted"),
-    false,
+    finalEvents.filter(
+      (event) =>
+        event.type === "delivery.release.accepted" &&
+        event.payload?.deliveryCandidateId === deliveryCandidate.id,
+    ).length,
+    1,
   );
   assert.ok(restartHealth);
-  assert.equal(restartHealth.schemaVersion, 50);
+  assert.equal(restartHealth.schemaVersion, 51);
 
   const recoveredInteraction = {
     view: await humanRuntimeClient.query({
@@ -2602,12 +3081,12 @@ const run = async () => {
     ),
     true,
   );
-  assert.equal(health.schemaVersion, 50);
+  assert.equal(health.schemaVersion, 51);
   assert.ok(eventRegistrySources.length > 0);
   const eventTypeById = new Map(
     finalEvents.map((event) => [event.eventId, event.type]),
   );
-  const t21FormalEventTypes = [
+  const t22FormalEventTypes = [
     "product.proposal.revised",
     "product.proposal.awaiting-confirmation",
     "product.baseline.confirmed",
@@ -2625,26 +3104,28 @@ const run = async () => {
     "delivery.candidate-input.authorized",
     "delivery.candidate.created",
     "run.waiting-human-release",
+    "delivery.release.accepted",
+    "delivery.release-operation.invalidated",
   ];
-  const t21FormalEventTypeSet = new Set(t21FormalEventTypes);
-  const t21FormalRegistryEvidence = eventRegistrySources
+  const t22FormalEventTypeSet = new Set(t22FormalEventTypes);
+  const t22FormalRegistryEvidence = eventRegistrySources
     .map((source) => ({
       eventId: source.eventId,
       type: eventTypeById.get(source.eventId),
       registryVersion: source.registryVersion,
     }))
-    .filter((event) => t21FormalEventTypeSet.has(event.type));
+    .filter((event) => t22FormalEventTypeSet.has(event.type));
   assert.deepEqual(
-    [...new Set(t21FormalRegistryEvidence.map((event) => event.type))].sort(),
-    [...t21FormalEventTypes].sort(),
+    [...new Set(t22FormalRegistryEvidence.map((event) => event.type))].sort(),
+    [...t22FormalEventTypes].sort(),
   );
   assert.deepEqual(
     [
       ...new Set(
-        t21FormalRegistryEvidence.map((event) => event.registryVersion),
+        t22FormalRegistryEvidence.map((event) => event.registryVersion),
       ),
     ],
-    [18],
+    [19],
   );
   const outOfScopeLegacySetupEvents = eventRegistrySources
     .map((source) => ({
@@ -2652,18 +3133,18 @@ const run = async () => {
       type: eventTypeById.get(source.eventId),
       registryVersion: source.registryVersion,
     }))
-    .filter((event) => event.registryVersion !== 18);
+    .filter((event) => event.registryVersion !== 19);
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
-      scope: "T21 only",
+      scope: "T22 only",
       excludedEffects: {
-        T22: true,
+        T22: false,
         T26: true,
         T27: true,
-        releaseDecisionAcceptance: true,
-        destinationRefUpdate: true,
-        export: true,
+        releaseDecisionAcceptance: false,
+        destinationRefUpdate: false,
+        export: false,
         deployment: true,
         network: true,
       },
@@ -2686,11 +3167,12 @@ const run = async () => {
       },
       runtimePid: (await supervisor.health()).pid,
       schemaVersion: health.schemaVersion,
-      eventRegistryVersion: 18,
+      eventRegistryVersion: 19,
       eventRegistryEvidence: {
-        scope: "exact T21 formal events from proposal through candidate",
+        scope:
+          "exact T21 Product-to-Candidate and T22 Release operation events",
         typedControlFramesExcluded: true,
-        formalEvents: t21FormalRegistryEvidence,
+        formalEvents: t22FormalRegistryEvidence,
         outOfScopeLegacySetupEventCount: outOfScopeLegacySetupEvents.length,
         outOfScopeLegacySetupRegistryVersions: [
           ...new Set(
@@ -2740,9 +3222,47 @@ const run = async () => {
       candidate: {
         id: deliveryCandidate.id,
         manifestHash: deliveryCandidate.manifestHash,
-        projection: deliveryCandidate.projection,
-        decision: deliveryCandidate.decision,
-        rendererProjection: awaitingDeliveryObservation.projection,
+        projection: "accepted",
+        decisionId: acceptedDeliveryObservation.decisionId,
+        rendererProjection: acceptedDeliveryObservation.projection,
+      },
+      release: {
+        authorityId: acceptedAuthority.id,
+        authorityHash: acceptedAuthority.authorityHash,
+        merge: {
+          operationId: mergeOperation.id,
+          targetBranch: mergeTargetBranch,
+          resultingTargetTip:
+            mergeOperation.items[0]?.receipt?.resultingTargetTip,
+          duplicateGestureCountStable:
+            (await releaseOperationsForCandidate("final-merge-count")).filter(
+              (operation) =>
+                operation.request.kind === "merge" &&
+                operation.request.items[0]?.destination.targetBranch ===
+                  mergeTargetBranch,
+            ).length === 1,
+        },
+        destinationConflict: {
+          operationId: conflictOperation.id,
+          targetTip: git("rev-parse", `${conflictTargetRef}^{commit}`),
+          state: conflictOperation.items[0]?.state,
+        },
+        export: {
+          operationId: exportOperation.id,
+          destinationDigest:
+            exportOperation.items[0]?.receipt?.destinationDigest,
+          partialOperationId: partialExportOperation.id,
+          partialCounts: partialExportOperation.counts,
+        },
+        reconciliation: {
+          operationId: reconciledReleaseOperation.id,
+          before: unknownReleaseOperation.aggregateState,
+          after: reconciledReleaseOperation.aggregateState,
+          restartPid: releaseReconcileHealth.pid,
+          rendererReloaded: reloadedReleaseObservation.operations.some(
+            (operation) => operation.id === reconciledReleaseOperation.id,
+          ),
+        },
       },
       lineage: lineageReport,
       duplicateReplay: duplicateReplayEvidence,

@@ -47,6 +47,16 @@ const requiredEnvironment = (name: string): string => {
   return value;
 };
 
+const releaseFailurePoint = (): "after-effect-before-finalize" | null => {
+  const value =
+    process.env.SANDCASTLE_ELECTRON_TEST_FIXTURE_RELEASE_FAILURE_POINT;
+  if (value === undefined) return null;
+  if (value !== "after-effect-before-finalize") {
+    throw new Error("Electron Test Release failure point is invalid.");
+  }
+  return value;
+};
+
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value === null || typeof value !== "object") return value;
@@ -342,6 +352,7 @@ const main = async (): Promise<void> => {
   };
   const fixtureRuntimeOptions =
     createIntegrationAuthorityFixtureRuntimeOptions(fixtureInput);
+  const configuredReleaseFailurePoint = releaseFailurePoint();
   const setupReceiptPath = join(
     config.evidenceDirectory,
     "runtime",
@@ -413,6 +424,17 @@ const main = async (): Promise<void> => {
         return deliveryQualityPlans.plan(input);
       },
     },
+    ...(configuredReleaseFailurePoint
+      ? {
+          releaseOperationFailureInjection: (point) => {
+            if (point === configuredReleaseFailurePoint) {
+              throw new Error(
+                "Electron Test stopped after the Release effect and before finalization.",
+              );
+            }
+          },
+        }
+      : {}),
     testBuildFixture: {
       clock: fixtureRuntimeOptions.clock,
       nextId: repeatableIdFactory(config.repeatableIdSeed),
