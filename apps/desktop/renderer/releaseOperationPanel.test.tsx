@@ -85,6 +85,12 @@ const operation = (
     items: [
       {
         id: "merge:0",
+        repositoryReference: "repo-api",
+        sourceCommit: "f".repeat(40),
+        destination: {
+          targetBranch: "main",
+          expectedTargetTip: "4".repeat(40),
+        },
         state: "succeeded",
         receipt: {
           kind: "merge",
@@ -97,6 +103,12 @@ const operation = (
       },
       {
         id: "merge:1",
+        repositoryReference: "repo-web",
+        sourceCommit: "1".repeat(40),
+        destination: {
+          targetBranch: "main",
+          expectedTargetTip: "5".repeat(40),
+        },
         state: "destination-conflict",
         receipt: null,
         evidence: [],
@@ -104,6 +116,12 @@ const operation = (
       },
       {
         id: "merge:2",
+        repositoryReference: "repo-api",
+        sourceCommit: "f".repeat(40),
+        destination: {
+          targetBranch: "main",
+          expectedTargetTip: "4".repeat(40),
+        },
         state: "unknown",
         receipt: null,
         evidence: ["adapter could not verify"],
@@ -119,6 +137,7 @@ const renderPanel = async (input: {
     command: ReleaseOperationEnvelopeCommand,
   ) => void | Promise<void>;
   readonly operations?: readonly ReleaseOperationView[];
+  readonly createOperationId?: () => string;
 }) => {
   const dom = new JSDOM(
     "<!doctype html><html><body><div id=app></div></body></html>",
@@ -163,7 +182,9 @@ const renderPanel = async (input: {
         authority={authority}
         operations={input.operations ?? []}
         onCommand={input.onCommand ?? (() => undefined)}
-        createOperationId={() => "operation-stable"}
+        createOperationId={
+          input.createOperationId ?? (() => "operation-stable")
+        }
       />,
     );
   });
@@ -481,6 +502,64 @@ describe("ReleaseOperationPanel", () => {
       await act(async () => submit.click());
       assert.equal(commands.length, 1);
       resolve();
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+
+  it("releases a fulfilled create gesture and assigns the next operation ID on the same mount", async () => {
+    const commands: ReleaseOperationEnvelopeCommand[] = [];
+    const operationIds = ["release-operation-1", "release-operation-2"];
+    const rendered = await renderPanel({
+      onCommand: (command) => {
+        commands.push(command);
+      },
+      createOperationId: () => operationIds.shift()!,
+    });
+    try {
+      const document = rendered.document;
+      for (const repository of ["repo-api", "repo-web"]) {
+        await change(
+          document.querySelector<HTMLInputElement>(
+            `[data-merge-target='${repository}']`,
+          )!,
+          "main",
+        );
+        await change(
+          document.querySelector<HTMLInputElement>(
+            `[data-merge-tip='${repository}']`,
+          )!,
+          repository === "repo-api" ? "5".repeat(40) : "6".repeat(40),
+        );
+      }
+      await change(
+        document.querySelector<HTMLTextAreaElement>("[data-release-reason]")!,
+        "Evidence reviewed.",
+      );
+      await change(
+        document.querySelector<HTMLInputElement>("[data-release-evidence]")!,
+        "review:1",
+      );
+      await act(async () =>
+        document
+          .querySelector<HTMLInputElement>("[data-release-confirm]")!
+          .click(),
+      );
+      const submit = document.querySelector<HTMLButtonElement>(
+        "[data-release-create]",
+      )!;
+      await act(async () => submit.click());
+      await act(async () => undefined);
+      assert.equal(submit.disabled, false);
+      await act(async () => submit.click());
+      assert.deepEqual(
+        commands.map((command) =>
+          command.type === "delivery.release-operation.create"
+            ? command.operation.operationId
+            : null,
+        ),
+        ["release-operation-1", "release-operation-2"],
+      );
     } finally {
       await rendered.cleanup();
     }

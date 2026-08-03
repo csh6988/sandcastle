@@ -77,6 +77,7 @@ export class ReleaseOperationRuntimeError extends Error {
       | "RELEASE_AUTHORITY_CONFLICT"
       | "RELEASE_ARTIFACT_NOT_AUTHORIZED"
       | "RELEASE_ARTIFACT_UNREADABLE"
+      | "RELEASE_DESTINATION_INVALID"
       | "RELEASE_DESTINATION_CONFLICT"
       | "RELEASE_OPERATION_BLOCKED"
       | "RELEASE_RECONCILIATION_INVALID",
@@ -387,7 +388,27 @@ export const openReleaseOperationRuntime = (
 
   const create: ReleaseOperationRuntime["create"] = (input, actor) => {
     if (actor.type !== "human" || actor.authenticatedBy !== "local-session" || actor.id.trim() === "") throw new ReleaseOperationRuntimeError("RELEASE_OPERATION_BLOCKED", "Release operation creation requires a verified local-session human actor.");
-    const request = ReleaseOperationCreateRequestSchema.parse({ ...input, authorization: { ...input.authorization, actor } });
+    const parsed = ReleaseOperationCreateRequestSchema.parse({ ...input, authorization: { ...input.authorization, actor } });
+    let request: ReleaseOperationCreateRequest;
+    try {
+      request = ReleaseOperationCreateRequestSchema.parse(
+        options.adapter.normalizeCreateRequest?.(parsed) ?? parsed,
+      );
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+      if (code === "RELEASE_DESTINATION_INVALID") {
+        throw new ReleaseOperationRuntimeError(
+          "RELEASE_DESTINATION_INVALID",
+          error instanceof Error
+            ? error.message
+            : "Artifact export destination could not be proven stable.",
+        );
+      }
+      throw error;
+    }
     const authority = validateAuthority(request);
     const requestHash = digest({ request, authorityHash: authority.authorityHash });
     let inserted = false;
@@ -455,7 +476,33 @@ export const openReleaseOperationRuntime = (
       if (row.state === "unknown") break;
       const requestItem = parseJson<ReleaseOperationCreateRequest["items"][number]>(row.requestJson, `Release item ${row.itemKey}`);
       const current = inspect(operationId);
-      const effect = itemEffect(current, requestItem);
+      let effect: ReleaseOperationEffectRequest;
+      try {
+        effect = itemEffect(current, requestItem);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Release operation preparation could not be completed.";
+        const code =
+          error instanceof ReleaseOperationRuntimeError
+            ? error.code
+            : "RELEASE_ARTIFACT_UNREADABLE";
+        const result: ReleaseOperationItemFinalize =
+          row.state === "pending"
+            ? {
+                state: "failed",
+                failure: { code, message, observedAt: now() },
+              }
+            : {
+                state: "unknown",
+                unknown: {
+                  code: "RELEASE_RECONCILIATION_INVALID",
+                  message,
+                  observedAt: now(),
+                },
+              };
+        view = finalize(operationId, row, result);
+        if (result.state === "unknown") break;
+        continue;
+      }
       if (row.state === "running" || row.state === "reconciling") {
         const reconciliation = row.state === "reconciling" ? pendingReconciliationIntent(row.databaseId) : null;
         if (row.state === "running") {

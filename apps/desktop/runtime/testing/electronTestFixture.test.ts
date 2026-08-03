@@ -250,6 +250,39 @@ describe("Electron Test fixture", () => {
     fixture.cleanup();
   });
 
+  it("creates a second frozen Repository and linked Worktree when requested", () => {
+    const fixture = createElectronTestFixture({
+      fixtureId: "fixture-second-git",
+      testRunId: "test-run-second-git",
+      testRunManifestHash: "7".repeat(64),
+      adapters: scripts(),
+      allowedAdapterIds: ["scripted-execution", "scripted-interaction"],
+      fakeClock: "2026-07-29T00:00:00.000Z",
+      repeatableIdSeed: "seed-second-git",
+      packaged: false,
+      entrypoint: "electron-test-fixture",
+      additionalRepositoryCount: 1,
+    });
+
+    const additional = fixture.config.additionalRepositories?.[0];
+    assert.ok(additional);
+    assert.equal(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: additional.repositoryDirectory,
+        encoding: "utf8",
+      }).trim(),
+      additional.repositoryCommit,
+    );
+    assert.equal(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: additional.worktreeDirectory,
+        encoding: "utf8",
+      }).trim(),
+      additional.repositoryCommit,
+    );
+    fixture.cleanup();
+  });
+
   it("removes only frozen execution Repository and Worktree targets before PASS and preserves catalog resources until final cleanup", () => {
     const fixture = createElectronTestFixture({
       fixtureId: "fixture-cleanup",

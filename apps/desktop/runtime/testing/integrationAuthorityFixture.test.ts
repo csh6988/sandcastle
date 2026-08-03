@@ -434,6 +434,7 @@ describe("Integration authority fixture", () => {
       repeatableIdSeed: "integration-authority-product-fixture-seed",
       packaged: false,
       entrypoint: "electron-test-fixture",
+      additionalRepositoryCount: 1,
     });
     fixtureCleanups.push(() => void electronFixture.cleanup());
     const fixtureInput = {
@@ -443,6 +444,12 @@ describe("Integration authority fixture", () => {
       fixtureId: electronFixture.config.fixtureId,
       repositoryDirectory: electronFixture.config.repositoryDirectory,
       worktreeDirectory: electronFixture.config.worktreeDirectory,
+      repositoryDirectories: [
+        electronFixture.config.repositoryDirectory,
+        ...(electronFixture.config.additionalRepositories ?? []).map(
+          (repository) => repository.repositoryDirectory,
+        ),
+      ],
       fakeClock: electronFixture.config.fakeClock,
       repeatableIdSeed: electronFixture.config.repeatableIdSeed,
     };
@@ -547,6 +554,7 @@ describe("Integration authority fixture", () => {
 
       assert.equal(created.projectId, preparation.projectId);
       assert.equal(created.runId, baseline.runId);
+      assert.equal(created.integrationAuthority.repositoryResults.length, 2);
       assert.equal(
         database.pipelineRuntime.inspectRun(created.runId).snapshot.payload
           .productBaseline?.id,

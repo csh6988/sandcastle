@@ -347,6 +347,12 @@ const main = async (): Promise<void> => {
     fixtureId: config.fixtureId,
     repositoryDirectory: config.repositoryDirectory,
     worktreeDirectory: config.worktreeDirectory,
+    repositoryDirectories: [
+      config.repositoryDirectory,
+      ...(config.additionalRepositories ?? []).map(
+        (repository) => repository.repositoryDirectory,
+      ),
+    ],
     fakeClock: config.fakeClock,
     repeatableIdSeed: config.repeatableIdSeed,
   };

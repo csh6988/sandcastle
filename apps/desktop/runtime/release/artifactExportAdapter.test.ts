@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -165,6 +166,32 @@ describe("Artifact export release adapter", () => {
     const aliased = root.replace(/^\/private\/tmp\//, "/tmp/");
     const result = await adapter.execute(request(aliased, bytes));
     assert.equal(result.state, "succeeded");
+  });
+
+  it("canonicalizes an export root before immutable intent and rejects an unprovable root", () => {
+    const root = destination();
+    const bytes = Buffer.from("intent-root");
+    const adapter = createArtifactExportAdapter({ artifacts: artifacts(bytes) });
+    const alias = root.startsWith("/private/") ? root.slice(8) : `/private${root}`;
+    const intent = (canonicalRoot: string) => ({
+      operationId: "release-operation-1",
+      candidateId: "candidate-1",
+      expectedAcceptedAuthorityHash: "a".repeat(64),
+      kind: "export" as const,
+      authorization: {
+        actor: { type: "human" as const, id: "human-1", authenticatedBy: "local-session" as const },
+        reason: "Export the accepted Artifact.",
+        evidenceRefs: ["checklist:1"],
+      },
+      items: [{ ...request(canonicalRoot, bytes).item }],
+    });
+    const normalized = adapter.normalizeCreateRequest!(intent(alias));
+    assert.equal(normalized.kind, "export");
+    if (normalized.kind !== "export") return;
+    assert.equal(normalized.items[0]?.destination.canonicalRoot, realpathSync(root));
+    assert.throws(() =>
+      adapter.normalizeCreateRequest!(intent(join(root, "missing"))),
+    );
   });
 
   it("rejects symbolic-link roots, ancestors, and leaves without writing outside the root", async () => {

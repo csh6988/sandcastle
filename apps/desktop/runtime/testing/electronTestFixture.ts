@@ -63,6 +63,11 @@ export type ElectronTestFixtureConfig = {
   readonly repositoryDirectory: string;
   readonly worktreeDirectory: string;
   readonly repositoryCommit: string;
+  readonly additionalRepositories?: readonly {
+    readonly repositoryDirectory: string;
+    readonly worktreeDirectory: string;
+    readonly repositoryCommit: string;
+  }[];
   readonly rootFingerprint: string;
   readonly cleanupTargets: readonly {
     readonly kind: "repository" | "worktree";
@@ -529,6 +534,21 @@ export const loadElectronTestFixtureConfig = (input: {
       "Electron Test fixture config identity or authorization is invalid.",
     );
   }
+  if (
+    config.additionalRepositories !== undefined &&
+    (!Array.isArray(config.additionalRepositories) ||
+      config.additionalRepositories.some(
+        (repository) =>
+          typeof repository.repositoryDirectory !== "string" ||
+          typeof repository.worktreeDirectory !== "string" ||
+          !/^[a-f0-9]{40}$/.test(repository.repositoryCommit),
+      ))
+  ) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_CONFIG_INVALID",
+      "Electron Test fixture additional Repository identity is invalid.",
+    );
+  }
   assertHash(config.testRunManifestHash, "Test Run manifest hash");
   assertHash(
     config.companyDirectoryFingerprint,
@@ -543,6 +563,10 @@ export const loadElectronTestFixtureConfig = (input: {
   assertInside(root, evidenceDirectory);
   assertInside(root, repositoryDirectory);
   assertInside(root, worktreeDirectory);
+  for (const repository of config.additionalRepositories ?? []) {
+    assertInside(root, pathWithin(root, repository.repositoryDirectory));
+    assertInside(root, pathWithin(root, repository.worktreeDirectory));
+  }
   assertHash(config.configHash, "fixture config hash");
   const { configHash, ...configInput } = config;
   if (configHashFor(configInput) !== configHash) {
@@ -604,6 +628,19 @@ export const loadElectronTestFixtureConfig = (input: {
       "FIXTURE_REPOSITORY_IDENTITY_MISMATCH",
       "Electron Test fixture Repository and Worktree do not match the frozen commit.",
     );
+  }
+  for (const repository of config.additionalRepositories ?? []) {
+    if (
+      git(repository.repositoryDirectory, ["rev-parse", "HEAD"]) !==
+        repository.repositoryCommit ||
+      git(repository.worktreeDirectory, ["rev-parse", "HEAD"]) !==
+        repository.repositoryCommit
+    ) {
+      throw new ElectronTestFixtureError(
+        "FIXTURE_REPOSITORY_IDENTITY_MISMATCH",
+        "Electron Test fixture additional Repository and Worktree do not match the frozen commit.",
+      );
+    }
   }
   claimAuthorization(
     config,
@@ -694,6 +731,7 @@ export const createElectronTestFixture = (input: {
   readonly repeatableIdSeed: string;
   readonly packaged: boolean;
   readonly entrypoint: "electron-test-fixture";
+  readonly additionalRepositoryCount?: 0 | 1;
 }): ElectronTestFixture => {
   if (input.packaged || input.entrypoint !== "electron-test-fixture") {
     throw new ElectronTestFixtureError(
@@ -723,6 +761,15 @@ export const createElectronTestFixture = (input: {
   const worktreeDirectory = join(root, "worktree");
   const executionRepositoryDirectory = join(root, "execution-repository");
   const executionWorktreeDirectory = join(root, "execution-worktree");
+  const additionalRepositories =
+    input.additionalRepositoryCount === 1
+      ? [
+          {
+            repositoryDirectory: join(root, "repository-2"),
+            worktreeDirectory: join(root, "worktree-2"),
+          },
+        ]
+      : [];
   for (const directory of [
     companyDirectory,
     evidenceDirectory,
@@ -769,6 +816,44 @@ export const createElectronTestFixture = (input: {
     executionWorktreeDirectory,
     repositoryCommit,
   ]);
+  const frozenAdditionalRepositories = additionalRepositories.map(
+    (repository, index) => {
+      mkdirSync(repository.repositoryDirectory, { mode: 0o700 });
+      git(repository.repositoryDirectory, [
+        "init",
+        "--initial-branch=fixture-main",
+      ]);
+      writeFileSync(
+        join(repository.repositoryDirectory, "README.md"),
+        `# ${input.fixtureId} Repository ${index + 2}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
+      git(repository.repositoryDirectory, ["add", "README.md"]);
+      git(repository.repositoryDirectory, [
+        "-c",
+        "user.name=Sandcastle Test Fixture",
+        "-c",
+        "user.email=fixture@sandcastle.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-m",
+        "test: initialize second electron fixture repository",
+      ]);
+      const repositoryCommit = git(repository.repositoryDirectory, [
+        "rev-parse",
+        "HEAD",
+      ]);
+      git(repository.repositoryDirectory, [
+        "worktree",
+        "add",
+        "--detach",
+        repository.worktreeDirectory,
+        repositoryCommit,
+      ]);
+      return { ...repository, repositoryCommit };
+    },
+  );
   const marker = JSON.stringify({
     schemaVersion: 1,
     fixtureId: input.fixtureId,
@@ -833,6 +918,9 @@ export const createElectronTestFixture = (input: {
     repositoryDirectory,
     worktreeDirectory,
     repositoryCommit,
+    ...(frozenAdditionalRepositories.length > 0
+      ? { additionalRepositories: frozenAdditionalRepositories }
+      : {}),
     rootFingerprint,
     cleanupTargets,
     fakeClock: input.fakeClock,

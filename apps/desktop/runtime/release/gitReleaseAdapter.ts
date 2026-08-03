@@ -302,6 +302,28 @@ const refIsCheckedOut = async (repositoryRoot: string, ref: string, boundary: Gi
     .split("\n")
     .some((line) => line === `branch ${ref}`);
 
+const assertAssociatedWorktreesClean = async (
+  repositoryRoot: string,
+  boundary: GitReleaseExecutionBoundary,
+): Promise<void> => {
+  const worktrees = (await git(repositoryRoot, ["worktree", "list", "--porcelain"], boundary))
+    .split("\n")
+    .flatMap((line) => (line.startsWith("worktree ") ? [line.slice("worktree ".length)] : []));
+  for (const worktree of worktrees) {
+    const status = await git(
+      worktree,
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      boundary,
+    );
+    if (status !== "") {
+      throw new GitReleaseAdapterError(
+        "RELEASE_TARGET_INVALID",
+        "Release Git effects require every Repository-associated worktree to be clean.",
+      );
+    }
+  }
+};
+
 const isAncestor = async (
   repositoryRoot: string,
   ancestor: string,
@@ -382,6 +404,7 @@ const prepare = async (
   if (await refIsCheckedOut(repositoryRoot, targetRef, boundary)) {
     throw new GitReleaseAdapterError("RELEASE_TARGET_CHECKED_OUT", "The selected Release target branch is checked out in a Git worktree.");
   }
+  await assertAssociatedWorktreesClean(repositoryRoot, boundary);
   try {
     await git(repositoryRoot, ["cat-file", "-e", `${request.item.sourceCommit}^{commit}`], boundary);
     await git(repositoryRoot, ["cat-file", "-e", `${request.item.destination.expectedTargetTip}^{commit}`], boundary);
@@ -491,6 +514,10 @@ export const openLocalGitReleaseAdapter = (
           if (await refIsCheckedOut(prepared.repositoryRoot, prepared.targetRef, executionBoundary)) {
             return failure("RELEASE_TARGET_CHECKED_OUT", "The selected Release target branch is checked out in a Git worktree.");
           }
+          await assertAssociatedWorktreesClean(
+            prepared.repositoryRoot,
+            executionBoundary,
+          );
           const result = await runCommand(
             ["-C", prepared.repositoryRoot, "update-ref", "--no-deref", prepared.targetRef, prepared.sourceCommit, prepared.expectedTargetTip],
             executionBoundary,

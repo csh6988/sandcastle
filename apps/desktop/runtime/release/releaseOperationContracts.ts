@@ -355,15 +355,27 @@ export type ReleaseOperationReconcileObservation = z.infer<
   typeof ReleaseOperationReconcileObservationSchema
 >;
 
-const ReleaseOperationItemViewSchema = z
+const ReleaseOperationItemStateViewSchema = z
   .object({
-    id: IdSchema,
     state: ReleaseOperationItemStateSchema,
     receipt: ReleaseOperationReceiptSchema.nullable(),
     evidence: z.array(z.unknown()),
     updatedAt: TimestampSchema,
   })
-  .passthrough();
+  .strict();
+
+const MergeReleaseOperationItemViewSchema = MergeReleaseOperationItemSchema
+  .merge(ReleaseOperationItemStateViewSchema)
+  .strict();
+
+const ExportReleaseOperationItemViewSchema = ExportReleaseOperationItemSchema
+  .merge(ReleaseOperationItemStateViewSchema)
+  .strict();
+
+const ReleaseOperationItemViewSchema = z.union([
+  MergeReleaseOperationItemViewSchema,
+  ExportReleaseOperationItemViewSchema,
+]);
 
 export const ReleaseOperationNextActionSchema = z.enum([
   "reconcile",
@@ -413,6 +425,14 @@ export interface ReleaseOperationPersistence {
 }
 
 export interface ReleaseOperationEffectAdapter {
+  /**
+   * Freezes provider-owned destination identity before Release intent and its
+   * destination claim commit. Implementations must fail closed when identity
+   * cannot be proven stable.
+   */
+  readonly normalizeCreateRequest?: (
+    request: ReleaseOperationCreateRequest,
+  ) => ReleaseOperationCreateRequest;
   readonly execute: (
     request: ReleaseOperationEffectRequest,
   ) => Promise<ReleaseOperationItemFinalize>;

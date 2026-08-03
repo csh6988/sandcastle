@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import {
   openReleaseOperationRuntime,
+  type ReleaseOperationArtifactReader,
 } from "./releaseOperationRuntime.js";
 import type {
   AcceptedDeliveryCandidateAuthoritySnapshot,
@@ -35,6 +39,9 @@ const authority: AcceptedDeliveryCandidateAuthoritySnapshot = {
 const setup = (
   adapter: ReleaseOperationEffectAdapter,
   acceptedAuthority: AcceptedDeliveryCandidateAuthoritySnapshot = authority,
+  artifacts: ReleaseOperationArtifactReader = {
+    metadata: () => ({ contentKind: "managed-file", integrityStatus: "verified", digest: hash("b") }),
+  },
 ) => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
@@ -43,9 +50,7 @@ const setup = (
     database,
     runtime: openReleaseOperationRuntime(database, {
       acceptedAuthority: () => acceptedAuthority,
-      artifacts: {
-        metadata: () => ({ contentKind: "managed-file", integrityStatus: "verified", digest: hash("b") }),
-      },
+      artifacts,
       adapter,
       id: (() => { let value = 0; return () => `id-${++value}`; })(),
       clock: () => new Date("2026-08-03T00:00:00.000Z"),
@@ -62,7 +67,62 @@ const mergeRequest = (operationId = "release-operation-1") => ({
   items: [{ id: "repository:api", repositoryReference: "repository:api", sourceCommit: commit("b"), destination: { targetBranch: "main", expectedTargetTip: commit("a") } }],
 });
 
+const exportRequest = (operationId: string, canonicalRoot: string) => ({
+  operationId,
+  candidateId: authority.candidateId,
+  expectedAcceptedAuthorityHash: authority.authorityHash,
+  kind: "export" as const,
+  authorization: { actor: { type: "human" as const, id: "human-1", authenticatedBy: "local-session" as const }, reason: "Export the accepted Artifact.", evidenceRefs: ["checklist-1"] },
+  items: [{ id: "artifact:release-notes", artifactVersionId: "artifact-version-1", destination: { canonicalRoot, expectedRootState: "preexisting-local-filesystem-root" as const, relativePath: "release-notes.md", overwrite: { kind: "create-only" as const } }}],
+});
+
 describe("ReleaseOperationRuntime", () => {
+  it("durably fails an export whose Artifact preparation rejects before any effect", async () => {
+    let executions = 0;
+    const { runtime } = setup(
+      {
+        execute: async () => {
+          executions += 1;
+          return { state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } };
+        },
+        reconcile: async () => ({ state: "pending" }),
+      },
+      authority,
+      { metadata: () => { throw new Error("Artifact Registry unavailable"); } },
+    );
+    const input = exportRequest("release-operation-preparation-failure", "/tmp/release");
+    const view = await runtime.dispatch(runtime.create(input, input.authorization.actor).id);
+    assert.equal(view.aggregateState, "failed");
+    assert.equal(view.items[0]?.state, "failed");
+    assert.equal(executions, 0);
+  });
+
+  it("freezes normalized export identity before its immutable intent and destination claim", () => {
+    const root = mkdtempSync(join(tmpdir(), "sandcastle-release-runtime-"));
+    try {
+      const canonicalRoot = realpathSync(root);
+      const alias = canonicalRoot.startsWith("/private/") ? canonicalRoot.slice(8) : `/private${canonicalRoot}`;
+      const { runtime } = setup({
+        normalizeCreateRequest: (request) =>
+          request.kind === "export"
+            ? { ...request, items: request.items.map((item) => ({ ...item, destination: { ...item.destination, canonicalRoot } })) }
+            : request,
+        execute: async () => ({ state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } }),
+        reconcile: async () => ({ state: "pending" }),
+      });
+      const created = runtime.create(exportRequest("release-operation-1", alias), exportRequest("release-operation-1", alias).authorization.actor);
+      assert.equal(created.request.kind, "export");
+      if (created.request.kind !== "export") return;
+      assert.equal(created.request.items[0]?.destination.canonicalRoot, canonicalRoot);
+      assert.throws(
+        () => runtime.create(exportRequest("release-operation-2", canonicalRoot), exportRequest("release-operation-2", canonicalRoot).authorization.actor),
+        (error: unknown) => error instanceof Error && "code" in error && error.code === "RELEASE_DESTINATION_CONFLICT",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists immutable intent before a deterministic external effect", async () => {
     const calls: string[] = [];
     const { runtime } = setup({

@@ -130,6 +130,18 @@ describe("Local Git Release Adapter", () => {
     assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
   });
 
+  it("fails closed when any Repository-associated worktree is dirty without advancing the target ref", async () => {
+    const fixture = repository();
+    writeFileSync(join(fixture.root, "untracked-release-drift.txt"), "dirty\n");
+
+    const result = await openLocalGitReleaseAdapter().execute(request(fixture));
+
+    assert.equal(result.state, "failed");
+    if (result.state !== "failed") return;
+    assert.equal(result.failure.code, "RELEASE_TARGET_INVALID");
+    assert.equal(git(fixture.root, "rev-parse", "main"), fixture.base);
+  });
+
   it("refuses a divergent source without creating a merge commit", async () => {
     const fixture = repository();
     git(fixture.root, "switch", "main");

@@ -86,6 +86,7 @@ const fixture = createElectronTestFixture({
   repeatableIdSeed: "electron-test-fixture-seed-v1",
   packaged: app.isPackaged,
   entrypoint: "electron-test-fixture",
+  additionalRepositoryCount: 1,
 });
 const humanRuntimeToken = randomBytes(32).toString("base64url");
 const humanRuntimeClient = createCompanyRuntimeClient({
@@ -2562,8 +2563,8 @@ const run = async () => {
   );
   assert.ok(acceptedAuthority.artifactVersionIds.length >= 2);
 
-  const git = (...args) =>
-    execFileSync("git", ["-C", fixture.config.repositoryDirectory, ...args], {
+  const git = (repositoryDirectory, ...args) =>
+    execFileSync("git", ["-C", repositoryDirectory, ...args], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2572,27 +2573,50 @@ const run = async () => {
         GIT_TERMINAL_PROMPT: "0",
       },
     }).trim();
-  const repositoryAuthority = acceptedAuthority.repositoryCommits[0];
-  assert.ok(repositoryAuthority);
+  const fixtureRepositories = [
+    {
+      repositoryDirectory: fixture.config.repositoryDirectory,
+      repositoryCommit: fixture.config.repositoryCommit,
+    },
+    ...(fixture.config.additionalRepositories ?? []),
+  ];
   assert.equal(
-    repositoryAuthority.repositoryReference,
-    fixture.config.repositoryDirectory,
+    acceptedAuthority.repositoryCommits.length,
+    fixtureRepositories.length,
   );
-  const releaseBaseCommit = fixture.config.repositoryCommit;
-  assert.doesNotThrow(() =>
-    git(
-      "merge-base",
-      "--is-ancestor",
-      releaseBaseCommit,
-      repositoryAuthority.commit,
-    ),
+  const releaseRepositories = fixtureRepositories.map(
+    (configuration, index) => {
+      const authority = acceptedAuthority.repositoryCommits.find(
+        (repository) =>
+          repository.repositoryReference === configuration.repositoryDirectory,
+      );
+      assert.ok(
+        authority,
+        `Fixture Repository ${index + 1} lacks accepted authority.`,
+      );
+      assert.doesNotThrow(() =>
+        git(
+          configuration.repositoryDirectory,
+          "merge-base",
+          "--is-ancestor",
+          configuration.repositoryCommit,
+          authority.commit,
+        ),
+      );
+      return {
+        authority,
+        directory: configuration.repositoryDirectory,
+        baseCommit: configuration.repositoryCommit,
+      };
+    },
   );
-  const createReleaseTarget = (branch, tip = releaseBaseCommit) => {
+  assert.equal(releaseRepositories.length, 2);
+  const createReleaseTarget = ({ directory, branch, tip }) => {
     const ref = `refs/heads/${branch}`;
-    git("update-ref", ref, tip);
-    assert.equal(git("rev-parse", `${ref}^{commit}`), tip);
+    git(directory, "update-ref", ref, tip);
+    assert.equal(git(directory, "rev-parse", `${ref}^{commit}`), tip);
     assert.equal(
-      git("worktree", "list", "--porcelain")
+      git(directory, "worktree", "list", "--porcelain")
         .split("\n")
         .some((line) => line === `branch ${ref}`),
       false,
@@ -2653,17 +2677,18 @@ const run = async () => {
       (state) => state.disabled === false,
     );
   };
-  const submitMerge = async ({ branch, expectedTip, reason }) => {
-    await typeElement(
-      `[data-merge-target="${fixture.config.repositoryDirectory}"]`,
-      branch,
-    );
-    await typeElement(
-      `[data-merge-tip="${fixture.config.repositoryDirectory}"]`,
-      expectedTip,
-    );
+  const submitMerge = async ({ destinations, reason }) => {
+    for (const destination of destinations) {
+      await typeElement(
+        `[data-merge-target="${destination.repositoryReference}"]`,
+        destination.targetBranch,
+      );
+      await typeElement(
+        `[data-merge-tip="${destination.repositoryReference}"]`,
+        destination.expectedTargetTip,
+      );
+    }
     await fillReleaseAuthorization(reason);
-    await clickElement("[data-release-create]");
     await clickElement("[data-release-create]");
   };
   const submitExport = async ({ root, items, reason }) => {
@@ -2680,66 +2705,36 @@ const run = async () => {
     await clickElement("[data-release-create]");
   };
 
-  const mergeTargetBranch = "release/t22-electron";
-  const mergeTargetRef = createReleaseTarget(mergeTargetBranch);
-  const operationsBeforeMerge =
-    await releaseOperationsForCandidate("before-merge");
-  await submitMerge({
-    branch: mergeTargetBranch,
-    expectedTip: releaseBaseCommit,
-    reason: "Verified the exact accepted Repository commit and target tip.",
+  const mergeDestinations = releaseRepositories.map((repository, index) => {
+    const targetBranch = `release/t22-partial-merge-${index + 1}`;
+    return {
+      repositoryReference: repository.authority.repositoryReference,
+      targetBranch,
+      expectedTargetTip: repository.baseCommit,
+      targetRef: createReleaseTarget({
+        directory: repository.directory,
+        branch: targetBranch,
+        tip: repository.baseCommit,
+      }),
+      ...repository,
+    };
   });
-  const mergeOperation = await waitForReleaseOperation(
-    "merge-succeeded",
-    (operation) =>
-      operation.request.kind === "merge" &&
-      operation.request.items[0]?.destination.targetBranch ===
-        mergeTargetBranch &&
-      operation.aggregateState === "succeeded",
+  const driftDestination = mergeDestinations[1];
+  assert.ok(driftDestination);
+  const releaseBaseTree = git(
+    driftDestination.directory,
+    "rev-parse",
+    `${driftDestination.baseCommit}^{tree}`,
   );
-  assert.equal(
-    (await releaseOperationsForCandidate("after-duplicate-merge-gesture"))
-      .length,
-    operationsBeforeMerge.length + 1,
-  );
-  assert.equal(
-    git("rev-parse", `${mergeTargetRef}^{commit}`),
-    repositoryAuthority.commit,
-  );
-  assert.equal(mergeOperation.items[0]?.state, "succeeded");
-  assert.equal(mergeOperation.items[0]?.receipt?.kind, "merge");
-  assert.equal(
-    mergeOperation.items[0]?.receipt?.resultingTargetTip,
-    repositoryAuthority.commit,
-  );
-  await waitForReleaseOperationObservation((observation) =>
-    observation.operations.some(
-      (operation) =>
-        operation.id === mergeOperation.id &&
-        operation.text.includes("succeeded"),
-    ),
-  );
-  await reloadProjectReviews();
-  await waitForReleaseOperationObservation((observation) =>
-    observation.operations.some(
-      (operation) =>
-        operation.id === mergeOperation.id &&
-        operation.text.includes("succeeded"),
-    ),
-  );
-
-  const conflictTargetBranch = "release/t22-drift";
-  const conflictTargetRef = createReleaseTarget(conflictTargetBranch);
-  const releaseBaseTree = git("rev-parse", `${releaseBaseCommit}^{tree}`);
   const driftCommit = execFileSync(
     "git",
     [
       "-C",
-      fixture.config.repositoryDirectory,
+      driftDestination.directory,
       "commit-tree",
       releaseBaseTree,
       "-p",
-      releaseBaseCommit,
+      driftDestination.baseCommit,
     ],
     {
       input: "fixture release destination drift\n",
@@ -2755,27 +2750,103 @@ const run = async () => {
       },
     },
   ).trim();
-  git("update-ref", conflictTargetRef, driftCommit, releaseBaseCommit);
-  await reloadProjectReviews();
+  git(
+    driftDestination.directory,
+    "update-ref",
+    driftDestination.targetRef,
+    driftCommit,
+    driftDestination.baseCommit,
+  );
+  const operationsBeforeMerge =
+    await releaseOperationsForCandidate("before-merge");
   await submitMerge({
-    branch: conflictTargetBranch,
-    expectedTip: releaseBaseCommit,
+    destinations: mergeDestinations,
     reason:
-      "Verify destination compare-and-swap rejects unrelated target drift.",
+      "Verify independent durable results for the exact accepted Repository destinations.",
   });
-  const conflictOperation = await waitForReleaseOperation(
-    "merge-destination-conflict",
+  const mergeOperation = await waitForReleaseOperation(
+    "merge-partially-succeeded",
     (operation) =>
       operation.request.kind === "merge" &&
-      operation.request.items[0]?.destination.targetBranch ===
-        conflictTargetBranch &&
-      operation.items[0]?.state === "destination-conflict",
+      operation.request.items.length === 2 &&
+      operation.aggregateState === "partially-succeeded",
   );
-  assert.equal(git("rev-parse", `${conflictTargetRef}^{commit}`), driftCommit);
-  assert.equal(conflictOperation.aggregateState, "failed");
   assert.equal(
-    conflictOperation.nextActions.includes("create-new-operation"),
-    true,
+    (await releaseOperationsForCandidate("after-partial-merge-gesture")).length,
+    operationsBeforeMerge.length + 1,
+  );
+  assert.equal(mergeOperation.aggregateState === "succeeded", false);
+  assert.equal(
+    new Set(
+      mergeOperation.request.items.map((item) => item.repositoryReference),
+    ).size,
+    2,
+  );
+  for (const destination of mergeDestinations) {
+    const requested = mergeOperation.request.items.find(
+      (item) => item.repositoryReference === destination.repositoryReference,
+    );
+    assert.equal(requested?.sourceCommit, destination.authority.commit);
+    assert.equal(requested?.destination.targetBranch, destination.targetBranch);
+    assert.equal(
+      requested?.destination.expectedTargetTip,
+      destination.expectedTargetTip,
+    );
+  }
+  assert.equal(mergeOperation.counts.succeeded, 1);
+  assert.equal(mergeOperation.counts.destinationConflict, 1);
+  const succeededMerge = mergeOperation.items.find(
+    (item) =>
+      item.repositoryReference === mergeDestinations[0]?.repositoryReference,
+  );
+  assert.equal(succeededMerge?.state, "succeeded");
+  assert.equal(succeededMerge?.receipt?.kind, "merge");
+  assert.equal(
+    succeededMerge?.receipt?.resultingTargetTip,
+    mergeDestinations[0]?.authority.commit,
+  );
+  assert.equal(
+    git(
+      mergeDestinations[0].directory,
+      "rev-parse",
+      `${mergeDestinations[0].targetRef}^{commit}`,
+    ),
+    mergeDestinations[0].authority.commit,
+  );
+  const conflictedMerge = mergeOperation.items.find(
+    (item) => item.repositoryReference === driftDestination.repositoryReference,
+  );
+  assert.equal(conflictedMerge?.state, "destination-conflict");
+  assert.equal(
+    git(
+      driftDestination.directory,
+      "rev-parse",
+      `${driftDestination.targetRef}^{commit}`,
+    ),
+    driftCommit,
+  );
+  const partialMergeEvents = (
+    await supervisor.events({ afterSequence: 0, limit: 1_000 })
+  ).filter(
+    (event) =>
+      event.type === "delivery.release-operation.invalidated" &&
+      event.payload?.releaseOperationId === mergeOperation.id,
+  );
+  assert.ok(partialMergeEvents.length > 0);
+  await waitForReleaseOperationObservation((observation) =>
+    observation.operations.some(
+      (operation) =>
+        operation.id === mergeOperation.id &&
+        operation.text.includes("partially-succeeded"),
+    ),
+  );
+  await reloadProjectReviews();
+  await waitForReleaseOperationObservation((observation) =>
+    observation.operations.some(
+      (operation) =>
+        operation.id === mergeOperation.id &&
+        operation.text.includes("partially-succeeded"),
+    ),
   );
 
   const exportRoot = join(fixture.root, "release-exports");
@@ -3231,21 +3302,23 @@ const run = async () => {
         authorityHash: acceptedAuthority.authorityHash,
         merge: {
           operationId: mergeOperation.id,
-          targetBranch: mergeTargetBranch,
-          resultingTargetTip:
-            mergeOperation.items[0]?.receipt?.resultingTargetTip,
-          duplicateGestureCountStable:
-            (await releaseOperationsForCandidate("final-merge-count")).filter(
-              (operation) =>
-                operation.request.kind === "merge" &&
-                operation.request.items[0]?.destination.targetBranch ===
-                  mergeTargetBranch,
-            ).length === 1,
-        },
-        destinationConflict: {
-          operationId: conflictOperation.id,
-          targetTip: git("rev-parse", `${conflictTargetRef}^{commit}`),
-          state: conflictOperation.items[0]?.state,
+          aggregateState: mergeOperation.aggregateState,
+          counts: mergeOperation.counts,
+          succeeded: {
+            repositoryReference: mergeDestinations[0]?.repositoryReference,
+            targetBranch: mergeDestinations[0]?.targetBranch,
+            resultingTargetTip: succeededMerge?.receipt?.resultingTargetTip,
+          },
+          destinationConflict: {
+            repositoryReference: driftDestination.repositoryReference,
+            targetBranch: driftDestination.targetBranch,
+            targetTip: git(
+              driftDestination.directory,
+              "rev-parse",
+              `${driftDestination.targetRef}^{commit}`,
+            ),
+            state: conflictedMerge?.state,
+          },
         },
         export: {
           operationId: exportOperation.id,

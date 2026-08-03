@@ -54,7 +54,7 @@ export function ReleaseOperationPanel({
   readonly createOperationId?: () => string;
 }) {
   const [kind, setKind] = useState<"merge" | "export">("merge");
-  const [operationId] = useState(createOperationId);
+  const [operationId, setOperationId] = useState(createOperationId);
   const [mergeDestinations, setMergeDestinations] = useState<
     Readonly<Record<string, MergeDestination>>
   >({});
@@ -182,6 +182,9 @@ export function ReleaseOperationPanel({
           };
     try {
       await onCommand({ type: "delivery.release-operation.create", operation });
+      inFlightRef.current = false;
+      setInFlight(false);
+      setOperationId(createOperationId());
     } catch {
       inFlightRef.current = false;
       setInFlight(false);

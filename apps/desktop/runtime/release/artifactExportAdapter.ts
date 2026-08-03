@@ -470,6 +470,24 @@ export const createArtifactExportAdapter = (
   };
 
   return {
+    normalizeCreateRequest(request) {
+      if (request.kind !== "export") return request;
+      return {
+        ...request,
+        items: request.items.map((item) => {
+          const components = assertRelativePath(item.destination.relativePath);
+          const root = canonicalRoot(item.destination.canonicalRoot);
+          assertInside(root, components);
+          return {
+            ...item,
+            destination: {
+              ...item.destination,
+              canonicalRoot: root,
+            },
+          };
+        }),
+      };
+    },
     async execute(request): Promise<ReleaseOperationItemFinalize> {
       if (request.kind !== "export") return failure("RELEASE_DESTINATION_INVALID", "Artifact export adapter cannot execute a merge Release operation.");
       try {

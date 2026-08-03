@@ -119,6 +119,7 @@ export interface IntegrationAuthorityFixtureInput {
   readonly fixtureId: string;
   readonly repositoryDirectory: string;
   readonly worktreeDirectory: string;
+  readonly repositoryDirectories?: readonly string[];
   readonly fakeClock: string;
   readonly repeatableIdSeed: string;
 }
@@ -354,17 +355,20 @@ export const createIntegrationAuthorityFixtureRuntimeOptions = (
       onExecute: async (execution, sink) => {
         const request = execution.request;
         if (
-          execution.node.id !== "development" ||
+          execution.node.handlerKindId !== "development@1" ||
           request?.sideEffectPolicy !== "formal" ||
           !request.immutableContext.workPackage
         ) {
           return { kind: "succeeded" as const };
         }
-        const baseCommit = git(input.repositoryDirectory, [
+        const workPackage = request.immutableContext.workPackage;
+        const baseCommit = git(workPackage.repositoryReference, [
           "rev-parse",
           "HEAD",
         ]);
-        const repositoryDirectory = realpathSync(input.repositoryDirectory);
+        const repositoryDirectory = realpathSync(
+          workPackage.repositoryReference,
+        );
         const fixtureRoot = dirname(repositoryDirectory);
         if (
           dirname(realpathSync(input.companyDirectory)) !== fixtureRoot ||
@@ -374,7 +378,6 @@ export const createIntegrationAuthorityFixtureRuntimeOptions = (
             "Electron Test fixture resources must share one temporary fixture root.",
           );
         }
-        const workPackage = request.immutableContext.workPackage;
         if (
           realpathSync(workPackage.repositoryReference) !== repositoryDirectory
         ) {
@@ -914,6 +917,12 @@ export const createIntegrationAuthorityFixturePreparation = (
   },
 ): IntegrationAuthorityFixturePreparation => {
   const database = input.database;
+  const repositoryReferences = [
+    input.repositoryDirectory,
+    ...(input.repositoryDirectories ?? []).filter(
+      (repository) => repository !== input.repositoryDirectory,
+    ),
+  ];
   const project = database.catalog.createProject({
     name: "Electron Test Fixture",
     goal: "Verify the real Product-to-Candidate authority chain.",
@@ -924,8 +933,8 @@ export const createIntegrationAuthorityFixturePreparation = (
     name: project.name,
     goal: project.goal,
     sharedContext:
-      "One temporary Repository produces one reviewed source commit.",
-    repositoryReferences: [input.repositoryDirectory],
+      "Temporary Repositories produce independently reviewed source commits.",
+    repositoryReferences,
   });
   requireSucceeded(
     database.commandRegistry.execute({
@@ -950,6 +959,33 @@ export const createIntegrationAuthorityFixturePreparation = (
       },
     }),
   );
+  for (const [index, repositoryReference] of repositoryReferences
+    .slice(1)
+    .entries()) {
+    requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:application-register:${index + 2}`,
+        actor: {
+          type: "human",
+          id: "electron-test-fixture",
+          authenticatedBy: "local-session",
+        },
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: 0,
+        command: {
+          type: "application.register",
+          applicationId: `${input.fixtureId}:application:${index + 2}`,
+          projectId: project.id,
+          repositoryReference,
+          applicationKey: `fixture-${index + 2}`,
+          ownership: "software-rnd",
+          buildCommand: "fixture-build",
+          testCommand: "fixture-test",
+        },
+      }),
+    );
+  }
   const department = database.catalog.createDepartment({
     name: "Electron Test Quality",
   });
@@ -1027,6 +1063,14 @@ export const createIntegrationAuthorityFixturePreparation = (
     outputArtifactContracts: [],
     defaultExecutionProfileId: profile.id,
   });
+  const developmentNodes = repositoryReferences.map((_, index) => ({
+    id: index === 0 ? "development" : `development:${index + 1}`,
+    type: "ai-task" as const,
+    name: index === 0 ? "Development" : `Development ${index + 1}`,
+    positionId: developer.id,
+    executionProfileId: producerProfile.id,
+    handlerKindId: "development@1",
+  }));
   const graph = {
     nodes: [
       {
@@ -1035,14 +1079,7 @@ export const createIntegrationAuthorityFixturePreparation = (
         name: "Start",
         handlerKindId: "run-start@1",
       },
-      {
-        id: "development",
-        type: "ai-task" as const,
-        name: "Development",
-        positionId: developer.id,
-        executionProfileId: producerProfile.id,
-        handlerKindId: "development@1",
-      },
+      ...developmentNodes,
       {
         id: "review",
         type: "ai-task" as const,
@@ -1114,8 +1151,8 @@ export const createIntegrationAuthorityFixturePreparation = (
       },
     ],
     edges: [
-      { from: "start", to: "development" },
-      { from: "development", to: "review" },
+      ...developmentNodes.map((node) => ({ from: "start", to: node.id })),
+      ...developmentNodes.map((node) => ({ from: node.id, to: "review" })),
       { from: "review", to: "integration" },
       { from: "integration", to: "test" },
       { from: "test", to: "candidate-input" },
@@ -1172,7 +1209,12 @@ export const createIntegrationAuthorityFixture = async (
   },
 ): Promise<IntegrationAuthorityFixtureResult> => {
   const database = input.database;
-  const baseCommit = git(input.repositoryDirectory, ["rev-parse", "HEAD"]);
+  const repositoryReferences = [
+    input.repositoryDirectory,
+    ...(input.repositoryDirectories ?? []).filter(
+      (repository) => repository !== input.repositoryDirectory,
+    ),
+  ];
   const preparation =
     input.preparation ??
     createIntegrationAuthorityFixturePreparation({ ...input, database });
@@ -1575,37 +1617,45 @@ export const createIntegrationAuthorityFixture = async (
     softwareArchitect,
     "architect",
   );
-  const applicationSpecResult = requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:application-spec-revise`,
-      actor: runtimeActor(softwareArchitect.aiMember.id),
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: 0,
-      command: {
-        type: "application-spec.revise",
-        runId: productBaseline.runId,
-        applicationId: `${input.fixtureId}:application`,
-        promotedProjectSpecRevisionId: projectSpecRevision.id,
-        promotedProjectSpecHash: projectSpecRevision.hash,
-        producerSessionId: architectureSession,
-        content: {
-          design: "Apply one temporary Repository change.",
-          acceptanceCriteria: [
-            "The exact frozen Diff is independently reviewed.",
-          ],
-          workPackageConstraints: ["Use one development@1 Node Run."],
-          integrationObligations: ["Run the scoped fixture validation."],
-          contractRefs: [],
+  const applicationSpecRevisions = repositoryReferences.map((_, index) => {
+    const applicationId = `${input.fixtureId}:application${index === 0 ? "" : `:${index + 1}`}`;
+    const applicationSpecResult = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:application-spec-revise${index === 0 ? "" : `:${index + 1}`}`,
+        actor: runtimeActor(softwareArchitect.aiMember.id),
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: 0,
+        command: {
+          type: "application-spec.revise",
+          runId: productBaseline.runId,
+          applicationId,
+          promotedProjectSpecRevisionId: projectSpecRevision.id,
+          promotedProjectSpecHash: projectSpecRevision.hash,
+          producerSessionId: architectureSession,
+          content: {
+            design: "Apply one temporary Repository change.",
+            acceptanceCriteria: [
+              "The exact frozen Diff is independently reviewed.",
+            ],
+            workPackageConstraints: [
+              "Use one development@1 Node Run per Repository.",
+            ],
+            integrationObligations: ["Run the scoped fixture validation."],
+            contractRefs: [],
+          },
         },
-      },
-    }),
-  );
-  const applicationSpecRevision =
-    applicationSpecResult.applicationSpecRevisions[0];
-  if (!applicationSpecRevision) {
-    throw new Error("Formal Application Spec Command produced no revision.");
-  }
+      }),
+    );
+    const applicationSpecRevision =
+      applicationSpecResult.applicationSpecRevisions.find(
+        (revision) => revision.applicationId === applicationId,
+      );
+    if (!applicationSpecRevision) {
+      throw new Error("Formal Application Spec Command produced no revision.");
+    }
+    return applicationSpecRevision;
+  });
   const technicalProposalResult = requireSucceeded(
     database.commandRegistry.execute({
       schemaVersion: 1,
@@ -1617,14 +1667,12 @@ export const createIntegrationAuthorityFixture = async (
         type: "technical-baseline-proposal.revise",
         runId: productBaseline.runId,
         producerSessionId: architectureSession,
-        applicationSpecRevisions: [
-          {
-            id: applicationSpecRevision.id,
-            hash: applicationSpecRevision.hash,
-          },
-        ],
+        applicationSpecRevisions: applicationSpecRevisions.map((revision) => ({
+          id: revision.id,
+          hash: revision.hash,
+        })),
         content: {
-          architecture: "One temporary Application and Repository.",
+          architecture: "Temporary Applications and Repositories.",
           dependencyGraph: [],
           contracts: [],
           riskPolicy: ["No credentials or user Repository access."],
@@ -1799,19 +1847,30 @@ export const createIntegrationAuthorityFixture = async (
     departmentId: department.id,
   });
   let awaitingReview = formalStarted;
-  const developmentNode = awaitingReview.nodes.find(
-    (node) => node.pipelineNodeId === "development",
+  const developmentNodes = awaitingReview.nodes.filter(
+    (node) =>
+      node.pipelineNodeId === "development" ||
+      node.pipelineNodeId.startsWith("development:"),
   );
-  if (!developmentNode) {
+  if (developmentNodes.length !== repositoryReferences.length) {
     throw new Error("Formal fixture Run has no development Node Run.");
   }
+  const developmentNode = developmentNodes[0]!;
 
   const now = input.fakeClock;
   const projectSpecRevisionId = projectSpecRevision.id;
   const technicalBaselineId = formalTechnicalBaseline.id;
-  const workPackageId = `${input.fixtureId}:work-package`;
-  const workPackageVersionId = `${workPackageId}:v1`;
-  const allocationId = `${input.fixtureId}:allocation`;
+  const repositoryDescriptors = [
+    input.repositoryDirectory,
+    ...(input.repositoryDirectories ?? []).filter(
+      (repository) => repository !== input.repositoryDirectory,
+    ),
+  ].map((repositoryReference, index) => ({
+    repositoryReference,
+    baseCommit: git(repositoryReference, ["rev-parse", "HEAD"]),
+    workPackageId: `${input.fixtureId}:work-package${index === 0 ? "" : `:${index + 1}`}`,
+    applicationId: `${input.fixtureId}:application${index === 0 ? "" : `:${index + 1}`}`,
+  }));
   const manifest = {
     objective: "Apply the scoped fixture change.",
     acceptanceCriteria: ["The exact frozen Diff is independently reviewed."],
@@ -1844,55 +1903,60 @@ export const createIntegrationAuthorityFixture = async (
         type: "work-package.generate",
         runId: awaitingReview.run.id,
         technicalBaselineId,
-        packages: [
-          {
-            workPackageId,
-            versionId: workPackageVersionId,
-            applicationId: `${input.fixtureId}:application`,
-            repositoryReference: input.repositoryDirectory,
-            nodeRunId: developmentNode.id,
-            dependencies: [],
-            manifest,
-          },
-        ],
+        packages: repositoryDescriptors.map((repository, index) => ({
+          workPackageId: repository.workPackageId,
+          versionId: `${repository.workPackageId}:v1`,
+          applicationId: repository.applicationId,
+          repositoryReference: repository.repositoryReference,
+          nodeRunId: developmentNodes[index]!.id,
+          dependencies: [],
+          manifest,
+        })),
       },
     }),
   );
-  const assignedWorkPackage = requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:work-package-assign`,
-      actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: 0,
-      command: {
-        type: "work-package.assign",
-        workPackageId,
-        baseCommit,
-      },
-    }),
-  );
-  const formalAssignment = assignedWorkPackage.packages
-    .find((entry) => entry.id === workPackageId)
-    ?.versions.at(-1)
-    ?.assignments.at(-1);
-  if (!formalAssignment) {
-    throw new Error("Formal Work Package assignment was not created.");
-  }
-  await database.workspaces.executeProvision(formalAssignment.allocationId);
-  requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:work-package-start`,
-      actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: 1,
-      command: {
-        type: "work-package.start",
-        workPackageId,
-      },
-    }),
-  );
+  const assignments = repositoryDescriptors.map((repository) => {
+    const assigned = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:work-package-assign${repository === repositoryDescriptors[0] ? "" : `:${repository.workPackageId}`}`,
+        actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: 0,
+        command: {
+          type: "work-package.assign",
+          workPackageId: repository.workPackageId,
+          baseCommit: repository.baseCommit,
+        },
+      }),
+    );
+    const formalAssignment = assigned.packages
+      .find((entry) => entry.id === repository.workPackageId)
+      ?.versions.at(-1)
+      ?.assignments.at(-1);
+    if (!formalAssignment) {
+      throw new Error("Formal Work Package assignment was not created.");
+    }
+    return { ...repository, formalAssignment };
+  });
+  for (const assignment of assignments)
+    await database.workspaces.executeProvision(
+      assignment.formalAssignment.allocationId,
+    );
+  for (const assignment of assignments)
+    requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:work-package-start${assignment.workPackageId === repositoryDescriptors[0]?.workPackageId ? "" : `:${assignment.workPackageId}`}`,
+        actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: 1,
+        command: {
+          type: "work-package.start",
+          workPackageId: assignment.workPackageId,
+        },
+      }),
+    );
   const beforeDevelopment = database.pipelineRuntime.inspectRun(
     awaitingReview.run.id,
   );
@@ -1900,6 +1964,10 @@ export const createIntegrationAuthorityFixture = async (
     runId: awaitingReview.run.id,
     expectedRevision: beforeDevelopment.run.revision,
   });
+  const primaryAssignment = assignments[0]!;
+  const formalAssignment = primaryAssignment.formalAssignment;
+  const workPackageId = primaryAssignment.workPackageId;
+  const workPackageVersionId = `${workPackageId}:v1`;
   const importedCommit = database.workspaces
     .inspect(formalAssignment.allocationId)
     .imports.find((entry) => entry.state === "succeeded")?.resultCommit;
@@ -1924,37 +1992,44 @@ export const createIntegrationAuthorityFixture = async (
       )}`,
     );
   }
-  const diffBytes = execFileSync(
-    "git",
-    [
-      "-C",
-      input.repositoryDirectory,
-      "diff",
-      "--binary",
-      "--full-index",
-      "--no-ext-diff",
-      "--no-textconv",
-      baseCommit,
-      importedCommit,
-      "--",
-    ],
-    { encoding: "buffer" },
-  );
-  requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:work-package-self-check`,
-      actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: 3,
-      command: {
-        type: "work-package.self-check",
-        workPackageId,
-        ...selfCheck,
-        commitEvidence: [importedCommit],
-      },
-    }),
-  );
+  const importedAssignments = assignments.map((assignment) => {
+    const imported = database.workspaces
+      .inspect(assignment.formalAssignment.allocationId)
+      .imports.find((entry) => entry.state === "succeeded")?.resultCommit;
+    if (!imported) {
+      throw new Error(
+        `Formal Work Package ${assignment.workPackageId} produced no Runtime-owned source import.`,
+      );
+    }
+    return { ...assignment, importedCommit: imported };
+  });
+  for (const assignment of importedAssignments) {
+    const packageRevision = database.workPackages
+      .inspect(awaitingReview.run.id)
+      .packages.find(
+        (entry) => entry.id === assignment.workPackageId,
+      )?.revision;
+    if (packageRevision === undefined) {
+      throw new Error(
+        `Fixture Work Package ${assignment.workPackageId} is unavailable.`,
+      );
+    }
+    requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:work-package-self-check${assignment.workPackageId === repositoryDescriptors[0]?.workPackageId ? "" : `:${assignment.workPackageId}`}`,
+        actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: packageRevision,
+        command: {
+          type: "work-package.self-check",
+          workPackageId: assignment.workPackageId,
+          ...selfCheck,
+          commitEvidence: [assignment.importedCommit],
+        },
+      }),
+    );
+  }
   awaitingReview = database.pipelineRuntime.inspectRun(awaitingReview.run.id);
   const developmentAttempt = awaitingReview.nodes
     .find((node) => node.pipelineNodeId === "development")
@@ -1975,6 +2050,12 @@ export const createIntegrationAuthorityFixture = async (
     readonly artifactType: string;
     readonly logicalName: string;
     readonly content: Buffer;
+    readonly producer?: {
+      readonly nodeRunId: string;
+      readonly nodeAttemptId: string;
+      readonly sessionId: string;
+      readonly workPackageId: string;
+    };
     readonly integrationAuthority?: {
       readonly generationId: string;
       readonly manifestHash: string;
@@ -2005,13 +2086,15 @@ export const createIntegrationAuthorityFixture = async (
           producer: {
             projectId: project.id,
             runId: awaitingReview.run.id,
-            nodeRunId: developmentNode.id,
-            nodeAttemptId: developmentAttempt.id,
+            nodeRunId: artifact.producer?.nodeRunId ?? developmentNode.id,
+            nodeAttemptId:
+              artifact.producer?.nodeAttemptId ?? developmentAttempt.id,
             snapshotRevisionId: awaitingReview.snapshot.id,
             aiMemberId: developer.aiMember.id,
             positionId: developer.id,
-            sessionId: producerSession.session.id,
-            workPackageId,
+            sessionId:
+              artifact.producer?.sessionId ?? producerSession.session.id,
+            workPackageId: artifact.producer?.workPackageId ?? workPackageId,
             ...(artifact.integrationAuthority
               ? { integrationAuthority: artifact.integrationAuthority }
               : {}),
@@ -2033,24 +2116,100 @@ export const createIntegrationAuthorityFixture = async (
       }),
     );
   };
-  registerArtifactVersion({
-    commandPrefix: "canonical-diff",
-    artifactType: "canonical-diff",
-    logicalName: `${input.fixtureId}:canonical-diff`,
-    content: diffBytes,
-  });
+  for (const [index, assignment] of importedAssignments.entries()) {
+    const node = developmentNodes[index]!;
+    const attempt = awaitingReview.nodes
+      .find((candidate) => candidate.id === node.id)
+      ?.attempts.at(-1);
+    if (!attempt)
+      throw new Error(
+        `Fixture development attempt ${node.pipelineNodeId} is unavailable.`,
+      );
+    const content = execFileSync(
+      "git",
+      [
+        "-C",
+        assignment.repositoryReference,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        assignment.baseCommit,
+        assignment.importedCommit,
+        "--",
+      ],
+      { encoding: "buffer" },
+    );
+    registerArtifactVersion({
+      commandPrefix:
+        index === 0 ? "canonical-diff" : `canonical-diff:${index + 1}`,
+      artifactType: "canonical-diff",
+      logicalName: `${input.fixtureId}:canonical-diff:${index + 1}`,
+      content,
+      producer: {
+        nodeRunId: node.id,
+        nodeAttemptId: attempt.id,
+        sessionId: assignment.formalAssignment.interactionSessionId,
+        workPackageId: assignment.workPackageId,
+      },
+    });
+  }
   const buildBytes = Buffer.from(`fixture-build:${importedCommit}\n`);
 
-  const reviewed = await database.pipelineRuntime.executeReady({
+  let reviewed = await database.pipelineRuntime.executeReady({
     runId: awaitingReview.run.id,
     expectedRevision: awaitingReview.run.revision,
   });
-  const reviewResult = database.codeReviews.inspect(reviewed.run.id)[0];
-  if (!reviewResult?.integrationEligible) {
+  const convergedReviews = new Set<string>();
+  for (
+    let attempt = 0;
+    attempt < 8 &&
+    reviewed.nodes.find((node) => node.pipelineNodeId === "review")?.status ===
+      "running";
+    attempt += 1
+  ) {
+    for (const review of database.codeReviews
+      .inspect(reviewed.run.id)
+      .filter(
+        (review) =>
+          !review.integrationEligible && !convergedReviews.has(review.id),
+      )) {
+      requireSucceeded(
+        database.commandRegistry.execute({
+          schemaVersion: 1,
+          commandId: `${input.fixtureId}:code-review-converge:${review.id}`,
+          actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
+          consumerId: "electron-test-fixture-setup",
+          expectedRevision: reviewed.run.revision,
+          command: { type: "code-review.converge", codeReviewId: review.id },
+        }),
+      );
+      convergedReviews.add(review.id);
+    }
+    await database.codeReviewNodeHandler.reconcilePending();
+    reviewed = await database.pipelineRuntime.executeReady({
+      runId: reviewed.run.id,
+      expectedRevision: reviewed.run.revision,
+    });
+  }
+  const reviewResults = database.codeReviews.inspect(reviewed.run.id);
+  if (
+    reviewResults.length !== repositoryDescriptors.length ||
+    reviewResults.some((review) => !review.integrationEligible)
+  ) {
     throw new Error(
       `Code Review handler did not produce exact T15 authority: ${JSON.stringify(
         {
-          reviewResult,
+          reviews: reviewResults.map((review) => ({
+            id: review.id,
+            workPackageVersionId: review.manifest.workPackageVersionId,
+            integrationEligible: review.integrationEligible,
+            workspace: review.workspace,
+          })),
+          reviewNode: reviewed.nodes.find(
+            (node) => node.pipelineNodeId === "review",
+          ),
           artifacts: database.artifactRegistry
             .listVersionsForRun(reviewed.run.id)
             .map((artifact) => ({
@@ -2063,10 +2222,22 @@ export const createIntegrationAuthorityFixture = async (
       )}`,
     );
   }
-  const integrated = await database.pipelineRuntime.executeReady({
+  let integrated = await database.pipelineRuntime.executeReady({
     runId: reviewed.run.id,
     expectedRevision: reviewed.run.revision,
   });
+  for (
+    let attempt = 0;
+    attempt < 3 &&
+    integrated.nodes.find((node) => node.pipelineNodeId === "integration")
+      ?.status === "running";
+    attempt += 1
+  ) {
+    integrated = await database.pipelineRuntime.executeReady({
+      runId: integrated.run.id,
+      expectedRevision: integrated.run.revision,
+    });
+  }
   const generation = database.integrations
     .inspect(integrated.run.id)
     .find((candidate) => candidate.state === "passed");
@@ -2077,6 +2248,14 @@ export const createIntegrationAuthorityFixture = async (
           id: node.pipelineNodeId,
           status: node.status,
         })),
+        reviews: database.codeReviews
+          .inspect(integrated.run.id)
+          .map((review) => ({
+            id: review.id,
+            workPackageVersionId: review.manifest.workPackageVersionId,
+            integrationEligible: review.integrationEligible,
+            workspace: review.workspace,
+          })),
         integrated: integrated.nodes,
         generations: database.integrations.inspect(integrated.run.id),
       })}`,
@@ -2085,6 +2264,19 @@ export const createIntegrationAuthorityFixture = async (
   const integrationAuthority = database.integrations.readPassAuthority(
     generation.id,
   );
+  if (
+    integrationAuthority.repositoryResults.length !==
+      repositoryDescriptors.length ||
+    integrationAuthority.repositoryResults.some(
+      (result) => result.state !== "succeeded" || !result.integratedCommit,
+    )
+  ) {
+    throw new Error(
+      `Integration authority did not cover every fixture Repository: ${JSON.stringify(
+        integrationAuthority.repositoryResults,
+      )}`,
+    );
+  }
   const build = registerArtifactVersion({
     commandPrefix: "build",
     artifactType: "build",

@@ -18,6 +18,34 @@ import {
 const hash = "a".repeat(64);
 
 describe("Release operation contracts", () => {
+  it("rejects unknown fields from merge and export Release operation item views", () => {
+    const request = ReleaseOperationCreateRequestSchema.parse({
+      operationId: "release-operation-view-strict",
+      candidateId: "candidate-1",
+      expectedAcceptedAuthorityHash: hash,
+      kind: "merge",
+      authorization: {
+        actor: { type: "human", id: "human-1", authenticatedBy: "local-session" },
+        reason: "Release the accepted candidate.",
+        evidenceRefs: ["release-checklist:1"],
+      },
+      items: [{ id: "repository:api", repositoryReference: "repository:api", sourceCommit: "b".repeat(40), destination: { targetBranch: "main", expectedTargetTip: "c".repeat(40) }}],
+    });
+    const view = {
+      id: request.operationId,
+      request,
+      acceptedAuthority: { id: "authority-1", candidateId: "candidate-1", candidateHash: hash, releaseDecisionId: "decision-1", releaseDecisionHash: hash, candidateInputId: "candidate-input-1", candidateInputHash: hash, gateAuthorityId: "gate-authority-1", gateAuthorityHash: hash, integrationGenerationId: "generation-1", integrationAuthorityHash: hash, repositoryCommits: [{ repositoryReference: "repository:api", commit: "b".repeat(40) }], artifactVersionIds: [], runId: "run-1", snapshotRevisionId: "snapshot-1", authorityHash: hash, createdAt: "2026-08-03T00:00:00.000Z" },
+      canonicalRequestHash: hash,
+      nextActions: [],
+      aggregateState: "pending",
+      counts: { pending: 1, running: 0, reconciling: 0, succeeded: 0, failed: 0, destinationConflict: 0, unknown: 0 },
+      items: [{ ...request.items[0], state: "pending", receipt: null, evidence: [], updatedAt: "2026-08-03T00:00:00.000Z", unexpected: "must-not-project" }],
+      createdAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    };
+    assert.throws(() => ReleaseOperationViewSchema.parse(view));
+  });
+
   it("freezes a merge operation with its accepted authority and serial items", () => {
     const request = ReleaseOperationCreateRequestSchema.parse({
       operationId: "release-operation-1",

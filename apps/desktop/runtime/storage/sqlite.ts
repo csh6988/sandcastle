@@ -568,6 +568,10 @@ export const openCompanyDatabase = (
   });
   const releaseAdapter: ReleaseOperationEffectAdapter = options
     .releaseOperationRuntime?.adapter ?? {
+    normalizeCreateRequest: (request) =>
+      request.kind === "export"
+        ? (artifactExportAdapter.normalizeCreateRequest?.(request) ?? request)
+        : request,
     execute: (request) =>
       request.kind === "merge"
         ? gitReleaseAdapter.execute(request)
