@@ -5,8 +5,19 @@ import { dirname, join, relative, sep } from "node:path";
 import { createScriptedExecutionAdapter } from "../adapters/scriptedExecutionAdapter.js";
 import type { IntegrationGenerationView } from "../integration/integrationRuntime.js";
 import type { IntegrationValidationProvider } from "../integration/integrationValidationExecutor.js";
-import { createScriptedReviewerExecutionAdapter } from "../review/reviewerExecution.js";
+import type {
+  DeliveryQualityNodePlan,
+  DeliveryQualityNodePlanProvider,
+  PlannedDeliveryQualityCommandContext,
+} from "../quality/qualityGateNodeHandler.js";
+import type { CandidateGateInputView } from "../quality/qualityGateRuntime.js";
+import {
+  createScriptedReviewerExecutionAdapter,
+  type ReviewerExecutionAdapter,
+  type ReviewerExecutionInput,
+} from "../review/reviewerExecution.js";
 import type { CompanyDatabase } from "../storage/sqlite.js";
+import type { TestRuntime } from "./testRuntime.js";
 
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -86,6 +97,18 @@ export interface IntegrationAuthorityFixtureResult {
     readonly artifactVersionId: string;
     readonly digest: string;
   };
+  readonly deliveryQuality: {
+    readonly candidateInputNodeRunId: string;
+    readonly candidateInputSessionId: string;
+    readonly securityNodeRunId: string;
+    readonly operabilityNodeRunId: string;
+    readonly candidateNodeRunId: string;
+    readonly humanReleaseNodeRunId: string;
+    readonly producer: {
+      readonly aiMemberId: string;
+      readonly positionId: string;
+    };
+  };
   readonly integrationAuthority: IntegrationGenerationView;
 }
 
@@ -97,6 +120,27 @@ export interface IntegrationAuthorityFixtureInput {
   readonly worktreeDirectory: string;
   readonly fakeClock: string;
   readonly repeatableIdSeed: string;
+}
+
+export interface IntegrationAuthorityFixturePreparation {
+  readonly projectId: string;
+  readonly departmentId: string;
+  readonly productSessionId: string;
+  readonly developerPositionId: string;
+  readonly productManagerPositionId: string;
+  readonly reviewerPositionId: string;
+  readonly freshReviewerPositionId: string;
+  readonly testerPositionId: string;
+  readonly deliveryCoordinatorPositionId: string;
+  readonly producerExecutionProfileId: string;
+  readonly isolatedExecutionProfileId: string;
+}
+
+export interface ConfirmedFixtureProductAuthority {
+  readonly productBaselineId: string;
+  readonly productBaselineHash: string;
+  readonly runId: string;
+  readonly snapshotRevisionId: string;
 }
 
 export const createIntegrationAuthorityFixtureRuntimeOptions = (
@@ -339,20 +383,442 @@ export const createIntegrationAuthorityFixtureRuntimeOptions = (
   };
 };
 
-/**
- * Test-build-only setup seam. It uses the already-open Company Runtime
- * database so the fixture never becomes a second database owner.
- */
-export const createIntegrationAuthorityFixture = async (
+export const createIntegrationAuthorityFixtureDeliveryQualityPlans = (input: {
+  readonly fixtureId: string;
+  readonly database: CompanyDatabase;
+  readonly seeded: IntegrationAuthorityFixtureResult;
+  readonly tests: Pick<TestRuntime, "downstreamAuthority">;
+  readonly reviewerExecutionAdapter: ReviewerExecutionAdapter;
+  readonly executableHash: string;
+}): DeliveryQualityNodePlanProvider => ({
+  plan: ({ runId, nodeRunId, attempt }) => {
+    const run = input.database.pipelineRuntime.inspectRun(runId);
+    const node = run.nodes.find((candidate) => candidate.id === nodeRunId);
+    const handlerKindId = run.snapshot.payload.pipelineVersion.handlers?.find(
+      (handler) => handler.nodeId === node?.pipelineNodeId,
+    )?.handlerKindId;
+    if (!node || !handlerKindId) {
+      throw new Error(`Fixture Delivery quality Node ${nodeRunId} is invalid.`);
+    }
+    const testRunId = `test:${runId}:${input.seeded.testNodeRunId}`;
+    const candidateInputId = `${input.fixtureId}:delivery-candidate-input`;
+    if (handlerKindId === "delivery-candidate-input@1") {
+      const testAuthority = input.tests.downstreamAuthority(testRunId);
+      return {
+        handlerKindId,
+        initialCommands: [
+          {
+            commandId: `${input.fixtureId}:candidate-input-freeze`,
+            command: {
+              type: "delivery.candidate-input.freeze",
+              candidateInputId,
+              requestId: `${input.fixtureId}:delivery-candidate-input-request`,
+              projectId: input.seeded.projectId,
+              runId,
+              snapshotRevisionId: attempt.snapshotRevisionId,
+              nodeRunId,
+              nodeAttemptId: attempt.attemptId,
+              producer: {
+                ...input.seeded.deliveryQuality.producer,
+                sessionId: input.seeded.deliveryQuality.candidateInputSessionId,
+              },
+              requiredTestRunIds: [testRunId],
+              environment: {
+                platform: process.platform,
+                architecture: process.arch,
+                electronVersion: process.versions.electron ?? process.version,
+                executableHash: input.executableHash,
+                capabilityProfileHash: sha256(
+                  canonicalJson(testAuthority.capabilities),
+                ),
+              },
+              evidencePolicy: {
+                revisionId: "electron-test-fixture-evidence@1",
+                redactionProfile: "fixture-redacted",
+                retentionClass: "durable",
+                maxItemBytes: 20 * 1024 * 1024,
+                maxTotalBytes: 40 * 1024 * 1024,
+              },
+            },
+          },
+        ],
+      };
+    }
+    if (
+      handlerKindId === "security-review@1" ||
+      handlerKindId === "operability-review@1"
+    ) {
+      const kind =
+        handlerKindId === "security-review@1" ? "security" : "operability";
+      const candidate =
+        input.database.candidateInputs.inspect(candidateInputId);
+      const topicId = `${input.fixtureId}:${kind}-review-topic`;
+      const ownerParticipantId = `${topicId}:owner`;
+      const reviewerParticipantId = `${topicId}:reviewer`;
+      const gateInputId = `${input.fixtureId}:${kind}-gate-input`;
+      const gateResultId = `${input.fixtureId}:${kind}-gate-result`;
+      const executionId = `${input.fixtureId}:${kind}-gate-execution`;
+      const acceptanceCriteria = [
+        ...new Set(
+          candidate.manifest.integration.manifest.packages.flatMap(
+            (entry) => entry.reviewContext.acceptanceCriteria,
+          ),
+        ),
+      ].sort();
+      const excludedContext: Array<
+        | "hidden-prompts"
+        | "prior-reviewer-opinions"
+        | "private-transcripts"
+        | "provider-session-history"
+        | "credential-values"
+      > = [
+        "hidden-prompts",
+        "prior-reviewer-opinions",
+        "private-transcripts",
+        "provider-session-history",
+        "credential-values",
+      ];
+      const topicManifest = {
+        topicId,
+        supportingArtifactVersionIds: candidate.manifest.artifacts.map(
+          (entry) => entry.id,
+        ),
+        supportingSpecRevisionIds: [
+          candidate.manifest.product.projectSpecRevisionId,
+          ...candidate.manifest.technical.applicationSpecRevisions.map(
+            (entry) => entry.id,
+          ),
+        ],
+        harnessSnapshotIds: candidate.manifest.tests.map(
+          (entry) => entry.fixture.id,
+        ),
+        acceptanceCriteria,
+        excludedContext,
+        scope: "verification" as const,
+        verificationSubject: {
+          kind: "candidate-final" as const,
+          deliveryCandidateInputId: candidate.id,
+          deliveryCandidateInputHash: candidate.manifestHash,
+        },
+        evidenceIds: candidate.manifest.evidence.map((entry) => entry.id),
+      };
+      const reviewer = input.seeded.gateReview.reviewer;
+      const prepareCommandId = `${input.fixtureId}:${kind}-gate-input-prepare`;
+      const initialCommands: DeliveryQualityNodePlan["initialCommands"] = [
+        {
+          commandId: `${input.fixtureId}:${kind}-review-topic-create`,
+          expectedRevision: 0,
+          command: {
+            type: "review.topic.create" as const,
+            topicId,
+            projectId: input.seeded.projectId,
+            runId,
+            title: `${kind} review for the frozen Delivery Candidate Input`,
+            manifest: topicManifest,
+            producer: candidate.manifest.producer,
+            participants: [
+              {
+                id: ownerParticipantId,
+                role: "owner-participant" as const,
+                ...candidate.manifest.producer,
+              },
+              {
+                id: `${topicId}:moderator`,
+                role: "moderator" as const,
+                ...input.seeded.gateReview.moderator,
+              },
+              {
+                id: reviewerParticipantId,
+                role: "reviewer-participant" as const,
+                aiMemberId: reviewer.aiMemberId,
+                positionId: reviewer.positionId,
+                sessionId: reviewer.sessionId,
+              },
+            ],
+            quorum: 1,
+            budget: {
+              maxRounds: 1,
+              maxDurationSeconds: 60,
+              maxTokens: 0,
+              maxCostCents: 0,
+            },
+            stopCondition: "blocking-findings-dispositioned",
+            escalationPolicy: "fail-with-evidence",
+          },
+        },
+        {
+          commandId: prepareCommandId,
+          command: {
+            type: "quality-gate.input.prepare" as const,
+            gateInputId,
+            requestId: `${input.fixtureId}:${kind}-gate-input-request`,
+            kind,
+            candidateInputId: candidate.id,
+            expectedCandidateInputHash: candidate.manifestHash,
+            expectedRiskTier: candidate.manifest.risk.tier,
+            nodeRunId,
+            nodeAttemptId: attempt.attemptId,
+            reviewTopicId: topicId,
+            reviewerParticipantId,
+          },
+        },
+        (context) => {
+          const gateInput = context.result(prepareCommandId)
+            .value as CandidateGateInputView;
+          return {
+            commandId: `${input.fixtureId}:${kind}-review-revision`,
+            expectedRevision: 1,
+            actor: {
+              type: "runtime-worker",
+              id: candidate.manifest.producer.aiMemberId,
+              authenticatedBy: "runtime",
+            },
+            command: {
+              type: "review.revision.submit" as const,
+              topicId,
+              revisionId: `${topicId}:revision`,
+              ownerParticipantId,
+              subjectKind: `${kind}-gate-input`,
+              subjectId: gateInput.id,
+              subjectHash: gateInput.manifestHash,
+              producerAiMemberId: candidate.manifest.producer.aiMemberId,
+              producerPositionId: candidate.manifest.producer.positionId,
+              producerSessionId: candidate.manifest.producer.sessionId,
+              evidenceRefs: [...gateInput.manifest.supportingEvidenceRefs],
+            },
+          };
+        },
+      ];
+      const evidenceRefFor = (
+        gateInput: CandidateGateInputView,
+        evidenceKind: string,
+      ): string => {
+        const prefixes =
+          evidenceKind === "artifact" || evidenceKind === "static-analysis"
+            ? ["artifact-version:"]
+            : evidenceKind === "runtime-fact"
+              ? ["test-pass-authority:", "integration-pass-authority:"]
+              : evidenceKind === "dynamic-analysis"
+                ? ["test-evidence:", "artifact-version:"]
+                : [
+                    "test-evidence:",
+                    "test-pass-authority:",
+                    "integration-pass-authority:",
+                    "artifact-version:",
+                  ];
+        const reference = gateInput.manifest.supportingEvidenceRefs.find(
+          (entry) => prefixes.some((prefix) => entry.startsWith(prefix)),
+        );
+        if (!reference) {
+          throw new Error(
+            `${kind} fixture Gate has no authoritative ${evidenceKind} evidence reference.`,
+          );
+        }
+        return reference;
+      };
+      const reviewRequest = (
+        context: PlannedDeliveryQualityCommandContext,
+      ): ReviewerExecutionInput => {
+        const gateInput = context.result(prepareCommandId)
+          .value as CandidateGateInputView;
+        return {
+          operationKey: `${input.fixtureId}:${kind}:reviewer`,
+          phase: "fresh-recheck",
+          manifest: {
+            ...topicManifest,
+            deliveryCandidateInputId: candidate.id,
+            supportingEvidenceRefs: gateInput.manifest.supportingEvidenceRefs,
+          } as unknown as ReviewerExecutionInput["manifest"],
+          workspaceRef: input.seeded.projectId,
+          reviewNodeRunId: nodeRunId,
+          reviewer: {
+            participantId: reviewerParticipantId,
+            aiMemberId: reviewer.aiMemberId,
+            positionId: reviewer.positionId,
+            sessionId: reviewer.freshSessionId,
+          },
+          executionProfile: {
+            agentAdapterId: "scripted-execution",
+            model: "fixture-v1",
+            sandboxRef: "docker",
+            secretReferenceIds: [],
+            timeoutSeconds: 30,
+            maxIterations: 1,
+          },
+          findings: [],
+          revision: {
+            id: `${topicId}:revision`,
+            subjectId: gateInput.id,
+            subjectHash: gateInput.manifestHash,
+          },
+        };
+      };
+      return {
+        handlerKindId,
+        initialCommands,
+        review: {
+          reviewerSessionId: reviewer.freshSessionId,
+          reviewerAiMemberId: reviewer.aiMemberId,
+          operationKey: `${input.fixtureId}:${kind}:reviewer`,
+          reconcileExisting: false,
+          timeoutSeconds: 30,
+          request: reviewRequest,
+          adapter: input.reviewerExecutionAdapter,
+          terminalCommands: (_reviewerResult, context) => {
+            const gateInput = context.result(prepareCommandId)
+              .value as CandidateGateInputView;
+            return [
+              {
+                commandId: `${input.fixtureId}:${kind}-review-pass`,
+                expectedRevision: 2,
+                actor: {
+                  type: "runtime-worker",
+                  id: reviewer.aiMemberId,
+                  authenticatedBy: "runtime",
+                },
+                command: {
+                  type: "review.recheck.submit",
+                  topicId,
+                  recheckId: `${topicId}:recheck`,
+                  revisionId: `${topicId}:revision`,
+                  reviewerParticipantId,
+                  reviewerSessionId: reviewer.freshSessionId,
+                  result: "PASS",
+                  conditions: [],
+                  evidenceRefs: [...gateInput.manifest.supportingEvidenceRefs],
+                },
+              },
+              {
+                commandId: `${input.fixtureId}:${kind}-gate-execution-accept`,
+                command: {
+                  type: "quality-gate.execution.accept",
+                  executionId,
+                  gateInputId: gateInput.id,
+                  operationKey: `${input.fixtureId}:${kind}:gate-review`,
+                  request: {
+                    schemaVersion: 1,
+                    gateInputId: gateInput.id,
+                    gateInputHash: gateInput.manifestHash,
+                  },
+                },
+              },
+              {
+                commandId: `${input.fixtureId}:${kind}-gate-execution-reconcile`,
+                command: {
+                  type: "quality-gate.execution.reconcile",
+                  executionId,
+                  observation: {
+                    state: "succeeded",
+                    fact: {
+                      schemaVersion: 1,
+                      gateInputId: gateInput.id,
+                      checks: gateInput.manifest.checkCatalog.checks.map(
+                        (check) => ({
+                          checkId: check.id,
+                          status: "passed" as const,
+                          evidence: check.requiredEvidenceKinds.map(
+                            (evidenceKind) => ({
+                              kind: evidenceKind,
+                              ref: evidenceRefFor(gateInput, evidenceKind),
+                            }),
+                          ),
+                          responsibility: {
+                            kind: "aggregate" as const,
+                            candidateIds: [candidate.id],
+                          },
+                        }),
+                      ),
+                      resolutions: [],
+                    },
+                    receiptHash: sha256(
+                      canonicalJson({
+                        schemaVersion: 1,
+                        executionId,
+                        state: "succeeded",
+                      }),
+                    ),
+                  },
+                },
+              },
+              {
+                commandId: `${input.fixtureId}:${kind}-gate-result-finalize`,
+                command: {
+                  type: "quality-gate.result.finalize",
+                  candidateGateResultId: gateResultId,
+                  gateInputId: gateInput.id,
+                  executionId,
+                  qualityGateResultId: `quality-gate-${topicId}`,
+                },
+              },
+            ];
+          },
+        },
+        ...(kind === "operability"
+          ? {
+              afterPassCommands: [
+                {
+                  commandId: `${input.fixtureId}:candidate-input-authorize`,
+                  command: {
+                    type: "delivery.candidate-input.authorize" as const,
+                    authorityId: `${input.fixtureId}:candidate-input-authority`,
+                    candidateInputId: candidate.id,
+                    expectedCandidateInputHash: candidate.manifestHash,
+                    securityGateResultId: `${input.fixtureId}:security-gate-result`,
+                    operabilityGateResultId: gateResultId,
+                  },
+                },
+              ],
+            }
+          : {}),
+      };
+    }
+    if (handlerKindId === "delivery-candidate@1") {
+      const candidate =
+        input.database.candidateInputs.inspect(candidateInputId);
+      const authority = input.database.qualityGates.view(
+        candidate.id,
+      ).authority;
+      if (!authority) {
+        throw new Error(
+          "Fixture Candidate Input has no exact dual-PASS authority.",
+        );
+      }
+      return {
+        handlerKindId,
+        initialCommands: [
+          {
+            commandId: `${input.fixtureId}:delivery-candidate-assemble`,
+            command: {
+              type: "delivery.candidate.assemble",
+              candidateId: `${input.fixtureId}:delivery-candidate`,
+              requestId: `${input.fixtureId}:delivery-candidate-request`,
+              candidateInputId: candidate.id,
+              expectedCandidateInputHash: candidate.manifestHash,
+              expectedGateAuthorityHash: authority.authorityHash,
+              nodeRunId,
+              nodeAttemptId: attempt.attemptId,
+              leaseId: attempt.leaseId,
+              workerId: "delivery-quality-node-handler",
+            },
+          },
+        ],
+      };
+    }
+    throw new Error(
+      `Fixture Delivery quality plan for ${handlerKindId} is unavailable.`,
+    );
+  },
+});
+
+export const createIntegrationAuthorityFixturePreparation = (
   input: IntegrationAuthorityFixtureInput & {
     readonly database: CompanyDatabase;
   },
-): Promise<IntegrationAuthorityFixtureResult> => {
+): IntegrationAuthorityFixturePreparation => {
   const database = input.database;
-  const baseCommit = git(input.repositoryDirectory, ["rev-parse", "HEAD"]);
   const project = database.catalog.createProject({
     name: "Electron Test Fixture",
-    goal: "Verify exact T15 and T16 authority before a scoped Test Run.",
+    goal: "Verify the real Product-to-Candidate authority chain.",
   });
   database.projectConfiguration.update({
     projectId: project.id,
@@ -412,19 +878,10 @@ export const createIntegrationAuthorityFixture = async (
   const reviewer = createPosition("Fixture Reviewer", "review");
   const freshReviewer = createPosition("Fixture Fresh Reviewer", "review");
   const tester = createPosition("Fixture Test Engineer", "test");
-  const standardPositions =
-    database.catalog.inspectDepartment("software-rnd").positions;
-  const softwareArchitect = standardPositions.find(
-    (position) => position.id === "software-architect",
+  const deliveryCoordinator = createPosition(
+    "Fixture Delivery Coordinator",
+    "delivery-coordination",
   );
-  const standardDeliveryCoordinator = standardPositions.find(
-    (position) => position.id === "delivery-coordinator",
-  );
-  if (!softwareArchitect || !standardDeliveryCoordinator) {
-    throw new Error(
-      "Fixture requires the built-in Software architect and Delivery coordinator positions.",
-    );
-  }
   const producerProfile = database.catalog
     .saveExecutionProfile({
       departmentId: department.id,
@@ -513,6 +970,45 @@ export const createIntegrationAuthorityFixture = async (
         handlerKindId: "test@1",
       },
       {
+        id: "candidate-input",
+        type: "ai-task" as const,
+        name: "Candidate Input",
+        positionId: deliveryCoordinator.id,
+        executionProfileId: profile.id,
+        handlerKindId: "delivery-candidate-input@1",
+      },
+      {
+        id: "security",
+        type: "ai-task" as const,
+        name: "Security Review",
+        positionId: reviewer.id,
+        executionProfileId: profile.id,
+        handlerKindId: "security-review@1",
+      },
+      {
+        id: "operability",
+        type: "ai-task" as const,
+        name: "Operability Review",
+        positionId: freshReviewer.id,
+        executionProfileId: profile.id,
+        handlerKindId: "operability-review@1",
+      },
+      {
+        id: "candidate",
+        type: "ai-task" as const,
+        name: "Delivery Candidate",
+        positionId: deliveryCoordinator.id,
+        executionProfileId: profile.id,
+        handlerKindId: "delivery-candidate@1",
+      },
+      {
+        id: "human-release",
+        type: "human-approval" as const,
+        name: "Human Release",
+        positionId: deliveryCoordinator.id,
+        handlerKindId: "human-release@1",
+      },
+      {
         id: "complete",
         type: "complete" as const,
         name: "Complete",
@@ -524,7 +1020,12 @@ export const createIntegrationAuthorityFixture = async (
       { from: "development", to: "review" },
       { from: "review", to: "integration" },
       { from: "integration", to: "test" },
-      { from: "test", to: "complete" },
+      { from: "test", to: "candidate-input" },
+      { from: "candidate-input", to: "security" },
+      { from: "security", to: "operability" },
+      { from: "operability", to: "candidate" },
+      { from: "candidate", to: "human-release" },
+      { from: "human-release", to: "complete" },
     ],
   };
   const draft = database.pipelineConfiguration.saveDraft({
@@ -546,41 +1047,81 @@ export const createIntegrationAuthorityFixture = async (
     participantRef: productManager.aiMember.id,
     role: "product-manager",
   });
+  return {
+    projectId: project.id,
+    departmentId: department.id,
+    productSessionId: productSession.id,
+    developerPositionId: developer.id,
+    productManagerPositionId: productManager.id,
+    reviewerPositionId: reviewer.id,
+    freshReviewerPositionId: freshReviewer.id,
+    testerPositionId: tester.id,
+    deliveryCoordinatorPositionId: deliveryCoordinator.id,
+    producerExecutionProfileId: producerProfile.id,
+    isolatedExecutionProfileId: profile.id,
+  };
+};
 
-  const formalProductProposal = requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:product-proposal-revise`,
-      actor: {
-        type: "human",
-        id: "electron-test-fixture",
-        authenticatedBy: "local-session",
-      },
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: 0,
-      command: {
-        type: "product.proposal.revise",
-        projectId: project.id,
-        producerSessionId: productSession.id,
-        content: {
-          goal: "Verify one exact reviewed temporary Repository change.",
-          users: ["Electron Test fixture"],
-          scope: ["Versioned Test authority"],
-          nonGoals: ["Release Candidate creation"],
-          acceptanceCriteria: [
-            "The exact frozen Diff is independently reviewed.",
-          ],
-          constraints: ["Use only the temporary fixture Repository."],
-          risks: ["Fixture evidence must not escape its temporary root."],
-          openQuestions: [],
-        },
-      },
-    }),
+/**
+ * Test-build-only setup seam. It uses the already-open Company Runtime
+ * database so the fixture never becomes a second database owner.
+ */
+export const createIntegrationAuthorityFixture = async (
+  input: IntegrationAuthorityFixtureInput & {
+    readonly database: CompanyDatabase;
+    readonly preparation?: IntegrationAuthorityFixturePreparation;
+    readonly confirmedProduct?: ConfirmedFixtureProductAuthority;
+  },
+): Promise<IntegrationAuthorityFixtureResult> => {
+  const database = input.database;
+  const baseCommit = git(input.repositoryDirectory, ["rev-parse", "HEAD"]);
+  const preparation =
+    input.preparation ??
+    createIntegrationAuthorityFixturePreparation({ ...input, database });
+  const project = { id: preparation.projectId };
+  const department = database.catalog.inspectDepartment(
+    preparation.departmentId,
   );
-  if (!formalProductProposal.proposal) {
-    throw new Error("Formal Product Proposal Command produced no proposal.");
+  const position = (id: string) => {
+    const found = department.positions.find((candidate) => candidate.id === id);
+    if (!found) throw new Error(`Fixture Position ${id} is unavailable.`);
+    return found;
+  };
+  const developer = position(preparation.developerPositionId);
+  const productManager = position(preparation.productManagerPositionId);
+  const reviewer = position(preparation.reviewerPositionId);
+  const freshReviewer = position(preparation.freshReviewerPositionId);
+  const tester = position(preparation.testerPositionId);
+  const deliveryCoordinator = position(
+    preparation.deliveryCoordinatorPositionId,
+  );
+  const standardPositions =
+    database.catalog.inspectDepartment("software-rnd").positions;
+  const softwareArchitect = standardPositions.find(
+    (position) => position.id === "software-architect",
+  );
+  const standardDeliveryCoordinator = standardPositions.find(
+    (position) => position.id === "delivery-coordinator",
+  );
+  if (!softwareArchitect || !standardDeliveryCoordinator) {
+    throw new Error(
+      "Fixture requires the built-in Software architect and Delivery coordinator positions.",
+    );
   }
-  const productProposal = formalProductProposal.proposal;
+  const departmentProfiles = database.catalog.inspectDepartment(department.id);
+  const producerProfile = departmentProfiles.executionProfiles.find(
+    (candidate) => candidate.id === preparation.producerExecutionProfileId,
+  );
+  const profile = departmentProfiles.executionProfiles.find(
+    (candidate) => candidate.id === preparation.isolatedExecutionProfileId,
+  );
+  if (!producerProfile || !profile) {
+    throw new Error("Fixture Execution Profiles are unavailable.");
+  }
+  let productSession = database.interaction.inspectSession(
+    preparation.productSessionId,
+  ).session;
+
   const humanActor = {
     type: "human" as const,
     id: "electron-test-fixture",
@@ -607,42 +1148,133 @@ export const createIntegrationAuthorityFixture = async (
     });
     return session.id;
   };
-  const awaitingProductConfirmation = requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:product-proposal-awaiting`,
-      actor: humanActor,
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: productProposal.revision,
-      command: {
-        type: "product.proposal.mark-awaiting-confirmation",
-        projectId: project.id,
-        proposalRevisionId: productProposal.currentRevision.id,
-        proposalHash: productProposal.currentRevision.hash,
-      },
-    }),
-  );
-  const confirmedProduct = requireSucceeded(
-    database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: `${input.fixtureId}:product-baseline-confirm`,
-      actor: humanActor,
-      consumerId: "electron-test-fixture-setup",
-      expectedRevision: awaitingProductConfirmation.proposal!.revision,
-      command: {
-        type: "confirm-product-baseline",
-        projectId: project.id,
-        departmentId: department.id,
-        proposalRevisionId:
-          awaitingProductConfirmation.proposal!.currentRevision.id,
-        proposalHash:
-          awaitingProductConfirmation.proposal!.currentRevision.hash,
-      },
-    }),
-  );
-  const productBaseline = confirmedProduct.baselines[0];
-  if (!productBaseline) {
-    throw new Error("Formal Product confirmation produced no baseline.");
+  const productBaseline = (() => {
+    if (input.confirmedProduct) {
+      const discovery = database.product.inspect(project.id);
+      const exact = discovery.baselines.find(
+        (baseline) =>
+          baseline.id === input.confirmedProduct!.productBaselineId &&
+          baseline.hash === input.confirmedProduct!.productBaselineHash &&
+          baseline.runId === input.confirmedProduct!.runId &&
+          baseline.snapshotRevisionId ===
+            input.confirmedProduct!.snapshotRevisionId,
+      );
+      if (!exact) {
+        throw new Error(
+          "Renderer-confirmed Product authority does not match the authoritative Runtime view.",
+        );
+      }
+      const run = database.pipelineRuntime.inspectRun(exact.runId);
+      if (
+        run.run.projectId !== project.id ||
+        run.run.departmentId !== department.id ||
+        run.snapshot.id !== exact.snapshotRevisionId ||
+        run.snapshot.revision !== 1 ||
+        run.snapshot.payload.productBaseline?.id !== exact.id ||
+        run.snapshot.payload.productBaseline?.hash !== exact.hash
+      ) {
+        throw new Error(
+          `Renderer-confirmed Product Baseline did not atomically create the exact formal Run and r1: ${JSON.stringify(
+            {
+              expected: {
+                projectId: project.id,
+                departmentId: department.id,
+                snapshotRevisionId: exact.snapshotRevisionId,
+                baselineId: exact.id,
+                baselineHash: exact.hash,
+              },
+              actual: {
+                projectId: run.run.projectId,
+                departmentId: run.run.departmentId,
+                snapshotRevisionId: run.snapshot.id,
+                snapshotRevision: run.snapshot.revision,
+                baseline: run.snapshot.payload.productBaseline,
+              },
+            },
+          )}`,
+        );
+      }
+      return exact;
+    }
+    const formalProductProposal = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:product-proposal-revise`,
+        actor: humanActor,
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: 0,
+        command: {
+          type: "product.proposal.revise",
+          projectId: project.id,
+          producerSessionId: productSession.id,
+          content: {
+            goal: "Verify one exact reviewed temporary Repository change.",
+            users: ["Electron Test fixture"],
+            scope: ["Versioned Test authority"],
+            nonGoals: ["Release Candidate creation"],
+            acceptanceCriteria: [
+              "The exact frozen Diff is independently reviewed.",
+            ],
+            constraints: ["Use only the temporary fixture Repository."],
+            risks: ["Fixture evidence must not escape its temporary root."],
+            openQuestions: [],
+          },
+        },
+      }),
+    );
+    if (!formalProductProposal.proposal) {
+      throw new Error("Formal Product Proposal Command produced no proposal.");
+    }
+    const awaitingProductConfirmation = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:product-proposal-awaiting`,
+        actor: humanActor,
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: formalProductProposal.proposal.revision,
+        command: {
+          type: "product.proposal.mark-awaiting-confirmation",
+          projectId: project.id,
+          proposalRevisionId: formalProductProposal.proposal.currentRevision.id,
+          proposalHash: formalProductProposal.proposal.currentRevision.hash,
+        },
+      }),
+    );
+    const confirmed = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:product-baseline-confirm`,
+        actor: humanActor,
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: awaitingProductConfirmation.proposal!.revision,
+        command: {
+          type: "confirm-product-baseline",
+          projectId: project.id,
+          departmentId: department.id,
+          proposalRevisionId:
+            awaitingProductConfirmation.proposal!.currentRevision.id,
+          proposalHash:
+            awaitingProductConfirmation.proposal!.currentRevision.hash,
+        },
+      }),
+    );
+    const baseline = confirmed.baselines[0];
+    if (!baseline) {
+      throw new Error("Formal Product confirmation produced no baseline.");
+    }
+    return baseline;
+  })();
+  if (productSession.status !== "active") {
+    productSession = database.interaction.createSession({
+      projectId: project.id,
+      mode: "consultation",
+    });
+    database.interaction.addParticipant({
+      sessionId: productSession.id,
+      participantType: "ai-member",
+      participantRef: productManager.aiMember.id,
+      role: "product-manager",
+    });
   }
   const projectSpecResult = requireSucceeded(
     database.commandRegistry.execute({
@@ -1383,6 +2015,30 @@ export const createIntegrationAuthorityFixture = async (
   if (testNode?.status !== "running" || !testAttempt) {
     throw new Error("Fixture Pipeline did not claim the Test Node Attempt.");
   }
+  const candidateInputNode = testing.nodes.find(
+    (node) => node.pipelineNodeId === "candidate-input",
+  );
+  const securityNode = testing.nodes.find(
+    (node) => node.pipelineNodeId === "security",
+  );
+  const operabilityNode = testing.nodes.find(
+    (node) => node.pipelineNodeId === "operability",
+  );
+  const candidateNode = testing.nodes.find(
+    (node) => node.pipelineNodeId === "candidate",
+  );
+  const humanReleaseNode = testing.nodes.find(
+    (node) => node.pipelineNodeId === "human-release",
+  );
+  if (
+    !candidateInputNode ||
+    !securityNode ||
+    !operabilityNode ||
+    !candidateNode ||
+    !humanReleaseNode
+  ) {
+    throw new Error("Fixture Pipeline is missing Delivery quality Nodes.");
+  }
   const testSession = database.interaction.createSession({
     projectId: project.id,
     mode: "run-collaboration",
@@ -1394,6 +2050,18 @@ export const createIntegrationAuthorityFixture = async (
     participantType: "ai-member",
     participantRef: tester.aiMember.id,
     role: "test-engineer",
+  });
+  const candidateInputSession = database.interaction.createSession({
+    projectId: project.id,
+    mode: "run-collaboration",
+    runId: testing.run.id,
+    nodeRunId: candidateInputNode.id,
+  });
+  database.interaction.addParticipant({
+    sessionId: candidateInputSession.id,
+    participantType: "ai-member",
+    participantRef: deliveryCoordinator.aiMember.id,
+    role: "delivery-coordinator",
   });
   const gateReviewerSession = createConsultation(
     reviewer,
@@ -1473,6 +2141,18 @@ export const createIntegrationAuthorityFixture = async (
     build: {
       artifactVersionId: build.id,
       digest: sha256(buildBytes),
+    },
+    deliveryQuality: {
+      candidateInputNodeRunId: candidateInputNode.id,
+      candidateInputSessionId: candidateInputSession.id,
+      securityNodeRunId: securityNode.id,
+      operabilityNodeRunId: operabilityNode.id,
+      candidateNodeRunId: candidateNode.id,
+      humanReleaseNodeRunId: humanReleaseNode.id,
+      producer: {
+        aiMemberId: deliveryCoordinator.aiMember.id,
+        positionId: deliveryCoordinator.id,
+      },
     },
     integrationAuthority,
   };

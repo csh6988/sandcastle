@@ -1218,8 +1218,10 @@ export function DepartmentRunDetail({
   const retriesRemaining = Math.max(0, maxRetries - usedRetries);
   const canContinue =
     ["running", "recovering"].includes(run.run.status) &&
-    run.nodes.some((node) =>
-      node.attempts.some((attempt) => attempt.status === "ready"),
+    run.nodes.some(
+      (node) =>
+        node.status === "ready" ||
+        node.attempts.some((attempt) => attempt.status === "ready"),
     );
   const canPause = [
     "ready",

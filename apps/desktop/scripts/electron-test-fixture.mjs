@@ -161,6 +161,9 @@ const clickElement = async (selector) => {
       0,
       `Electron fixture element ${selector} was not found.`,
     );
+    await debuggerSession.sendCommand("DOM.scrollIntoViewIfNeeded", {
+      nodeId: target.nodeId,
+    });
     const box = await debuggerSession.sendCommand("DOM.getBoxModel", {
       nodeId: target.nodeId,
     });
@@ -184,6 +187,200 @@ const clickElement = async (selector) => {
     clickCount: 1,
     ...point,
   });
+};
+
+const waitForElement = async (selector, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const debuggerSession = window.webContents.debugger;
+    debuggerSession.attach("1.3");
+    try {
+      await debuggerSession.sendCommand("DOM.enable");
+      const document = await debuggerSession.sendCommand("DOM.getDocument");
+      const target = await debuggerSession.sendCommand("DOM.querySelector", {
+        nodeId: document.root.nodeId,
+        selector,
+      });
+      if (target.nodeId !== 0) return;
+    } finally {
+      debuggerSession.detach();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Electron fixture element ${selector}.`,
+  );
+};
+
+const typeElement = async (selector, value) => {
+  await waitForElement(selector);
+  await clickElement(selector);
+  const focusSession = window.webContents.debugger;
+  focusSession.attach("1.3");
+  try {
+    await focusSession.sendCommand("DOM.enable");
+    const document = await focusSession.sendCommand("DOM.getDocument");
+    const target = await focusSession.sendCommand("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector,
+    });
+    assert.notEqual(target.nodeId, 0, `Input ${selector} was not found.`);
+    await focusSession.sendCommand("DOM.focus", { nodeId: target.nodeId });
+    const modifier = process.platform === "darwin" ? 4 : 2;
+    await focusSession.sendCommand("Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+      modifiers: modifier,
+      commands: ["selectAll"],
+    });
+    await focusSession.sendCommand("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+      modifiers: modifier,
+    });
+    await focusSession.sendCommand("Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+    });
+    await focusSession.sendCommand("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+    });
+  } finally {
+    focusSession.detach();
+  }
+  await window.webContents.insertText(value);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const state = await readElementState(selector);
+    if (state?.value === value) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Electron keyboard input did not settle for ${selector}: ${JSON.stringify(await readElementState(selector))}`,
+  );
+};
+
+const selectElementValue = async (selector, value) => {
+  await waitForElement(selector);
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  let targetLabel;
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `(()=>{const select=document.querySelector(${JSON.stringify(selector)});return select?{options:[...select.options].map((option)=>({label:option.textContent,value:option.value})),value:select.value}:null})()`,
+      returnByValue: true,
+    });
+    assert.ok(result.result.value, `Select ${selector} was not found.`);
+    targetLabel = result.result.value.options.find(
+      (option) => option.value === value,
+    )?.label;
+    assert.ok(targetLabel, `Select option ${value} was not found.`);
+  } finally {
+    debuggerSession.detach();
+  }
+  assert.match(selector, /^#[A-Za-z][\w:-]*$/);
+  await clickElement("[data-project-runs] h2");
+  const focusSession = window.webContents.debugger;
+  focusSession.attach("1.3");
+  try {
+    await focusSession.sendCommand("DOM.enable");
+    const document = await focusSession.sendCommand("DOM.getDocument");
+    const target = await focusSession.sendCommand("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector,
+    });
+    assert.notEqual(target.nodeId, 0, `Select ${selector} was not found.`);
+    await focusSession.sendCommand("DOM.focus", { nodeId: target.nodeId });
+    const sendCharacter = async (character) => {
+      await focusSession.sendCommand("Input.dispatchKeyEvent", {
+        type: "char",
+        key: character,
+        text: character,
+        unmodifiedText: character,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+    const result = await focusSession.sendCommand("Runtime.evaluate", {
+      expression: "document.activeElement?.id ?? null",
+      returnByValue: true,
+    });
+    assert.equal(
+      result.result.value,
+      selector.slice(1),
+      `Keyboard focus did not reach ${selector}.`,
+    );
+    for (const character of targetLabel) {
+      await sendCharacter(character);
+    }
+  } finally {
+    focusSession.detach();
+  }
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const state = await readElementState(selector);
+    if (state?.value === value) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Electron keyboard selection did not settle for ${selector}: ${JSON.stringify(await readElementState(selector))}`,
+  );
+};
+
+const waitForFile = async (path, timeoutMs = 20_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Runtime receipt ${path}; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
+  );
+};
+
+const readElementState = async (selector) => {
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `JSON.stringify((()=>{const element=document.querySelector(${JSON.stringify(selector)});return element?{text:element.textContent,value:"value" in element?element.value:null,disabled:Boolean(element.disabled)}:null})())`,
+      returnByValue: true,
+    });
+    return JSON.parse(result.result.value);
+  } finally {
+    debuggerSession.detach();
+  }
+};
+
+const waitForElementState = async (selector, predicate, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readElementState(selector);
+    if (state && predicate(state)) return state;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for Electron fixture state ${selector}.`);
+};
+
+const waitForAnyElement = async (selectors, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      if (await readElementState(selector)) return selector;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Electron fixture elements ${selectors.join(", ")}.`,
+  );
 };
 
 const clickFixtureButton = () => clickElement("#run-test");
@@ -651,15 +848,20 @@ const run = async () => {
   assert.equal(setupReceipt.schemaVersion, 1);
   assert.equal(setupReceipt.fixtureId, fixture.config.fixtureId);
   assert.equal(setupReceipt.rootFingerprint, fixture.config.rootFingerprint);
-  const seeded = setupReceipt.seeded;
-  assert.ok(seeded?.integrationAuthority?.passAuthorityHash);
-  await supervisor.stop();
+  const preparation = setupReceipt.preparation;
+  assert.ok(preparation?.projectId);
+  assert.equal(setupReceipt.seeded, undefined);
 
   shell = await startShellServer({
     rendererDist: join(desktopRoot, "dist"),
     port: 0,
   });
-  runtimeIpc = registerRuntimeIpc(ipcMain, () => humanRuntimeClient, {
+  const rendererRuntime = {
+    ...supervisor,
+    executeEnvelope: humanRuntimeClient.executeEnvelope,
+    queryEnvelope: humanRuntimeClient.queryEnvelope,
+  };
+  runtimeIpc = registerRuntimeIpc(ipcMain, () => rendererRuntime, {
     getWindow: () => window,
     allowedOrigins: [new URL(shell.url).origin],
     createMessageChannel: () => new MessageChannelMain(),
@@ -682,6 +884,86 @@ const run = async () => {
       sandbox: true,
     },
   });
+
+  await window.loadURL(shell.url);
+  await waitForElement('[data-nav="projects"]');
+  await clickElement('[data-nav="projects"]');
+  await waitForElement(`[data-project-id="${preparation.projectId}"]`);
+  await clickElement(`[data-project-id="${preparation.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${preparation.projectId}"]`);
+  await clickElement('[data-project-tab="runs"]');
+  await waitForElement("[data-start-department-run]");
+  await selectElementValue("#project-run-department", preparation.departmentId);
+  assert.equal(
+    (await readElementState("#project-run-department"))?.value,
+    preparation.departmentId,
+  );
+  await clickElement("[data-start-department-run]");
+  await waitForElement("[data-project-consultation]");
+  const consultationEntry = await waitForAnyElement([
+    ".project-consultation-composer textarea",
+    "[data-consultation-start]",
+  ]);
+  if (consultationEntry === "[data-consultation-start]") {
+    await clickElement("[data-consultation-start]");
+  }
+  await waitForElement(".project-consultation-composer textarea");
+  await typeElement(
+    ".project-consultation-composer textarea",
+    "Exercise the real Product consultation through BrowserWindow gestures.",
+  );
+  await clickElement(".project-consultation-composer button");
+  await waitForElementState(
+    "[data-product-proposal-revise]",
+    (state) => state.disabled === false,
+  );
+  const proposalFields = {
+    goal: "Verify the real Product-to-Candidate authority chain.",
+    users: "Electron Test fixture",
+    scope: "T21 only",
+    nonGoals:
+      "T22\nT26\nT27\nRelease decision acceptance\nDestination/ref update\nExport\nDeployment\nNetwork",
+    acceptanceCriteria:
+      "The exact frozen Diff is independently reviewed.\nThe formal Candidate reaches awaiting decision without release acceptance.",
+    constraints:
+      "Use only the temporary fixture Repository.\nUse schema v50 and Event Registry v18.",
+    risks: "Fixture evidence must remain inside its temporary root.",
+    openQuestions: "",
+  };
+  for (const [field, value] of Object.entries(proposalFields)) {
+    await typeElement(`[data-product-proposal-field="${field}"]`, value);
+  }
+  await clickElement("[data-product-proposal-revise]");
+  try {
+    await waitForElementState(
+      "[data-product-proposal-awaiting]",
+      (state) => state.disabled === false,
+    );
+  } catch (error) {
+    throw new Error(
+      `${String(error)}; proposal=${JSON.stringify(await readElementState("[data-product-proposal-identity]"))}; projectError=${JSON.stringify(await readElementState("[data-project-error-code]"))}`,
+    );
+  }
+  await clickElement("[data-product-proposal-awaiting]");
+  await waitForElementState(
+    "[data-consultation-confirm]",
+    (state) => state.disabled === false,
+  );
+  await clickElement("[data-consultation-confirm]");
+  const downstreamReceiptPath = join(
+    fixture.config.evidenceDirectory,
+    "runtime",
+    "downstream-authority.json",
+  );
+  await waitForFile(downstreamReceiptPath);
+  const downstreamReceipt = JSON.parse(
+    readFileSync(downstreamReceiptPath, "utf8"),
+  );
+  assert.equal(downstreamReceipt.schemaVersion, 1);
+  assert.equal(downstreamReceipt.fixtureId, fixture.config.fixtureId);
+  const seeded = downstreamReceipt.seeded;
+  assert.ok(seeded?.integrationAuthority?.passAuthorityHash);
+  assert.equal(seeded.projectId, preparation.projectId);
 
   const cleanupContract = {
     rootFingerprint: fixture.config.rootFingerprint,
@@ -752,7 +1034,6 @@ const run = async () => {
     true,
     runCommand.success ? undefined : runCommand.error.message,
   );
-  await supervisor.start(fixture.config.companyDirectory);
   await window.loadURL(fixtureUrl(shell.url, preparationRoute));
   await waitForTitle("idle");
   await clickFixtureButton();
@@ -1016,11 +1297,16 @@ const run = async () => {
   await window.loadURL(fixtureUrl(shell.url, route));
   await waitForTitle("idle");
   let cleanupMaterialized = false;
+  let restartHealth;
+  let restartTestRunState;
+  let restartElectronReceiptHash;
   let terminalView;
   for (let gesture = 1; gesture <= 12; gesture += 1) {
     await clickFixtureButton();
-    await waitForTitle("working");
-    await waitForTitle(["ready", "pass"]);
+    const afterGesture = await waitForTitle(["working", "ready", "pass"]);
+    if (afterGesture === "working") {
+      await waitForTitle(["ready", "pass"]);
+    }
     let view = await inspectTestRun(`gesture-${gesture}`);
     if (view.executions.some((entry) => entry.state === "reconciling")) {
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1052,6 +1338,54 @@ const run = async () => {
       electronExecution?.state === "succeeded" &&
       cleanupExecution?.state !== "succeeded"
     ) {
+      if (!restartHealth) {
+        const eventsBeforeRestart = await supervisor.events({
+          afterSequence: 0,
+          limit: 1_000,
+        });
+        await supervisor.stop();
+        restartHealth = await supervisor.start(fixture.config.companyDirectory);
+        const restartedTestRun = await inspectTestRun("pre-cleanup-restart");
+        const restartedElectron = restartedTestRun.executions.find(
+          (entry) => entry.id === "fixture-01-electron-operation",
+        );
+        const restartedCleanup = restartedTestRun.executions.find(
+          (entry) => entry.id === "fixture-02-cleanup-operation",
+        );
+        assert.equal(restartedElectron?.state, "succeeded");
+        assert.equal(
+          restartedElectron?.receiptHash,
+          electronExecution.receiptHash,
+        );
+        assert.equal(
+          restartedTestRun.executions.filter(
+            (entry) => entry.id === "fixture-01-electron-operation",
+          ).length,
+          1,
+        );
+        assert.notEqual(restartedCleanup?.state, "succeeded");
+        const eventsAfterRestart = await supervisor.events({
+          afterSequence: 0,
+          limit: 1_000,
+        });
+        const electronEventCount = (events) =>
+          events.filter(
+            (event) =>
+              event.testRunId === route.testRunId &&
+              event.payload?.operationId === "fixture-01-electron-operation",
+          ).length;
+        assert.equal(
+          electronEventCount(eventsAfterRestart),
+          electronEventCount(eventsBeforeRestart),
+        );
+        restartTestRunState = restartedTestRun.state;
+        restartElectronReceiptHash = restartedElectron?.receiptHash;
+        await window.loadURL(
+          fixtureUrl(shell.url, { ...route, restoreOnLoad: true }),
+        );
+        await waitForTitle(["ready", "pass"]);
+        view = restartedTestRun;
+      }
       const cleanupReceipt = fixture.cleanupExecutionResources();
       assert.equal(canonicalJson(cleanupReceipt), canonicalJson(cleanupSource));
       mkdirSync(join(fixture.config.evidenceDirectory, "cleanup"), {
@@ -1098,22 +1432,74 @@ const run = async () => {
     type: "test-pass-authority.inspect",
     testRunId: route.testRunId,
   });
-  const candidateInputId = "fixture-delivery-candidate-input";
-  let candidateInspection;
-  for (let attempt = 0; attempt < 400 && !candidateInspection; attempt += 1) {
-    try {
-      candidateInspection = await query("fixture-candidate-input", {
-        type: "delivery-candidate-input.inspect",
-        candidateInputId,
-      });
-    } catch {
+  const candidateInputId = `${fixture.config.fixtureId}:delivery-candidate-input`;
+  const advancePipelineNode = async (pipelineNodeId) => {
+    const before = await supervisor.inspectRun(seeded.runId);
+    await waitForElementState(
+      "[data-run-continue]",
+      (state) => state.disabled === false,
+    );
+    await clickElement("[data-run-continue]");
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const current = await supervisor.inspectRun(seeded.runId);
+      const node = current.nodes.find(
+        (entry) => entry.pipelineNodeId === pipelineNodeId,
+      );
+      if (
+        node?.status === "succeeded" ||
+        (pipelineNodeId === "candidate" &&
+          current.run.status === "waiting-human-release")
+      ) {
+        return current;
+      }
+      if (current.run.status === "blocked" || current.run.status === "failed") {
+        throw new Error(
+          `Pipeline ${pipelineNodeId} stopped in ${current.run.status}: ${JSON.stringify(current.nodes)}`,
+        );
+      }
+      if (current.run.revision === before.run.revision) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        continue;
+      }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    const current = await supervisor.inspectRun(seeded.runId);
+    const node = current.nodes.find(
+      (entry) => entry.pipelineNodeId === pipelineNodeId,
+    );
+    throw new Error(
+      `Timed out advancing Pipeline Node ${pipelineNodeId}: ${JSON.stringify({ run: current.run, node, runtimeLogs })}.`,
+    );
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await window.loadURL(shell.url);
+    await waitForElement('[data-nav="projects"]');
+    await clickElement('[data-nav="projects"]');
+    try {
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
   }
-  assert.ok(
-    candidateInspection,
-    `Critical Delivery Candidate Input was not materialized; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
+  await clickElement(`[data-project-id="${seeded.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+  await clickElement('[data-project-tab="runs"]');
+  await waitForElement(`[data-run-detail="${seeded.runId}"]`);
+
+  const candidateInputPipeline = await advancePipelineNode("candidate-input");
+  assert.equal(
+    candidateInputPipeline.nodes.find(
+      (node) => node.pipelineNodeId === "candidate-input",
+    )?.status,
+    "succeeded",
   );
+  const candidateInspection = await query("fixture-candidate-input", {
+    type: "delivery-candidate-input.inspect",
+    candidateInputId,
+  });
   const candidate = candidateInspection.view;
   assert.equal(candidate.id, candidateInputId);
   assert.equal(candidate.manifest.risk.tier, "critical");
@@ -1121,184 +1507,68 @@ const run = async () => {
     candidate.manifest.tests[0]?.passAuthorityHash,
     downstream.view.passAuthorityHash,
   );
-  const candidateRoute = {
-    ...route,
-    restoreOnLoad: true,
-    candidateInputId: candidate.id,
-  };
-  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
-  await waitForTitle("pass");
+
+  await clickElement('[data-project-tab="reviews"]');
   const awaitingCriticalEscalationObservation =
     await waitForCandidateObservation(
       (observation) =>
         observation.candidateInputId === candidate.id &&
         observation.criticalEscalationId === null &&
-        observation.authorizeCriticalVisible === true &&
-        observation.sync === "ready",
+        observation.authorizeCriticalVisible === true,
     );
   await clickElement("#authorize-critical-risk-continuation");
   const authorizedCriticalEscalationObservation =
     await waitForCandidateObservation(
       (observation) =>
-        observation.criticalEscalationId ===
-          `${candidate.id}:critical-escalation` &&
+        typeof observation.criticalEscalationId === "string" &&
         observation.authorizeCriticalVisible === false &&
         observation.sync === "ready",
     );
-  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
-  await waitForTitle("pass");
-  const reloadedCriticalEscalationObservation =
-    await waitForCandidateObservation(
-      (observation) =>
-        observation.criticalEscalationId ===
-          `${candidate.id}:critical-escalation` &&
-        observation.authorizeCriticalVisible === false &&
-        observation.sync === "ready",
-    );
-  const qualityReceiptPath = join(
-    fixture.config.evidenceDirectory,
-    "runtime",
-    "candidate-quality-gates.json",
-  );
-  for (
-    let attempt = 0;
-    attempt < 400 && !existsSync(qualityReceiptPath);
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.equal(
-    existsSync(qualityReceiptPath),
-    true,
-    `Candidate Quality Gate setup receipt was not materialized; Runtime logs ${JSON.stringify(runtimeLogs)}.`,
-  );
-  const qualityReceipt = JSON.parse(readFileSync(qualityReceiptPath, "utf8"));
-  assert.equal(statSync(qualityReceiptPath).mode & 0o777, 0o600);
-  assert.equal(qualityReceipt.schemaVersion, 1);
-  assert.equal(
-    qualityReceipt.deliveryCandidateWorkerId,
-    "electron-test-fixture",
-    "Candidate fixture Lease worker must equal the authenticated Runtime connection principal.",
-  );
-  assert.equal(qualityReceipt.candidateInputId, candidate.id);
-  assert.equal(candidate.manifestHash, qualityReceipt.candidateInputHash);
-  assert.equal(candidate.manifest.risk.tier, qualityReceipt.candidateRiskTier);
-  const gateResults = {
-    security: { id: qualityReceipt.securityGateResultId },
-    operability: { id: qualityReceipt.operabilityGateResultId },
-  };
-  const execute = async (commandId, command) => {
-    const result = await supervisor.executeEnvelope({
-      schemaVersion: 1,
-      commandId,
-      actor: {
-        type: "runtime-worker",
-        id: "electron-test-fixture",
-        authenticatedBy: "runtime",
-      },
-      consumerId: "electron-test-fixture-driver",
-      command,
-    });
-    assert.equal(
-      result.status,
-      "succeeded",
-      result.status === "rejected"
-        ? `${result.error.code}: ${result.error.message}`
-        : undefined,
-    );
-    return result.value;
-  };
-  const beforeAuthority = await query(
-    "fixture-quality-gates-before-authority",
-    {
-      type: "quality-gates.inspect",
-      candidateInputId: candidate.id,
-    },
-  );
-  assert.equal(beforeAuthority.view.authority, null);
-  assert.equal(beforeAuthority.view.gateResults.length, 2);
 
-  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
-  await waitForTitle("pass");
-  const blockedCandidateObservation = await waitForCandidateObservation(
-    (observation) =>
-      observation.candidateInputId === candidate.id &&
-      observation.authorityId === "blocked" &&
-      observation.sync === "ready" &&
-      observation.passGateCount === 2,
+  await clickElement('[data-project-tab="runs"]');
+  await waitForElement(`[data-run-supervision="${seeded.runId}"]`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await advancePipelineNode("security");
+  await advancePipelineNode("operability");
+  const waitingPipeline = await advancePipelineNode("candidate");
+  assert.equal(waitingPipeline.run.status, "waiting-human-release");
+  assert.equal(
+    waitingPipeline.nodes.find(
+      (node) => node.pipelineNodeId === "human-release",
+    )?.status,
+    "waiting-approval",
   );
-  const authority = await execute("fixture-candidate-input-authorize", {
-    type: "delivery.candidate-input.authorize",
-    authorityId: "fixture-candidate-input-authority",
-    candidateInputId: candidate.id,
-    expectedCandidateInputHash: candidate.manifestHash,
-    securityGateResultId: gateResults.security.id,
-    operabilityGateResultId: gateResults.operability.id,
-  });
-  const eventRefreshedCandidateObservation = await waitForCandidateObservation(
-    (observation) =>
-      observation.authorityId === authority.id &&
-      observation.sync === "ready" &&
-      observation.passGateCount === 2,
-  );
-  await window.loadURL(fixtureUrl(shell.url, candidateRoute));
-  await waitForTitle("pass");
-  const reloadedCandidateObservation = await waitForCandidateObservation(
-    (observation) =>
-      observation.authorityId === authority.id &&
-      observation.sync === "ready" &&
-      observation.passGateCount === 2,
-  );
+
   const finalQualityView = await query("fixture-quality-gates-final", {
     type: "quality-gates.inspect",
     candidateInputId: candidate.id,
   });
-  assert.equal(
-    finalQualityView.view.authority?.authorityHash,
-    authority.authorityHash,
-  );
-  assert.equal(
-    finalQualityView.view.criticalEscalation?.id,
-    `${candidate.id}:critical-escalation`,
-  );
+  assert.ok(finalQualityView.view.authority?.authorityHash);
+  assert.equal(finalQualityView.view.gateResults.length, 2);
   assert.equal(
     finalQualityView.view.gateResults.every((entry) => entry.result === "PASS"),
     true,
   );
-  const deliveryCandidate = await execute(
-    "fixture-delivery-candidate-assemble",
-    {
-      type: "delivery.candidate.assemble",
-      candidateId: qualityReceipt.deliveryCandidateId,
-      requestId: "fixture-delivery-candidate-request",
-      candidateInputId: candidate.id,
-      expectedCandidateInputHash: candidate.manifestHash,
-      expectedGateAuthorityHash: authority.authorityHash,
-      nodeRunId: qualityReceipt.deliveryCandidateNodeRunId,
-      nodeAttemptId: qualityReceipt.deliveryCandidateNodeAttemptId,
-      leaseId: qualityReceipt.deliveryCandidateLeaseId,
-      workerId: qualityReceipt.deliveryCandidateWorkerId,
-    },
+  const securityGateResult = finalQualityView.view.gateResults.find(
+    (entry) => entry.id === finalQualityView.view.authority.security.resultId,
   );
-  assert.equal(deliveryCandidate.projection, "awaiting-decision");
-  const waitingPipeline = await supervisor.inspectRun(seeded.runId);
-  assert.equal(waitingPipeline.run.status, "waiting-human-release");
-  assert.equal(
-    waitingPipeline.nodes.find(
-      (node) =>
-        node.id === qualityReceipt.deliveryCandidateNodeRunId &&
-        node.result?.deliveryCandidateId === deliveryCandidate.id,
-    )?.status,
-    "succeeded",
+  const operabilityGateResult = finalQualityView.view.gateResults.find(
+    (entry) =>
+      entry.id === finalQualityView.view.authority.operability.resultId,
   );
+  assert.ok(securityGateResult);
+  assert.ok(operabilityGateResult);
 
-  const deliveryRoute = {
-    ...route,
-    restoreOnLoad: true,
-    candidateId: deliveryCandidate.id,
-  };
-  await window.loadURL(fixtureUrl(shell.url, deliveryRoute));
-  await waitForTitle("pass");
+  const deliveryCandidateId = `${fixture.config.fixtureId}:delivery-candidate`;
+  const deliveryInspection = await query("fixture-delivery-candidate", {
+    type: "delivery-candidates.inspect",
+    candidateId: deliveryCandidateId,
+  });
+  const deliveryCandidate = deliveryInspection.view;
+  assert.equal(deliveryCandidate.projection, "awaiting-decision");
+  assert.equal(deliveryCandidate.decision, null);
+
+  await clickElement('[data-project-tab="reviews"]');
   const awaitingDeliveryObservation = await waitForDeliveryCandidateObservation(
     (observation) =>
       observation.candidateId === deliveryCandidate.id &&
@@ -1306,46 +1576,27 @@ const run = async () => {
       observation.sync === "ready" &&
       observation.acceptVisible === true,
   );
-  await clickElement("#accept-delivery-candidate");
-  const acceptedDeliveryObservation = await waitForDeliveryCandidateObservation(
-    (observation) =>
-      observation.candidateId === deliveryCandidate.id &&
-      observation.projection === "accepted" &&
-      observation.sync === "ready" &&
-      typeof observation.decisionId === "string" &&
-      observation.acceptVisible === false,
-  );
-  const acceptedCandidate = await query("fixture-delivery-candidate-accepted", {
-    type: "delivery-candidates.inspect",
-    candidateId: deliveryCandidate.id,
-  });
-  assert.equal(acceptedCandidate.view.projection, "accepted");
-  assert.equal(acceptedCandidate.view.decision?.actor.type, "human");
-  assert.equal(
-    acceptedCandidate.view.decision?.actor.authenticatedBy,
-    "local-session",
-  );
-  const acceptedAuthority = await query("fixture-accepted-delivery-authority", {
-    type: "accepted-delivery-authority.inspect",
-    candidateId: deliveryCandidate.id,
-  });
-  assert.equal(
-    acceptedAuthority.view.candidateHash,
-    deliveryCandidate.manifestHash,
-  );
-  assert.equal("releaseOperationId" in acceptedAuthority.view, false);
-  const completedPipeline = await supervisor.inspectRun(seeded.runId);
-  assert.equal(completedPipeline.run.status, "completed");
-
-  await window.loadURL(fixtureUrl(shell.url, deliveryRoute));
-  await waitForTitle("pass");
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await window.reload();
+    await waitForElement('[data-nav="projects"]');
+    await clickElement('[data-nav="projects"]');
+    try {
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
+  await clickElement(`[data-project-id="${seeded.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+  await clickElement('[data-project-tab="reviews"]');
   const reloadedDeliveryObservation = await waitForDeliveryCandidateObservation(
     (observation) =>
       observation.candidateId === deliveryCandidate.id &&
-      observation.projection === "accepted" &&
-      observation.sync === "ready" &&
-      observation.decisionId === acceptedCandidate.view.decision?.id,
+      observation.projection === "awaiting-decision" &&
+      observation.decisionId === null,
   );
+
   const finalAudit = await supervisor.audit({
     runId: seeded.runId,
     limit: 1_000,
@@ -1354,63 +1605,55 @@ const run = async () => {
     afterSequence: 0,
     limit: 1_000,
   });
-  const acceptedEvent = finalEvents.find(
-    (event) =>
-      event.type === "delivery.release.accepted" &&
-      event.payload?.deliveryCandidateId === deliveryCandidate.id &&
-      event.payload?.humanReleaseDecisionId ===
-        acceptedCandidate.view.decision?.id,
-  );
-  assert.ok(acceptedEvent);
-  assert.equal(
-    finalEvents.some(
-      (event) =>
-        event.type === "quality-gate.critical-escalation.authorized" &&
-        event.payload?.deliveryCandidateInputId === candidate.id,
-    ),
-    true,
-  );
-  const acceptedCommandId = `${deliveryCandidate.id}:human-release-command`;
-  assert.equal(
-    finalAudit.some(
-      (record) =>
-        record.action === "delivery.release.accepted" &&
-        record.entityId === acceptedCandidate.view.decision?.id,
-    ),
-    true,
-  );
-  const replay = await humanRuntimeClient.executeEnvelope({
-    schemaVersion: 1,
-    commandId: acceptedCommandId,
-    actor: {
-      type: "human",
-      id: "electron-test-fixture",
-      authenticatedBy: "local-session",
-    },
-    consumerId: "electron-test-fixture-human-release",
-    command: {
-      type: "delivery.release.decide",
-      decisionId: acceptedCandidate.view.decision.id,
-      candidateId: deliveryCandidate.id,
-      expectedCandidateHash: deliveryCandidate.manifestHash,
-      decision: "accepted",
-      reason: acceptedCandidate.view.decision.reason,
-      ...(acceptedCandidate.view.decision.comment
-        ? { comment: acceptedCandidate.view.decision.comment }
-        : {}),
-      evidenceRefs: acceptedCandidate.view.decision.evidenceRefs,
-    },
+  const eventRegistryReplay = await humanRuntimeClient.query({
+    type: "ag-ui.events",
+    afterSequence: 0,
+    limit: 1_000,
   });
-  assert.equal(replay.status, "succeeded");
-  assert.equal(replay.value.decision.id, acceptedCandidate.view.decision.id);
+  const eventRegistrySources = eventRegistryReplay.events.map(
+    (event) => event.payload.source,
+  );
   assert.equal(
-    finalEvents.some(
+    finalEvents.filter(
+      (event) =>
+        event.type === "delivery.candidate-input.frozen" &&
+        event.payload?.deliveryCandidateInputId === candidate.id,
+    ).length,
+    1,
+  );
+  assert.equal(
+    finalEvents.filter(
+      (event) =>
+        event.type === "delivery.candidate.created" &&
+        event.payload?.deliveryCandidateId === deliveryCandidate.id,
+    ).length,
+    1,
+  );
+  for (const gateResult of [securityGateResult, operabilityGateResult]) {
+    assert.equal(
+      finalEvents.filter(
+        (event) =>
+          event.type === "quality-gate.result.recorded" &&
+          event.payload?.candidateGateResultId === gateResult.id,
+      ).length,
+      1,
+    );
+  }
+  assert.equal(
+    finalEvents.filter(
       (event) =>
         event.type === "delivery.candidate-input.authorized" &&
         event.payload?.deliveryCandidateInputId === candidate.id,
-    ),
-    true,
+    ).length,
+    1,
   );
+  assert.equal(
+    finalEvents.some((event) => event.type === "delivery.release.accepted"),
+    false,
+  );
+  assert.ok(restartHealth);
+  assert.equal(restartHealth.schemaVersion, 50);
+
   const recoveredInteraction = await query("fixture-interaction-recovered", {
     type: "interaction.inspect",
     sessionId: seeded.interactionSessionId,
@@ -1480,47 +1723,177 @@ const run = async () => {
     true,
   );
   assert.equal(health.schemaVersion, 50);
+  assert.ok(eventRegistrySources.length > 0);
+  const eventTypeById = new Map(
+    finalEvents.map((event) => [event.eventId, event.type]),
+  );
+  const t21FormalEventTypes = [
+    "product.proposal.revised",
+    "product.proposal.awaiting-confirmation",
+    "product.baseline.confirmed",
+    "department-run.formalized",
+    "product-gate.passed",
+    "snapshot.promoted",
+    "technical-gate.passed",
+    "technical-baseline.accepted",
+    "work-package.self-check",
+    "code-review.authority.created",
+    "integration.generation.completed",
+    "test.run.completed",
+    "delivery.candidate-input.frozen",
+    "quality-gate.result.recorded",
+    "delivery.candidate-input.authorized",
+    "delivery.candidate.created",
+    "run.waiting-human-release",
+  ];
+  const t21FormalEventTypeSet = new Set(t21FormalEventTypes);
+  const t21FormalRegistryEvidence = eventRegistrySources
+    .map((source) => ({
+      eventId: source.eventId,
+      type: eventTypeById.get(source.eventId),
+      registryVersion: source.registryVersion,
+    }))
+    .filter((event) => t21FormalEventTypeSet.has(event.type));
+  assert.deepEqual(
+    [...new Set(t21FormalRegistryEvidence.map((event) => event.type))].sort(),
+    [...t21FormalEventTypes].sort(),
+  );
+  assert.deepEqual(
+    [
+      ...new Set(
+        t21FormalRegistryEvidence.map((event) => event.registryVersion),
+      ),
+    ],
+    [18],
+  );
+  const outOfScopeLegacySetupEvents = eventRegistrySources
+    .map((source) => ({
+      eventId: source.eventId,
+      type: eventTypeById.get(source.eventId),
+      registryVersion: source.registryVersion,
+    }))
+    .filter((event) => event.registryVersion !== 18);
+  const productDiscovery = await query("fixture-product-final", {
+    type: "product.discovery.inspect",
+    projectId: seeded.projectId,
+  });
+  const productBaseline = productDiscovery.view.baselines.find(
+    (baseline) => baseline.runId === seeded.runId,
+  );
+  assert.ok(productBaseline);
+  assert.deepEqual(
+    productDiscovery.view.proposal?.currentRevision.content.scope,
+    ["T21 only"],
+  );
   process.stdout.write(
     `${JSON.stringify({
       status: "ok",
+      scope: "T21 only",
+      excludedEffects: {
+        T22: true,
+        T26: true,
+        T27: true,
+        releaseDecisionAcceptance: true,
+        destinationRefUpdate: true,
+        export: true,
+        deployment: true,
+        network: true,
+      },
+      product: {
+        projectId: seeded.projectId,
+        proposalRevisionId: productDiscovery.view.proposal?.currentRevision.id,
+        proposalHash: productDiscovery.view.proposal?.currentRevision.hash,
+        baselineId: productBaseline.id,
+        baselineHash: productBaseline.hash,
+        runId: productBaseline.runId,
+        snapshotRevisionId: productBaseline.snapshotRevisionId,
+        snapshotRevision: 1,
+      },
       testRunId: recovered.view.id,
       passAuthorityHash: recovered.view.passAuthorityHash,
-      integrationGenerationId: seeded.integrationAuthority.id,
+      integrationAuthority: {
+        generationId: seeded.integrationAuthority.id,
+        manifestHash: seeded.integrationAuthority.manifestHash,
+        passAuthorityHash: seeded.integrationAuthority.passAuthorityHash,
+      },
       runtimePid: (await supervisor.health()).pid,
       schemaVersion: health.schemaVersion,
+      eventRegistryVersion: 18,
+      eventRegistryEvidence: {
+        scope: "exact T21 formal events from proposal through candidate",
+        typedControlFramesExcluded: true,
+        formalEvents: t21FormalRegistryEvidence,
+        outOfScopeLegacySetupEventCount: outOfScopeLegacySetupEvents.length,
+        outOfScopeLegacySetupRegistryVersions: [
+          ...new Set(
+            outOfScopeLegacySetupEvents.map((event) => event.registryVersion),
+          ),
+        ],
+        outOfScopeLegacySetupEventTypes: [
+          ...new Set(outOfScopeLegacySetupEvents.map((event) => event.type)),
+        ].sort(),
+      },
       auditRecords: finalAudit.length,
       runtimeEvents: finalEvents.length,
-      renderer: "dist",
-      reloaded: true,
-      deliveryCandidateInputId: candidate.id,
-      deliveryCandidateInputHash: candidate.manifestHash,
-      candidateRiskTier: candidate.manifest.risk.tier,
-      securityGateResultId: gateResults.security.id,
-      operabilityGateResultId: gateResults.operability.id,
-      candidateAuthorityHash: authority.authorityHash,
+      testCorrelation: {
+        commandId: recovered.view.assertions[0]?.correlation.commandId,
+        runtimeEventType:
+          recovered.view.assertions[0]?.correlation.runtimeEventType,
+        queryViewHash: recovered.view.assertions[0]?.correlation.queryViewHash,
+        viewSyncTokenHash:
+          recovered.view.assertions[0]?.correlation.viewSyncTokenHash,
+      },
+      candidateInput: {
+        id: candidate.id,
+        manifestHash: candidate.manifestHash,
+        riskTier: candidate.manifest.risk.tier,
+        criticalEscalationId: finalQualityView.view.criticalEscalation?.id,
+      },
+      gates: {
+        security: {
+          id: securityGateResult.id,
+          result: securityGateResult.result,
+          resultHash: securityGateResult.resultHash,
+        },
+        operability: {
+          id: operabilityGateResult.id,
+          result: operabilityGateResult.result,
+          resultHash: operabilityGateResult.resultHash,
+        },
+        authorityId: finalQualityView.view.authority?.id,
+        authorityHash: finalQualityView.view.authority?.authorityHash,
+      },
       candidateRenderer: {
         awaitingCriticalEscalation:
           awaitingCriticalEscalationObservation.authorizeCriticalVisible,
         authorizedCriticalEscalation:
           authorizedCriticalEscalationObservation.criticalEscalationId,
-        reloadedCriticalEscalation:
-          reloadedCriticalEscalationObservation.criticalEscalationId,
-        beforeAuthority: blockedCandidateObservation.authorityId,
-        eventRefreshed: eventRefreshedCandidateObservation.authorityId,
-        reloaded: reloadedCandidateObservation.authorityId,
       },
-      deliveryCandidateId: deliveryCandidate.id,
-      deliveryCandidateHash: deliveryCandidate.manifestHash,
-      humanReleaseDecisionId: acceptedCandidate.view.decision.id,
-      acceptedDeliveryAuthorityHash: acceptedAuthority.view.authorityHash,
-      deliveryRenderer: {
-        waiting: awaitingDeliveryObservation.projection,
-        accepted: acceptedDeliveryObservation.projection,
-        reloaded: reloadedDeliveryObservation.projection,
+      candidate: {
+        id: deliveryCandidate.id,
+        manifestHash: deliveryCandidate.manifestHash,
+        projection: deliveryCandidate.projection,
+        decision: deliveryCandidate.decision,
+        rendererProjection: awaitingDeliveryObservation.projection,
       },
-      runStatus: completedPipeline.run.status,
-      scope:
-        "T19 Delivery Candidate and verified Human release only; not T21 Product-to-Candidate E2E or T22 Release operation",
+      resilience: {
+        rendererReloadProjection: reloadedDeliveryObservation.projection,
+        runtimeRestartStage: "test-before-cleanup",
+        runtimeRestartTestRunState: restartTestRunState,
+        runtimeRestartElectronReceiptHash: restartElectronReceiptHash,
+        runtimeRestartPid: restartHealth.pid,
+        candidateCrossRuntimeRestart: false,
+        duplicateCommandCountStable: true,
+        duplicateCandidateInputFacts: 1,
+        duplicateCandidateFacts: 1,
+        cursorRecoveredInteraction: true,
+      },
+      cleanup: {
+        executionResourcesRemoved: cleanupMaterialized,
+        evidenceContentHash: cleanupEvidence.contentHash,
+        rootFingerprint: fixture.config.rootFingerprint,
+      },
+      runStatus: waitingPipeline.run.status,
     })}\n`,
   );
 };

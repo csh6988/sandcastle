@@ -85,6 +85,7 @@ describe("Quality Gate Node Handler", () => {
 
   it("uses formal Commands and lets Pipeline Runtime complete the Candidate Input Attempt", async () => {
     const commands: EnvelopeCommand[] = [];
+    const expectedRevisions: Array<number | undefined> = [];
     const completed: unknown[] = [];
     const handler = openQualityGateNodeHandler({
       pipelineRuntime: {
@@ -103,6 +104,7 @@ describe("Quality Gate Node Handler", () => {
       commandRegistry: {
         execute: (envelope) => {
           commands.push(envelope.command);
+          expectedRevisions.push(envelope.expectedRevision);
           return {
             status: "succeeded",
             value: {
@@ -119,6 +121,7 @@ describe("Quality Gate Node Handler", () => {
           initialCommands: [
             {
               commandId: "freeze-candidate-1",
+              expectedRevision: 0,
               command: {
                 type: "delivery.candidate-input.freeze",
               } as EnvelopeCommand,
@@ -134,6 +137,7 @@ describe("Quality Gate Node Handler", () => {
       commands.map((command) => command.type),
       ["delivery.candidate-input.freeze"],
     );
+    assert.deepEqual(expectedRevisions, [0]);
     assert.equal(completed.length, 1);
   });
 
@@ -230,6 +234,287 @@ describe("Quality Gate Node Handler", () => {
       "quality-gate.result.finalize",
     ]);
     assert.equal(blocked.length, 1);
+  });
+
+  it("runs exact downstream authorization Commands only after a PASS Gate result", async () => {
+    const commandTypes: string[] = [];
+    const handler = openQualityGateNodeHandler({
+      pipelineRuntime: {
+        claimReadyAttempt: () => attempt,
+        blockClaimedAttempt: () => {
+          throw new Error("PASS must not block");
+        },
+        completeClaimedAttempt: () => ({}) as never,
+        executeQualityReviewStage: async () => ({
+          status: "succeeded",
+          providerId: "scripted-reviewer",
+          isolation: {
+            readOnlyFilesystem: true,
+            independentGitDatabase: true,
+            independentSessionStorage: true,
+            independentCredentialScope: true,
+            independentMutableCache: true,
+            inputAllowlist: true,
+            mechanism: "fixture",
+            mechanismVersion: "1",
+          },
+          isolationEvidence: ["artifact-version:review-isolation"],
+          output: {
+            result: "PASS",
+            conditions: [],
+            evidenceRefs: ["artifact-version:review-evidence"],
+          },
+          terminalExecutionFactId: "execution-fact-1",
+        }),
+      },
+      commandRegistry: {
+        execute: (envelope) => {
+          commandTypes.push(envelope.command.type);
+          return envelope.command.type === "quality-gate.result.finalize"
+            ? ({
+                status: "succeeded",
+                value: {
+                  id: "operability-result-1",
+                  result: "PASS",
+                  resultHash: "b".repeat(64),
+                },
+                effectIds: [],
+              } as never)
+            : ({ status: "succeeded", value: {}, effectIds: [] } as never);
+        },
+      },
+      plans: {
+        plan: () => ({
+          handlerKindId: "operability-review@1",
+          initialCommands: [],
+          review: {
+            reviewerSessionId: "reviewer-session-1",
+            reviewerAiMemberId: "reviewer-1",
+            operationKey: "operability-review-1",
+            reconcileExisting: false,
+            timeoutSeconds: 60,
+            request: reviewRequest,
+            adapter: reviewerAdapter,
+            terminalCommands: () => [
+              {
+                commandId: "finalize-operability-1",
+                command: {
+                  type: "quality-gate.result.finalize",
+                } as EnvelopeCommand,
+              },
+            ],
+          },
+          afterPassCommands: [
+            {
+              commandId: "authorize-candidate-input-1",
+              command: {
+                type: "delivery.candidate-input.authorize",
+              } as EnvelopeCommand,
+            },
+          ],
+        }),
+      },
+    });
+
+    await handler.executeReady({ runId: "run-1", nodeRunId: "node-1" });
+
+    assert.deepEqual(commandTypes, [
+      "quality-gate.result.finalize",
+      "delivery.candidate-input.authorize",
+    ]);
+  });
+
+  it("builds later Commands and the Reviewer request from an earlier authoritative Command result", async () => {
+    const commands: EnvelopeCommand[] = [];
+    const commandActors: unknown[] = [];
+    let reviewerRequest: ReviewerExecutionInput | undefined;
+    let reviewerExecutionInput: unknown;
+    const handler = openQualityGateNodeHandler({
+      pipelineRuntime: {
+        claimReadyAttempt: () => attempt,
+        blockClaimedAttempt: () => {
+          throw new Error("authoritative staged plan must not block");
+        },
+        completeClaimedAttempt: () => ({}) as never,
+        executeQualityReviewStage: async (input) => {
+          reviewerExecutionInput = input;
+          reviewerRequest = input.request;
+          return {
+            status: "succeeded",
+            providerId: "scripted-reviewer",
+            isolation: {
+              readOnlyFilesystem: true,
+              independentGitDatabase: true,
+              independentSessionStorage: true,
+              independentCredentialScope: true,
+              independentMutableCache: true,
+              inputAllowlist: true,
+              mechanism: "fixture",
+              mechanismVersion: "1",
+            },
+            isolationEvidence: ["artifact-version:review-isolation"],
+            output: {
+              result: "PASS",
+              conditions: [],
+              evidenceRefs: ["artifact-version:review-evidence"],
+            },
+            terminalExecutionFactId: "execution-fact-1",
+          };
+        },
+      },
+      commandRegistry: {
+        execute: (envelope) => {
+          commands.push(envelope.command);
+          commandActors.push(envelope.actor);
+          if (envelope.command.type === "quality-gate.input.prepare") {
+            return {
+              status: "succeeded",
+              value: {
+                id: "gate-input-1",
+                manifestHash: "a".repeat(64),
+              },
+              effectIds: [],
+            } as never;
+          }
+          if (envelope.command.type === "quality-gate.result.finalize") {
+            return {
+              status: "succeeded",
+              value: {
+                id: "security-result-1",
+                result: "PASS",
+                resultHash: "b".repeat(64),
+              },
+              effectIds: [],
+            } as never;
+          }
+          return { status: "succeeded", value: {}, effectIds: [] } as never;
+        },
+      },
+      plans: {
+        plan: () => ({
+          handlerKindId: "security-review@1",
+          initialCommands: [
+            {
+              commandId: "prepare-gate-input-1",
+              command: {
+                type: "quality-gate.input.prepare",
+              } as EnvelopeCommand,
+            },
+            (context) => {
+              const prepared = context.result("prepare-gate-input-1").value as {
+                readonly id: string;
+                readonly manifestHash: string;
+              };
+              return {
+                commandId: "submit-review-revision-1",
+                actor: {
+                  type: "runtime-worker",
+                  id: "producer-1",
+                  authenticatedBy: "runtime",
+                },
+                command: {
+                  type: "review.revision.submit",
+                  subjectId: prepared.id,
+                  subjectHash: prepared.manifestHash,
+                } as EnvelopeCommand,
+              };
+            },
+          ],
+          review: {
+            reviewerSessionId: "reviewer-session-1",
+            reviewerAiMemberId: "reviewer-1",
+            operationKey: "security-review-1",
+            reconcileExisting: false,
+            timeoutSeconds: 60,
+            request: (context) => {
+              const prepared = context.result("prepare-gate-input-1").value as {
+                readonly id: string;
+                readonly manifestHash: string;
+              };
+              return {
+                ...reviewRequest,
+                revision: {
+                  id: "revision-1",
+                  subjectId: prepared.id,
+                  subjectHash: prepared.manifestHash,
+                },
+              };
+            },
+            adapter: reviewerAdapter,
+            terminalCommands: () => [
+              {
+                commandId: "finalize-security-1",
+                actor: {
+                  type: "runtime-worker",
+                  id: "reviewer-1",
+                  authenticatedBy: "runtime",
+                },
+                command: {
+                  type: "quality-gate.result.finalize",
+                } as EnvelopeCommand,
+              },
+            ],
+          },
+        }),
+      },
+    });
+
+    await handler.executeReady({ runId: "run-1", nodeRunId: "node-1" });
+
+    assert.deepEqual(commands[1], {
+      type: "review.revision.submit",
+      subjectId: "gate-input-1",
+      subjectHash: "a".repeat(64),
+    });
+    assert.deepEqual(reviewerRequest?.revision, {
+      id: "revision-1",
+      subjectId: "gate-input-1",
+      subjectHash: "a".repeat(64),
+    });
+    assert.deepEqual(reviewerExecutionInput, {
+      runId: "run-1",
+      nodeRunId: "node-1",
+      handlerKindId: "security-review@1",
+      reviewerSessionId: "reviewer-session-1",
+      reviewerAiMemberId: "reviewer-1",
+      operationKey: "node-attempt:attempt-1",
+      reconcileExisting: false,
+      timeoutSeconds: 60,
+      request: {
+        operationKey: "node-attempt:attempt-1",
+        revision: {
+          id: "revision-1",
+          subjectId: "gate-input-1",
+          subjectHash: "a".repeat(64),
+        },
+      },
+      adapter: reviewerAdapter,
+      executionLease: {
+        leaseId: "lease-1",
+        leaseKind: "execution",
+        operationKey: "node-attempt:attempt-1",
+        target: { kind: "node-attempt", id: "attempt-1" },
+        executionEpoch: 1,
+        fenceToken: "fence-1",
+      },
+    });
+    assert.deepEqual(commandActors, [
+      {
+        type: "runtime-worker",
+        id: "delivery-quality-node-handler",
+        authenticatedBy: "runtime",
+      },
+      {
+        type: "runtime-worker",
+        id: "producer-1",
+        authenticatedBy: "runtime",
+      },
+      {
+        type: "runtime-worker",
+        id: "reviewer-1",
+        authenticatedBy: "runtime",
+      },
+    ]);
   });
 
   it("replays the exact formal Candidate Input Command after Pipeline recovery", async () => {

@@ -274,6 +274,12 @@ export interface PipelineRuntime {
     readonly timeoutSeconds: number;
     readonly request: ReviewerExecutionInput;
     readonly adapter: ReviewerExecutionAdapter;
+    readonly executionLease: ExecutionLeaseContext & {
+      readonly target: {
+        readonly kind: "node-attempt";
+        readonly id: string;
+      };
+    };
   }) => Promise<ReviewerExecutionResult>;
   readonly controlRun: (input: {
     readonly runId: string;
