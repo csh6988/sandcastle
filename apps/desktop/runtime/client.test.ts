@@ -898,6 +898,62 @@ describe("Company Runtime client", () => {
       supersededByCandidateId: null,
       createdAt: "2026-08-01T00:00:00.000Z",
     };
+    const activatedCandidate = {
+      ...candidate,
+      id: "delivery-candidate-rework-1",
+      requestId: "delivery-candidate-rework-request-1",
+      projection: "changes-requested" as const,
+      decision: {
+        id: "release-decision-rework-1",
+        candidateId: "delivery-candidate-rework-1",
+        candidateHash: candidate.manifestHash,
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        decision: "changes-requested" as const,
+        actor: {
+          type: "human" as const,
+          id: "local-release-owner",
+          authenticatedBy: "local-session" as const,
+        },
+        reason: "Recheck the complete Candidate evidence.",
+        comment: null,
+        evidenceRefs: ["artifact-version:artifact-version-1"],
+        rework: {
+          scope: "same-boundary" as const,
+          responsibility: {
+            kind: "aggregate" as const,
+            summary: "Recheck the complete Candidate evidence.",
+          },
+        },
+        childRunId: null,
+        decisionHash: "2".repeat(64),
+        createdAt: "2026-08-01T00:01:00.000Z",
+      },
+      recoveryActivation: {
+        id: "release-rework-activation-1",
+        decisionId: "release-decision-rework-1",
+        reworkRecordId: "release-rework-record-1",
+        candidateId: "delivery-candidate-rework-1",
+        runId: "run-1",
+        snapshotRevisionId: "snapshot-1",
+        targetNodeRunId: "candidate-input-node-1",
+        authority: {
+          kind: "candidate-input-recheck" as const,
+          id: "candidate-input-1",
+          hash: "3".repeat(64),
+          lineage: { candidateInputId: "candidate-input-1" },
+          lineageHash: "4".repeat(64),
+        },
+        actor: {
+          type: "human" as const,
+          id: "local-release-owner",
+          authenticatedBy: "local-session" as const,
+        },
+        commandId: "release-recovery-command-1",
+        createdAt: "2026-08-01T00:02:00.000Z",
+        activationHash: "5".repeat(64),
+      },
+    };
     const authority = {
       id: "accepted-authority-1",
       candidateId: candidate.id,
@@ -939,7 +995,7 @@ describe("Company Runtime client", () => {
                   ? [candidate]
                   : query?.type === "accepted-delivery-authority.inspect"
                     ? authority
-                    : candidate,
+                    : activatedCandidate,
               asOfSequence: 50,
             },
           };
@@ -953,7 +1009,10 @@ describe("Company Runtime client", () => {
       requestId: "delivery-candidate-inspect",
       principal: actor,
       consumerId: "delivery-coordinator",
-      query: { type: "delivery-candidates.inspect", candidateId: candidate.id },
+      query: {
+        type: "delivery-candidates.inspect",
+        candidateId: activatedCandidate.id,
+      },
     });
     const listed = await client.queryEnvelope({
       schemaVersion: 1,
@@ -973,7 +1032,11 @@ describe("Company Runtime client", () => {
       },
     });
 
-    assert.equal(inspected.view.projection, "accepted");
+    assert.equal(inspected.view.projection, "changes-requested");
+    assert.equal(
+      inspected.view.recoveryActivation?.activationHash,
+      activatedCandidate.recoveryActivation.activationHash,
+    );
     assert.equal(listed.view[0]?.id, candidate.id);
     assert.equal(accepted.view.authorityHash, authority.authorityHash);
     assert.equal("releaseOperationId" in accepted.view, false);

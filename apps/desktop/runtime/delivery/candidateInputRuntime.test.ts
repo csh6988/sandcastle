@@ -1704,7 +1704,7 @@ describe("Delivery Candidate Input Runtime", () => {
         },
       },
     });
-    assert.equal(activated.projection, "rework-activated");
+    assert.equal(activated.projection, "changes-requested");
     assert.equal(pipeline.inspectRun("run-1").run.status, "recovering");
 
     const second = produceCandidate(2);

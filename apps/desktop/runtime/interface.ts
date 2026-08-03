@@ -1939,7 +1939,6 @@ export const DeliveryCandidateViewSchema = z
       "accepted",
       "rejected",
       "changes-requested",
-      "rework-activated",
       "superseded",
     ]),
     decision: HumanReleaseDecisionViewSchema.nullable(),

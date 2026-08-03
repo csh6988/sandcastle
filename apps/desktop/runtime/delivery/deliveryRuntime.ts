@@ -65,7 +65,6 @@ export type DeliveryCandidateProjection =
   | "accepted"
   | "rejected"
   | "changes-requested"
-  | "rework-activated"
   | "superseded";
 
 export type HumanReleaseDecisionKind =
@@ -508,11 +507,9 @@ export const openDeliveryRuntime = (
         ? "accepted"
         : successor
           ? "superseded"
-          : recoveryActivation
-            ? "rework-activated"
-            : decision
-              ? decision.decision
-              : "awaiting-decision";
+          : decision
+            ? decision.decision
+            : "awaiting-decision";
     return {
       id: row.id,
       requestId: row.requestId,
