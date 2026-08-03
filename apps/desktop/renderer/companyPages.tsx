@@ -3240,24 +3240,30 @@ export function ProjectDetailView({
         setDeliveryCandidateDiagnostic(
           deliveryCandidateId ? "Synchronizing Reviews…" : null,
         );
+        const applyReviewsViews = (views: {
+          readonly integrationGenerations: readonly IntegrationGenerationView[];
+          readonly candidateQuality: CandidateQualityGateView | null;
+          readonly deliveryCandidate: DeliveryCandidateView | null;
+          readonly generation?: number;
+        }): void => {
+          if (!canApply()) return;
+          setIntegrationGenerationState({
+            generation: views.generation ?? 0,
+            view: views.integrationGenerations,
+          });
+          setCandidateQualityGateView(views.candidateQuality);
+          setDeliveryCandidateView(views.deliveryCandidate);
+          setIntegrationDiagnostic(null);
+          setCandidateQualityDiagnostic(null);
+          setDeliveryCandidateDiagnostic(null);
+        };
         const connection = await connectReviewsEventStream({
           bridge: window.sandcastle,
           runId: selectedRun.run.id,
           candidateInputId,
           candidateId: deliveryCandidateId,
-          onViews: (views) => {
-            if (canApply()) {
-              setIntegrationGenerationState({
-                generation: views.generation,
-                view: views.integrationGenerations,
-              });
-              setCandidateQualityGateView(views.candidateQuality);
-              setDeliveryCandidateView(views.deliveryCandidate);
-              setIntegrationDiagnostic(null);
-              setCandidateQualityDiagnostic(null);
-              setDeliveryCandidateDiagnostic(null);
-            }
-          },
+          onInitialViews: applyReviewsViews,
+          onViews: applyReviewsViews,
           onDiagnostic: (diagnostic) => {
             if (canApply()) {
               setIntegrationDiagnostic(diagnostic);
