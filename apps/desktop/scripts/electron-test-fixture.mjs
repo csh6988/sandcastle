@@ -938,6 +938,9 @@ const run = async () => {
   });
 
   await window.loadURL(shell.url);
+  if (process.env.SANDCASTLE_ELECTRON_TEST_FORCE_FAILURE === "after-window") {
+    throw new Error("Electron test fixture forced failure after window.");
+  }
   await waitForElement('[data-nav="projects"]');
   await clickElement('[data-nav="projects"]');
   await waitForElement(`[data-project-id="${preparation.projectId}"]`);
@@ -3387,8 +3390,12 @@ const run = async () => {
 };
 
 const cleanup = async () => {
+  window?.webContents.stop();
   runtimeIpc?.revokeWindow();
-  window?.destroy();
+  if (window) {
+    app.once("window-all-closed", (event) => event.preventDefault());
+    window.destroy();
+  }
   await supervisor?.stop().catch(() => undefined);
   await shell?.close().catch(() => undefined);
   fixture.cleanup();
@@ -3405,12 +3412,14 @@ app.whenReady().then(async () => {
     }
     await run();
   } catch (error) {
+    process.exitCode = 1;
+    exitCode = 1;
     process.stderr.write(
       `[electron-test-fixture] ${String(error?.stack ?? error)}\n`,
     );
-    exitCode = 1;
   } finally {
     await cleanup();
+    process.exitCode = exitCode;
     applyElectronTestFixtureExitCode(app, exitCode);
   }
 });

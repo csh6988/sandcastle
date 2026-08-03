@@ -2295,6 +2295,30 @@ export const createIntegrationAuthorityFixture = async (
         ),
     },
   });
+  for (const assignment of importedAssignments) {
+    const allocation = database.workspaces.inspect(
+      assignment.formalAssignment.allocationId,
+    );
+    const cleanup = requireSucceeded(
+      database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `${input.fixtureId}:workspace-cleanup${assignment.workPackageId === repositoryDescriptors[0]?.workPackageId ? "" : `:${assignment.workPackageId}`}`,
+        actor: runtimeActor(standardDeliveryCoordinator.aiMember.id),
+        consumerId: "electron-test-fixture-setup",
+        expectedRevision: allocation.revision,
+        command: {
+          type: "workspace-allocation.cleanup",
+          allocationId: allocation.id,
+        },
+      }),
+    );
+    const cleaned = database.workspaces.executeCleanup(cleanup.id);
+    if (cleaned.state !== "cleaned") {
+      throw new Error(
+        `Fixture Workspace Allocation ${assignment.formalAssignment.allocationId} was not cleaned.`,
+      );
+    }
+  }
   const testing = await database.pipelineRuntime.executeReady({
     runId: integrated.run.id,
     expectedRevision: integrated.run.revision,

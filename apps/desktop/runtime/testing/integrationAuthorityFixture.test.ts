@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -585,6 +586,36 @@ describe("Integration authority fixture", () => {
           .map((workPackage) => workPackage.workPackageVersionId)
           .sort(),
       );
+      for (const repository of [
+        electronFixture.config.repositoryDirectory,
+        ...(electronFixture.config.additionalRepositories ?? []).map(
+          (additional) => additional.repositoryDirectory,
+        ),
+      ]) {
+        const worktrees = execFileSync(
+          "git",
+          ["-C", repository, "worktree", "list", "--porcelain"],
+          { encoding: "utf8" },
+        )
+          .split("\n")
+          .filter((line) => line.startsWith("worktree "))
+          .map((line) => line.slice("worktree ".length));
+        assert.ok(worktrees.length > 0, `${repository} has no Worktrees.`);
+        for (const worktree of worktrees) {
+          const status = execFileSync(
+            "git",
+            [
+              "-C",
+              worktree,
+              "status",
+              "--porcelain=v1",
+              "--untracked-files=all",
+            ],
+            { encoding: "utf8" },
+          );
+          assert.equal(status, "", `${worktree} is dirty:\n${status}`);
+        }
+      }
       assert.equal(
         database.pipelineRuntime.inspectRun(created.runId).snapshot.payload
           .productBaseline?.id,
