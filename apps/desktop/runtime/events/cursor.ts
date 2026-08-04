@@ -6,7 +6,12 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { ActorRef, EventEnvelope, QueryResult } from "../interface.js";
+import {
+  ActorRefSchema,
+  type ActorRef,
+  type EventEnvelope,
+  type QueryResult,
+} from "../interface.js";
 import type { RuntimeEventOutbox } from "./outbox.js";
 
 export class RuntimeEventCursorError extends Error {
@@ -115,7 +120,8 @@ const sha256 = (value: string): string =>
 export const runtimeQueryViewHash = (value: unknown): string =>
   sha256(canonicalJson(value));
 
-const principalJson = (principal: ActorRef): string => canonicalJson(principal);
+const principalJson = (principal: ActorRef): string =>
+  canonicalJson(ActorRefSchema.parse(principal));
 const principalHash = (principal: ActorRef): string =>
   sha256(principalJson(principal));
 
