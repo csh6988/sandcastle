@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +11,18 @@ import type {
   StatisticsEvidenceSnapshotView,
 } from "../interface.js";
 
-const hash = "a".repeat(64);
 const timestamp = "2026-08-04T00:00:00.000Z";
+const sourceHarnessContent = JSON.stringify({
+  principles: ["Preserve governed history."],
+  constitution: "Restore only exact governed revisions.",
+  rules: ["Require an exact rollback source."],
+  examples: { positive: [], negative: [] },
+  impactScope: ["project:improvements"],
+});
+const sourceRevision = {
+  revisionId: "harness:review:source",
+  revisionHash: createHash("sha256").update(sourceHarnessContent).digest("hex"),
+};
 
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-improvement-proposal-runtime-"));
@@ -25,6 +36,32 @@ const seedProject = (path: string): void => {
       'Govern evidence-backed improvements', 'active', '${timestamp}'
     );
   `);
+  database.close();
+};
+
+const seedGovernedHarnessSource = (
+  path: string,
+  input: {
+    readonly revisionId?: string;
+    readonly ownerId?: string;
+  } = {},
+): void => {
+  const database = new DatabaseSync(path);
+  database.exec("PRAGMA foreign_keys = ON;");
+  database
+    .prepare(
+      `INSERT INTO governed_harness_revisions(
+         id, owner_id, revision, supersedes_revision_id, content_json,
+         content_hash, operation_id, phase, created_at
+       ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+    )
+    .run(
+      input.revisionId ?? sourceRevision.revisionId,
+      input.ownerId ?? "harness:review",
+      sourceHarnessContent,
+      sourceRevision.revisionHash,
+      timestamp,
+    );
   database.close();
 };
 
@@ -107,7 +144,7 @@ const proposalContent = (
       minimumComparableObservations: 1,
     },
     rolloutNotes: "Validate against the next comparable Project cohort.",
-    rollbackSource: { revisionId: "harness:review:source", revisionHash: hash },
+    rollbackSource: sourceRevision,
   };
 };
 
@@ -118,6 +155,7 @@ describe("Improvement Proposal Runtime", () => {
       clock: () => new Date(timestamp),
     });
     seedProject(database.path);
+    seedGovernedHarnessSource(database.path);
     const evidence = freezeEvidence(database, {
       commandId: "command:freeze-proposal-evidence",
       evidenceSnapshotId: "statistics-evidence:proposal-before",
@@ -394,7 +432,7 @@ describe("Improvement Proposal Runtime", () => {
             readonly count: number;
           }
         ).count,
-        0,
+        table === "governed_harness_revisions" ? 1 : 0,
         table,
       );
     }
@@ -417,6 +455,7 @@ describe("Improvement Proposal Runtime", () => {
       clock: () => new Date(timestamp),
     });
     seedProject(database.path);
+    seedGovernedHarnessSource(database.path);
     const availableEvidence = freezeEvidence(database, {
       commandId: "command:freeze-available-evidence",
       evidenceSnapshotId: "statistics-evidence:available",
@@ -553,6 +592,76 @@ describe("Improvement Proposal Runtime", () => {
     if (superseded.status !== "rejected")
       assert.fail("must reject stale revision");
     assert.equal(superseded.error.code, "IMPROVEMENT_PROPOSAL_SUPERSEDED");
+    database.close();
+  });
+
+  it("rejects rollback sources that are missing or do not match the target owner and hash", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedProject(database.path);
+    seedGovernedHarnessSource(database.path);
+    seedGovernedHarnessSource(database.path, {
+      revisionId: "harness:other:source",
+      ownerId: "harness:other",
+    });
+    const evidence = freezeEvidence(database, {
+      commandId: "command:freeze-rollback-source-evidence",
+      evidenceSnapshotId: "statistics-evidence:rollback-source",
+      metricId: "review-finding-count",
+    });
+
+    for (const [caseId, rollbackSource] of [
+      [
+        "missing",
+        {
+          revisionId: "harness:review:missing",
+          revisionHash: sourceRevision.revisionHash,
+        },
+      ],
+      [
+        "wrong-owner",
+        {
+          revisionId: "harness:other:source",
+          revisionHash: sourceRevision.revisionHash,
+        },
+      ],
+      [
+        "wrong-hash",
+        { revisionId: sourceRevision.revisionId, revisionHash: "b".repeat(64) },
+      ],
+    ] as const) {
+      const result = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `command:create-proposal:${caseId}`,
+        actor: {
+          type: "runtime-worker",
+          id: "runtime-worker:improvements",
+          authenticatedBy: "runtime",
+        },
+        command: {
+          type: "improvement.proposal.create",
+          proposal: {
+            proposalId: `improvement-proposal:${caseId}`,
+            revisionId: `improvement-proposal-revision:${caseId}`,
+            projectId: "project:improvements",
+            departmentId: null,
+            content: {
+              ...proposalContent(evidence),
+              rollbackSource,
+            },
+          },
+        },
+      });
+      assert.equal(result.status, "rejected", caseId);
+      if (result.status !== "rejected") assert.fail(`${caseId} must reject`);
+      assert.equal(result.error.code, "IMPROVEMENT_TARGET_CONFLICT", caseId);
+    }
+    assert.deepEqual(
+      database.improvementProposals.list("project:improvements"),
+      [],
+    );
     database.close();
   });
 });

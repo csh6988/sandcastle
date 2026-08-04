@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvents } from "../events/subscription.js";
-import type { StatisticsRuntime } from "../statistics/statisticsRuntime.js";
+import {
+  StatisticsRuntimeError,
+  type StatisticsRuntime,
+} from "../statistics/statisticsRuntime.js";
 import type {
   StatisticsEvidenceSnapshotView,
   StatisticsMetricObservation,
@@ -548,7 +551,8 @@ export const openImprovementApplicationRuntime = (
       const request = ImprovementApplicationApplyRequestSchema.parse(
         input.request,
       );
-      const canonicalRequestJson = canonicalJson(request);
+      const { reconciliation, ...canonicalRequest } = request;
+      const canonicalRequestJson = canonicalJson(canonicalRequest);
       const canonicalRequestHash = sha256(canonicalRequestJson);
       const existing = database
         .prepare(
@@ -560,11 +564,65 @@ export const openImprovementApplicationRuntime = (
         | undefined;
       if (existing) {
         if (existing.canonicalRequestHash === canonicalRequestHash) {
-          return inspect(request.operationId);
+          const operation = inspect(request.operationId);
+          if (!reconciliation) return operation;
+          if (reconciliation.expectedOperationHash !== canonicalRequestHash) {
+            throw new ImprovementApplicationRuntimeError(
+              "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+              `Improvement application ${operation.id} does not match the expected immutable operation hash.`,
+            );
+          }
+          if (operation.state !== "unknown") {
+            throw new ImprovementApplicationRuntimeError(
+              "IMPROVEMENT_INVALID_STATE",
+              `Improvement application ${operation.id} cannot reconcile from ${operation.state}.`,
+            );
+          }
+          const reconciledAt = clock().toISOString();
+          appendReconciliation({
+            operationId: operation.id,
+            result: "unknown",
+            evidenceRefs: reconciliation.evidenceRefs,
+            createdAt: reconciledAt,
+          });
+          setProjection({
+            operationId: operation.id,
+            state: "reconciling",
+            error: null,
+            updatedAt: reconciledAt,
+          });
+          appendAudit({
+            action: "improvement.application.reconcile",
+            operationId: operation.id,
+            actor: request.actor,
+            before: { state: operation.state },
+            after: {
+              state: "reconciling",
+              reason: reconciliation.reason,
+              evidenceRefs: reconciliation.evidenceRefs,
+            },
+            timestamp: reconciledAt,
+            commandId: input.commandId,
+          });
+          invalidate({
+            operationId: operation.id,
+            projectId: operation.projectId,
+            proposalId: operation.proposalId,
+            state: "reconciling",
+            timestamp: reconciledAt,
+            commandId: input.commandId,
+          });
+          return inspect(operation.id);
         }
         throw new ImprovementApplicationRuntimeError(
           "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
           `Improvement application operation ${request.operationId} already binds different input.`,
+        );
+      }
+      if (reconciliation) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_INVALID_STATE",
+          `Improvement application ${request.operationId} must exist in unknown state before reconciliation.`,
         );
       }
       const proposal = database
@@ -784,26 +842,6 @@ export const openImprovementApplicationRuntime = (
           `Improvement application ${operation.id} cannot be validated from ${operation.state}.`,
         );
       }
-      let afterEvidence;
-      try {
-        afterEvidence = options.statistics.inspectEvidence(
-          request.afterEvidence.id,
-        );
-      } catch {
-        throw new ImprovementApplicationRuntimeError(
-          "STATISTICS_EVIDENCE_STALE",
-          `After evidence ${request.afterEvidence.id} is not a persisted immutable Statistics snapshot.`,
-        );
-      }
-      if (
-        afterEvidence.hash !== request.afterEvidence.hash ||
-        canonicalJson(afterEvidence) !== canonicalJson(request.afterEvidence)
-      ) {
-        throw new ImprovementApplicationRuntimeError(
-          "STATISTICS_EVIDENCE_STALE",
-          `After evidence ${request.afterEvidence.id} does not match its persisted snapshot.`,
-        );
-      }
       const proposalRow = database
         .prepare(
           `SELECT content_json AS contentJson
@@ -828,6 +866,30 @@ export const openImprovementApplicationRuntime = (
         ),
       );
       const beforeEvidence = content.evidence;
+      let afterEvidence;
+      try {
+        afterEvidence = options.statistics.freezeInTransaction({
+          commandId: input.commandId,
+          evidenceSnapshotId: request.afterEvidenceSnapshotId,
+          query: {
+            catalogVersion: beforeEvidence.query.catalogVersion,
+            projectId: beforeEvidence.query.projectId,
+            filters: beforeEvidence.query.filters,
+            window: request.afterWindow,
+            cohort: beforeEvidence.query.cohort,
+            comparisonSet: beforeEvidence.query.comparisonSet,
+          },
+          actor: request.actor,
+        });
+      } catch (error) {
+        if (error instanceof StatisticsRuntimeError) {
+          throw new ImprovementApplicationRuntimeError(
+            error.code,
+            error.message,
+          );
+        }
+        throw error;
+      }
       if (!comparableEvidence(beforeEvidence, afterEvidence)) {
         throw new ImprovementApplicationRuntimeError(
           "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",

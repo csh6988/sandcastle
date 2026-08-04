@@ -437,6 +437,246 @@ describe("Sandcastle preload bridge", () => {
     );
   });
 
+  it("strictly parses Improvement query and command Views through the typed tunnel", async () => {
+    const hash = "a".repeat(64);
+    const evidence = {
+      id: "statistics-evidence:1",
+      query: {
+        catalogVersion: "statistics@1" as const,
+        projectId: "project-1",
+        filters: {
+          departmentIds: [],
+          aiMemberIds: [],
+          modelIds: [],
+          repositoryIds: [],
+          workPackageIds: [],
+          pipelineVersionIds: [],
+        },
+        window: {
+          kind: "explicit-utc-half-open" as const,
+          startInclusive: "2026-08-01T00:00:00.000Z",
+          endExclusive: "2026-08-02T00:00:00.000Z",
+        },
+        cohort: {
+          id: "cohort:1",
+          filters: {
+            departmentIds: [],
+            aiMemberIds: [],
+            modelIds: [],
+            repositoryIds: [],
+            workPackageIds: [],
+            pipelineVersionIds: [],
+          },
+        },
+        comparisonSet: {
+          id: "comparison:1",
+          metricIds: ["review-finding-count" as const],
+        },
+      },
+      queryHash: hash,
+      asOfSequence: 7,
+      observations: [
+        {
+          metricId: "review-finding-count" as const,
+          status: "available" as const,
+          measurement: { kind: "count" as const, value: 1 },
+          sourceFactFamily: "review-finding",
+          sourceFactRefs: ["finding:1"],
+        },
+      ],
+      completeness: {
+        status: "complete" as const,
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      frozenBy: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvements",
+        authenticatedBy: "runtime" as const,
+      },
+      hash,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    };
+    const target = {
+      targetKind: "harness" as const,
+      ownerId: "harness:review",
+      governedHead: { revisionId: null, revisionHash: null },
+      content: {
+        principles: ["Use exact evidence."],
+        constitution: "Review immutable contracts.",
+        rules: ["Bind recommendations to frozen evidence."],
+        examples: { positive: [], negative: [] },
+        impactScope: ["project-1"],
+      },
+    };
+    const proposal = {
+      id: "improvement-proposal:1",
+      projectId: "project-1",
+      departmentId: null,
+      currentRevisionId: "improvement-proposal-revision:1",
+      currentState: "proposed" as const,
+      revisions: [
+        {
+          id: "improvement-proposal-revision:1",
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            evidence,
+            target,
+            rootCauseHypothesis: "Review guidance permits moving evidence.",
+            impactScope: {
+              projectIds: ["project-1"],
+              departmentIds: [],
+              positionIds: [],
+            },
+            expectedMetrics: [
+              {
+                metricId: "review-finding-count" as const,
+                direction: "decrease" as const,
+              },
+            ],
+            validationPolicy: {
+              metricIds: ["review-finding-count" as const],
+              minimumComparableObservations: 1,
+            },
+            rolloutNotes: "Validate the next cohort.",
+            rollbackSource: {
+              revisionId: "harness:source",
+              revisionHash: hash,
+            },
+          },
+          hash,
+          authoredBy: evidence.frozenBy,
+          lifecycle: [
+            {
+              state: "draft" as const,
+              confirmation: null,
+              createdAt: "2026-08-04T00:01:00.000Z",
+            },
+            {
+              state: "proposed" as const,
+              confirmation: null,
+              createdAt: "2026-08-04T00:02:00.000Z",
+            },
+          ],
+          decision: null,
+          createdAt: "2026-08-04T00:01:00.000Z",
+        },
+      ],
+      nextActions: ["revise" as const, "request-decision" as const],
+      createdAt: "2026-08-04T00:01:00.000Z",
+      updatedAt: "2026-08-04T00:02:00.000Z",
+    };
+    const application = {
+      id: "improvement-application:1",
+      projectId: "project-1",
+      proposalId: proposal.id,
+      proposalRevisionId: proposal.currentRevisionId,
+      proposalRevisionHash: hash,
+      approvedDecisionId: "improvement-decision:1",
+      approvedDecisionHash: hash,
+      target,
+      canonicalRequestHash: hash,
+      state: "applied" as const,
+      deterministicEffectId: "improvement-effect:1",
+      confirmation: "Apply this exact approved revision.",
+      reason: "Apply the bounded Harness revision.",
+      evidenceRefs: [evidence.id],
+      appliedBy: {
+        type: "human" as const,
+        id: "human:1",
+        authenticatedBy: "local-session" as const,
+      },
+      latestError: null,
+      receipts: [],
+      observations: [],
+      reconciliations: [],
+      validations: [],
+      rollbacks: [],
+      nextActions: ["validate" as const, "rollback" as const],
+      createdAt: "2026-08-04T00:03:00.000Z",
+      updatedAt: "2026-08-04T00:03:00.000Z",
+    };
+    const bridge = createSandcastleBridge(async (_channel, payload) => {
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: { readonly type: string };
+      };
+      return request.operation === "execute"
+        ? { status: "succeeded", value: proposal, effectIds: [] }
+        : {
+            view:
+              request.query?.type === "improvement-applications.list"
+                ? [application]
+                : request.query?.type.includes("application")
+                  ? application
+                  : proposal,
+            asOfSequence: 7,
+          };
+    });
+
+    const inspectedProposal = await bridge.query({
+      type: "improvement-proposal.inspect",
+      proposalId: proposal.id,
+    });
+    const listedApplications = await bridge.query({
+      type: "improvement-applications.list",
+      projectId: "project-1",
+    });
+    const proposed = await bridge.execute({
+      commandId: "improvement-propose:1",
+      command: {
+        type: "improvement.proposal.propose",
+        proposalId: proposal.id,
+        proposalRevisionId: proposal.currentRevisionId,
+        expectedProposalRevisionHash: hash,
+      },
+    });
+
+    assert.equal(inspectedProposal.view.id, proposal.id);
+    assert.equal(listedApplications.view[0]?.id, application.id);
+    assert.equal(proposed.status, "succeeded");
+    if (proposed.status === "succeeded")
+      assert.equal(proposed.value.id, proposal.id);
+
+    const malformedQuery = createSandcastleBridge(async () => ({
+      view: { ...proposal, unexpected: true },
+      asOfSequence: 7,
+    }));
+    await assert.rejects(
+      malformedQuery.query({
+        type: "improvement-proposal.inspect",
+        proposalId: proposal.id,
+      }),
+    );
+
+    const malformedCommand = createSandcastleBridge(async () => ({
+      status: "succeeded",
+      value: { ...application, unexpected: true },
+      effectIds: [],
+    }));
+    await assert.rejects(
+      malformedCommand.execute({
+        commandId: "improvement-apply:1",
+        command: {
+          type: "improvement.application.apply",
+          application: {
+            operationId: application.id,
+            proposalId: proposal.id,
+            proposalRevisionId: proposal.currentRevisionId,
+            expectedProposalRevisionHash: hash,
+            approvedDecisionId: application.approvedDecisionId,
+            expectedApprovedDecisionHash: hash,
+            target,
+            confirmation: application.confirmation,
+            reason: application.reason,
+            evidenceRefs: application.evidenceRefs,
+          },
+        },
+      }),
+    );
+  });
+
   it("parses Workspace command results through the typed tunnel", async () => {
     const bridge = createSandcastleBridge(async (channel) => {
       assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);

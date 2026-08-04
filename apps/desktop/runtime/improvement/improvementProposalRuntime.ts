@@ -98,6 +98,52 @@ export const openImprovementProposalRuntime = (
 ): ImprovementProposalRuntime => {
   const clock = options.clock ?? (() => new Date());
 
+  const validateRollbackSource = (
+    content: ImprovementProposalRevisionContent,
+  ): void => {
+    const source =
+      content.target.targetKind === "harness"
+        ? {
+            table: "governed_harness_revisions",
+            ownerColumn: "owner_id",
+          }
+        : content.target.targetKind === "project-spec"
+          ? {
+              table: "project_spec_revisions",
+              ownerColumn: "project_spec_id",
+            }
+          : content.target.targetKind === "application-spec"
+            ? {
+                table: "application_spec_revisions",
+                ownerColumn: "application_spec_id",
+              }
+            : content.target.targetKind === "template"
+              ? {
+                  table: "runtime_template_revisions",
+                  ownerColumn: "owner_id",
+                }
+              : {
+                  table: "governed_skill_flow_revisions",
+                  ownerColumn: "owner_id",
+                };
+    const rollbackSource = database
+      .prepare(
+        `SELECT 1 AS present FROM ${source.table}
+          WHERE id = ? AND ${source.ownerColumn} = ? AND content_hash = ?`,
+      )
+      .get(
+        content.rollbackSource.revisionId,
+        content.target.ownerId,
+        content.rollbackSource.revisionHash,
+      );
+    if (!rollbackSource) {
+      throw new ImprovementProposalRuntimeError(
+        "IMPROVEMENT_TARGET_CONFLICT",
+        `Rollback source ${content.rollbackSource.revisionId} is not an exact governed ${content.target.targetKind} revision for ${content.target.ownerId}.`,
+      );
+    }
+  };
+
   const validateEvidence = (
     projectId: string,
     content: ImprovementProposalRevisionContent,
@@ -145,6 +191,7 @@ export const openImprovementProposalRuntime = (
         )}.`,
       );
     }
+    validateRollbackSource(parsed);
     return parsed;
   };
 

@@ -316,15 +316,25 @@ describe("Improvement proposal contracts", () => {
           reason: "Apply the approved exact revision.",
           evidenceRefs: ["decision:2"],
         },
+        reconciliation: {
+          expectedOperationHash: hash,
+          reason: "A verified human reviewed exact target evidence.",
+          evidenceRefs: ["target-inspection:1"],
+        },
       },
       {
         type: "improvement.application.validate",
         validation: {
           operationId: "operation:1",
           expectedOperationHash: hash,
-          afterEvidence: evidence,
+          afterEvidenceSnapshotId: "statistics-evidence:after",
+          afterWindow: {
+            kind: "explicit-utc-half-open",
+            startInclusive: "2026-08-02T00:00:00.000Z",
+            endExclusive: "2026-08-03T00:00:00.000Z",
+          },
           reason: "Compare the approved metric set.",
-          evidenceRefs: ["statistics-evidence:1"],
+          evidenceRefs: ["statistics-evidence:1", "statistics-evidence:after"],
         },
       },
       {
@@ -482,13 +492,33 @@ describe("Improvement proposal contracts", () => {
       ImprovementApplicationValidateRequestSchema.parse({
         operationId: "operation:1",
         expectedOperationHash: hash,
-        afterEvidence: evidence,
+        afterEvidenceSnapshotId: "statistics-evidence:after",
+        afterWindow: {
+          kind: "explicit-utc-half-open",
+          startInclusive: "2026-08-02T00:00:00.000Z",
+          endExclusive: "2026-08-03T00:00:00.000Z",
+        },
         actor: {
           type: "runtime-worker",
           id: "runtime-worker:statistics",
           authenticatedBy: "runtime",
         },
         reason: "Compare the exact metric set.",
+        evidenceRefs: ["statistics-evidence:1", "statistics-evidence:after"],
+      }),
+    );
+    assert.throws(() =>
+      ImprovementApplicationValidateRequestSchema.parse({
+        operationId: "operation:1",
+        expectedOperationHash: hash,
+        afterEvidence: evidence,
+        actor: {
+          type: "runtime-worker",
+          id: "runtime-worker:statistics",
+          authenticatedBy: "runtime",
+        },
+        reason:
+          "A pre-existing snapshot cannot be supplied as validation authority.",
         evidenceRefs: ["statistics-evidence:1"],
       }),
     );

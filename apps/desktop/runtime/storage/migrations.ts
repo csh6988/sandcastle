@@ -6808,14 +6808,19 @@ const migrations: readonly CompanyMigration[] = [
             supersedes_revision_id TEXT,
             content_json TEXT NOT NULL,
             content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
-            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
-            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            operation_id TEXT REFERENCES improvement_application_operations(id),
+            phase TEXT CHECK (phase IS NULL OR phase IN ('apply', 'rollback')),
             created_at TEXT NOT NULL,
             UNIQUE (owner_id, revision),
             UNIQUE (owner_id, id),
             UNIQUE (operation_id, phase),
             FOREIGN KEY (owner_id, supersedes_revision_id)
-              REFERENCES governed_harness_revisions(owner_id, id)
+              REFERENCES governed_harness_revisions(owner_id, id),
+            CHECK (
+              (operation_id IS NULL AND phase IS NULL AND revision = 1
+                AND supersedes_revision_id IS NULL)
+              OR (operation_id IS NOT NULL AND phase IS NOT NULL)
+            )
           ) STRICT;
           CREATE INDEX governed_harness_revisions_owner_idx
             ON governed_harness_revisions(owner_id, revision, id);
@@ -6833,14 +6838,19 @@ const migrations: readonly CompanyMigration[] = [
             supersedes_revision_id TEXT,
             manifest_json TEXT NOT NULL,
             content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
-            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
-            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            operation_id TEXT REFERENCES improvement_application_operations(id),
+            phase TEXT CHECK (phase IS NULL OR phase IN ('apply', 'rollback')),
             created_at TEXT NOT NULL,
             UNIQUE (owner_id, revision),
             UNIQUE (owner_id, id),
             UNIQUE (operation_id, phase),
             FOREIGN KEY (owner_id, supersedes_revision_id)
-              REFERENCES runtime_template_revisions(owner_id, id)
+              REFERENCES runtime_template_revisions(owner_id, id),
+            CHECK (
+              (operation_id IS NULL AND phase IS NULL AND revision = 1
+                AND supersedes_revision_id IS NULL)
+              OR (operation_id IS NOT NULL AND phase IS NOT NULL)
+            )
           ) STRICT;
           CREATE INDEX runtime_template_revisions_owner_idx
             ON runtime_template_revisions(owner_id, revision, id);
@@ -6861,14 +6871,19 @@ const migrations: readonly CompanyMigration[] = [
             instructions TEXT NOT NULL,
             skill_ids_json TEXT NOT NULL,
             content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
-            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
-            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            operation_id TEXT REFERENCES improvement_application_operations(id),
+            phase TEXT CHECK (phase IS NULL OR phase IN ('apply', 'rollback')),
             created_at TEXT NOT NULL,
             UNIQUE (owner_id, revision),
             UNIQUE (owner_id, id),
             UNIQUE (operation_id, phase),
             FOREIGN KEY (owner_id, supersedes_revision_id)
-              REFERENCES governed_skill_flow_revisions(owner_id, id)
+              REFERENCES governed_skill_flow_revisions(owner_id, id),
+            CHECK (
+              (operation_id IS NULL AND phase IS NULL AND revision = 1
+                AND supersedes_revision_id IS NULL)
+              OR (operation_id IS NOT NULL AND phase IS NOT NULL)
+            )
           ) STRICT;
           CREATE INDEX governed_skill_flow_revisions_owner_idx
             ON governed_skill_flow_revisions(owner_id, revision, id);

@@ -5,6 +5,7 @@ import {
 } from "./release/releaseOperationContracts.js";
 import {
   ImprovementApplicationApplyCommandInputSchema,
+  ImprovementApplicationReconciliationInstructionSchema,
   ImprovementApplicationRollbackCommandInputSchema,
   ImprovementApplicationValidateCommandInputSchema,
   ImprovementProposalCreateCommandInputSchema,
@@ -5310,6 +5311,8 @@ export const ImprovementApplicationApplyEnvelopeCommandSchema = z
   .object({
     type: z.literal("improvement.application.apply"),
     application: ImprovementApplicationApplyCommandInputSchema,
+    reconciliation:
+      ImprovementApplicationReconciliationInstructionSchema.optional(),
   })
   .strict();
 

@@ -581,6 +581,119 @@ describe("Statistics Runtime", () => {
     database.close();
   });
 
+  it("applies canonical cohort filters to Statistics aggregation", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    const sqlite = new DatabaseSync(database.path);
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      INSERT INTO department_runs(
+        id, project_id, department_id, status, created_at, revision,
+        snapshot_revision_id, pipeline_version_id
+      ) VALUES (
+        'run:statistics:other', 'project:statistics', 'other-department',
+        'completed', '2026-08-01T00:00:00.000Z', 1,
+        'snapshot:statistics:other', 'other-pipeline-v1'
+      );
+      INSERT INTO review_topics(
+        id, project_id, run_id, title, kind, status, revision, manifest_json,
+        manifest_hash, producer_ai_member_id, producer_position_id,
+        producer_session_id, quorum, budget_json, rounds_used,
+        duration_seconds_used, tokens_used, cost_cents_used, stop_condition,
+        escalation_policy, created_at, updated_at
+      ) VALUES (
+        'review-topic:statistics:other', 'project:statistics',
+        'run:statistics:other', 'Other review', 'product', 'PASS', 1, '{}',
+        '${hash}', 'product-planner-member', 'product-planner',
+        'session:statistics:other', 1, '{}', 0, 0, 0, 0,
+        'blocking-findings-dispositioned', 'fail-with-evidence',
+        '2026-08-01T00:20:00.000Z', '2026-08-01T00:50:00.000Z'
+      );
+      INSERT INTO review_participants(
+        id, topic_id, role, ai_member_id, position_id, session_id, eligible,
+        eligibility_reasons_json, eligibility_snapshot_json,
+        eligibility_snapshot_hash, created_at
+      ) VALUES (
+        'review-participant:statistics:other', 'review-topic:statistics:other',
+        'reviewer-participant', 'reviewer-member', 'reviewer',
+        'session:reviewer-statistics:other', 1, '[]', '{}', '${hash}',
+        '2026-08-01T00:20:00.000Z'
+      );
+      INSERT INTO review_findings(
+        id, topic_id, reviewer_participant_id, reviewer_session_id, severity,
+        summary, rationale, impact, evidence_refs_json, suggested_owner,
+        blocking, created_at, scope_impact
+      ) VALUES (
+        'finding:other', 'review-topic:statistics:other',
+        'review-participant:statistics:other',
+        'session:reviewer-statistics:other', 'medium', 'Other', 'Rationale',
+        'Impact', '[]', 'other-department', 0,
+        '2026-08-01T00:25:00.000Z', 'scope-preserving'
+      );
+    `);
+    sqlite.close();
+
+    const allDepartments = database.statistics.inspect({
+      ...baselineQuery,
+      filters: {},
+      cohort: { id: "cohort:all" },
+      comparisonSet: {
+        id: "comparison:review-findings",
+        metricIds: ["review-finding-count"],
+      },
+    });
+    const softwareRndCohort = database.statistics.inspect({
+      ...baselineQuery,
+      filters: {},
+      cohort: {
+        id: "cohort:software-rnd",
+        filters: { departmentIds: ["software-rnd"] },
+      },
+      comparisonSet: {
+        id: "comparison:review-findings",
+        metricIds: ["review-finding-count"],
+      },
+    });
+    const disjointCohort = database.statistics.inspect({
+      ...baselineQuery,
+      filters: { departmentIds: ["other-department"] },
+      cohort: {
+        id: "cohort:software-rnd",
+        filters: { departmentIds: ["software-rnd"] },
+      },
+      comparisonSet: {
+        id: "comparison:review-findings",
+        metricIds: ["review-finding-count"],
+      },
+    });
+
+    assert.deepEqual(allDepartments.observations[0], {
+      metricId: "review-finding-count",
+      status: "available",
+      measurement: { kind: "count", value: 3 },
+      sourceFactFamily: "review-finding",
+      sourceFactRefs: ["finding:1", "finding:other", "finding:2"],
+    });
+    assert.deepEqual(softwareRndCohort.observations[0], {
+      metricId: "review-finding-count",
+      status: "available",
+      measurement: { kind: "count", value: 2 },
+      sourceFactFamily: "review-finding",
+      sourceFactRefs: ["finding:1", "finding:2"],
+    });
+    assert.deepEqual(disjointCohort.observations[0], {
+      metricId: "review-finding-count",
+      status: "available",
+      measurement: { kind: "count", value: 0 },
+      sourceFactFamily: "review-finding",
+      sourceFactRefs: [],
+    });
+    database.close();
+  });
+
   it("keeps exact zero distinct from missing dimensional and denominator facts", () => {
     const companyDir = tempCompanyDir();
     const database = openCompanyDatabase(companyDir, {
@@ -948,6 +1061,7 @@ describe("Statistics Runtime", () => {
     const view = database.statistics.inspect({
       ...baselineQuery,
       filters: {},
+      cohort: { id: "cohort:all" },
       comparisonSet: {
         id: "comparison:quality-delivery-memory",
         metricIds: [
@@ -1112,6 +1226,7 @@ describe("Statistics Runtime", () => {
       const observation = database.statistics.inspect({
         ...baselineQuery,
         filters: {},
+        cohort: { id: "cohort:all" },
         window: {
           kind: "explicit-utc-half-open",
           startInclusive,
@@ -1217,6 +1332,7 @@ describe("Statistics Runtime", () => {
       database.statistics.inspect({
         ...baselineQuery,
         filters: {},
+        cohort: { id: "cohort:all" },
         comparisonSet: {
           id: `comparison:gap:${metricId}`,
           metricIds: [metricId],
@@ -1507,6 +1623,7 @@ describe("Statistics Runtime", () => {
     const view = database.statistics.inspect({
       ...baselineQuery,
       filters: {},
+      cohort: { id: "cohort:all" },
       comparisonSet: {
         id: "comparison:quality-delivery-memory-boundary",
         metricIds: [
@@ -1576,6 +1693,7 @@ describe("Statistics Runtime", () => {
     const completedCatalogQuery: StatisticsInspectInput = {
       ...baselineQuery,
       filters: {},
+      cohort: { id: "cohort:all" },
       comparisonSet: {
         id: "comparison:statistics-at-1-complete-catalog",
         metricIds: [

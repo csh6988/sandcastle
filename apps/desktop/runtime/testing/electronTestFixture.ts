@@ -86,6 +86,8 @@ export interface T26ElectronTestEvidence {
     readonly duplicateReplayRevisionCountStable: boolean;
     readonly applicationIdentityStable: boolean;
     readonly receiptStable: boolean;
+    readonly verifiedHumanReconciliation: boolean;
+    readonly noBlindResend: boolean;
   };
   readonly cleanup: {
     readonly rootFingerprint: string;

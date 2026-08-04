@@ -71,6 +71,7 @@ export interface CompanyRuntimeServerOptions {
     readonly clock: () => Date;
     readonly nextId: () => string;
     readonly fixtureAuthority: TestFixtureAuthority;
+    readonly improvementApplicationAdapter?: import("./improvement/improvementProposalContracts.js").ImprovementApplicationEffectAdapter;
     readonly setup: (database: CompanyDatabase) => void | Promise<void>;
   };
   readonly agentHost?: LocalAgentHost;
@@ -188,6 +189,14 @@ export const startCompanyRuntimeServer = async (
       ...(options.testBuildFixture
         ? {
             clock: options.testBuildFixture.clock,
+            ...(options.testBuildFixture.improvementApplicationAdapter
+              ? {
+                  improvementApplicationRuntime: {
+                    adapter:
+                      options.testBuildFixture.improvementApplicationAdapter,
+                  },
+                }
+              : {}),
             testRuntime: {
               fixtureAuthority: options.testBuildFixture.fixtureAuthority,
               nextId: options.testBuildFixture.nextId,

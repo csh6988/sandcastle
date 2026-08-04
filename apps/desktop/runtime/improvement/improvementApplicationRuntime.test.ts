@@ -34,6 +34,161 @@ const sha256 = (value: unknown): string =>
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-improvement-application-runtime-"));
 
+const fixtureHarnessSourceContent = {
+  principles: ["Preserve governed history."],
+  constitution: "Restore only exact governed revisions.",
+  rules: ["Require an exact rollback source."],
+  examples: { positive: [], negative: [] },
+  impactScope: ["fixture"],
+};
+
+const ensureGovernedRollbackSource = (
+  databasePath: string,
+  target: ImprovementProposalRevisionContent["target"],
+): { readonly revisionId: string; readonly revisionHash: string } => {
+  const revisionHash =
+    target.targetKind === "harness"
+      ? sha256(fixtureHarnessSourceContent)
+      : target.targetKind === "application-spec"
+        ? sha256({
+            applicationId: target.content.lineage.applicationId,
+            promotedProjectSpecRevisionId:
+              target.content.lineage.promotedProjectSpecRevisionId,
+            promotedProjectSpecHash:
+              target.content.lineage.promotedProjectSpecHash,
+            content: target.content.content,
+          })
+        : sha256(target.content);
+  const revisionId = `fixture-${target.targetKind}-source:${sha256(target.ownerId).slice(0, 24)}`;
+  const sqlite = new DatabaseSync(databasePath);
+  const table =
+    target.targetKind === "harness"
+      ? "governed_harness_revisions"
+      : target.targetKind === "project-spec"
+        ? "project_spec_revisions"
+        : target.targetKind === "application-spec"
+          ? "application_spec_revisions"
+          : target.targetKind === "template"
+            ? "runtime_template_revisions"
+            : "governed_skill_flow_revisions";
+  if (
+    sqlite
+      .prepare(`SELECT 1 AS present FROM ${table} WHERE id = ?`)
+      .get(revisionId)
+  ) {
+    sqlite.close();
+    return { revisionId, revisionHash };
+  }
+  sqlite.exec(
+    target.targetKind === "project-spec" ||
+      target.targetKind === "application-spec"
+      ? "PRAGMA foreign_keys = OFF;"
+      : "PRAGMA foreign_keys = ON;",
+  );
+  if (target.targetKind === "harness") {
+    sqlite
+      .prepare(
+        `INSERT INTO governed_harness_revisions(
+           id, owner_id, revision, supersedes_revision_id, content_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        canonicalJson(fixtureHarnessSourceContent),
+        revisionHash,
+        timestamp,
+      );
+  } else if (target.targetKind === "project-spec") {
+    sqlite
+      .prepare(
+        `INSERT INTO project_spec_revisions(
+           id, project_spec_id, project_id, run_id, product_baseline_id,
+           product_baseline_hash, revision, supersedes_revision_id,
+           content_json, content_hash, producer_ai_member_id,
+           producer_position_id, producer_session_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        `fixture-project:${target.ownerId}`,
+        `fixture-run:${target.ownerId}`,
+        `fixture-baseline:${target.ownerId}`,
+        hash,
+        canonicalJson(target.content),
+        revisionHash,
+        "fixture-ai-member",
+        "fixture-position",
+        "fixture-session",
+        timestamp,
+      );
+  } else if (target.targetKind === "application-spec") {
+    sqlite
+      .prepare(
+        `INSERT INTO application_spec_revisions(
+           id, application_spec_id, application_id, project_id, run_id,
+           promoted_project_spec_revision_id, promoted_project_spec_hash,
+           revision, supersedes_revision_id, content_json, content_hash,
+           producer_ai_member_id, producer_position_id, producer_session_id,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        target.content.lineage.applicationId,
+        target.content.lineage.projectId,
+        `fixture-run:${target.ownerId}`,
+        target.content.lineage.promotedProjectSpecRevisionId,
+        target.content.lineage.promotedProjectSpecHash,
+        canonicalJson(target.content.content),
+        revisionHash,
+        "fixture-ai-member",
+        "fixture-position",
+        "fixture-session",
+        timestamp,
+      );
+  } else if (target.targetKind === "template") {
+    sqlite
+      .prepare(
+        `INSERT INTO runtime_template_revisions(
+           id, owner_id, revision, supersedes_revision_id, manifest_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        canonicalJson(target.content.manifest),
+        revisionHash,
+        timestamp,
+      );
+  } else {
+    sqlite
+      .prepare(
+        `INSERT INTO governed_skill_flow_revisions(
+           id, owner_id, position_id, revision, supersedes_revision_id, name,
+           instructions, skill_ids_json, content_hash, operation_id, phase,
+           created_at
+         ) VALUES (?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        target.content.positionId,
+        target.content.name,
+        target.content.instructions,
+        canonicalJson(target.content.skillIds),
+        revisionHash,
+        timestamp,
+      );
+  }
+  sqlite.close();
+  return { revisionId, revisionHash };
+};
+
 const createApprovedHarnessProposal = (
   database: ReturnType<typeof openCompanyDatabase>,
   suffix = "1",
@@ -94,26 +249,38 @@ const createApprovedHarnessProposal = (
   assert.equal(frozen.status, "succeeded");
   if (frozen.status !== "succeeded") assert.fail("freeze must succeed");
   const evidence: StatisticsEvidenceSnapshotView = frozen.value;
+  const requestedTarget = targetOptions.target?.(project.id) ?? {
+    targetKind: "harness" as const,
+    ownerId: "harness:software-rnd-review",
+    governedHead: targetOptions.governedHead ?? {
+      revisionId: null,
+      revisionHash: null,
+    },
+    content: {
+      principles: [targetOptions.principle ?? "Use exact frozen evidence."],
+      constitution: "Review immutable production contracts.",
+      rules: ["Bind every recommendation to exact evidence."],
+      examples: {
+        positive: ["Cite the frozen evidence identity."],
+        negative: ["Use a moving dashboard result."],
+      },
+      impactScope: [project.id],
+    },
+  };
+  const rollbackSource =
+    targetOptions.rollbackSource ??
+    ensureGovernedRollbackSource(database.path, requestedTarget);
+  const target = {
+    ...requestedTarget,
+    governedHead:
+      targetOptions.governedHead ??
+      (requestedTarget.governedHead.revisionId === null
+        ? rollbackSource
+        : requestedTarget.governedHead),
+  } as ImprovementProposalRevisionContent["target"];
   const content: ImprovementProposalRevisionContent = {
     evidence,
-    target: targetOptions.target?.(project.id) ?? {
-      targetKind: "harness",
-      ownerId: "harness:software-rnd-review",
-      governedHead: targetOptions.governedHead ?? {
-        revisionId: null,
-        revisionHash: null,
-      },
-      content: {
-        principles: [targetOptions.principle ?? "Use exact frozen evidence."],
-        constitution: "Review immutable production contracts.",
-        rules: ["Bind every recommendation to exact evidence."],
-        examples: {
-          positive: ["Cite the frozen evidence identity."],
-          negative: ["Use a moving dashboard result."],
-        },
-        impactScope: [project.id],
-      },
-    },
+    target,
     rootCauseHypothesis: "Review guidance permits moving evidence.",
     impactScope: {
       projectIds: [project.id],
@@ -126,10 +293,7 @@ const createApprovedHarnessProposal = (
       minimumComparableObservations: 1,
     },
     rolloutNotes: "Validate against the next comparable cohort.",
-    rollbackSource: targetOptions.rollbackSource ?? {
-      revisionId: "harness:software-rnd-review:source",
-      revisionHash: hash,
-    },
+    rollbackSource,
   };
   const created = database.commandRegistry.execute({
     schemaVersion: 1,
@@ -308,6 +472,75 @@ const persistEvidenceVariant = (
   return snapshot;
 };
 
+const seedReviewFindingFacts = (
+  databasePath: string,
+  input: {
+    readonly projectId: string;
+    readonly suffix: string;
+    readonly createdAt: string;
+    readonly count: number;
+  },
+): void => {
+  const sqlite = new DatabaseSync(databasePath);
+  sqlite.exec("PRAGMA foreign_keys = OFF;");
+  sqlite
+    .prepare(
+      `INSERT INTO department_runs(
+         id, project_id, department_id, status, created_at, revision,
+         snapshot_revision_id, pipeline_version_id
+       ) VALUES (?, ?, ?, 'completed', ?, 1, ?, ?)`,
+    )
+    .run(
+      `run:validation:${input.suffix}`,
+      input.projectId,
+      `department:validation:${input.suffix}`,
+      input.createdAt,
+      `snapshot:validation:${input.suffix}`,
+      `pipeline:validation:${input.suffix}`,
+    );
+  sqlite
+    .prepare(
+      `INSERT INTO review_topics(
+         id, project_id, run_id, title, kind, status, revision, manifest_json,
+         manifest_hash, producer_ai_member_id, producer_position_id,
+         producer_session_id, quorum, budget_json, rounds_used,
+         duration_seconds_used, tokens_used, cost_cents_used, stop_condition,
+         escalation_policy, created_at, updated_at
+       ) VALUES (?, ?, ?, 'Validation review', 'product', 'PASS', 1, '{}', ?,
+                 'fixture-ai-member', 'fixture-position', 'fixture-session', 1,
+                 '{}', 0, 0, 0, 0, 'blocking-findings-dispositioned',
+                 'fail-with-evidence', ?, ?)`,
+    )
+    .run(
+      `review-topic:validation:${input.suffix}`,
+      input.projectId,
+      `run:validation:${input.suffix}`,
+      hash,
+      input.createdAt,
+      input.createdAt,
+    );
+  for (let index = 0; index < input.count; index += 1) {
+    sqlite
+      .prepare(
+        `INSERT INTO review_findings(
+           id, topic_id, reviewer_participant_id, reviewer_session_id,
+           severity, summary, rationale, impact, evidence_refs_json,
+           suggested_owner, blocking, created_at, scope_impact
+         ) VALUES (?, ?, ?, ?, 'medium', 'Validation finding', 'Exact fact',
+                   'Measured impact', '[]', 'fixture-owner', 0, ?,
+                   'scope-preserving')`,
+      )
+      .run(
+        `review-finding:validation:${input.suffix}:${index}`,
+        `review-topic:validation:${input.suffix}`,
+        `review-participant:validation:${input.suffix}`,
+        `review-session:validation:${input.suffix}`,
+        input.createdAt,
+      );
+  }
+  sqlite.close();
+};
+
 const harnessApplyEnvelope = (
   approved: ReturnType<typeof createApprovedHarnessProposal>,
   input: {
@@ -418,7 +651,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      0,
+      1,
     );
     sqlite.close();
 
@@ -428,10 +661,9 @@ describe("Improvement Application Runtime", () => {
     assert.equal(applied.state, "applied");
     assert.equal(applied.receipts.length, 1);
     assert.equal(applied.receipts[0]?.disposition, "applied");
-    assert.match(
-      applied.receipts[0]?.targetRevision?.revisionHash ?? "",
-      /^[a-f0-9]{64}$/,
-    );
+    const appliedTargetRevision = applied.receipts[0]?.targetRevision;
+    if (!appliedTargetRevision) assert.fail("applied revision must exist");
+    assert.match(appliedTargetRevision.revisionHash, /^[a-f0-9]{64}$/);
     assert.deepEqual(applied.nextActions, ["validate", "rollback"]);
 
     const operationReplay = database.commandRegistry.execute({
@@ -452,21 +684,22 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      1,
+      2,
     );
     const governedRevision = after
       .prepare(
         `SELECT id, content_hash AS contentHash
-           FROM governed_harness_revisions`,
+           FROM governed_harness_revisions
+          WHERE id = ?`,
       )
-      .get() as { readonly id: string; readonly contentHash: string };
-    assert.equal(
-      governedRevision.id,
-      applied.receipts[0]?.targetRevision?.revisionId,
-    );
+      .get(appliedTargetRevision.revisionId) as {
+      readonly id: string;
+      readonly contentHash: string;
+    };
+    assert.equal(governedRevision.id, appliedTargetRevision.revisionId);
     assert.equal(
       governedRevision.contentHash,
-      applied.receipts[0]?.targetRevision?.revisionHash,
+      appliedTargetRevision.revisionHash,
     );
     for (const table of [
       "department_runs",
@@ -555,7 +788,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      1,
+      2,
     );
     sqlite.close();
     database.close();
@@ -726,14 +959,28 @@ describe("Improvement Application Runtime", () => {
   it("fails closed for unauthorized apply and insufficient target evidence without invoking append", async () => {
     const companyDir = tempCompanyDir();
     let appendCalls = 0;
+    let verifiedEffect = false;
+    let inspectCalls = 0;
     const database = openCompanyDatabase(companyDir, {
       clock: () => new Date(timestamp),
       improvementApplicationRuntime: {
         adapter: {
-          inspectEffect: async () => ({
-            outcome: "insufficient-evidence",
-            evidenceRefs: ["target-inspection:insufficient"],
-          }),
+          inspectEffect: async () => {
+            inspectCalls += 1;
+            return verifiedEffect
+              ? {
+                  outcome: "exact-match" as const,
+                  revision: {
+                    revisionId: "governed-harness-revision:verified",
+                    revisionHash: "c".repeat(64),
+                  },
+                  evidenceRefs: ["target-inspection:verified"],
+                }
+              : {
+                  outcome: "insufficient-evidence" as const,
+                  evidenceRefs: ["target-inspection:insufficient"],
+                };
+          },
           appendRevision: async () => {
             appendCalls += 1;
             throw new Error("append must not be called");
@@ -774,6 +1021,63 @@ describe("Improvement Application Runtime", () => {
     assert.equal(unknown.latestError?.code, "IMPROVEMENT_APPLICATION_UNKNOWN");
     assert.deepEqual(unknown.nextActions, ["reconcile"]);
     assert.equal(appendCalls, 0);
+    assert.equal(inspectCalls, 1);
+
+    const replayWithoutReconciliation = database.commandRegistry.execute({
+      ...harnessApplyEnvelope(approved, {
+        operationId: unknown.id,
+        commandId: "command:apply-harness-improvement-unknown-replay",
+      }),
+    });
+    assert.equal(replayWithoutReconciliation.status, "succeeded");
+    if (replayWithoutReconciliation.status !== "succeeded") {
+      assert.fail("canonical replay must succeed");
+    }
+    assert.equal(replayWithoutReconciliation.value.state, "unknown");
+    assert.equal(inspectCalls, 1);
+
+    verifiedEffect = true;
+    const reconciliation = database.commandRegistry.execute({
+      ...harnessApplyEnvelope(approved, {
+        operationId: unknown.id,
+        commandId: "command:reconcile-harness-improvement-unknown",
+      }),
+      command: {
+        ...harnessApplyEnvelope(approved, {
+          operationId: unknown.id,
+          commandId: "unused",
+        }).command,
+        reconciliation: {
+          expectedOperationHash: unknown.canonicalRequestHash,
+          reason: "A verified human reviewed exact target inspection evidence.",
+          evidenceRefs: ["target-inspection:verified-human"],
+        },
+      },
+    });
+    assert.equal(reconciliation.status, "succeeded");
+    if (reconciliation.status !== "succeeded") {
+      assert.fail("verified reconciliation must succeed");
+    }
+    assert.equal(reconciliation.value.state, "reconciling");
+    assert.equal(
+      reconciliation.value.canonicalRequestHash,
+      unknown.canonicalRequestHash,
+    );
+    assert.deepEqual(reconciliation.value.reconciliations.at(-1), {
+      id: reconciliation.value.reconciliations.at(-1)?.id,
+      phase: "apply",
+      result: "unknown",
+      evidenceRefs: ["target-inspection:verified-human"],
+      hash: reconciliation.value.reconciliations.at(-1)?.hash,
+      createdAt: timestamp,
+    });
+    const recovered = await database.improvementApplications.dispatch(
+      unknown.id,
+    );
+    assert.equal(recovered.state, "applied");
+    assert.equal(recovered.observations.at(-1)?.outcome, "exact-match");
+    assert.equal(appendCalls, 0);
+    assert.equal(inspectCalls, 2);
     const sqlite = new DatabaseSync(database.path);
     assert.equal(
       (
@@ -781,7 +1085,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      0,
+      1,
     );
     sqlite.close();
     database.close();
@@ -871,7 +1175,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      1,
+      2,
     );
     sqlite.close();
     database.close();
@@ -895,34 +1199,11 @@ describe("Improvement Application Runtime", () => {
     );
     assert.equal(applied.state, "applied");
 
-    const afterEvidence = database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: "command:freeze-harness-validation-after",
-      actor: {
-        type: "runtime-worker" as const,
-        id: "runtime-worker:improvement-validation",
-        authenticatedBy: "runtime" as const,
-      },
-      command: {
-        type: "statistics.evidence.freeze" as const,
-        evidenceSnapshotId: "statistics-evidence:harness-validation:after",
-        query: {
-          projectId: approved.content.evidence.query.projectId,
-          filters: approved.content.evidence.query.filters,
-          window: {
-            kind: "explicit-utc-half-open" as const,
-            startInclusive: "2026-08-02T00:00:00.000Z",
-            endExclusive: "2026-08-03T00:00:00.000Z",
-          },
-          cohort: approved.content.evidence.query.cohort,
-          comparisonSet: approved.content.evidence.query.comparisonSet,
-        },
-      },
-    });
-    assert.equal(afterEvidence.status, "succeeded");
-    if (afterEvidence.status !== "succeeded") {
-      assert.fail("after evidence freeze must succeed");
-    }
+    const afterEvidenceSnapshotId =
+      "statistics-evidence:harness-validation:after";
+    assert.throws(() =>
+      database.statistics.inspectEvidence(afterEvidenceSnapshotId),
+    );
     const validationEnvelope = {
       schemaVersion: 1 as const,
       commandId: "command:validate-harness-improvement",
@@ -936,9 +1217,14 @@ describe("Improvement Application Runtime", () => {
         validation: {
           operationId: applied.id,
           expectedOperationHash: applied.canonicalRequestHash,
-          afterEvidence: afterEvidence.value,
+          afterEvidenceSnapshotId,
+          afterWindow: {
+            kind: "explicit-utc-half-open" as const,
+            startInclusive: "2026-08-02T00:00:00.000Z",
+            endExclusive: "2026-08-03T00:00:00.000Z",
+          },
           reason: "Compare the next exact governed cohort.",
-          evidenceRefs: [approved.content.evidence.id, afterEvidence.value.id],
+          evidenceRefs: [approved.content.evidence.id, afterEvidenceSnapshotId],
         },
       },
     };
@@ -950,6 +1236,18 @@ describe("Improvement Application Runtime", () => {
     assert.equal(validated.value.state, "validated");
     assert.equal(validated.value.validations.length, 1);
     assert.equal(validated.value.validations[0]?.outcome, "unchanged");
+    const afterEvidence = database.statistics.inspectEvidence(
+      afterEvidenceSnapshotId,
+    );
+    assert.deepEqual(afterEvidence.query, {
+      ...approved.content.evidence.query,
+      window: validationEnvelope.command.validation.afterWindow,
+    });
+    assert.deepEqual(afterEvidence.frozenBy, validationEnvelope.actor);
+    assert.deepEqual(
+      validated.value.validations[0]?.afterEvidence,
+      afterEvidence,
+    );
     assert.deepEqual(
       database.commandRegistry.execute(validationEnvelope),
       validated,
@@ -977,7 +1275,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      1,
+      2,
     );
     sqlite.close();
     database.close();
@@ -1015,14 +1313,13 @@ describe("Improvement Application Runtime", () => {
       const applied = await database.improvementApplications.dispatch(
         apply.value.id,
       );
-      const afterEvidence = persistEvidenceVariant(
-        database.path,
-        approved.content.evidence,
-        {
-          id: `statistics-evidence:${scenario.suffix}:after`,
-          count: 1,
-        },
-      );
+      const afterEvidenceSnapshotId = `statistics-evidence:${scenario.suffix}:after`;
+      seedReviewFindingFacts(database.path, {
+        projectId: approved.content.evidence.query.projectId,
+        suffix: scenario.suffix,
+        createdAt: "2026-08-02T12:00:00.000Z",
+        count: 1,
+      });
       const validated = database.commandRegistry.execute({
         schemaVersion: 1,
         commandId: `command:validate-harness-${scenario.suffix}`,
@@ -1036,9 +1333,17 @@ describe("Improvement Application Runtime", () => {
           validation: {
             operationId: applied.id,
             expectedOperationHash: applied.canonicalRequestHash,
-            afterEvidence,
+            afterEvidenceSnapshotId,
+            afterWindow: {
+              kind: "explicit-utc-half-open",
+              startInclusive: "2026-08-02T00:00:00.000Z",
+              endExclusive: "2026-08-03T00:00:00.000Z",
+            },
             reason: `Record the ${scenario.outcome} validation outcome.`,
-            evidenceRefs: [approved.content.evidence.id, afterEvidence.id],
+            evidenceRefs: [
+              approved.content.evidence.id,
+              afterEvidenceSnapshotId,
+            ],
           },
         },
       });
@@ -1075,6 +1380,7 @@ describe("Improvement Application Runtime", () => {
       approved.content.evidence,
       { id: "statistics-evidence:validation:comparable", count: 0 },
     );
+    const afterWindow = comparable.query.window;
     const unauthorized = database.commandRegistry.execute({
       schemaVersion: 1,
       commandId: "command:validate-harness-unauthorized",
@@ -1088,9 +1394,14 @@ describe("Improvement Application Runtime", () => {
         validation: {
           operationId: applied.id,
           expectedOperationHash: applied.canonicalRequestHash,
-          afterEvidence: comparable,
+          afterEvidenceSnapshotId:
+            "statistics-evidence:validation:unauthorized",
+          afterWindow,
           reason: "Fixture authority must not validate production state.",
-          evidenceRefs: [approved.content.evidence.id, comparable.id],
+          evidenceRefs: [
+            approved.content.evidence.id,
+            "statistics-evidence:validation:unauthorized",
+          ],
         },
       },
     });
@@ -1113,63 +1424,21 @@ describe("Improvement Application Runtime", () => {
         validation: {
           operationId: applied.id,
           expectedOperationHash: applied.canonicalRequestHash,
-          afterEvidence: { ...comparable, hash: "b".repeat(64) },
-          reason: "Reject changed frozen evidence content.",
+          afterEvidenceSnapshotId: comparable.id,
+          afterWindow,
+          reason: "Reject a pre-existing frozen evidence identity.",
           evidenceRefs: [approved.content.evidence.id, comparable.id],
         },
       },
     });
     assert.equal(stale.status, "rejected");
     if (stale.status !== "rejected") {
-      assert.fail("stale validation evidence must be rejected");
+      assert.fail("pre-existing validation evidence must be rejected");
     }
     assert.equal(stale.error.code, "STATISTICS_EVIDENCE_STALE");
 
-    const unavailable = persistEvidenceVariant(
-      database.path,
-      approved.content.evidence,
-      {
-        id: "statistics-evidence:validation:unavailable",
-        unavailable: true,
-      },
-    );
-    const unavailableResult = database.commandRegistry.execute({
-      schemaVersion: 1,
-      commandId: "command:validate-harness-unavailable-evidence",
-      actor: {
-        type: "runtime-worker" as const,
-        id: "runtime-worker:improvement-validation",
-        authenticatedBy: "runtime" as const,
-      },
-      command: {
-        type: "improvement.application.validate" as const,
-        validation: {
-          operationId: applied.id,
-          expectedOperationHash: applied.canonicalRequestHash,
-          afterEvidence: unavailable,
-          reason: "Reject unavailable after evidence.",
-          evidenceRefs: [approved.content.evidence.id, unavailable.id],
-        },
-      },
-    });
-    assert.equal(unavailableResult.status, "rejected");
-    if (unavailableResult.status !== "rejected") {
-      assert.fail("unavailable validation evidence must be rejected");
-    }
-    assert.equal(
-      unavailableResult.error.code,
-      "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
-    );
-
-    const nonComparable = persistEvidenceVariant(
-      database.path,
-      approved.content.evidence,
-      {
-        id: "statistics-evidence:validation:non-comparable",
-        count: 0,
-        comparisonSetId: "comparison:different",
-      },
-    );
+    const nonComparableSnapshotId =
+      "statistics-evidence:validation:non-comparable";
     const rejected = database.commandRegistry.execute({
       schemaVersion: 1,
       commandId: "command:validate-harness-non-comparable",
@@ -1183,9 +1452,13 @@ describe("Improvement Application Runtime", () => {
         validation: {
           operationId: applied.id,
           expectedOperationHash: applied.canonicalRequestHash,
-          afterEvidence: nonComparable,
-          reason: "Reject a changed comparison set.",
-          evidenceRefs: [approved.content.evidence.id, nonComparable.id],
+          afterEvidenceSnapshotId: nonComparableSnapshotId,
+          afterWindow: {
+            ...afterWindow,
+            endExclusive: "2026-08-02T12:00:00.000Z",
+          },
+          reason: "Reject a changed comparison window policy.",
+          evidenceRefs: [approved.content.evidence.id, nonComparableSnapshotId],
         },
       },
     });
@@ -1194,6 +1467,9 @@ describe("Improvement Application Runtime", () => {
       assert.fail("non-comparable validation must be rejected");
     }
     assert.equal(rejected.error.code, "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE");
+    assert.throws(() =>
+      database.statistics.inspectEvidence(nonComparableSnapshotId),
+    );
     assert.equal(
       database.improvementApplications.inspect(applied.id).state,
       "applied",
@@ -1343,12 +1619,12 @@ describe("Improvement Application Runtime", () => {
       readonly id: string;
       readonly contentJson: string;
     }>;
-    assert.equal(revisions.length, 3);
-    assert.equal(revisions[0]?.id, sourceRevision.revisionId);
-    assert.equal(revisions[1]?.id, appliedRevision.revisionId);
-    assert.equal(revisions[2]?.id, restoringRevision.revisionId);
-    assert.equal(revisions[2]?.contentJson, revisions[0]?.contentJson);
-    assert.notEqual(revisions[1]?.contentJson, revisions[0]?.contentJson);
+    assert.equal(revisions.length, 4);
+    assert.equal(revisions[1]?.id, sourceRevision.revisionId);
+    assert.equal(revisions[2]?.id, appliedRevision.revisionId);
+    assert.equal(revisions[3]?.id, restoringRevision.revisionId);
+    assert.equal(revisions[3]?.contentJson, revisions[1]?.contentJson);
+    assert.notEqual(revisions[2]?.contentJson, revisions[1]?.contentJson);
     sqlite.close();
     database.close();
   });
@@ -1551,10 +1827,10 @@ describe("Improvement Application Runtime", () => {
           readonly id: string;
           readonly contentJson: string;
         }>;
-        assert.equal(revisions.length, 3);
-        assert.equal(revisions[2]?.id, restoringRevision.revisionId);
-        assert.equal(revisions[2]?.contentJson, revisions[0]?.contentJson);
-        assert.notEqual(revisions[1]?.contentJson, revisions[0]?.contentJson);
+        assert.equal(revisions.length, 4);
+        assert.equal(revisions[3]?.id, restoringRevision.revisionId);
+        assert.equal(revisions[3]?.contentJson, revisions[1]?.contentJson);
+        assert.notEqual(revisions[2]?.contentJson, revisions[1]?.contentJson);
       } else {
         const revisions = after
           .prepare(
@@ -1570,12 +1846,12 @@ describe("Improvement Application Runtime", () => {
           readonly instructions: string;
           readonly skillIdsJson: string;
         }>;
-        assert.equal(revisions.length, 3);
-        assert.equal(revisions[2]?.id, restoringRevision.revisionId);
+        assert.equal(revisions.length, 4);
+        assert.equal(revisions[3]?.id, restoringRevision.revisionId);
         assert.deepEqual(
-          { ...revisions[2] },
+          { ...revisions[3] },
           {
-            ...revisions[0],
+            ...revisions[1],
             id: restoringRevision.revisionId,
           },
         );
@@ -1654,11 +1930,8 @@ describe("Improvement Application Runtime", () => {
     );
     const appliedRevision = changed.receipts[0]?.targetRevision;
     if (!appliedRevision) assert.fail("changed revision must exist");
-    const afterEvidence = persistEvidenceVariant(
-      database.path,
-      changedProposal.content.evidence,
-      { id: "statistics-evidence:rollback-restart-after", count: 0 },
-    );
+    const afterEvidenceSnapshotId =
+      "statistics-evidence:rollback-restart-after";
     const validation = database.commandRegistry.execute({
       schemaVersion: 1,
       commandId: "command:rollback-restart-validation",
@@ -1672,9 +1945,17 @@ describe("Improvement Application Runtime", () => {
         validation: {
           operationId: changed.id,
           expectedOperationHash: changed.canonicalRequestHash,
-          afterEvidence,
+          afterEvidenceSnapshotId,
+          afterWindow: {
+            kind: "explicit-utc-half-open",
+            startInclusive: "2026-08-02T00:00:00.000Z",
+            endExclusive: "2026-08-03T00:00:00.000Z",
+          },
           reason: "Validate before exercising restoring restart recovery.",
-          evidenceRefs: [changedProposal.content.evidence.id, afterEvidence.id],
+          evidenceRefs: [
+            changedProposal.content.evidence.id,
+            afterEvidenceSnapshotId,
+          ],
         },
       },
     });
@@ -1733,7 +2014,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      3,
+      4,
     );
     sqlite.close();
     restarted.close();
@@ -1806,7 +2087,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      3,
+      4,
     );
     sqlite.close();
     database.close();
@@ -1858,7 +2139,7 @@ describe("Improvement Application Runtime", () => {
         `INSERT INTO governed_harness_revisions(
            id, owner_id, revision, supersedes_revision_id, content_json,
            content_hash, operation_id, phase, created_at
-         ) VALUES (?, ?, 3, ?, '{}', ?, ?, 'rollback', ?)`,
+         ) VALUES (?, ?, 4, ?, '{}', ?, ?, 'rollback', ?)`,
       )
       .run(
         conflictId,
@@ -1902,7 +2183,7 @@ describe("Improvement Application Runtime", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      3,
+      4,
     );
     after.close();
     database.close();

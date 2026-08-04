@@ -261,7 +261,7 @@ export function ProjectImprovementsPanel({
   ) => void;
   readonly onValidateApplication?: (
     application: ImprovementApplicationOperationView,
-    afterEvidence: StatisticsEvidenceSnapshotView,
+    afterWindow: StatisticsWindow,
     reason: string,
   ) => void;
   readonly onRollbackApplication?: (
@@ -993,15 +993,13 @@ export function ProjectImprovementsPanel({
                     data-improvement-validate-application={application.id}
                     disabled={
                       busy ||
-                      !evidence ||
                       validationReason.trim().length === 0 ||
                       !onValidateApplication
                     }
                     onClick={() =>
-                      evidence &&
                       onValidateApplication?.(
                         application,
-                        evidence,
+                        query.window,
                         validationReason.trim(),
                       )
                     }

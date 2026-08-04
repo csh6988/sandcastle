@@ -185,6 +185,8 @@ describe("Electron Test fixture", () => {
         duplicateReplayRevisionCountStable: true,
         applicationIdentityStable: true,
         receiptStable: true,
+        verifiedHumanReconciliation: true,
+        noBlindResend: true,
       },
       cleanup: {
         rootFingerprint: "1".repeat(64),

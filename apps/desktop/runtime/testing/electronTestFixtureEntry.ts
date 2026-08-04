@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { startCompanyRuntimeServer } from "../server.js";
 import type { ModelOnlyInteractionExecutionAdapter } from "../adapters/interactionExecutionAdapter.js";
 import type { AdapterExecutionFact } from "../execution/contract.js";
@@ -15,6 +16,8 @@ import type { ArtifactVersionView } from "../artifactRegistry.js";
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
 import type { RuntimeInteraction } from "../interaction.js";
 import type { DeliveryQualityNodePlanProvider } from "../quality/qualityGateNodeHandler.js";
+import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
+import type { ImprovementApplicationEffectAdapter } from "../improvement/improvementProposalContracts.js";
 
 import {
   electronTestFixtureRuntimePrincipal,
@@ -73,6 +76,51 @@ const canonicalJson = (value: unknown): string =>
 
 const sha256 = (value: string | Buffer): string =>
   createHash("sha256").update(value).digest("hex");
+
+const t26BootstrapHarnessContent = {
+  principles: ["Preserve governed history."],
+  constitution: "Restore only exact governed revisions.",
+  rules: ["Require an exact rollback source."],
+  examples: { positive: [], negative: [] },
+  impactScope: ["electron-test-fixture"],
+};
+
+const ensureT26BootstrapHarnessRevision = (
+  databasePath: string,
+  createdAt: string,
+): void => {
+  const revisionId = "governed-harness-revision:t26:bootstrap";
+  const sqlite = new DatabaseSync(databasePath);
+  if (
+    sqlite
+      .prepare(
+        "SELECT 1 AS present FROM governed_harness_revisions WHERE id = ?",
+      )
+      .get(revisionId)
+  ) {
+    sqlite.close();
+    return;
+  }
+  sqlite.exec("PRAGMA foreign_keys = ON;");
+  sqlite
+    .prepare(
+      `INSERT INTO governed_harness_revisions(
+         id, owner_id, revision, supersedes_revision_id, content_json,
+         content_hash, operation_id, phase, created_at
+       ) VALUES (?, 'harness:t26-electron', 1, NULL, ?, ?, NULL, NULL, ?)`,
+    )
+    .run(
+      revisionId,
+      canonicalJson(t26BootstrapHarnessContent),
+      sha256(canonicalJson(t26BootstrapHarnessContent)),
+      createdAt,
+    );
+  if (sqlite.prepare("PRAGMA foreign_key_check").all().length > 0) {
+    sqlite.close();
+    throw new Error("Electron Test T26 bootstrap violated foreign keys.");
+  }
+  sqlite.close();
+};
 
 const repeatableIdFactory = (seed: string): (() => string) => {
   let sequence = 0;
@@ -383,6 +431,56 @@ const main = async (): Promise<void> => {
     }
     return seeded;
   };
+  const t26UnknownOperationId = "improvement-application:t26:changed";
+  const withGovernedRevisionAdapter = async <Result>(
+    use: (adapter: ImprovementApplicationEffectAdapter) => Promise<Result>,
+  ): Promise<Result> => {
+    const sqlite = new DatabaseSync(
+      join(config.companyDirectory, ".sandcastle", "company.sqlite"),
+    );
+    try {
+      return await use(
+        openSqliteGovernedRevisionAdapter(sqlite, {
+          clock: fixtureRuntimeOptions.clock,
+        }),
+      );
+    } finally {
+      sqlite.close();
+    }
+  };
+  const improvementApplicationAdapter: ImprovementApplicationEffectAdapter = {
+    inspectEffect: async (input) => {
+      if (
+        input.operationId === t26UnknownOperationId &&
+        input.phase === "apply"
+      ) {
+        const sqlite = new DatabaseSync(
+          join(config.companyDirectory, ".sandcastle", "company.sqlite"),
+        );
+        try {
+          const projection = sqlite
+            .prepare(
+              `SELECT state FROM improvement_application_projections
+                WHERE operation_id = ?`,
+            )
+            .get(input.operationId) as { readonly state: string } | undefined;
+          if (projection?.state === "applying") {
+            return {
+              outcome: "insufficient-evidence",
+              evidenceRefs: ["fixture:t26:apply-inspection:insufficient"],
+            };
+          }
+        } finally {
+          sqlite.close();
+        }
+      }
+      return withGovernedRevisionAdapter((adapter) =>
+        adapter.inspectEffect(input),
+      );
+    },
+    appendRevision: (input) =>
+      withGovernedRevisionAdapter((adapter) => adapter.appendRevision(input)),
+  };
   const runtime = await startCompanyRuntimeServer({
     address: requiredEnvironment("SANDCASTLE_COMPANY_RUNTIME_ADDRESS"),
     companyDir: config.companyDirectory,
@@ -444,6 +542,7 @@ const main = async (): Promise<void> => {
     testBuildFixture: {
       clock: fixtureRuntimeOptions.clock,
       nextId: repeatableIdFactory(config.repeatableIdSeed),
+      improvementApplicationAdapter,
       fixtureAuthority: {
         read: (fixtureId) => {
           if (fixtureId !== config.fixtureId) {
@@ -523,6 +622,11 @@ const main = async (): Promise<void> => {
             throw new Error("Electron Test setup receipt must be mode 0600.");
           }
         }
+
+        ensureT26BootstrapHarnessRevision(
+          database.path,
+          fixtureRuntimeOptions.clock().toISOString(),
+        );
 
         if (existsSync(downstreamReceiptPath)) {
           const receipt = JSON.parse(

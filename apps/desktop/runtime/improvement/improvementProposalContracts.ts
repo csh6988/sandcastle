@@ -4,6 +4,7 @@ import {
   StatisticsEvidenceSnapshotViewSchema,
   StatisticsEvidenceValidationOutcomeSchema,
   StatisticsMetricIdSchema,
+  StatisticsWindowSchema,
   type StatisticsEvidenceSnapshotView,
 } from "../statistics/statisticsContracts.js";
 
@@ -475,8 +476,18 @@ export type ImprovementApplicationApplyCommandInput = z.infer<
   typeof ImprovementApplicationApplyCommandInputSchema
 >;
 
+export const ImprovementApplicationReconciliationInstructionSchema = z
+  .object({
+    expectedOperationHash: Sha256Schema,
+    reason: ReasonSchema,
+    evidenceRefs: EvidenceRefsSchema,
+  })
+  .strict();
+
 export const ImprovementApplicationApplyRequestSchema =
   ImprovementApplicationApplyBaseSchema.extend({
+    reconciliation:
+      ImprovementApplicationReconciliationInstructionSchema.optional(),
     actor: VerifiedLocalSessionHumanSchema,
   }).strict();
 export type ImprovementApplicationApplyRequest = z.infer<
@@ -487,7 +498,8 @@ const ImprovementApplicationValidateBaseSchema = z
   .object({
     operationId: IdSchema,
     expectedOperationHash: Sha256Schema,
-    afterEvidence: StatisticsEvidenceSnapshotViewSchema,
+    afterEvidenceSnapshotId: IdSchema,
+    afterWindow: StatisticsWindowSchema,
     reason: ReasonSchema,
     evidenceRefs: EvidenceRefsSchema,
   })

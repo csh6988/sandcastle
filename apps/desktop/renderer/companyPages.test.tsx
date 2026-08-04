@@ -2453,15 +2453,17 @@ describe("Project detail", () => {
     assert.equal(application && "actor" in application, false);
     const validation = improvementApplicationValidateInput(
       { ...existingApplication, state: "applied", nextActions: ["validate"] },
-      evidence,
+      "statistics-evidence:after",
+      evidence.query.window,
       "Compare the exact next cohort.",
     );
     assert.deepEqual(validation, {
       operationId: existingApplication.id,
       expectedOperationHash: hash,
-      afterEvidence: evidence,
+      afterEvidenceSnapshotId: "statistics-evidence:after",
+      afterWindow: evidence.query.window,
       reason: "Compare the exact next cohort.",
-      evidenceRefs: [evidence.id, decision.id],
+      evidenceRefs: [evidence.id, decision.id, "statistics-evidence:after"],
     });
     assert.equal("actor" in validation, false);
     const rollback = improvementApplicationRollbackInput(

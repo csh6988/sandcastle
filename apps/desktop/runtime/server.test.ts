@@ -614,12 +614,52 @@ describe("Company Runtime server startup", () => {
       id: "improvement-author",
       authenticatedBy: "local-session" as const,
     };
+    const sourceContent = {
+      principles: ["Preserve governed history."],
+      constitution: "Restore only exact governed revisions.",
+      rules: ["Require an exact rollback source."],
+      examples: { positive: [], negative: [] },
+      impactScope: ["server-test"],
+    };
+    const sourceRevision = {
+      revisionId: "harness:server-review:source",
+      revisionHash: canonicalHash(sourceContent),
+    };
     const server = await startCompanyRuntimeServer({
       address,
       companyDir,
       token,
       principal: actor,
       consumerId: "improvement-proposal-server-test",
+      testBuildFixture: {
+        clock: () => new Date("2026-08-04T00:00:00.000Z"),
+        nextId: () => "server-improvement-proposal-fixture-id",
+        fixtureAuthority: {
+          read: () => {
+            throw new Error("unused");
+          },
+        },
+        setup: (database) => {
+          const sqlite = new DatabaseSync(database.path);
+          sqlite.exec("PRAGMA foreign_keys = OFF;");
+          sqlite
+            .prepare(
+              `INSERT INTO governed_harness_revisions(
+                 id, owner_id, revision, supersedes_revision_id, content_json,
+                 content_hash, operation_id, phase, created_at
+               ) VALUES (?, 'harness:server-review', 1, NULL, ?, ?, ?,
+                         'apply', ?)`,
+            )
+            .run(
+              sourceRevision.revisionId,
+              JSON.stringify(canonicalize(sourceContent)),
+              sourceRevision.revisionHash,
+              "fixture-operation:harness:server-review:source",
+              "2026-08-04T00:00:00.000Z",
+            );
+          sqlite.close();
+        },
+      },
     });
     const client = createCompanyRuntimeClientFromTransport(
       createLocalRuntimeTransport({ address, token }),
@@ -675,7 +715,7 @@ describe("Company Runtime server startup", () => {
               target: {
                 targetKind: "harness",
                 ownerId: "harness:server-review",
-                governedHead: { revisionId: null, revisionHash: null },
+                governedHead: sourceRevision,
                 content: {
                   principles: ["Use exact frozen evidence."],
                   constitution: "Review immutable production contracts.",
@@ -702,10 +742,7 @@ describe("Company Runtime server startup", () => {
                 minimumComparableObservations: 1,
               },
               rolloutNotes: "Validate with the next comparable cohort.",
-              rollbackSource: {
-                revisionId: "harness:server-review:source",
-                revisionHash: "a".repeat(64),
-              },
+              rollbackSource: sourceRevision,
             },
           },
         },
@@ -783,7 +820,7 @@ describe("Company Runtime server startup", () => {
               readonly count: number;
             }
           ).count,
-          0,
+          table === "governed_harness_revisions" ? 1 : 0,
           table,
         );
       }
@@ -872,31 +909,7 @@ describe("Company Runtime server startup", () => {
       });
       assert.deepEqual(applications.view, [applied]);
 
-      const afterEvidence = await client.executeEnvelope({
-        schemaVersion: 1,
-        commandId: "command:freeze-improvement-validation-server",
-        actor,
-        consumerId: "improvement-proposal-server-test",
-        command: {
-          type: "statistics.evidence.freeze",
-          evidenceSnapshotId: "statistics-evidence:validation-server",
-          query: {
-            projectId: project.id,
-            filters: frozen.value.query.filters,
-            window: {
-              kind: "explicit-utc-half-open",
-              startInclusive: "2026-08-02T00:00:00.000Z",
-              endExclusive: "2026-08-03T00:00:00.000Z",
-            },
-            cohort: frozen.value.query.cohort,
-            comparisonSet: frozen.value.query.comparisonSet,
-          },
-        },
-      });
-      assert.equal(afterEvidence.status, "succeeded");
-      if (afterEvidence.status !== "succeeded") {
-        assert.fail("after evidence freeze must succeed");
-      }
+      const afterEvidenceSnapshotId = "statistics-evidence:validation-server";
       const validated = await client.executeEnvelope({
         schemaVersion: 1,
         commandId: "command:validate-improvement-server",
@@ -907,9 +920,14 @@ describe("Company Runtime server startup", () => {
           validation: {
             operationId: applied.id,
             expectedOperationHash: applied.canonicalRequestHash,
-            afterEvidence: afterEvidence.value,
+            afterEvidenceSnapshotId,
+            afterWindow: {
+              kind: "explicit-utc-half-open",
+              startInclusive: "2026-08-02T00:00:00.000Z",
+              endExclusive: "2026-08-03T00:00:00.000Z",
+            },
             reason: "Compare the next exact server cohort.",
-            evidenceRefs: [frozen.value.id, afterEvidence.value.id],
+            evidenceRefs: [frozen.value.id, afterEvidenceSnapshotId],
           },
         },
       });
@@ -936,16 +954,16 @@ describe("Company Runtime server startup", () => {
             rollbackSource: revision.content.rollbackSource,
             confirmation:
               "I confirm restoring the exact selected source revision.",
-            reason: "Prove the typed rollback route fails closed.",
+            reason: "Prove the typed rollback route accepts an exact source.",
             evidenceRefs: [appliedRevision.revisionId],
           },
         },
       });
-      assert.equal(rollback.status, "rejected");
-      if (rollback.status !== "rejected") {
-        assert.fail("missing rollback source must be rejected");
+      assert.equal(rollback.status, "succeeded");
+      if (rollback.status !== "succeeded") {
+        assert.fail("exact rollback source must succeed");
       }
-      assert.equal(rollback.error.code, "IMPROVEMENT_TARGET_CONFLICT");
+      assert.equal(rollback.value.state, "rollback-requested");
     } finally {
       await server.close();
     }

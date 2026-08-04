@@ -3314,6 +3314,72 @@ describe("Test authority schema migration", () => {
     database.close();
   });
 
+  it("permits only an operation-free genesis revision for Runtime-owned governed targets", () => {
+    const companyDir = tempCompanyDir();
+    openCompanyDatabase(companyDir).close();
+    const database = new DatabaseSync(
+      join(companyDir, ".sandcastle", "company.sqlite"),
+    );
+    database.exec("PRAGMA foreign_keys = ON");
+    const hash = "a".repeat(64);
+    const timestamp = "2026-08-04T00:00:00.000Z";
+
+    database
+      .prepare(
+        `INSERT INTO governed_harness_revisions(
+           id, owner_id, revision, supersedes_revision_id, content_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, '{}', ?, NULL, NULL, ?)`,
+      )
+      .run("harness-revision:genesis", "harness:review", hash, timestamp);
+    database
+      .prepare(
+        `INSERT INTO runtime_template_revisions(
+           id, owner_id, revision, supersedes_revision_id, manifest_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, '[]', ?, NULL, NULL, ?)`,
+      )
+      .run("template-revision:genesis", "template:default", hash, timestamp);
+    database
+      .prepare(
+        `INSERT INTO governed_skill_flow_revisions(
+           id, owner_id, position_id, revision, supersedes_revision_id, name,
+           instructions, skill_ids_json, content_hash, operation_id, phase,
+           created_at
+         ) VALUES (?, ?, 'software-engineer', 1, NULL, ?, ?, '[]', ?, NULL,
+                   NULL, ?)`,
+      )
+      .run(
+        "skill-flow-revision:genesis",
+        "skill-flow:implementation",
+        "Implementation",
+        "Implement through governed Skills.",
+        hash,
+        timestamp,
+      );
+
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `INSERT INTO governed_harness_revisions(
+               id, owner_id, revision, supersedes_revision_id, content_json,
+               content_hash, operation_id, phase, created_at
+             ) VALUES (?, ?, 2, ?, '{}', ?, NULL, NULL, ?)`,
+          )
+          .run(
+            "harness-revision:orphan",
+            "harness:review",
+            "harness-revision:genesis",
+            hash,
+            timestamp,
+          ),
+      /CHECK constraint failed/,
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    database.close();
+  });
+
   it("rejects a future Test authority schema without rewriting its version", () => {
     const companyDir = tempCompanyDir();
     const initialized = openCompanyDatabase(companyDir);

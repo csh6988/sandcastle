@@ -1014,6 +1014,11 @@ const executeImprovementApplicationCommand = (
                 commandId: envelope.commandId,
                 request: {
                   ...envelope.command.application,
+                  ...(envelope.command.reconciliation
+                    ? {
+                        reconciliation: envelope.command.reconciliation,
+                      }
+                    : {}),
                   actor: {
                     type: "human",
                     id: envelope.actor.id,

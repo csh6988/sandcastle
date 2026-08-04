@@ -80,6 +80,81 @@ const canonicalFilters = (
   pipelineVersionIds: canonicalIds(filters?.pipelineVersionIds),
 });
 
+const intersectCanonicalIds = (
+  filters: readonly string[],
+  cohortFilters: readonly string[],
+): string[] =>
+  filters.length === 0
+    ? [...cohortFilters]
+    : cohortFilters.length === 0
+      ? [...filters]
+      : filters.filter((value) => cohortFilters.includes(value));
+
+const hasDisjointCanonicalIds = (
+  filters: readonly string[],
+  cohortFilters: readonly string[],
+): boolean =>
+  filters.length > 0 &&
+  cohortFilters.length > 0 &&
+  !filters.some((value) => cohortFilters.includes(value));
+
+const hasEmptyAggregationIntersection = (
+  query: StatisticsCanonicalQuery,
+): boolean =>
+  hasDisjointCanonicalIds(
+    query.filters.departmentIds,
+    query.cohort.filters.departmentIds,
+  ) ||
+  hasDisjointCanonicalIds(
+    query.filters.aiMemberIds,
+    query.cohort.filters.aiMemberIds,
+  ) ||
+  hasDisjointCanonicalIds(
+    query.filters.modelIds,
+    query.cohort.filters.modelIds,
+  ) ||
+  hasDisjointCanonicalIds(
+    query.filters.repositoryIds,
+    query.cohort.filters.repositoryIds,
+  ) ||
+  hasDisjointCanonicalIds(
+    query.filters.workPackageIds,
+    query.cohort.filters.workPackageIds,
+  ) ||
+  hasDisjointCanonicalIds(
+    query.filters.pipelineVersionIds,
+    query.cohort.filters.pipelineVersionIds,
+  );
+
+const aggregationFilters = (
+  query: StatisticsCanonicalQuery,
+): StatisticsCanonicalFilters => ({
+  departmentIds: intersectCanonicalIds(
+    query.filters.departmentIds,
+    query.cohort.filters.departmentIds,
+  ),
+  aiMemberIds: intersectCanonicalIds(
+    query.filters.aiMemberIds,
+    query.cohort.filters.aiMemberIds,
+  ),
+  modelIds: intersectCanonicalIds(
+    query.filters.modelIds,
+    query.cohort.filters.modelIds,
+  ),
+  repositoryIds: intersectCanonicalIds(
+    query.filters.repositoryIds,
+    query.cohort.filters.repositoryIds,
+  ),
+  workPackageIds: intersectCanonicalIds(
+    query.filters.workPackageIds,
+    query.cohort.filters.workPackageIds,
+  ),
+  pipelineVersionIds: intersectCanonicalIds(
+    query.filters.pipelineVersionIds,
+    query.cohort.filters.pipelineVersionIds,
+  ),
+});
+
 const canonicalQuery = (
   input: StatisticsInspectInput,
 ): StatisticsCanonicalQuery => {
@@ -136,30 +211,36 @@ export const openStatisticsRuntime = (
     query: StatisticsCanonicalQuery,
     alias: string,
   ): { readonly sql: string; readonly values: readonly string[] } => {
+    const filters = aggregationFilters(query);
     const clauses = [`${alias}.project_id = ?`];
     const values: string[] = [query.projectId];
-    if (query.filters.departmentIds.length > 0) {
+    if (hasEmptyAggregationIntersection(query)) clauses.push("0 = 1");
+    if (filters.departmentIds.length > 0) {
       clauses.push(
-        `${alias}.department_id IN (${query.filters.departmentIds.map(() => "?").join(", ")})`,
+        `${alias}.department_id IN (${filters.departmentIds.map(() => "?").join(", ")})`,
       );
-      values.push(...query.filters.departmentIds);
+      values.push(...filters.departmentIds);
     }
-    if (query.filters.pipelineVersionIds.length > 0) {
+    if (filters.pipelineVersionIds.length > 0) {
       clauses.push(
-        `${alias}.pipeline_version_id IN (${query.filters.pipelineVersionIds.map(() => "?").join(", ")})`,
+        `${alias}.pipeline_version_id IN (${filters.pipelineVersionIds.map(() => "?").join(", ")})`,
       );
-      values.push(...query.filters.pipelineVersionIds);
+      values.push(...filters.pipelineVersionIds);
     }
     return { sql: clauses.join(" AND "), values };
   };
 
   const unsupportedDimensionSelected = (
     query: StatisticsCanonicalQuery,
-  ): boolean =>
-    query.filters.aiMemberIds.length > 0 ||
-    query.filters.modelIds.length > 0 ||
-    query.filters.repositoryIds.length > 0 ||
-    query.filters.workPackageIds.length > 0;
+  ): boolean => {
+    const filters = aggregationFilters(query);
+    return (
+      filters.aiMemberIds.length > 0 ||
+      filters.modelIds.length > 0 ||
+      filters.repositoryIds.length > 0 ||
+      filters.workPackageIds.length > 0
+    );
+  };
 
   const countObservation = (
     metricId: StatisticsMetricId,
@@ -211,9 +292,11 @@ export const openStatisticsRuntime = (
     metricId: StatisticsMetricId,
     query: StatisticsCanonicalQuery,
   ): StatisticsMetricObservation => {
-    if (unsupportedDimensionSelected(query)) {
+    const emptyIntersection = hasEmptyAggregationIntersection(query);
+    if (!emptyIntersection && unsupportedDimensionSelected(query)) {
       return dimensionAttributionUnavailable(metricId);
     }
+    const filters = aggregationFilters(query);
     const run = runPredicate(query, "runs");
     const { startInclusive, endExclusive } = query.window;
     switch (metricId) {
@@ -1023,9 +1106,16 @@ export const openStatisticsRuntime = (
         );
       }
       case "memory-promotion-rate": {
+        if (emptyIntersection) {
+          return missingDenominator(
+            metricId,
+            "reviewed-memory-decision",
+            "No reviewed Memory decision denominator exists.",
+          );
+        }
         if (
-          query.filters.departmentIds.length > 0 ||
-          query.filters.pipelineVersionIds.length > 0
+          filters.departmentIds.length > 0 ||
+          filters.pipelineVersionIds.length > 0
         ) {
           return dimensionAttributionUnavailable(metricId);
         }
@@ -1081,9 +1171,16 @@ export const openStatisticsRuntime = (
         );
       }
       case "memory-selection-rate": {
+        if (emptyIntersection) {
+          return missingDenominator(
+            metricId,
+            "reviewed-memory-entry",
+            "No promoted Memory entry denominator exists.",
+          );
+        }
         if (
-          query.filters.departmentIds.length > 0 ||
-          query.filters.pipelineVersionIds.length > 0
+          filters.departmentIds.length > 0 ||
+          filters.pipelineVersionIds.length > 0
         ) {
           return dimensionAttributionUnavailable(metricId);
         }

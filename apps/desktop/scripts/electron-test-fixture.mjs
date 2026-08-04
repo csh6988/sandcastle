@@ -3242,6 +3242,17 @@ const run = async () => {
   assert.equal(sourceMetric?.measurement?.kind, "count");
   assert.equal(sourceMetric?.measurement?.value, 0);
   const sourceOwnerId = "harness:t26-electron";
+  const bootstrapHarnessContent = {
+    principles: ["Preserve governed history."],
+    constitution: "Restore only exact governed revisions.",
+    rules: ["Require an exact rollback source."],
+    examples: { positive: [], negative: [] },
+    impactScope: ["electron-test-fixture"],
+  };
+  const bootstrapRevision = {
+    revisionId: "governed-harness-revision:t26:bootstrap",
+    revisionHash: sha256(canonicalJson(bootstrapHarnessContent)),
+  };
   const sourceProposalId = "improvement-proposal:t26:source";
   const sourceProposalRevisionId = "improvement-proposal-revision:t26:source:1";
   const sourceContent = {
@@ -3249,7 +3260,7 @@ const run = async () => {
     target: {
       targetKind: "harness",
       ownerId: sourceOwnerId,
-      governedHead: { revisionId: null, revisionHash: null },
+      governedHead: bootstrapRevision,
       content: {
         principles: ["Use exact frozen evidence."],
         constitution: "Keep the disposable Electron Harness bounded.",
@@ -3271,10 +3282,7 @@ const run = async () => {
     },
     rolloutNotes:
       "Create the disposable rollback source through formal Runtime Commands.",
-    rollbackSource: {
-      revisionId: "governed-harness-revision:t26:bootstrap",
-      revisionHash: "0".repeat(64),
-    },
+    rollbackSource: bootstrapRevision,
   };
   const sourceCreated = await executeT26("fixture:t26:source-create", {
     type: "improvement.proposal.create",
@@ -3511,6 +3519,23 @@ const run = async () => {
   await clickElement(
     `[data-improvement-apply-proposal="${changedProposal.id}"]`,
   );
+  const unknownApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "unknown",
+  );
+  await waitForElementAttribute(
+    `[data-improvement-application="${changedOperationId}"]`,
+    "data-improvement-application-state",
+    (value) => value === "unknown",
+  );
+  assert.equal(unknownApplication.receipts.length, 0);
+  assert.equal(
+    unknownApplication.observations.at(-1)?.outcome,
+    "insufficient-evidence",
+  );
+  await clickElement(
+    `[data-improvement-reconcile-application="${changedOperationId}"]`,
+  );
   let changedApplication = await waitForT26Application(
     changedOperationId,
     (application) => application.state === "applied",
@@ -3520,6 +3545,17 @@ const run = async () => {
     "data-improvement-application-state",
     (value) => value === "applied",
   );
+  assert.equal(
+    changedApplication.reconciliations.some(
+      (entry) =>
+        entry.result === "unknown" &&
+        entry.evidenceRefs.includes(
+          "fixture:t26:apply-inspection:insufficient",
+        ),
+    ),
+    true,
+  );
+  assert.equal(changedApplication.receipts.length, 1);
   const appliedReceipt = changedApplication.receipts.find(
     (receipt) => receipt.phase === "apply" && receipt.targetRevision !== null,
   );
@@ -3637,22 +3673,6 @@ const run = async () => {
     "data-statistics-view-window-end",
     (value) => value === afterWindow.endExclusive,
   );
-  await clickElement("[data-statistics-freeze]");
-  const afterEvidenceId = await waitForElementAttribute(
-    "[data-statistics-evidence]",
-    "data-statistics-evidence",
-    (value) => value !== beforeEvidence.id,
-  );
-  const afterEvidence = await humanRuntimeClient.query({
-    type: "statistics-evidence.inspect",
-    evidenceSnapshotId: afterEvidenceId,
-  });
-  const afterMetric = afterEvidence.observations.find(
-    (observation) => observation.metricId === t26MetricId,
-  );
-  assert.equal(afterMetric?.status, "available");
-  assert.equal(afterMetric?.measurement?.kind, "count");
-  assert.equal(afterMetric?.measurement?.value, 0);
   await typeElement(
     `[data-improvement-validation-reason="${changedOperationId}"]`,
     "The shifted exact window retains the same authoritative baseline count.",
@@ -3664,7 +3684,30 @@ const run = async () => {
     changedOperationId,
     (application) => application.state === "validated",
   );
-  assert.equal(changedApplication.validations.at(-1)?.outcome, "unchanged");
+  const validation = changedApplication.validations.at(-1);
+  assert.equal(validation?.outcome, "unchanged");
+  const afterEvidence = validation?.afterEvidence;
+  assert.ok(afterEvidence);
+  const afterMetric = afterEvidence.observations.find(
+    (observation) => observation.metricId === t26MetricId,
+  );
+  assert.equal(afterMetric?.status, "available");
+  assert.equal(afterMetric?.measurement?.kind, "count");
+  assert.equal(afterMetric?.measurement?.value, 0);
+  assert.deepEqual(afterEvidence.query.filters, beforeEvidence.query.filters);
+  assert.deepEqual(afterEvidence.query.cohort, beforeEvidence.query.cohort);
+  assert.deepEqual(
+    afterEvidence.query.comparisonSet,
+    beforeEvidence.query.comparisonSet,
+  );
+  assert.equal(
+    afterEvidence.query.window.startInclusive,
+    afterWindow.startInclusive,
+  );
+  assert.equal(
+    afterEvidence.query.window.endExclusive,
+    afterWindow.endExclusive,
+  );
   await waitForElementAttribute(
     `[data-improvement-application="${changedOperationId}"]`,
     "data-improvement-application-state",
@@ -3796,6 +3839,18 @@ const run = async () => {
       receiptStable:
         canonicalJson(restartedApplication.receipts) ===
         canonicalJson(duplicateApplication.receipts),
+      verifiedHumanReconciliation: changedApplication.reconciliations.some(
+        (entry) =>
+          entry.result === "unknown" &&
+          entry.evidenceRefs.includes(
+            "fixture:t26:apply-inspection:insufficient",
+          ),
+      ),
+      noBlindResend:
+        unknownApplication.receipts.length === 0 &&
+        changedApplication.receipts.filter(
+          (receipt) => receipt.phase === "apply",
+        ).length === 1,
     },
     cleanup: {
       rootFingerprint: fixture.config.rootFingerprint,

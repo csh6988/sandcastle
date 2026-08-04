@@ -123,14 +123,18 @@ export const improvementApplicationApplyInput = (
 
 export const improvementApplicationValidateInput = (
   application: ImprovementApplicationOperationView,
-  afterEvidence: StatisticsEvidenceSnapshotView,
+  afterEvidenceSnapshotId: string,
+  afterWindow: StatisticsWindow,
   reason: string,
 ) => ({
   operationId: application.id,
   expectedOperationHash: application.canonicalRequestHash,
-  afterEvidence,
+  afterEvidenceSnapshotId,
+  afterWindow,
   reason,
-  evidenceRefs: [...new Set([...application.evidenceRefs, afterEvidence.id])],
+  evidenceRefs: [
+    ...new Set([...application.evidenceRefs, afterEvidenceSnapshotId]),
+  ],
 });
 
 export const improvementApplicationRollbackInput = (
@@ -4723,6 +4727,11 @@ export function ProjectDetailView({
     readonly confirmation: string;
     readonly reason: string;
     readonly evidenceRefs: readonly string[];
+    readonly reconciliation?: {
+      readonly expectedOperationHash: string;
+      readonly reason: string;
+      readonly evidenceRefs: readonly string[];
+    };
     readonly gestureKey: string;
   }): Promise<void> => {
     setStatisticsBusy(true);
@@ -4748,6 +4757,14 @@ export function ProjectDetailView({
             reason: input.reason,
             evidenceRefs: [...input.evidenceRefs],
           },
+          ...(input.reconciliation
+            ? {
+                reconciliation: {
+                  ...input.reconciliation,
+                  evidenceRefs: [...input.reconciliation.evidenceRefs],
+                },
+              }
+            : {}),
         },
       });
       if (result.status === "rejected") {
@@ -4807,28 +4824,37 @@ export function ProjectDetailView({
       confirmation: application.confirmation,
       reason: application.reason,
       evidenceRefs: application.evidenceRefs,
+      reconciliation: {
+        expectedOperationHash: application.canonicalRequestHash,
+        reason:
+          "A verified human requested exact deterministic effect reconciliation.",
+        evidenceRefs:
+          application.observations.at(-1)?.evidenceRefs ??
+          application.evidenceRefs,
+      },
       gestureKey: `reconcile:${application.id}:${application.canonicalRequestHash}`,
     });
   };
 
   const validateImprovementApplication = async (
     application: ImprovementApplicationOperationView,
-    afterEvidence: StatisticsEvidenceSnapshotView,
+    afterWindow: StatisticsWindow,
     reason: string,
   ): Promise<void> => {
-    const validation = improvementApplicationValidateInput(
-      application,
-      afterEvidence,
-      reason,
-    );
     setStatisticsBusy(true);
     setStatisticsDiagnostic(null);
     try {
-      const key = `validate:${application.id}:${application.canonicalRequestHash}:${afterEvidence.hash}:${reason}`;
+      const key = `validate:${application.id}:${application.canonicalRequestHash}:${JSON.stringify(afterWindow)}:${reason}`;
       const commandId =
         improvementApplicationGestures.current.get(key) ??
         `improvement-application-validate:${globalThis.crypto.randomUUID()}`;
       improvementApplicationGestures.current.set(key, commandId);
+      const validation = improvementApplicationValidateInput(
+        application,
+        `statistics-evidence:validation:${commandId}`,
+        afterWindow,
+        reason,
+      );
       const result = await window.sandcastle.execute({
         commandId,
         command: {
@@ -5302,10 +5328,10 @@ export function ProjectDetailView({
           onReconcileApplication={(application) =>
             void reconcileImprovementApplication(application)
           }
-          onValidateApplication={(application, afterEvidence, reason) =>
+          onValidateApplication={(application, afterWindow, reason) =>
             void validateImprovementApplication(
               application,
-              afterEvidence,
+              afterWindow,
               reason,
             )
           }
