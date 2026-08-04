@@ -223,6 +223,7 @@ describe("Electron Test fixture", () => {
       type: "runtime-worker",
       id: "electron-test-fixture",
       authenticatedBy: "runtime",
+      projectReadAuthority: ["*"],
     });
   });
 

@@ -866,6 +866,15 @@ export const openImprovementApplicationRuntime = (
         ),
       );
       const beforeEvidence = content.evidence;
+      if (
+        new Date(request.afterWindow.startInclusive).getTime() <
+        new Date(beforeEvidence.query.window.endExclusive).getTime()
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+          "After Statistics evidence must use a window that follows the approved baseline window.",
+        );
+      }
       let afterEvidence;
       try {
         afterEvidence = options.statistics.freezeInTransaction({
@@ -1432,11 +1441,32 @@ export const openImprovementApplicationRuntime = (
         }
         if (operation.state === "unknown") {
           const updatedAt = clock().toISOString();
+          appendReconciliation({
+            operationId: operation.id,
+            phase: "rollback",
+            result: "unknown",
+            evidenceRefs: request.evidenceRefs,
+            createdAt: updatedAt,
+          });
           setProjection({
             operationId: operation.id,
             state: "reconciling",
             error: null,
             updatedAt,
+          });
+          appendAudit({
+            action: "improvement.application.reconcile",
+            operationId: operation.id,
+            actor: request.actor,
+            before: { state: operation.state },
+            after: {
+              state: "reconciling",
+              phase: "rollback",
+              reason: request.reason,
+              evidenceRefs: request.evidenceRefs,
+            },
+            timestamp: updatedAt,
+            commandId: input.commandId,
           });
           invalidate({
             operationId: operation.id,

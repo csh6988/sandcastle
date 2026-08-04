@@ -32,6 +32,21 @@ export const deterministicGovernedRevisionId = (input: {
   readonly phase: "apply" | "rollback";
 }): string => `improvement-revision:${sha256(input).slice(0, 48)}`;
 
+export const deterministicGovernedGenesisRevisionId = (input: {
+  readonly targetKind: "harness" | "template" | "skill-flow";
+  readonly ownerId: string;
+}): string => `improvement-genesis:${sha256(input).slice(0, 48)}`;
+
+export interface GovernedRevisionAdapter extends ImprovementApplicationEffectAdapter {
+  readonly initializeTarget: (input: {
+    readonly target: ImprovementTarget;
+  }) => {
+    readonly revision: GovernedRevisionRef;
+    readonly disposition: "created" | "no-op";
+    readonly evidenceRefs: readonly string[];
+  };
+}
+
 export class GovernedRevisionAdapterError extends Error {
   constructor(
     readonly code:
@@ -56,7 +71,7 @@ const sameHead = (
 export const openSqliteGovernedRevisionAdapter = (
   database: DatabaseSync,
   options: { readonly clock?: () => Date } = {},
-): ImprovementApplicationEffectAdapter => {
+): GovernedRevisionAdapter => {
   const clock = options.clock ?? (() => new Date());
 
   const requireSupportedTarget = (target: ImprovementTarget) => {
@@ -118,6 +133,136 @@ export const openSqliteGovernedRevisionAdapter = (
     revisionId: string,
     suffix = "",
   ): string => `governed-${target.targetKind}-revision:${revisionId}${suffix}`;
+
+  const assertSkillFlowBindings = (
+    target: Extract<ImprovementTarget, { readonly targetKind: "skill-flow" }>,
+  ): void => {
+    const position = database
+      .prepare("SELECT 1 AS present FROM positions WHERE id = ?")
+      .get(target.content.positionId);
+    if (!position) {
+      throw new GovernedRevisionAdapterError(
+        "IMPROVEMENT_TARGET_CONFLICT",
+        `Governed Skill Flow ${target.ownerId} references unknown Position ${target.content.positionId}.`,
+      );
+    }
+    for (const skillId of target.content.skillIds) {
+      const binding = database
+        .prepare(
+          `SELECT 1 AS present FROM position_skill_bindings
+            WHERE position_id = ? AND skill_id = ?`,
+        )
+        .get(target.content.positionId, skillId);
+      if (!binding) {
+        throw new GovernedRevisionAdapterError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Skill ${skillId} is not owned by Position ${target.content.positionId}.`,
+        );
+      }
+    }
+  };
+
+  const initializeTarget: GovernedRevisionAdapter["initializeTarget"] = (
+    input,
+  ) => {
+    const target = requireSupportedTarget(input.target);
+    if (
+      target.targetKind === "project-spec" ||
+      target.targetKind === "application-spec"
+    ) {
+      throw new GovernedRevisionAdapterError(
+        "IMPROVEMENT_TARGET_UNSUPPORTED",
+        `Governed ${target.targetKind} genesis must use its existing production revision seam.`,
+      );
+    }
+    if (
+      target.governedHead.revisionId !== null ||
+      target.governedHead.revisionHash !== null
+    ) {
+      throw new GovernedRevisionAdapterError(
+        "IMPROVEMENT_TARGET_CONFLICT",
+        `Governed ${target.targetKind} ${target.ownerId} genesis requires an empty governed head.`,
+      );
+    }
+    const contentHash = revisionHash(target);
+    const revisionId = deterministicGovernedGenesisRevisionId({
+      targetKind: target.targetKind,
+      ownerId: target.ownerId,
+    });
+    const head = currentHead(target);
+    if (head) {
+      if (head.revisionId !== revisionId || head.revisionHash !== contentHash) {
+        throw new GovernedRevisionAdapterError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Governed ${target.targetKind} ${target.ownerId} already has a governed head that is not this exact genesis revision.`,
+        );
+      }
+      return {
+        revision: head,
+        disposition: "no-op",
+        evidenceRefs: [evidenceRef(target, head.revisionId)],
+      };
+    }
+    if (target.targetKind === "skill-flow") {
+      assertSkillFlowBindings(target);
+    }
+    const createdAt = clock().toISOString();
+    if (target.targetKind === "harness") {
+      database
+        .prepare(
+          `INSERT INTO governed_harness_revisions(
+             id, owner_id, revision, supersedes_revision_id, content_json,
+             content_hash, operation_id, phase, created_at
+           ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          revisionId,
+          target.ownerId,
+          canonicalJson(target.content),
+          contentHash,
+          createdAt,
+        );
+    } else if (target.targetKind === "template") {
+      database
+        .prepare(
+          `INSERT INTO runtime_template_revisions(
+             id, owner_id, revision, supersedes_revision_id, manifest_json,
+             content_hash, operation_id, phase, created_at
+           ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          revisionId,
+          target.ownerId,
+          canonicalJson(target.content.manifest),
+          contentHash,
+          createdAt,
+        );
+    } else {
+      database
+        .prepare(
+          `INSERT INTO governed_skill_flow_revisions(
+             id, owner_id, position_id, revision, supersedes_revision_id,
+             name, instructions, skill_ids_json, content_hash, operation_id,
+             phase, created_at
+           ) VALUES (?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          revisionId,
+          target.ownerId,
+          target.content.positionId,
+          target.content.name,
+          target.content.instructions,
+          canonicalJson(target.content.skillIds),
+          contentHash,
+          createdAt,
+        );
+    }
+    return {
+      revision: { revisionId, revisionHash: contentHash },
+      disposition: "created",
+      evidenceRefs: [evidenceRef(target, revisionId)],
+    };
+  };
 
   const inspectEffect: ImprovementApplicationEffectAdapter["inspectEffect"] =
     async (input) => {
@@ -454,29 +599,7 @@ export const openSqliteGovernedRevisionAdapter = (
             createdAt,
           );
       } else {
-        const position = database
-          .prepare("SELECT 1 AS present FROM positions WHERE id = ?")
-          .get(target.content.positionId);
-        if (!position) {
-          throw new GovernedRevisionAdapterError(
-            "IMPROVEMENT_TARGET_CONFLICT",
-            `Governed Skill Flow ${target.ownerId} references unknown Position ${target.content.positionId}.`,
-          );
-        }
-        for (const skillId of target.content.skillIds) {
-          const binding = database
-            .prepare(
-              `SELECT 1 AS present FROM position_skill_bindings
-                WHERE position_id = ? AND skill_id = ?`,
-            )
-            .get(target.content.positionId, skillId);
-          if (!binding) {
-            throw new GovernedRevisionAdapterError(
-              "IMPROVEMENT_TARGET_CONFLICT",
-              `Skill ${skillId} is not owned by Position ${target.content.positionId}.`,
-            );
-          }
-        }
+        assertSkillFlowBindings(target);
         const revision = (
           database
             .prepare(
@@ -515,5 +638,5 @@ export const openSqliteGovernedRevisionAdapter = (
       };
     };
 
-  return { inspectEffect, appendRevision };
+  return { initializeTarget, inspectEffect, appendRevision };
 };

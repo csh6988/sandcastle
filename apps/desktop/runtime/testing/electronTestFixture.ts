@@ -175,6 +175,7 @@ export const electronTestFixtureRuntimePrincipal = {
   type: "runtime-worker",
   id: "electron-test-fixture",
   authenticatedBy: "runtime",
+  projectReadAuthority: ["*"],
 } as const;
 
 export type ElectronTestFixtureConfig = {

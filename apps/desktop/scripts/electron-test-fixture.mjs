@@ -3250,7 +3250,12 @@ const run = async () => {
     impactScope: ["electron-test-fixture"],
   };
   const bootstrapRevision = {
-    revisionId: "governed-harness-revision:t26:bootstrap",
+    revisionId: `improvement-genesis:${sha256(
+      canonicalJson({
+        ownerId: "harness:t26-electron",
+        targetKind: "harness",
+      }),
+    ).slice(0, 48)}`,
     revisionHash: sha256(canonicalJson(bootstrapHarnessContent)),
   };
   const sourceProposalId = "improvement-proposal:t26:source";
@@ -3649,12 +3654,14 @@ const run = async () => {
   );
   assert.ok(t26CursorAfterRestart.sequence >= t26CursorBeforeRestart.sequence);
 
+  const beforeWindowDuration =
+    Date.parse(beforeEvidence.query.window.endExclusive) -
+    Date.parse(beforeEvidence.query.window.startInclusive);
   const afterWindow = {
-    startInclusive: new Date(
-      Date.parse(beforeEvidence.query.window.startInclusive) - 1,
-    ).toISOString(),
+    startInclusive: beforeEvidence.query.window.endExclusive,
     endExclusive: new Date(
-      Date.parse(beforeEvidence.query.window.endExclusive) - 1,
+      Date.parse(beforeEvidence.query.window.endExclusive) +
+        beforeWindowDuration,
     ).toISOString(),
   };
   await typeElement(
@@ -3675,7 +3682,7 @@ const run = async () => {
   );
   await typeElement(
     `[data-improvement-validation-reason="${changedOperationId}"]`,
-    "The shifted exact window retains the same authoritative baseline count.",
+    "The following exact window retains the same authoritative baseline count.",
   );
   await clickElement(
     `[data-improvement-validate-application="${changedOperationId}"]`,

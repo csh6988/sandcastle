@@ -180,7 +180,10 @@ import {
   openImprovementApplicationRuntime,
   type ImprovementApplicationRuntime,
 } from "../improvement/improvementApplicationRuntime.js";
-import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
+import {
+  openSqliteGovernedRevisionAdapter,
+  type GovernedRevisionAdapter,
+} from "../improvement/governedRevisionAdapter.js";
 import type { ImprovementApplicationEffectAdapter } from "../improvement/improvementProposalContracts.js";
 
 export interface CompanyDatabase {
@@ -216,6 +219,7 @@ export interface CompanyDatabase {
   readonly statistics: StatisticsRuntime;
   readonly improvementProposals: ImprovementProposalRuntime;
   readonly improvementApplications: ImprovementApplicationRuntime;
+  readonly governedRevisions: GovernedRevisionAdapter;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -701,13 +705,13 @@ export const openCompanyDatabase = (
       });
     },
   });
+  const governedRevisions = openSqliteGovernedRevisionAdapter(database, {
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const improvementApplications = openImprovementApplicationRuntime(database, {
     statistics,
     adapter:
-      options.improvementApplicationRuntime?.adapter ??
-      openSqliteGovernedRevisionAdapter(database, {
-        ...(options.clock ? { clock: options.clock } : {}),
-      }),
+      options.improvementApplicationRuntime?.adapter ?? governedRevisions,
     events,
     ...(options.clock ? { clock: options.clock } : {}),
     ...(options.improvementApplicationRuntime?.failureInjection
@@ -875,6 +879,7 @@ export const openCompanyDatabase = (
     statistics,
     improvementProposals,
     improvementApplications,
+    governedRevisions,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 import {
+  deterministicGovernedGenesisRevisionId,
   deterministicGovernedRevisionId,
   GovernedRevisionAdapterError,
   openSqliteGovernedRevisionAdapter,
@@ -47,79 +48,23 @@ const seedGovernedGenesis = (
   target: ImprovementTarget,
 ): ImprovementTarget => {
   if (target.governedHead.revisionId !== null) return target;
-  const revisionId = `${target.ownerId}:source`;
-  const revisionHash = hash(
-    target.targetKind === "application-spec"
-      ? {
-          applicationId: target.content.lineage.applicationId,
-          promotedProjectSpecRevisionId:
-            target.content.lineage.promotedProjectSpecRevisionId,
-          promotedProjectSpecHash:
-            target.content.lineage.promotedProjectSpecHash,
-          content: target.content.content,
-        }
-      : target.content,
-  );
   const sqlite = new DatabaseSync(company.path);
   sqlite.exec("PRAGMA foreign_keys = ON;");
-  if (target.targetKind === "harness") {
-    sqlite
-      .prepare(
-        `INSERT INTO governed_harness_revisions(
-           id, owner_id, revision, supersedes_revision_id, content_json,
-           content_hash, operation_id, phase, created_at
-         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
-      )
-      .run(
-        revisionId,
-        target.ownerId,
-        canonicalJson(target.content),
-        revisionHash,
-        "2026-08-04T00:00:00.000Z",
-      );
-  } else if (target.targetKind === "template") {
-    sqlite
-      .prepare(
-        `INSERT INTO runtime_template_revisions(
-           id, owner_id, revision, supersedes_revision_id, manifest_json,
-           content_hash, operation_id, phase, created_at
-         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
-      )
-      .run(
-        revisionId,
-        target.ownerId,
-        canonicalJson(target.content.manifest),
-        revisionHash,
-        "2026-08-04T00:00:00.000Z",
-      );
-  } else if (target.targetKind === "skill-flow") {
-    sqlite
-      .prepare(
-        `INSERT INTO governed_skill_flow_revisions(
-           id, owner_id, position_id, revision, supersedes_revision_id, name,
-           instructions, skill_ids_json, content_hash, operation_id, phase,
-           created_at
-         ) VALUES (?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL, NULL, ?)`,
-      )
-      .run(
-        revisionId,
-        target.ownerId,
-        target.content.positionId,
-        target.content.name,
-        target.content.instructions,
-        canonicalJson(target.content.skillIds),
-        revisionHash,
-        "2026-08-04T00:00:00.000Z",
-      );
-  } else {
+  if (
+    target.targetKind === "project-spec" ||
+    target.targetKind === "application-spec"
+  ) {
     sqlite.close();
     return target;
   }
+  const initialized = openSqliteGovernedRevisionAdapter(sqlite, {
+    clock: () => new Date("2026-08-04T00:00:00.000Z"),
+  }).initializeTarget({ target });
   assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
   sqlite.close();
   return {
     ...target,
-    governedHead: { revisionId, revisionHash },
+    governedHead: initialized.revision,
   } as ImprovementTarget;
 };
 
@@ -308,6 +253,37 @@ describe("Governed revision Adapter", () => {
     const adapter = openSqliteGovernedRevisionAdapter(sqlite, {
       clock: () => new Date("2026-08-04T00:00:00.000Z"),
     });
+    const genesis = adapter.initializeTarget({
+      target: {
+        ...governedTarget,
+        governedHead: { revisionId: null, revisionHash: null },
+      },
+    });
+    assert.equal(genesis.disposition, "no-op");
+    assert.equal(
+      genesis.revision.revisionId,
+      deterministicGovernedGenesisRevisionId({
+        targetKind: "harness",
+        ownerId: governedTarget.ownerId,
+      }),
+    );
+    assert.deepEqual(
+      {
+        ...sqlite
+          .prepare(
+            `SELECT revision, supersedes_revision_id AS supersedesRevisionId,
+                    operation_id AS operationId, phase
+               FROM governed_harness_revisions WHERE id = ?`,
+          )
+          .get(genesis.revision.revisionId),
+      },
+      {
+        revision: 1,
+        supersedesRevisionId: null,
+        operationId: null,
+        phase: null,
+      },
+    );
     const absent = await adapter.inspectEffect({
       operationId,
       target: governedTarget,
@@ -346,6 +322,18 @@ describe("Governed revision Adapter", () => {
           .get() as { readonly count: number }
       ).count,
       2,
+    );
+    assert.throws(
+      () =>
+        adapter.initializeTarget({
+          target: {
+            ...governedTarget,
+            governedHead: { revisionId: null, revisionHash: null },
+          },
+        }),
+      (error: unknown) =>
+        error instanceof GovernedRevisionAdapterError &&
+        error.code === "IMPROVEMENT_TARGET_CONFLICT",
     );
 
     await assert.rejects(

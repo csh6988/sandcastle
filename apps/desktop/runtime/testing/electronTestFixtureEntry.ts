@@ -14,6 +14,7 @@ import type { AdapterExecutionFact } from "../execution/contract.js";
 import { MODEL_ONLY_CONTEXT_SCHEMA_HASH } from "../execution/contract.js";
 import type { ArtifactVersionView } from "../artifactRegistry.js";
 import type { CompanyCommandRegistry } from "../commandRegistry.js";
+import type { CompanyDatabase } from "../storage/sqlite.js";
 import type { RuntimeInteraction } from "../interaction.js";
 import type { DeliveryQualityNodePlanProvider } from "../quality/qualityGateNodeHandler.js";
 import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
@@ -86,40 +87,16 @@ const t26BootstrapHarnessContent = {
 };
 
 const ensureT26BootstrapHarnessRevision = (
-  databasePath: string,
-  createdAt: string,
+  database: Pick<CompanyDatabase, "governedRevisions">,
 ): void => {
-  const revisionId = "governed-harness-revision:t26:bootstrap";
-  const sqlite = new DatabaseSync(databasePath);
-  if (
-    sqlite
-      .prepare(
-        "SELECT 1 AS present FROM governed_harness_revisions WHERE id = ?",
-      )
-      .get(revisionId)
-  ) {
-    sqlite.close();
-    return;
-  }
-  sqlite.exec("PRAGMA foreign_keys = ON;");
-  sqlite
-    .prepare(
-      `INSERT INTO governed_harness_revisions(
-         id, owner_id, revision, supersedes_revision_id, content_json,
-         content_hash, operation_id, phase, created_at
-       ) VALUES (?, 'harness:t26-electron', 1, NULL, ?, ?, NULL, NULL, ?)`,
-    )
-    .run(
-      revisionId,
-      canonicalJson(t26BootstrapHarnessContent),
-      sha256(canonicalJson(t26BootstrapHarnessContent)),
-      createdAt,
-    );
-  if (sqlite.prepare("PRAGMA foreign_key_check").all().length > 0) {
-    sqlite.close();
-    throw new Error("Electron Test T26 bootstrap violated foreign keys.");
-  }
-  sqlite.close();
+  database.governedRevisions.initializeTarget({
+    target: {
+      targetKind: "harness",
+      ownerId: "harness:t26-electron",
+      governedHead: { revisionId: null, revisionHash: null },
+      content: t26BootstrapHarnessContent,
+    },
+  });
 };
 
 const repeatableIdFactory = (seed: string): (() => string) => {
@@ -496,6 +473,7 @@ const main = async (): Promise<void> => {
           type: "human",
           id: "electron-test-fixture",
           authenticatedBy: "local-session",
+          projectReadAuthority: ["*"],
         },
         consumerId: "electron-test-fixture-human-release",
       },
@@ -623,10 +601,7 @@ const main = async (): Promise<void> => {
           }
         }
 
-        ensureT26BootstrapHarnessRevision(
-          database.path,
-          fixtureRuntimeOptions.clock().toISOString(),
-        );
+        ensureT26BootstrapHarnessRevision(database);
 
         if (existsSync(downstreamReceiptPath)) {
           const receipt = JSON.parse(

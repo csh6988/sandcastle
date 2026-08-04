@@ -1356,6 +1356,62 @@ describe("Improvement Application Runtime", () => {
     }
   });
 
+  it("rejects an after-evidence window that does not follow the approved baseline window", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date(timestamp),
+    });
+    const approved = createApprovedHarnessProposal(
+      database,
+      "validation-window-order",
+    );
+    const apply = database.commandRegistry.execute(
+      harnessApplyEnvelope(approved, {
+        operationId: "improvement-application:harness:validation-window-order",
+        commandId: "command:apply-harness-validation-window-order",
+      }),
+    );
+    assert.equal(apply.status, "succeeded");
+    if (apply.status !== "succeeded") assert.fail("apply must succeed");
+    const applied = await database.improvementApplications.dispatch(
+      apply.value.id,
+    );
+    const afterEvidenceSnapshotId =
+      "statistics-evidence:validation-window-order:after";
+    const validation = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-validation-window-order",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidenceSnapshotId,
+          afterWindow: approved.content.evidence.query.window,
+          reason: "Reject reuse of the pre-apply baseline window.",
+          evidenceRefs: [approved.content.evidence.id, afterEvidenceSnapshotId],
+        },
+      },
+    });
+    assert.equal(validation.status, "rejected");
+    if (validation.status !== "rejected") {
+      assert.fail("the baseline window must not validate as after evidence");
+    }
+    assert.equal(validation.error.code, "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE");
+    assert.throws(() =>
+      database.statistics.inspectEvidence(afterEvidenceSnapshotId),
+    );
+    assert.equal(
+      database.improvementApplications.inspect(applied.id).state,
+      "applied",
+    );
+    database.close();
+  });
+
   it("rejects non-comparable or unauthorized validation without changing applied state", async () => {
     const database = openCompanyDatabase(tempCompanyDir(), {
       clock: () => new Date(timestamp),
@@ -2156,6 +2212,7 @@ describe("Improvement Application Runtime", () => {
     );
     assert.equal(unknown.state, "unknown");
     assert.equal(unknown.rollbacks.at(-1)?.state, "unknown");
+    const priorReconciliationCount = unknown.reconciliations.length;
     const replay = database.commandRegistry.execute({
       schemaVersion: 1,
       commandId: "command:rollback-unknown:reconcile",
@@ -2172,6 +2229,58 @@ describe("Improvement Application Runtime", () => {
     assert.equal(replay.status, "succeeded");
     if (replay.status !== "succeeded") assert.fail("reconcile must succeed");
     assert.equal(replay.value.state, "reconciling");
+    assert.equal(
+      replay.value.reconciliations.length,
+      priorReconciliationCount + 1,
+    );
+    const verifiedHumanReconciliation = replay.value.reconciliations.at(-1);
+    assert.deepEqual(
+      verifiedHumanReconciliation && {
+        phase: verifiedHumanReconciliation.phase,
+        result: verifiedHumanReconciliation.result,
+        evidenceRefs: verifiedHumanReconciliation.evidenceRefs,
+      },
+      {
+        phase: "rollback",
+        result: "unknown",
+        evidenceRefs: rollbackInput.evidenceRefs,
+      },
+    );
+    const auditDatabase = new DatabaseSync(database.path);
+    const reconciliationAudit = (
+      auditDatabase
+        .prepare(
+          `SELECT action, actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy, after_json AS afterJson
+           FROM runtime_audit_records
+          WHERE entity_type = 'improvement-application'
+            AND entity_id = ?
+            AND action = 'improvement.application.reconcile'
+       ORDER BY created_at, id`,
+        )
+        .all(scenario.application.id) as Array<{
+        readonly action: string;
+        readonly actorType: string;
+        readonly actorId: string;
+        readonly authenticatedBy: string;
+        readonly afterJson: string;
+      }>
+    ).map((record) => ({ ...record }));
+    auditDatabase.close();
+    assert.deepEqual(reconciliationAudit, [
+      {
+        action: "improvement.application.reconcile",
+        actorType: "human",
+        actorId: "human:improvement-owner",
+        authenticatedBy: "local-session",
+        afterJson: canonicalJson({
+          state: "reconciling",
+          phase: "rollback",
+          reason: rollbackInput.reason,
+          evidenceRefs: rollbackInput.evidenceRefs,
+        }),
+      },
+    ]);
     const stillUnknown = await database.improvementApplications.dispatch(
       scenario.application.id,
     );

@@ -44,6 +44,7 @@ const main = async (): Promise<void> => {
       type: "human",
       id: "local-desktop-user",
       authenticatedBy: "local-session",
+      projectReadAuthority: ["*"],
     },
     ...(acpToken && acpClientId
       ? {

@@ -17,6 +17,7 @@ import {
   startCompanyRuntimeServer,
 } from "./server.js";
 import type { CompanyDatabase } from "./storage/sqlite.js";
+import { deterministicGovernedGenesisRevisionId } from "./improvement/governedRevisionAdapter.js";
 
 const roots: string[] = [];
 const canonicalize = (value: unknown): unknown => {
@@ -479,6 +480,7 @@ describe("Company Runtime server startup", () => {
       type: "human" as const,
       id: "statistics-reader",
       authenticatedBy: "local-session" as const,
+      projectReadAuthority: ["*"],
     };
     const server = await startCompanyRuntimeServer({
       address,
@@ -495,6 +497,16 @@ describe("Company Runtime server startup", () => {
             authenticatedBy: "ipc-token",
           },
           consumerId: "fixture-only",
+        },
+        {
+          token: "statistics-other-project-token",
+          principal: {
+            type: "human",
+            id: "other-project-reader",
+            authenticatedBy: "local-session",
+            projectReadAuthority: ["project:other"],
+          },
+          consumerId: "other-project-reader",
         },
       ],
     });
@@ -597,6 +609,35 @@ describe("Company Runtime server startup", () => {
         (error: unknown) =>
           error instanceof RuntimeClientError && error.code === "FORBIDDEN",
       );
+
+      const otherProjectActor = {
+        type: "human" as const,
+        id: "other-project-reader",
+        authenticatedBy: "local-session" as const,
+        projectReadAuthority: ["project:other"],
+      };
+      const otherProjectClient = createCompanyRuntimeClientFromTransport(
+        createLocalRuntimeTransport({
+          address,
+          token: "statistics-other-project-token",
+        }),
+        "statistics-other-project-token",
+        {
+          actor: otherProjectActor,
+          consumerId: "other-project-reader",
+        },
+      );
+      await assert.rejects(
+        otherProjectClient.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "query-statistics-other-project",
+          principal: otherProjectActor,
+          consumerId: "other-project-reader",
+          query: { type: "statistics.inspect", projectId: project.id, query },
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+      );
     } finally {
       await server.close();
     }
@@ -613,6 +654,7 @@ describe("Company Runtime server startup", () => {
       type: "human" as const,
       id: "improvement-author",
       authenticatedBy: "local-session" as const,
+      projectReadAuthority: ["*"],
     };
     const sourceContent = {
       principles: ["Preserve governed history."],
@@ -622,7 +664,10 @@ describe("Company Runtime server startup", () => {
       impactScope: ["server-test"],
     };
     const sourceRevision = {
-      revisionId: "harness:server-review:source",
+      revisionId: deterministicGovernedGenesisRevisionId({
+        targetKind: "harness",
+        ownerId: "harness:server-review",
+      }),
       revisionHash: canonicalHash(sourceContent),
     };
     const server = await startCompanyRuntimeServer({
@@ -640,24 +685,14 @@ describe("Company Runtime server startup", () => {
           },
         },
         setup: (database) => {
-          const sqlite = new DatabaseSync(database.path);
-          sqlite.exec("PRAGMA foreign_keys = OFF;");
-          sqlite
-            .prepare(
-              `INSERT INTO governed_harness_revisions(
-                 id, owner_id, revision, supersedes_revision_id, content_json,
-                 content_hash, operation_id, phase, created_at
-               ) VALUES (?, 'harness:server-review', 1, NULL, ?, ?, ?,
-                         'apply', ?)`,
-            )
-            .run(
-              sourceRevision.revisionId,
-              JSON.stringify(canonicalize(sourceContent)),
-              sourceRevision.revisionHash,
-              "fixture-operation:harness:server-review:source",
-              "2026-08-04T00:00:00.000Z",
-            );
-          sqlite.close();
+          database.governedRevisions.initializeTarget({
+            target: {
+              targetKind: "harness",
+              ownerId: "harness:server-review",
+              governedHead: { revisionId: null, revisionHash: null },
+              content: sourceContent,
+            },
+          });
         },
       },
     });

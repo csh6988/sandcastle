@@ -47,6 +47,11 @@ import type { DeliveryQualityNodePlanProvider } from "./quality/qualityGateNodeH
 import { ReleaseOperationRuntimeError } from "./release/releaseOperationRuntime.js";
 import type { ReleaseOperationEffectAdapter } from "./release/releaseOperationContracts.js";
 import { StatisticsRuntimeError } from "./statistics/statisticsRuntime.js";
+import { StatisticsProjectReaderSchema } from "./statistics/statisticsContracts.js";
+
+type RuntimePrincipal = ActorRef & {
+  readonly projectReadAuthority?: readonly string[];
+};
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -75,11 +80,11 @@ export interface CompanyRuntimeServerOptions {
     readonly setup: (database: CompanyDatabase) => void | Promise<void>;
   };
   readonly agentHost?: LocalAgentHost;
-  readonly principal?: ActorRef;
+  readonly principal?: RuntimePrincipal;
   readonly consumerId?: string;
   readonly trustedConnections?: readonly {
     readonly token: string;
-    readonly principal: ActorRef;
+    readonly principal: RuntimePrincipal;
     readonly consumerId: string;
   }[];
 }
@@ -90,20 +95,19 @@ export interface CompanyRuntimeServerHandle {
   readonly close: () => Promise<void>;
 }
 
-const assertStatisticsReader = (principal: ActorRef): void => {
-  const authenticated =
-    (principal.type === "human" &&
-      principal.authenticatedBy === "local-session") ||
-    (principal.type === "runtime-worker" &&
-      principal.authenticatedBy === "runtime") ||
-    (principal.type === "electron-main" &&
-      principal.authenticatedBy === "ipc-token") ||
-    (principal.type === "acp-client" &&
-      principal.authenticatedBy === "acp-connection");
-  if (!authenticated) {
+const assertStatisticsReader = (
+  principal: RuntimePrincipal,
+  projectId: string,
+): void => {
+  const parsed = StatisticsProjectReaderSchema.safeParse(principal);
+  if (
+    !parsed.success ||
+    (!parsed.data.projectReadAuthority.includes("*") &&
+      !parsed.data.projectReadAuthority.includes(projectId))
+  ) {
     throw new CompanyCommandError(
       "FORBIDDEN",
-      "Statistics queries require an authenticated Project reader.",
+      `Statistics queries require authenticated read authority for Project ${projectId}.`,
     );
   }
 };
@@ -280,7 +284,8 @@ export const startCompanyRuntimeServer = async (
           type: "human",
           id: "local-desktop-user",
           authenticatedBy: "local-session",
-        } satisfies ActorRef),
+          projectReadAuthority: ["*"],
+        } satisfies RuntimePrincipal),
       consumerId: options.consumerId ?? "desktop-window-1",
     },
     ...(options.trustedConnections ?? []),
@@ -631,7 +636,7 @@ export const startCompanyRuntimeServer = async (
                   case "release-operations.list":
                     return database.releaseOperations.list(query.candidateId);
                   case "statistics.inspect":
-                    assertStatisticsReader(principal);
+                    assertStatisticsReader(principal, query.projectId);
                     if (query.projectId !== query.query.projectId) {
                       throw new CompanyCommandError(
                         "FORBIDDEN",
@@ -639,26 +644,33 @@ export const startCompanyRuntimeServer = async (
                       );
                     }
                     return database.statistics.inspect(query.query);
-                  case "statistics-evidence.inspect":
-                    assertStatisticsReader(principal);
-                    return database.statistics.inspectEvidence(
+                  case "statistics-evidence.inspect": {
+                    const evidence = database.statistics.inspectEvidence(
                       query.evidenceSnapshotId,
                     );
-                  case "improvement-proposal.inspect":
-                    assertStatisticsReader(principal);
-                    return database.improvementProposals.inspect(
+                    assertStatisticsReader(principal, evidence.query.projectId);
+                    return evidence;
+                  }
+                  case "improvement-proposal.inspect": {
+                    const proposal = database.improvementProposals.inspect(
                       query.proposalId,
                     );
+                    assertStatisticsReader(principal, proposal.projectId);
+                    return proposal;
+                  }
                   case "improvement-proposals.list":
-                    assertStatisticsReader(principal);
+                    assertStatisticsReader(principal, query.projectId);
                     return database.improvementProposals.list(query.projectId);
-                  case "improvement-application.inspect":
-                    assertStatisticsReader(principal);
-                    return database.improvementApplications.inspect(
-                      query.operationId,
-                    );
+                  case "improvement-application.inspect": {
+                    const application =
+                      database.improvementApplications.inspect(
+                        query.operationId,
+                      );
+                    assertStatisticsReader(principal, application.projectId);
+                    return application;
+                  }
                   case "improvement-applications.list":
-                    assertStatisticsReader(principal);
+                    assertStatisticsReader(principal, query.projectId);
                     return database.improvementApplications.list(
                       query.projectId,
                     );
@@ -773,7 +785,7 @@ export const startCompanyRuntimeServer = async (
                     request.query.candidateId,
                   );
                 case "statistics.inspect":
-                  assertStatisticsReader(principal);
+                  assertStatisticsReader(principal, request.query.projectId);
                   if (
                     request.query.projectId !== request.query.query.projectId
                   ) {
@@ -783,28 +795,34 @@ export const startCompanyRuntimeServer = async (
                     );
                   }
                   return database.statistics.inspect(request.query.query);
-                case "statistics-evidence.inspect":
-                  assertStatisticsReader(principal);
-                  return database.statistics.inspectEvidence(
+                case "statistics-evidence.inspect": {
+                  const evidence = database.statistics.inspectEvidence(
                     request.query.evidenceSnapshotId,
                   );
-                case "improvement-proposal.inspect":
-                  assertStatisticsReader(principal);
-                  return database.improvementProposals.inspect(
+                  assertStatisticsReader(principal, evidence.query.projectId);
+                  return evidence;
+                }
+                case "improvement-proposal.inspect": {
+                  const proposal = database.improvementProposals.inspect(
                     request.query.proposalId,
                   );
+                  assertStatisticsReader(principal, proposal.projectId);
+                  return proposal;
+                }
                 case "improvement-proposals.list":
-                  assertStatisticsReader(principal);
+                  assertStatisticsReader(principal, request.query.projectId);
                   return database.improvementProposals.list(
                     request.query.projectId,
                   );
-                case "improvement-application.inspect":
-                  assertStatisticsReader(principal);
-                  return database.improvementApplications.inspect(
+                case "improvement-application.inspect": {
+                  const application = database.improvementApplications.inspect(
                     request.query.operationId,
                   );
+                  assertStatisticsReader(principal, application.projectId);
+                  return application;
+                }
                 case "improvement-applications.list":
-                  assertStatisticsReader(principal);
+                  assertStatisticsReader(principal, request.query.projectId);
                   return database.improvementApplications.list(
                     request.query.projectId,
                   );
