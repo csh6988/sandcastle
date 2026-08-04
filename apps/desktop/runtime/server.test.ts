@@ -958,8 +958,8 @@ describe("Company Runtime server startup", () => {
             afterEvidenceSnapshotId,
             afterWindow: {
               kind: "explicit-utc-half-open",
-              startInclusive: "2026-08-02T00:00:00.000Z",
-              endExclusive: "2026-08-03T00:00:00.000Z",
+              startInclusive: "2026-08-04T00:00:00.000Z",
+              endExclusive: "2026-08-05T00:00:00.000Z",
             },
             reason: "Compare the next exact server cohort.",
             evidenceRefs: [frozen.value.id, afterEvidenceSnapshotId],

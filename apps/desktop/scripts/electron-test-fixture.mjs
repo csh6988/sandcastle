@@ -3657,11 +3657,20 @@ const run = async () => {
   const beforeWindowDuration =
     Date.parse(beforeEvidence.query.window.endExclusive) -
     Date.parse(beforeEvidence.query.window.startInclusive);
+  const appliedAt = restartedApplication.receipts.find(
+    (receipt) => receipt.phase === "apply" && receipt.targetRevision !== null,
+  )?.createdAt;
+  assert.ok(appliedAt);
+  const afterWindowStart = new Date(
+    Math.max(
+      Date.parse(beforeEvidence.query.window.endExclusive),
+      Date.parse(appliedAt),
+    ),
+  ).toISOString();
   const afterWindow = {
-    startInclusive: beforeEvidence.query.window.endExclusive,
+    startInclusive: afterWindowStart,
     endExclusive: new Date(
-      Date.parse(beforeEvidence.query.window.endExclusive) +
-        beforeWindowDuration,
+      Date.parse(afterWindowStart) + beforeWindowDuration,
     ).toISOString(),
   };
   await typeElement(

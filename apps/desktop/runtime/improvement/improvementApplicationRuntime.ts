@@ -866,13 +866,27 @@ export const openImprovementApplicationRuntime = (
         ),
       );
       const beforeEvidence = content.evidence;
+      const appliedReceipt = operation.receipts.find(
+        (receipt) =>
+          receipt.phase === "apply" && receipt.targetRevision !== null,
+      );
+      if (!appliedReceipt) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_INVALID_STATE",
+          `Improvement application ${operation.id} has no completed apply receipt to validate.`,
+        );
+      }
+      const earliestAfterStart = Math.max(
+        new Date(beforeEvidence.query.window.endExclusive).getTime(),
+        new Date(appliedReceipt.createdAt).getTime(),
+      );
       if (
         new Date(request.afterWindow.startInclusive).getTime() <
-        new Date(beforeEvidence.query.window.endExclusive).getTime()
+        earliestAfterStart
       ) {
         throw new ImprovementApplicationRuntimeError(
           "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
-          "After Statistics evidence must use a window that follows the approved baseline window.",
+          "After Statistics evidence must use a window that follows both the approved baseline and the completed apply effect.",
         );
       }
       let afterEvidence;

@@ -12,7 +12,7 @@ import type {
   StatisticsEvidenceSnapshotView,
 } from "../interface.js";
 
-const timestamp = "2026-08-04T00:00:00.000Z";
+const timestamp = "2026-08-02T00:00:00.000Z";
 const hash = "a".repeat(64);
 
 const canonicalize = (value: unknown): unknown => {
@@ -1400,6 +1400,67 @@ describe("Improvement Application Runtime", () => {
     assert.equal(validation.status, "rejected");
     if (validation.status !== "rejected") {
       assert.fail("the baseline window must not validate as after evidence");
+    }
+    assert.equal(validation.error.code, "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE");
+    assert.throws(() =>
+      database.statistics.inspectEvidence(afterEvidenceSnapshotId),
+    );
+    assert.equal(
+      database.improvementApplications.inspect(applied.id).state,
+      "applied",
+    );
+    database.close();
+  });
+
+  it("rejects an after-evidence window that predates the applied effect", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date("2026-08-04T00:00:00.000Z"),
+    });
+    const approved = createApprovedHarnessProposal(
+      database,
+      "validation-applied-effect-order",
+    );
+    const apply = database.commandRegistry.execute(
+      harnessApplyEnvelope(approved, {
+        operationId:
+          "improvement-application:harness:validation-applied-effect-order",
+        commandId: "command:apply-harness-validation-applied-effect-order",
+      }),
+    );
+    assert.equal(apply.status, "succeeded");
+    if (apply.status !== "succeeded") assert.fail("apply must succeed");
+    const applied = await database.improvementApplications.dispatch(
+      apply.value.id,
+    );
+    const afterEvidenceSnapshotId =
+      "statistics-evidence:validation-applied-effect-order:after";
+    const validation = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-validation-applied-effect-order",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidenceSnapshotId,
+          afterWindow: {
+            kind: "explicit-utc-half-open" as const,
+            startInclusive: "2026-08-02T00:00:00.000Z",
+            endExclusive: "2026-08-03T00:00:00.000Z",
+          },
+          reason: "Reject evidence collected before the applied effect.",
+          evidenceRefs: [approved.content.evidence.id, afterEvidenceSnapshotId],
+        },
+      },
+    });
+    assert.equal(validation.status, "rejected");
+    if (validation.status !== "rejected") {
+      assert.fail("pre-apply evidence must not validate an applied operation");
     }
     assert.equal(validation.error.code, "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE");
     assert.throws(() =>
