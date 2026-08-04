@@ -2091,6 +2091,37 @@ describe("Project detail", () => {
     assert.match(markup, /data-project-overview/);
   });
 
+  it("opens the Project Improvements tab with an explicit UTC Statistics window", () => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const markup = renderToStaticMarkup(
+      <ProjectDetailView
+        initialTab="improvements"
+        onArchive={async () => project}
+        onBack={() => undefined}
+        onSave={async () => project}
+        project={project}
+        t={messages.en}
+      />,
+    );
+
+    assert.match(markup, /data-project-tab="improvements"/);
+    assert.match(markup, /aria-selected="true"[^>]*>Improvements/);
+    assert.match(markup, /data-project-improvements/);
+    assert.match(markup, /UTC window start \(inclusive\)/);
+    assert.match(markup, /UTC window end \(exclusive\)/);
+    assert.match(markup, /Freeze exact evidence/);
+  });
+
   it("queries and mounts the selected Run Work Package graph without retaining failed data", async () => {
     const graph = {
       projectId: "project-1",

@@ -168,6 +168,10 @@ import {
   type DeliveryQualityNodePlanProvider,
   type QualityGateNodeHandler,
 } from "../quality/qualityGateNodeHandler.js";
+import {
+  openStatisticsRuntime,
+  type StatisticsRuntime,
+} from "../statistics/statisticsRuntime.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -199,6 +203,7 @@ export interface CompanyDatabase {
   readonly qualityGates: QualityGateRuntime;
   readonly delivery: DeliveryRuntime;
   readonly releaseOperations: ReleaseOperationRuntime;
+  readonly statistics: StatisticsRuntime;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -561,6 +566,10 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const statistics = openStatisticsRuntime(database, {
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const gitReleaseAdapter = openLocalGitReleaseAdapter();
   const artifactExportAdapter = createArtifactExportAdapter({
     artifacts: artifactRegistry,
@@ -702,6 +711,7 @@ export const openCompanyDatabase = (
     qualityGates,
     delivery,
     releaseOperations,
+    statistics,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -821,6 +831,7 @@ export const openCompanyDatabase = (
     qualityGates,
     delivery,
     releaseOperations,
+    statistics,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

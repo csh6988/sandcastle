@@ -304,6 +304,139 @@ const testRunView = {
 };
 
 describe("Sandcastle preload bridge", () => {
+  it("parses Statistics live and frozen evidence through the actor-free typed tunnel", async () => {
+    const canonicalQuery = {
+      catalogVersion: "statistics@1" as const,
+      projectId: "project-1",
+      filters: {
+        departmentIds: [],
+        aiMemberIds: [],
+        modelIds: [],
+        repositoryIds: [],
+        workPackageIds: [],
+        pipelineVersionIds: [],
+      },
+      window: {
+        kind: "explicit-utc-half-open" as const,
+        startInclusive: "2026-08-01T00:00:00.000Z",
+        endExclusive: "2026-08-02T00:00:00.000Z",
+      },
+      cohort: {
+        id: "cohort:baseline-quality",
+        filters: {
+          departmentIds: [],
+          aiMemberIds: [],
+          modelIds: [],
+          repositoryIds: [],
+          workPackageIds: [],
+          pipelineVersionIds: [],
+        },
+      },
+      comparisonSet: {
+        id: "comparison:baseline-quality",
+        metricIds: ["review-finding-count" as const],
+      },
+    };
+    const statistics = {
+      query: canonicalQuery,
+      asOfSequence: 9,
+      observations: [
+        {
+          metricId: "review-finding-count" as const,
+          status: "available" as const,
+          measurement: { kind: "count" as const, value: 0 },
+          sourceFactFamily: "review-finding",
+          sourceFactRefs: [],
+        },
+      ],
+      completeness: {
+        status: "complete" as const,
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      generatedAt: "2026-08-04T00:00:00.000Z",
+    };
+    const evidence = {
+      id: "statistics-evidence-1",
+      query: canonicalQuery,
+      queryHash: "a".repeat(64),
+      asOfSequence: 9,
+      observations: statistics.observations,
+      completeness: statistics.completeness,
+      frozenBy: {
+        type: "human" as const,
+        id: "verified-local-human",
+        authenticatedBy: "local-session" as const,
+      },
+      hash: "b".repeat(64),
+      createdAt: "2026-08-04T00:01:00.000Z",
+    };
+    const requests: unknown[] = [];
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);
+      requests.push(payload);
+      const request = payload as {
+        readonly operation: "query" | "execute";
+        readonly query?: { readonly type: string };
+      };
+      if (request.operation === "execute") {
+        return { status: "succeeded", value: evidence, effectIds: [] };
+      }
+      return {
+        view:
+          request.query?.type === "statistics.inspect" ? statistics : evidence,
+        asOfSequence: 9,
+        viewSyncToken: "statistics-token-9",
+      };
+    });
+
+    const inspected = await bridge.query({
+      type: "statistics.inspect",
+      projectId: "project-1",
+      query: {
+        projectId: "project-1",
+        window: canonicalQuery.window,
+        cohort: { id: canonicalQuery.cohort.id },
+        comparisonSet: canonicalQuery.comparisonSet,
+      },
+    });
+    const frozen = await bridge.execute({
+      commandId: "statistics-freeze-1",
+      command: {
+        type: "statistics.evidence.freeze",
+        evidenceSnapshotId: evidence.id,
+        query: statistics.query,
+      },
+    });
+
+    assert.equal(inspected.view.observations[0]?.status, "available");
+    assert.equal(frozen.status, "succeeded");
+    if (frozen.status === "succeeded")
+      assert.equal(frozen.value.id, evidence.id);
+    for (const request of requests) {
+      const payload = request as Record<string, unknown>;
+      assert.equal("actor" in payload, false);
+      assert.equal("principal" in payload, false);
+    }
+
+    const malformed = createSandcastleBridge(async () => ({
+      view: { ...statistics, unexpected: true },
+      asOfSequence: 9,
+    }));
+    await assert.rejects(
+      malformed.query({
+        type: "statistics.inspect",
+        projectId: "project-1",
+        query: {
+          projectId: "project-1",
+          window: canonicalQuery.window,
+          cohort: { id: canonicalQuery.cohort.id },
+          comparisonSet: canonicalQuery.comparisonSet,
+        },
+      }),
+    );
+  });
+
   it("parses Workspace command results through the typed tunnel", async () => {
     const bridge = createSandcastleBridge(async (channel) => {
       assert.equal(channel, RUNTIME_TUNNEL_CHANNEL);

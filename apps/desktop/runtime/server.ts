@@ -46,6 +46,7 @@ import { DeliveryRuntimeError } from "./delivery/deliveryRuntime.js";
 import type { DeliveryQualityNodePlanProvider } from "./quality/qualityGateNodeHandler.js";
 import { ReleaseOperationRuntimeError } from "./release/releaseOperationRuntime.js";
 import type { ReleaseOperationEffectAdapter } from "./release/releaseOperationContracts.js";
+import { StatisticsRuntimeError } from "./statistics/statisticsRuntime.js";
 
 export interface CompanyRuntimeServerOptions {
   readonly address: string;
@@ -87,6 +88,24 @@ export interface CompanyRuntimeServerHandle {
   readonly closed: Promise<void>;
   readonly close: () => Promise<void>;
 }
+
+const assertStatisticsReader = (principal: ActorRef): void => {
+  const authenticated =
+    (principal.type === "human" &&
+      principal.authenticatedBy === "local-session") ||
+    (principal.type === "runtime-worker" &&
+      principal.authenticatedBy === "runtime") ||
+    (principal.type === "electron-main" &&
+      principal.authenticatedBy === "ipc-token") ||
+    (principal.type === "acp-client" &&
+      principal.authenticatedBy === "acp-connection");
+  if (!authenticated) {
+    throw new CompanyCommandError(
+      "FORBIDDEN",
+      "Statistics queries require an authenticated Project reader.",
+    );
+  }
+};
 
 export const reconcileCompanyRuntimeStartup = async (
   database: Pick<
@@ -585,6 +604,20 @@ export const startCompanyRuntimeServer = async (
                     );
                   case "release-operations.list":
                     return database.releaseOperations.list(query.candidateId);
+                  case "statistics.inspect":
+                    assertStatisticsReader(principal);
+                    if (query.projectId !== query.query.projectId) {
+                      throw new CompanyCommandError(
+                        "FORBIDDEN",
+                        "Statistics query Project authority does not match its canonical query.",
+                      );
+                    }
+                    return database.statistics.inspect(query.query);
+                  case "statistics-evidence.inspect":
+                    assertStatisticsReader(principal);
+                    return database.statistics.inspectEvidence(
+                      query.evidenceSnapshotId,
+                    );
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -694,6 +727,22 @@ export const startCompanyRuntimeServer = async (
                 case "release-operations.list":
                   return database.releaseOperations.list(
                     request.query.candidateId,
+                  );
+                case "statistics.inspect":
+                  assertStatisticsReader(principal);
+                  if (
+                    request.query.projectId !== request.query.query.projectId
+                  ) {
+                    throw new CompanyCommandError(
+                      "FORBIDDEN",
+                      "Statistics query Project authority does not match its canonical query.",
+                    );
+                  }
+                  return database.statistics.inspect(request.query.query);
+                case "statistics-evidence.inspect":
+                  assertStatisticsReader(principal);
+                  return database.statistics.inspectEvidence(
+                    request.query.evidenceSnapshotId,
                   );
                 case "departments.list":
                   return database.catalog.departments();
@@ -1328,6 +1377,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof QualityGateRuntimeError ||
                 error instanceof DeliveryRuntimeError ||
                 error instanceof ReleaseOperationRuntimeError ||
+                error instanceof StatisticsRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.code
                   : "PROTOCOL_ERROR",
@@ -1349,6 +1399,7 @@ export const startCompanyRuntimeServer = async (
                 error instanceof QualityGateRuntimeError ||
                 error instanceof DeliveryRuntimeError ||
                 error instanceof ReleaseOperationRuntimeError ||
+                error instanceof StatisticsRuntimeError ||
                 error instanceof RuntimeEventCursorError
                   ? error.message
                   : `Invalid Runtime IPC request: ${String(error)}`,

@@ -58,6 +58,7 @@ import {
   type RunSupervisionView,
   PermissionRequestViewSchema,
   type PermissionRequestView,
+  StatisticsEvidenceSnapshotViewSchema,
 } from "./interface.js";
 import {
   ProjectConfigurationError,
@@ -129,6 +130,10 @@ import {
   ReleaseOperationRuntimeError,
   type ReleaseOperationRuntime,
 } from "./release/releaseOperationRuntime.js";
+import {
+  StatisticsRuntimeError,
+  type StatisticsRuntime,
+} from "./statistics/statisticsRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -149,6 +154,10 @@ export class CompanyCommandError extends Error {
 export type MemoryCommandFailurePoint = "before-receipt" | "before-commit";
 
 export const companyCommandDefinitions = {
+  "statistics.evidence.freeze": {
+    primaryAggregate: "statistics-evidence",
+    expectedRevisionRequired: false,
+  },
   "project.update": {
     primaryAggregate: "project",
     expectedRevisionRequired: true,
@@ -448,10 +457,174 @@ const deterministicError = (
   if (error instanceof ReleaseOperationRuntimeError) {
     return { code: error.code, message: error.message };
   }
+  if (error instanceof StatisticsRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
   if (error instanceof RuntimeMemoryError) {
     return { code: error.code, message: error.message };
   }
   return undefined;
+};
+
+const executeStatisticsCommand = (
+  database: DatabaseSync,
+  statistics: StatisticsRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<unknown> => {
+  if (envelope.command.type !== "statistics.evidence.freeze") {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not a Statistics command.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      const parsed = CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<unknown>;
+      return parsed.status === "succeeded"
+        ? {
+            ...parsed,
+            value: StatisticsEvidenceSnapshotViewSchema.parse(parsed.value),
+          }
+        : parsed;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    let result: CommandResult<unknown>;
+    const validActor =
+      (envelope.actor.type === "human" &&
+        envelope.actor.authenticatedBy === "local-session") ||
+      (envelope.actor.type === "runtime-worker" &&
+        envelope.actor.authenticatedBy === "runtime");
+    if (!validActor) {
+      result = {
+        status: "rejected",
+        error: {
+          code: "FORBIDDEN",
+          message:
+            "Freezing Statistics evidence requires a trusted Runtime worker or verified local-session human.",
+        },
+        effectIds: [],
+      };
+    } else {
+      try {
+        const actor =
+          envelope.actor.type === "human"
+            ? {
+                type: "human" as const,
+                id: envelope.actor.id,
+                authenticatedBy: "local-session" as const,
+              }
+            : {
+                type: "runtime-worker" as const,
+                id: envelope.actor.id,
+                authenticatedBy: "runtime" as const,
+              };
+        const value = statistics.freezeInTransaction({
+          commandId: envelope.commandId,
+          evidenceSnapshotId: envelope.command.evidenceSnapshotId,
+          query: envelope.command.query,
+          actor,
+        });
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = { status: "succeeded", value, effectIds };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
 };
 
 const executeReviewCommand = (
@@ -3781,11 +3954,26 @@ export const openCompanyCommandRegistry = (
   qualityGates?: QualityGateRuntime,
   delivery?: DeliveryRuntime,
   releaseOperations?: ReleaseOperationRuntime,
+  statistics?: StatisticsRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
       input,
     ) as CommandEnvelope<EnvelopeCommand>;
+    if (envelope.command.type === "statistics.evidence.freeze") {
+      if (!statistics) {
+        throw new CompanyCommandError(
+          "STATISTICS_RUNTIME_UNAVAILABLE",
+          "Statistics Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeStatisticsCommand(
+        database,
+        statistics,
+        envelope,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
     if (envelope.command.type.startsWith("delivery.release-operation.")) {
       if (!releaseOperations) {
         throw new CompanyCommandError(

@@ -36,6 +36,8 @@ import {
   DeliveryCandidateViewSchema,
   AcceptedDeliveryCandidateAuthoritySchema,
   ReleaseOperationViewSchema,
+  StatisticsEvidenceSnapshotViewSchema,
+  StatisticsViewSchema,
   type DeliveryCandidateView,
   type AcceptedDeliveryCandidateAuthorityView,
   type DeliveryQualityEnvelopeCommand,
@@ -883,38 +885,48 @@ export const createSandcastleBridge = (
                                             result.view,
                                           )
                                         : nextQuery.type ===
-                                            "run.supervision.inspect"
-                                          ? RunSupervisionViewSchema.parse(
+                                            "statistics.inspect"
+                                          ? StatisticsViewSchema.parse(
                                               result.view,
                                             )
                                           : nextQuery.type ===
-                                              "interaction.inspect"
-                                            ? InteractionViewSchema.parse(
+                                              "statistics-evidence.inspect"
+                                            ? StatisticsEvidenceSnapshotViewSchema.parse(
                                                 result.view,
                                               )
                                             : nextQuery.type ===
-                                                "memory.candidates.list"
-                                              ? MemoryCandidateViewSchema.array().parse(
+                                                "run.supervision.inspect"
+                                              ? RunSupervisionViewSchema.parse(
                                                   result.view,
                                                 )
                                               : nextQuery.type ===
-                                                    "memory.records.list" ||
-                                                  nextQuery.type ===
-                                                    "memory.legacy-records.list"
-                                                ? LegacyMemoryRecordViewSchema.array().parse(
+                                                  "interaction.inspect"
+                                                ? InteractionViewSchema.parse(
                                                     result.view,
                                                   )
                                                 : nextQuery.type ===
-                                                    "memory.entries.list"
-                                                  ? MemoryEntryViewSchema.array().parse(
+                                                    "memory.candidates.list"
+                                                  ? MemoryCandidateViewSchema.array().parse(
                                                       result.view,
                                                     )
                                                   : nextQuery.type ===
-                                                      "memory.selections.list"
-                                                    ? RunMemorySelectionViewSchema.array().parse(
+                                                        "memory.records.list" ||
+                                                      nextQuery.type ===
+                                                        "memory.legacy-records.list"
+                                                    ? LegacyMemoryRecordViewSchema.array().parse(
                                                         result.view,
                                                       )
-                                                    : result.view;
+                                                    : nextQuery.type ===
+                                                        "memory.entries.list"
+                                                      ? MemoryEntryViewSchema.array().parse(
+                                                          result.view,
+                                                        )
+                                                      : nextQuery.type ===
+                                                          "memory.selections.list"
+                                                        ? RunMemorySelectionViewSchema.array().parse(
+                                                            result.view,
+                                                          )
+                                                        : result.view;
     return {
       view: view as CompanyQueryResult<Query>,
       asOfSequence: result.asOfSequence,
@@ -1020,42 +1032,47 @@ export const createSandcastleBridge = (
                                             ? WorkPackageGraphViewSchema.parse(
                                                 result.value,
                                               )
-                                            : input.command.type.startsWith(
-                                                  "delivery.release-operation.",
-                                                )
-                                              ? ReleaseOperationViewSchema.parse(
+                                            : input.command.type ===
+                                                "statistics.evidence.freeze"
+                                              ? StatisticsEvidenceSnapshotViewSchema.parse(
                                                   result.value,
                                                 )
                                               : input.command.type.startsWith(
-                                                    "delivery.",
+                                                    "delivery.release-operation.",
                                                   )
-                                                ? DeliveryCandidateViewSchema.parse(
+                                                ? ReleaseOperationViewSchema.parse(
                                                     result.value,
                                                   )
-                                                : input.command.type ===
-                                                    "quality-gate.critical-escalation.decide"
-                                                  ? CriticalRiskEscalationDecisionSchema.parse(
+                                                : input.command.type.startsWith(
+                                                      "delivery.",
+                                                    )
+                                                  ? DeliveryCandidateViewSchema.parse(
                                                       result.value,
                                                     )
-                                                  : z
-                                                      .object({
-                                                        acknowledged:
-                                                          z.literal(true),
-                                                        subscriptionGeneration:
-                                                          z
+                                                  : input.command.type ===
+                                                      "quality-gate.critical-escalation.decide"
+                                                    ? CriticalRiskEscalationDecisionSchema.parse(
+                                                        result.value,
+                                                      )
+                                                    : z
+                                                        .object({
+                                                          acknowledged:
+                                                            z.literal(true),
+                                                          subscriptionGeneration:
+                                                            z
+                                                              .number()
+                                                              .int()
+                                                              .positive(),
+                                                          barrierSequence: z
                                                             .number()
                                                             .int()
-                                                            .positive(),
-                                                        barrierSequence: z
-                                                          .number()
-                                                          .int()
-                                                          .nonnegative(),
-                                                        auditId: z
-                                                          .string()
-                                                          .trim()
-                                                          .min(1),
-                                                      })
-                                                      .parse(result.value);
+                                                            .nonnegative(),
+                                                          auditId: z
+                                                            .string()
+                                                            .trim()
+                                                            .min(1),
+                                                        })
+                                                        .parse(result.value);
     return {
       status: "succeeded",
       value: value as EnvelopeCommandResult<Command>,

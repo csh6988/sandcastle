@@ -36,6 +36,10 @@ import type {
   AcceptedDeliveryCandidateAuthorityView,
   ReleaseOperationEnvelopeCommand,
   ReleaseOperationView,
+  StatisticsEvidenceSnapshotView,
+  StatisticsInspectInput,
+  StatisticsView,
+  StatisticsWindow,
 } from "../runtime/interface.js";
 import { WorkPackageGraphPanel } from "./workPackageView.js";
 import {
@@ -63,6 +67,11 @@ import {
 } from "./reviewsEventConnection.js";
 import { createRuntimeViewConnectionCoordinator } from "./runtimeViewConnectionCoordinator.js";
 import { ReleaseOperationPanel } from "./releaseOperationPanel.js";
+import { ProjectImprovementsPanel } from "./projectImprovementsPanel.js";
+import {
+  connectStatisticsEventStream,
+  type StatisticsEventConnection,
+} from "./statisticsEventConnection.js";
 
 type ProjectRuntimeViewConnection =
   | {
@@ -73,6 +82,11 @@ type ProjectRuntimeViewConnection =
   | {
       readonly kind: "reviews";
       readonly connection: ReviewsEventConnection;
+      readonly close: () => Promise<void>;
+    }
+  | {
+      readonly kind: "improvements";
+      readonly connection: StatisticsEventConnection;
       readonly close: () => Promise<void>;
     };
 
@@ -2398,8 +2412,39 @@ type ProjectDetailTab =
   | "runs"
   | "artifacts"
   | "reviews"
+  | "improvements"
   | "memory"
   | "settings";
+
+const baselineStatisticsQuery = (
+  project: Pick<ProjectEditorView, "id" | "createdAt">,
+): StatisticsInspectInput => {
+  const start = Date.parse(project.createdAt);
+  const now = Date.now();
+  const end = Number.isFinite(start)
+    ? Math.max(now, start + 24 * 60 * 60 * 1_000)
+    : now;
+  return {
+    projectId: project.id,
+    window: {
+      kind: "explicit-utc-half-open",
+      startInclusive: project.createdAt,
+      endExclusive: new Date(end).toISOString(),
+    },
+    cohort: { id: "cohort:baseline-quality" },
+    comparisonSet: {
+      id: "comparison:baseline-quality",
+      metricIds: [
+        "product-baseline-confirmation-count",
+        "product-baseline-confirmation-latency",
+        "readiness-blocker-count",
+        "review-discussion-round-count",
+        "review-finding-count",
+        "review-recheck-pass-rate",
+      ],
+    },
+  };
+};
 
 export const inspectProjectRunWorkPackages = async (
   runtime: {
@@ -3105,6 +3150,28 @@ export function ProjectDetailView({
   const [runError, setRunError] = useState<string | null>(null);
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ProjectDetailTab>(initialTab);
+  const [statisticsQueryDraft, setStatisticsQueryDraft] =
+    useState<StatisticsInspectInput>(() => baselineStatisticsQuery(project));
+  const [statisticsQuery, setStatisticsQuery] =
+    useState<StatisticsInspectInput>(() => baselineStatisticsQuery(project));
+  const [statisticsView, setStatisticsView] = useState<StatisticsView | null>(
+    null,
+  );
+  const [statisticsEvidence, setStatisticsEvidence] =
+    useState<StatisticsEvidenceSnapshotView | null>(null);
+  const [statisticsEvidenceIdInput, setStatisticsEvidenceIdInput] =
+    useState("");
+  const [statisticsEvidenceSnapshotId, setStatisticsEvidenceSnapshotId] =
+    useState<string | null>(null);
+  const [statisticsBusy, setStatisticsBusy] = useState(false);
+  const [statisticsDiagnostic, setStatisticsDiagnostic] = useState<
+    string | null
+  >(null);
+  const statisticsFreezeGesture = useRef<{
+    readonly queryKey: string;
+    readonly commandId: string;
+    readonly evidenceSnapshotId: string;
+  } | null>(null);
   const [consultation, setConsultation] = useState<InteractionView | null>(
     null,
   );
@@ -3141,6 +3208,15 @@ export function ProjectDetailView({
     setSharedContext(project.sharedContext);
     setRepositoryReferences([...project.repositoryReferences]);
     setRepositoryReference("");
+    const nextStatisticsQuery = baselineStatisticsQuery(project);
+    setStatisticsQueryDraft(nextStatisticsQuery);
+    setStatisticsQuery(nextStatisticsQuery);
+    setStatisticsView(null);
+    setStatisticsEvidence(null);
+    setStatisticsEvidenceIdInput("");
+    setStatisticsEvidenceSnapshotId(null);
+    setStatisticsDiagnostic(null);
+    statisticsFreezeGesture.current = null;
   }, [project]);
 
   const refreshRuns = async (): Promise<readonly DepartmentRunView[]> => {
@@ -3211,6 +3287,47 @@ export function ProjectDetailView({
 
   useEffect(() => {
     let active = true;
+    if (activeTab === "improvements") {
+      const request = runtimeViewConnectionCoordinator.replace(
+        async (isCurrent) => {
+          const canApply = (): boolean => active && isCurrent();
+          if (canApply()) {
+            setStatisticsDiagnostic("Synchronizing Statistics…");
+          }
+          const connection = await connectStatisticsEventStream({
+            bridge: window.sandcastle,
+            projectId: project.id,
+            query: statisticsQuery,
+            evidenceSnapshotId: statisticsEvidenceSnapshotId,
+            onViews: (views) => {
+              if (!canApply()) return;
+              setStatisticsView(views.statistics);
+              setStatisticsEvidence(views.evidence);
+              setStatisticsDiagnostic(null);
+            },
+            onDiagnostic: (diagnostic) => {
+              if (canApply()) setStatisticsDiagnostic(diagnostic);
+            },
+          });
+          return {
+            kind: "improvements" as const,
+            connection,
+            close: connection.close,
+          };
+        },
+      );
+      void request.done.catch((nextError: unknown) => {
+        if (active) {
+          setStatisticsDiagnostic(
+            `Runtime unavailable; Statistics resync required: ${errorMessage(nextError)}`,
+          );
+        }
+      });
+      return () => {
+        active = false;
+        request.cancel();
+      };
+    }
     if (!selectedRun || (activeTab !== "runs" && activeTab !== "reviews")) {
       void runtimeViewConnectionCoordinator.clear();
       return () => {
@@ -3305,7 +3422,15 @@ export function ProjectDetailView({
       active = false;
       request.cancel();
     };
-  }, [activeTab, selectedRun?.run.id, candidateInputId, deliveryCandidateId]);
+  }, [
+    activeTab,
+    selectedRun?.run.id,
+    candidateInputId,
+    deliveryCandidateId,
+    project.id,
+    statisticsQuery,
+    statisticsEvidenceSnapshotId,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -4156,6 +4281,73 @@ export function ProjectDetailView({
     setActiveTab("overview");
   };
 
+  const inspectStatistics = (): void => {
+    const nextQuery = {
+      ...statisticsQueryDraft,
+      window: { ...statisticsQueryDraft.window },
+    };
+    if (JSON.stringify(nextQuery) === JSON.stringify(statisticsQuery)) {
+      const connection = runtimeViewConnectionCoordinator.current();
+      if (connection?.kind === "improvements") {
+        setStatisticsDiagnostic("Synchronizing Statistics…");
+        void connection.connection
+          .resync()
+          .catch((nextError: unknown) =>
+            setStatisticsDiagnostic(errorMessage(nextError)),
+          );
+      }
+      return;
+    }
+    setStatisticsView(null);
+    setStatisticsDiagnostic("Synchronizing Statistics…");
+    setStatisticsQuery(nextQuery);
+    statisticsFreezeGesture.current = null;
+  };
+
+  const inspectStatisticsEvidence = (): void => {
+    const evidenceSnapshotId = statisticsEvidenceIdInput.trim();
+    if (!evidenceSnapshotId) return;
+    setStatisticsEvidence(null);
+    setStatisticsDiagnostic("Synchronizing Statistics evidence…");
+    setStatisticsEvidenceSnapshotId(evidenceSnapshotId);
+  };
+
+  const freezeStatisticsEvidence = async (): Promise<void> => {
+    if (!statisticsView) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const queryKey = JSON.stringify(statisticsView.query);
+      const gesture =
+        statisticsFreezeGesture.current?.queryKey === queryKey
+          ? statisticsFreezeGesture.current
+          : {
+              queryKey,
+              commandId: `statistics-freeze:${globalThis.crypto.randomUUID()}`,
+              evidenceSnapshotId: `statistics-evidence:${globalThis.crypto.randomUUID()}`,
+            };
+      statisticsFreezeGesture.current = gesture;
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "statistics.evidence.freeze",
+          evidenceSnapshotId: gesture.evidenceSnapshotId,
+          query: statisticsView.query,
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      setStatisticsEvidence(result.value);
+      setStatisticsEvidenceIdInput(result.value.id);
+      setStatisticsEvidenceSnapshotId(result.value.id);
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
   return (
     <section
       className="page"
@@ -4192,6 +4384,7 @@ export function ProjectDetailView({
             ["runs", t.projectRunsTab],
             ["artifacts", t.projectArtifactsTab],
             ["reviews", "Reviews"],
+            ["improvements", t.projectImprovementsTab],
             ["memory", t.projectMemoryTab],
             ["settings", t.projectSettingsTab],
           ] as const
@@ -4529,6 +4722,24 @@ export function ProjectDetailView({
           />
           <ReviewTopicsPanel topics={reviewTopics} />
         </>
+      ) : null}
+      {activeTab === "improvements" ? (
+        <ProjectImprovementsPanel
+          busy={statisticsBusy}
+          diagnostic={statisticsDiagnostic}
+          evidence={statisticsEvidence}
+          evidenceSnapshotId={statisticsEvidenceIdInput}
+          onEvidenceSnapshotIdChange={setStatisticsEvidenceIdInput}
+          onFreeze={() => void freezeStatisticsEvidence()}
+          onInspect={inspectStatistics}
+          onInspectEvidence={inspectStatisticsEvidence}
+          onWindowChange={(window: StatisticsWindow) =>
+            setStatisticsQueryDraft((current) => ({ ...current, window }))
+          }
+          query={statisticsQueryDraft}
+          t={t}
+          view={statisticsView}
+        />
       ) : null}
       {activeTab === "memory" ? (
         <section className="create-panel" data-project-memory>

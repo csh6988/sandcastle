@@ -399,6 +399,7 @@ p {
 
 .project-configuration-grid[data-active-project-tab="overview"],
 .project-configuration-grid[data-active-project-tab="artifacts"],
+.project-configuration-grid[data-active-project-tab="improvements"],
 .project-configuration-grid[data-active-project-tab="memory"] {
   display: none;
 }

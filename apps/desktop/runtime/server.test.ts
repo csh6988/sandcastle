@@ -460,6 +460,140 @@ describe("Company Runtime server startup", () => {
     }
   });
 
+  it("routes Project-scoped Statistics queries and evidence freeze through the typed tunnel", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-server-statistics-"),
+    );
+    roots.push(companyDir);
+    const address = companyRuntimeAddress(companyDir);
+    const token = "server-statistics-test-token";
+    const actor = {
+      type: "human" as const,
+      id: "statistics-reader",
+      authenticatedBy: "local-session" as const,
+    };
+    const server = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token,
+      principal: actor,
+      consumerId: "statistics-server-test",
+      trustedConnections: [
+        {
+          token: "statistics-fixture-only-token",
+          principal: {
+            type: "test-driver",
+            id: "fixture-only",
+            authenticatedBy: "ipc-token",
+          },
+          consumerId: "fixture-only",
+        },
+      ],
+    });
+    const client = createCompanyRuntimeClientFromTransport(
+      createLocalRuntimeTransport({ address, token }),
+      token,
+      { actor, consumerId: "statistics-server-test" },
+    );
+    try {
+      const project = await client.execute({
+        type: "project.create",
+        name: "Statistics",
+        goal: "Inspect governed facts",
+      });
+      const query = {
+        projectId: project.id,
+        window: {
+          kind: "explicit-utc-half-open" as const,
+          startInclusive: "2026-08-01T00:00:00.000Z",
+          endExclusive: "2026-08-02T00:00:00.000Z",
+        },
+        cohort: { id: "cohort:empty" },
+        comparisonSet: {
+          id: "comparison:empty",
+          metricIds: [
+            "review-finding-count" as const,
+            "product-baseline-confirmation-count" as const,
+          ],
+        },
+      };
+      const inspected = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "query-statistics",
+        principal: actor,
+        consumerId: "statistics-server-test",
+        query: { type: "statistics.inspect", projectId: project.id, query },
+      });
+      assert.deepEqual(
+        inspected.view.observations.map((entry) =>
+          entry.status === "available" ? entry.measurement : entry.status,
+        ),
+        [
+          { kind: "count", value: 0 },
+          { kind: "count", value: 0 },
+        ],
+      );
+
+      const frozen = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:freeze-server-statistics",
+        actor,
+        consumerId: "statistics-server-test",
+        command: {
+          type: "statistics.evidence.freeze",
+          evidenceSnapshotId: "statistics-evidence:server",
+          query,
+        },
+      });
+      assert.equal(frozen.status, "succeeded");
+      if (frozen.status !== "succeeded") assert.fail("freeze must succeed");
+      const evidence = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "query-statistics-evidence",
+        principal: actor,
+        consumerId: "statistics-server-test",
+        query: {
+          type: "statistics-evidence.inspect",
+          evidenceSnapshotId: frozen.value.id,
+        },
+      });
+      assert.deepEqual(evidence.view, frozen.value);
+
+      const fixtureClient = createCompanyRuntimeClientFromTransport(
+        createLocalRuntimeTransport({
+          address,
+          token: "statistics-fixture-only-token",
+        }),
+        "statistics-fixture-only-token",
+        {
+          actor: {
+            type: "test-driver",
+            id: "fixture-only",
+            authenticatedBy: "ipc-token",
+          },
+          consumerId: "fixture-only",
+        },
+      );
+      await assert.rejects(
+        fixtureClient.queryEnvelope({
+          schemaVersion: 1,
+          requestId: "query-statistics-fixture-only",
+          principal: {
+            type: "test-driver",
+            id: "fixture-only",
+            authenticatedBy: "ipc-token",
+          },
+          consumerId: "fixture-only",
+          query: { type: "statistics.inspect", projectId: project.id, query },
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
   it("injects the fake clock and repeatable IDs into the actual Test Runtime", async () => {
     const first = await captureDeterministicTestRevision(
       "2026-07-29T00:00:00.000Z",
