@@ -735,12 +735,20 @@ A reviewer-owned observation recorded before any Review topic discussion, with s
 _Avoid_: "consensus comment" (the finding must precede consensus), an anonymous aggregate opinion
 
 **Improvement proposal**:
-An evidence-backed, versioned suggestion produced from **run records**, review findings, Test defects, cost and timing metrics, or repeated intervention patterns. It names the suspected root cause, proposed Harness/Spec/Skill Flow/template change, expected impact, validation plan, and rollback path. An Improvement proposal is advisory until a human approves it; approval authorizes a separate **Improvement application operation**, not an implicit configuration mutation.
+An evidence-backed suggestion with a stable identity and immutable revisions. Each revision binds one exact **Statistics evidence snapshot** and one governed Harness, Project Spec, Application Spec, Runtime-owned template, or Skill Flow target; it names the suspected root cause, expected impact, validation policy, rollout notes, and rollback source. Each revision receives at most one exact human decision, and approval authorizes a separate **Improvement application operation**, not an implicit configuration mutation.
 _Avoid_: "automatic learning" (promotion is governed), "model fine-tuning" (the proposal may change process artifacts), a raw failure log without a proposed change and validation plan
 
 **Improvement application operation**:
-An idempotent, human-authorized operation that applies one approved Improvement-proposal revision by creating a new Harness, Spec, template, or Skill Flow revision and recording validation evidence. Applying does not change a current Run or automatically publish the new revision; rollback creates another restoring revision rather than deleting history.
+An idempotent, human-authorized operation that applies one approved Improvement-proposal revision by appending one Company Runtime-governed target revision. Its intent is immutable, its current state is a projection, and receipts, observations, reconciliation, validation, and rollback evidence are append-only. Applying and rollback never change a current Run, Snapshot, or active/published pointer; rollback appends a restoring revision rather than deleting the applied history.
 _Avoid_: "auto-tuning", editing an active Snapshot, overwriting the applied revision during rollback
+
+**Statistics**:
+A Project-scoped, versioned catalog of deterministic measurements derived from authoritative Company Runtime facts under canonical dimensions and an explicit UTC half-open window. A missing fact is incomplete or unavailable rather than an inferred zero or PASS.
+_Avoid_: telemetry dashboard, guessed aggregate, an unversioned metric name
+
+**Statistics evidence snapshot**:
+An immutable freeze of one exact Statistics query and result at a Runtime-supplied sequence, including its catalog, canonical filters, cohort, comparison set, window, observations, completeness, authority, and hash. Improvement proposal revisions and validation bind this snapshot rather than mutable live Statistics.
+_Avoid_: cached chart data, free-text evidence query, opaque evidence refs without the frozen result
 
 **Board branch merge**:
 A **workflow board** action that merges a **board task** repository's recorded **source branch** into a human-selected **target branch** on the **host**. The action requires a clean target repository working tree and does not auto-stash or overwrite uncommitted changes.

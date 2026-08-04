@@ -1706,7 +1706,10 @@ const migrations: readonly CompanyMigration[] = [
 
       const triggers = database
         .prepare(
-          "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'runtime_%'",
+          `SELECT name FROM sqlite_schema
+            WHERE type = 'trigger'
+              AND name LIKE 'runtime_%'
+              AND name NOT LIKE 'runtime_template_revisions_%'`,
         )
         .all() as Array<{ readonly name: string }>;
       for (const trigger of triggers) {
@@ -6410,16 +6413,50 @@ const migrations: readonly CompanyMigration[] = [
     migrate: (database) => {
       const createSchema = (target: DatabaseSync): void =>
         target.exec(`
+          CREATE TABLE statistics_evidence_snapshots (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            catalog_version TEXT NOT NULL CHECK (catalog_version = 'statistics@1'),
+            canonical_query_json TEXT NOT NULL,
+            query_hash TEXT NOT NULL CHECK (length(query_hash) = 64),
+            as_of_sequence INTEGER NOT NULL CHECK (as_of_sequence >= 0),
+            observations_json TEXT NOT NULL,
+            completeness_json TEXT NOT NULL,
+            frozen_by_actor_type TEXT NOT NULL CHECK (
+              frozen_by_actor_type IN ('human', 'runtime-worker')
+            ),
+            frozen_by_actor_id TEXT NOT NULL,
+            frozen_by_authenticated_by TEXT NOT NULL,
+            snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            UNIQUE (id, snapshot_hash),
+            UNIQUE (id, snapshot_hash, project_id),
+            CHECK (
+              (frozen_by_actor_type = 'human' AND frozen_by_authenticated_by = 'local-session')
+              OR
+              (frozen_by_actor_type = 'runtime-worker' AND frozen_by_authenticated_by = 'runtime')
+            )
+          ) STRICT;
+          CREATE INDEX statistics_evidence_snapshots_project_idx
+            ON statistics_evidence_snapshots(project_id, created_at, id);
+          CREATE TRIGGER statistics_evidence_snapshots_immutable_update
+            BEFORE UPDATE ON statistics_evidence_snapshots
+            BEGIN SELECT RAISE(ABORT, 'Statistics evidence snapshot is immutable'); END;
+          CREATE TRIGGER statistics_evidence_snapshots_immutable_delete
+            BEFORE DELETE ON statistics_evidence_snapshots
+            BEGIN SELECT RAISE(ABORT, 'Statistics evidence snapshot is immutable'); END;
+
           CREATE TABLE improvement_proposals (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id),
-            department_id TEXT NOT NULL REFERENCES departments(id),
+            department_id TEXT REFERENCES departments(id),
             current_revision_id TEXT NOT NULL,
             revision INTEGER NOT NULL CHECK (revision >= 1),
-            status TEXT NOT NULL CHECK (status IN ('draft', 'proposed', 'awaiting-human', 'approved', 'rejected')),
-            decision_id TEXT,
+            state TEXT NOT NULL CHECK (state IN ('draft', 'proposed', 'awaiting-human', 'approved', 'rejected')),
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            UNIQUE (id, project_id)
           ) STRICT;
           CREATE INDEX improvement_proposals_project_idx
             ON improvement_proposals(project_id, created_at, id);
@@ -6430,6 +6467,7 @@ const migrations: readonly CompanyMigration[] = [
             WHEN NEW.id <> OLD.id
               OR NEW.project_id <> OLD.project_id
               OR NEW.department_id <> OLD.department_id
+              OR (NEW.department_id IS NULL) <> (OLD.department_id IS NULL)
               OR NEW.created_at <> OLD.created_at
             BEGIN SELECT RAISE(ABORT, 'Improvement proposal identity is immutable'); END;
           CREATE TRIGGER improvement_proposals_immutable_delete
@@ -6441,14 +6479,43 @@ const migrations: readonly CompanyMigration[] = [
             proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
             project_id TEXT NOT NULL REFERENCES projects(id),
             revision INTEGER NOT NULL CHECK (revision >= 1),
-            supersedes_revision_id TEXT REFERENCES improvement_proposal_revisions(id),
+            supersedes_revision_id TEXT,
+            evidence_snapshot_id TEXT NOT NULL,
+            evidence_snapshot_hash TEXT NOT NULL CHECK (length(evidence_snapshot_hash) = 64),
+            target_kind TEXT NOT NULL CHECK (
+              target_kind IN ('harness', 'project-spec', 'application-spec', 'template', 'skill-flow')
+            ),
+            target_owner_id TEXT NOT NULL,
+            governed_head_revision_id TEXT,
+            governed_head_revision_hash TEXT CHECK (
+              governed_head_revision_hash IS NULL OR length(governed_head_revision_hash) = 64
+            ),
             content_json TEXT NOT NULL,
             content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
-            proposed_by_actor_type TEXT NOT NULL CHECK (proposed_by_actor_type IN ('human', 'runtime-worker')),
-            proposed_by_actor_id TEXT NOT NULL,
-            proposed_by_authenticated_by TEXT NOT NULL,
+            authored_by_actor_type TEXT NOT NULL CHECK (
+              authored_by_actor_type IN ('human', 'runtime-worker')
+            ),
+            authored_by_actor_id TEXT NOT NULL,
+            authored_by_authenticated_by TEXT NOT NULL,
+            command_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
-            UNIQUE(proposal_id, revision)
+            UNIQUE (proposal_id, revision),
+            UNIQUE (proposal_id, id),
+            UNIQUE (proposal_id, id, content_hash),
+            FOREIGN KEY (proposal_id, project_id)
+              REFERENCES improvement_proposals(id, project_id),
+            FOREIGN KEY (proposal_id, supersedes_revision_id)
+              REFERENCES improvement_proposal_revisions(proposal_id, id),
+            FOREIGN KEY (evidence_snapshot_id, evidence_snapshot_hash, project_id)
+              REFERENCES statistics_evidence_snapshots(id, snapshot_hash, project_id),
+            CHECK (
+              (governed_head_revision_id IS NULL) = (governed_head_revision_hash IS NULL)
+            ),
+            CHECK (
+              (authored_by_actor_type = 'human' AND authored_by_authenticated_by = 'local-session')
+              OR
+              (authored_by_actor_type = 'runtime-worker' AND authored_by_authenticated_by = 'runtime')
+            )
           ) STRICT;
           CREATE INDEX improvement_proposal_revisions_proposal_idx
             ON improvement_proposal_revisions(proposal_id, revision, id);
@@ -6459,12 +6526,49 @@ const migrations: readonly CompanyMigration[] = [
             BEFORE DELETE ON improvement_proposal_revisions
             BEGIN SELECT RAISE(ABORT, 'Improvement proposal revision is immutable'); END;
 
+          CREATE TABLE improvement_proposal_lifecycle (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            proposal_revision_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('draft', 'proposed', 'awaiting-human')),
+            actor_type TEXT NOT NULL CHECK (actor_type IN ('human', 'runtime-worker')),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL,
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (proposal_id, proposal_revision_id)
+              REFERENCES improvement_proposal_revisions(proposal_id, id),
+            CHECK (
+              (actor_type = 'human' AND authenticated_by = 'local-session')
+              OR (actor_type = 'runtime-worker' AND authenticated_by = 'runtime')
+            )
+          ) STRICT;
+          CREATE INDEX improvement_proposal_lifecycle_revision_idx
+            ON improvement_proposal_lifecycle(proposal_revision_id, created_at, id);
+          CREATE TRIGGER improvement_proposal_lifecycle_immutable_update
+            BEFORE UPDATE ON improvement_proposal_lifecycle
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal lifecycle is immutable'); END;
+          CREATE TRIGGER improvement_proposal_lifecycle_immutable_delete
+            BEFORE DELETE ON improvement_proposal_lifecycle
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal lifecycle is immutable'); END;
+
           CREATE TABLE improvement_decisions (
             id TEXT PRIMARY KEY,
-            proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
-            proposal_revision_id TEXT NOT NULL UNIQUE REFERENCES improvement_proposal_revisions(id),
+            proposal_id TEXT NOT NULL,
+            proposal_revision_id TEXT NOT NULL UNIQUE,
             proposal_revision_hash TEXT NOT NULL CHECK (length(proposal_revision_hash) = 64),
+            evidence_snapshot_id TEXT NOT NULL,
+            evidence_snapshot_hash TEXT NOT NULL CHECK (length(evidence_snapshot_hash) = 64),
+            target_kind TEXT NOT NULL CHECK (
+              target_kind IN ('harness', 'project-spec', 'application-spec', 'template', 'skill-flow')
+            ),
+            target_owner_id TEXT NOT NULL,
+            governed_head_revision_id TEXT,
+            governed_head_revision_hash TEXT CHECK (
+              governed_head_revision_hash IS NULL OR length(governed_head_revision_hash) = 64
+            ),
             decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+            confirmation TEXT NOT NULL CHECK (length(confirmation) BETWEEN 1 AND 4000),
             actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
             actor_id TEXT NOT NULL,
             authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
@@ -6472,7 +6576,15 @@ const migrations: readonly CompanyMigration[] = [
             evidence_refs_json TEXT NOT NULL,
             decision_hash TEXT NOT NULL CHECK (length(decision_hash) = 64),
             command_id TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            UNIQUE (id, proposal_id, proposal_revision_id, decision_hash),
+            FOREIGN KEY (proposal_id, proposal_revision_id, proposal_revision_hash)
+              REFERENCES improvement_proposal_revisions(proposal_id, id, content_hash),
+            FOREIGN KEY (evidence_snapshot_id, evidence_snapshot_hash)
+              REFERENCES statistics_evidence_snapshots(id, snapshot_hash),
+            CHECK (
+              (governed_head_revision_id IS NULL) = (governed_head_revision_hash IS NULL)
+            )
           ) STRICT;
           CREATE INDEX improvement_decisions_proposal_idx
             ON improvement_decisions(proposal_id, created_at, id);
@@ -6485,45 +6597,283 @@ const migrations: readonly CompanyMigration[] = [
 
           CREATE TABLE improvement_application_operations (
             id TEXT PRIMARY KEY,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
-            approved_decision_id TEXT NOT NULL REFERENCES improvement_decisions(id),
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            proposal_id TEXT NOT NULL,
+            proposal_revision_id TEXT NOT NULL,
+            proposal_revision_hash TEXT NOT NULL CHECK (length(proposal_revision_hash) = 64),
+            approved_decision_id TEXT NOT NULL,
             approved_decision_hash TEXT NOT NULL CHECK (length(approved_decision_hash) = 64),
-            target_kind TEXT NOT NULL CHECK (target_kind IN ('harness', 'spec', 'template', 'skill-flow')),
-            target_id TEXT NOT NULL,
-            authorization_json TEXT NOT NULL,
-            authorization_hash TEXT NOT NULL CHECK (length(authorization_hash) = 64),
-            request_json TEXT NOT NULL,
+            target_kind TEXT NOT NULL CHECK (
+              target_kind IN ('harness', 'project-spec', 'application-spec', 'template', 'skill-flow')
+            ),
+            target_owner_id TEXT NOT NULL,
+            governed_head_revision_id TEXT,
+            governed_head_revision_hash TEXT CHECK (
+              governed_head_revision_hash IS NULL OR length(governed_head_revision_hash) = 64
+            ),
+            target_content_json TEXT NOT NULL,
+            target_content_hash TEXT NOT NULL CHECK (length(target_content_hash) = 64),
+            canonical_request_json TEXT NOT NULL,
             canonical_request_hash TEXT NOT NULL CHECK (length(canonical_request_hash) = 64),
-            state TEXT NOT NULL CHECK (state IN ('applying', 'applied', 'apply-failed', 'validated', 'rollback-requested', 'rolled-back')),
-            target_revision_ref TEXT,
-            rollback_revision_ref TEXT,
-            validation_evidence_json TEXT NOT NULL,
+            deterministic_effect_id TEXT NOT NULL UNIQUE,
+            confirmation TEXT NOT NULL CHECK (length(confirmation) BETWEEN 1 AND 4000),
+            reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
+            evidence_refs_json TEXT NOT NULL,
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
             command_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            FOREIGN KEY (proposal_id, project_id)
+              REFERENCES improvement_proposals(id, project_id),
+            FOREIGN KEY (proposal_id, proposal_revision_id, proposal_revision_hash)
+              REFERENCES improvement_proposal_revisions(proposal_id, id, content_hash),
+            FOREIGN KEY (
+              approved_decision_id, proposal_id, proposal_revision_id,
+              approved_decision_hash
+            ) REFERENCES improvement_decisions(
+              id, proposal_id, proposal_revision_id, decision_hash
+            ),
+            CHECK (
+              (governed_head_revision_id IS NULL) = (governed_head_revision_hash IS NULL)
+            )
           ) STRICT;
           CREATE INDEX improvement_application_operations_proposal_idx
             ON improvement_application_operations(proposal_id, created_at, id);
           CREATE TRIGGER improvement_application_operations_identity_update
             BEFORE UPDATE ON improvement_application_operations
-            WHEN NEW.id <> OLD.id
-              OR NEW.idempotency_key <> OLD.idempotency_key
-              OR NEW.proposal_id <> OLD.proposal_id
-              OR NEW.approved_decision_id <> OLD.approved_decision_id
-              OR NEW.approved_decision_hash <> OLD.approved_decision_hash
-              OR NEW.target_kind <> OLD.target_kind
-              OR NEW.target_id <> OLD.target_id
-              OR NEW.authorization_json <> OLD.authorization_json
-              OR NEW.authorization_hash <> OLD.authorization_hash
-              OR NEW.request_json <> OLD.request_json
-              OR NEW.canonical_request_hash <> OLD.canonical_request_hash
-              OR NEW.command_id <> OLD.command_id
-              OR NEW.created_at <> OLD.created_at
-            BEGIN SELECT RAISE(ABORT, 'Improvement application operation identity is immutable'); END;
+            BEGIN SELECT RAISE(ABORT, 'Improvement application intent is immutable'); END;
           CREATE TRIGGER improvement_application_operations_immutable_delete
             BEFORE DELETE ON improvement_application_operations
-            BEGIN SELECT RAISE(ABORT, 'Improvement application operation is immutable'); END;
+            BEGIN SELECT RAISE(ABORT, 'Improvement application intent is immutable'); END;
+
+          CREATE TABLE improvement_application_projections (
+            operation_id TEXT PRIMARY KEY REFERENCES improvement_application_operations(id),
+            state TEXT NOT NULL CHECK (
+              state IN (
+                'applying', 'applied', 'apply-failed', 'reconciling', 'unknown',
+                'validated', 'rollback-requested', 'rolled-back', 'rollback-failed'
+              )
+            ),
+            latest_error_code TEXT,
+            latest_error_message TEXT,
+            revision INTEGER NOT NULL CHECK (revision >= 0),
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_application_projections_state_idx
+            ON improvement_application_projections(state, updated_at, operation_id);
+          CREATE TRIGGER improvement_application_projections_identity_update
+            BEFORE UPDATE ON improvement_application_projections
+            WHEN NEW.operation_id <> OLD.operation_id
+            BEGIN SELECT RAISE(ABORT, 'Improvement application projection identity is immutable'); END;
+          CREATE TRIGGER improvement_application_projections_immutable_delete
+            BEFORE DELETE ON improvement_application_projections
+            BEGIN SELECT RAISE(ABORT, 'Improvement application projection is immutable'); END;
+
+          CREATE TABLE improvement_application_receipts (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            disposition TEXT NOT NULL CHECK (disposition IN ('applied', 'no-op', 'failed')),
+            target_revision_id TEXT,
+            target_revision_hash TEXT CHECK (
+              target_revision_hash IS NULL OR length(target_revision_hash) = 64
+            ),
+            evidence_refs_json TEXT NOT NULL,
+            receipt_hash TEXT NOT NULL CHECK (length(receipt_hash) = 64),
+            created_at TEXT NOT NULL,
+            CHECK ((target_revision_id IS NULL) = (target_revision_hash IS NULL))
+          ) STRICT;
+          CREATE INDEX improvement_application_receipts_operation_idx
+            ON improvement_application_receipts(operation_id, created_at, id);
+          CREATE TRIGGER improvement_application_receipts_immutable_update
+            BEFORE UPDATE ON improvement_application_receipts
+            BEGIN SELECT RAISE(ABORT, 'Improvement application receipt is immutable'); END;
+          CREATE TRIGGER improvement_application_receipts_immutable_delete
+            BEFORE DELETE ON improvement_application_receipts
+            BEGIN SELECT RAISE(ABORT, 'Improvement application receipt is immutable'); END;
+
+          CREATE TABLE improvement_application_observations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            outcome TEXT NOT NULL CHECK (
+              outcome IN ('exact-match', 'proven-absent', 'conflict', 'insufficient-evidence')
+            ),
+            evidence_refs_json TEXT NOT NULL,
+            observation_hash TEXT NOT NULL CHECK (length(observation_hash) = 64),
+            observed_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_application_observations_operation_idx
+            ON improvement_application_observations(operation_id, observed_at, id);
+          CREATE TRIGGER improvement_application_observations_immutable_update
+            BEFORE UPDATE ON improvement_application_observations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application observation is immutable'); END;
+          CREATE TRIGGER improvement_application_observations_immutable_delete
+            BEFORE DELETE ON improvement_application_observations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application observation is immutable'); END;
+
+          CREATE TABLE improvement_application_reconciliations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            result TEXT NOT NULL CHECK (result IN ('finalized', 'retry-permitted', 'unknown')),
+            evidence_refs_json TEXT NOT NULL,
+            reconciliation_hash TEXT NOT NULL CHECK (length(reconciliation_hash) = 64),
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_application_reconciliations_operation_idx
+            ON improvement_application_reconciliations(operation_id, created_at, id);
+          CREATE TRIGGER improvement_application_reconciliations_immutable_update
+            BEFORE UPDATE ON improvement_application_reconciliations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application reconciliation is immutable'); END;
+          CREATE TRIGGER improvement_application_reconciliations_immutable_delete
+            BEFORE DELETE ON improvement_application_reconciliations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application reconciliation is immutable'); END;
+
+          CREATE TABLE improvement_application_validations (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            before_evidence_snapshot_id TEXT NOT NULL,
+            before_evidence_snapshot_hash TEXT NOT NULL CHECK (length(before_evidence_snapshot_hash) = 64),
+            after_evidence_snapshot_id TEXT NOT NULL,
+            after_evidence_snapshot_hash TEXT NOT NULL CHECK (length(after_evidence_snapshot_hash) = 64),
+            outcome TEXT NOT NULL CHECK (outcome IN ('improved', 'unchanged', 'regressed')),
+            actor_type TEXT NOT NULL CHECK (actor_type IN ('human', 'runtime-worker')),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL,
+            validation_hash TEXT NOT NULL CHECK (length(validation_hash) = 64),
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (before_evidence_snapshot_id, before_evidence_snapshot_hash)
+              REFERENCES statistics_evidence_snapshots(id, snapshot_hash),
+            FOREIGN KEY (after_evidence_snapshot_id, after_evidence_snapshot_hash)
+              REFERENCES statistics_evidence_snapshots(id, snapshot_hash),
+            CHECK (
+              (actor_type = 'human' AND authenticated_by = 'local-session')
+              OR (actor_type = 'runtime-worker' AND authenticated_by = 'runtime')
+            )
+          ) STRICT;
+          CREATE INDEX improvement_application_validations_operation_idx
+            ON improvement_application_validations(operation_id, created_at, id);
+          CREATE TRIGGER improvement_application_validations_immutable_update
+            BEFORE UPDATE ON improvement_application_validations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application validation is immutable'); END;
+          CREATE TRIGGER improvement_application_validations_immutable_delete
+            BEFORE DELETE ON improvement_application_validations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application validation is immutable'); END;
+
+          CREATE TABLE improvement_application_rollbacks (
+            id TEXT PRIMARY KEY,
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            applied_revision_id TEXT NOT NULL,
+            applied_revision_hash TEXT NOT NULL CHECK (length(applied_revision_hash) = 64),
+            source_revision_id TEXT NOT NULL,
+            source_revision_hash TEXT NOT NULL CHECK (length(source_revision_hash) = 64),
+            expected_governed_head_revision_id TEXT NOT NULL,
+            expected_governed_head_revision_hash TEXT NOT NULL CHECK (
+              length(expected_governed_head_revision_hash) = 64
+            ),
+            restoring_revision_id TEXT,
+            restoring_revision_hash TEXT CHECK (
+              restoring_revision_hash IS NULL OR length(restoring_revision_hash) = 64
+            ),
+            state TEXT NOT NULL CHECK (state IN ('requested', 'rolled-back', 'failed', 'unknown')),
+            evidence_refs_json TEXT NOT NULL,
+            rollback_hash TEXT NOT NULL CHECK (length(rollback_hash) = 64),
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            CHECK ((restoring_revision_id IS NULL) = (restoring_revision_hash IS NULL))
+          ) STRICT;
+          CREATE INDEX improvement_application_rollbacks_operation_idx
+            ON improvement_application_rollbacks(operation_id, created_at, id);
+          CREATE TRIGGER improvement_application_rollbacks_immutable_update
+            BEFORE UPDATE ON improvement_application_rollbacks
+            BEGIN SELECT RAISE(ABORT, 'Improvement application rollback is immutable'); END;
+          CREATE TRIGGER improvement_application_rollbacks_immutable_delete
+            BEFORE DELETE ON improvement_application_rollbacks
+            BEGIN SELECT RAISE(ABORT, 'Improvement application rollback is immutable'); END;
+
+          CREATE TABLE governed_harness_revisions (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes_revision_id TEXT,
+            content_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            created_at TEXT NOT NULL,
+            UNIQUE (owner_id, revision),
+            UNIQUE (owner_id, id),
+            UNIQUE (operation_id, phase),
+            FOREIGN KEY (owner_id, supersedes_revision_id)
+              REFERENCES governed_harness_revisions(owner_id, id)
+          ) STRICT;
+          CREATE INDEX governed_harness_revisions_owner_idx
+            ON governed_harness_revisions(owner_id, revision, id);
+          CREATE TRIGGER governed_harness_revisions_immutable_update
+            BEFORE UPDATE ON governed_harness_revisions
+            BEGIN SELECT RAISE(ABORT, 'Governed Harness revision is immutable'); END;
+          CREATE TRIGGER governed_harness_revisions_immutable_delete
+            BEFORE DELETE ON governed_harness_revisions
+            BEGIN SELECT RAISE(ABORT, 'Governed Harness revision is immutable'); END;
+
+          CREATE TABLE runtime_template_revisions (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes_revision_id TEXT,
+            manifest_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            created_at TEXT NOT NULL,
+            UNIQUE (owner_id, revision),
+            UNIQUE (owner_id, id),
+            UNIQUE (operation_id, phase),
+            FOREIGN KEY (owner_id, supersedes_revision_id)
+              REFERENCES runtime_template_revisions(owner_id, id)
+          ) STRICT;
+          CREATE INDEX runtime_template_revisions_owner_idx
+            ON runtime_template_revisions(owner_id, revision, id);
+          CREATE TRIGGER runtime_template_revisions_immutable_update
+            BEFORE UPDATE ON runtime_template_revisions
+            BEGIN SELECT RAISE(ABORT, 'Runtime template revision is immutable'); END;
+          CREATE TRIGGER runtime_template_revisions_immutable_delete
+            BEFORE DELETE ON runtime_template_revisions
+            BEGIN SELECT RAISE(ABORT, 'Runtime template revision is immutable'); END;
+
+          CREATE TABLE governed_skill_flow_revisions (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            position_id TEXT NOT NULL REFERENCES positions(id),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes_revision_id TEXT,
+            name TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            skill_ids_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            operation_id TEXT NOT NULL REFERENCES improvement_application_operations(id),
+            phase TEXT NOT NULL CHECK (phase IN ('apply', 'rollback')),
+            created_at TEXT NOT NULL,
+            UNIQUE (owner_id, revision),
+            UNIQUE (owner_id, id),
+            UNIQUE (operation_id, phase),
+            FOREIGN KEY (owner_id, supersedes_revision_id)
+              REFERENCES governed_skill_flow_revisions(owner_id, id)
+          ) STRICT;
+          CREATE INDEX governed_skill_flow_revisions_owner_idx
+            ON governed_skill_flow_revisions(owner_id, revision, id);
+          CREATE TRIGGER governed_skill_flow_revisions_immutable_update
+            BEFORE UPDATE ON governed_skill_flow_revisions
+            BEGIN SELECT RAISE(ABORT, 'Governed Skill Flow revision is immutable'); END;
+          CREATE TRIGGER governed_skill_flow_revisions_immutable_delete
+            BEFORE DELETE ON governed_skill_flow_revisions
+            BEGIN SELECT RAISE(ABORT, 'Governed Skill Flow revision is immutable'); END;
         `);
 
       const objects = (target: DatabaseSync) =>
@@ -6531,6 +6881,10 @@ const migrations: readonly CompanyMigration[] = [
           .prepare(
             `SELECT type, name, sql FROM sqlite_schema
               WHERE name LIKE 'improvement%'
+                 OR name LIKE 'statistics_evidence_snapshots%'
+                 OR name LIKE 'governed_harness_revisions%'
+                 OR name LIKE 'governed_skill_flow_revisions%'
+                 OR name LIKE 'runtime_template_revisions%'
               ORDER BY name`,
           )
           .all() as Array<{
@@ -6573,7 +6927,7 @@ const migrations: readonly CompanyMigration[] = [
           );
           if (incompatible.length > 0) {
             throw new Error(
-              `Existing Improvement proposal v52 schema is incompatible: ${[
+              `Existing T26 v52 schema is incompatible: ${[
                 ...new Set(incompatible),
               ]
                 .sort()

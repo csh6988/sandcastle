@@ -2,4 +2,4 @@
 "@chenshaohui6988/sandcastle": minor
 ---
 
-Define append-only, human-approved Improvement-proposal and idempotent application-operation contracts.
+Add Project Statistics, frozen evidence, and the append-only, human-governed Improvement proposal, application, validation, and rollback workflow.

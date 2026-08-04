@@ -40,6 +40,7 @@ export interface RuntimeEventScope {
   readonly deliveryCandidateId?: string;
   readonly releaseDecisionId?: string;
   readonly releaseOperationId?: string;
+  readonly statisticsEvidenceSnapshotId?: string;
   readonly improvementProposalId?: string;
   readonly improvementApplicationOperationId?: string;
   readonly candidateGateInputId?: string;
@@ -704,34 +705,24 @@ const releaseOperationInvalidatedEventPayloadSchema = z
   })
   .strict();
 
-const improvementProposalCreatedEventPayloadSchema = z
+const statisticsEvidenceInvalidatedEventPayloadSchema = z
   .object({
-    proposalId: z.string().trim().min(1),
-    proposalRevisionId: z.string().trim().min(1),
-    proposalRevisionHash: z.string().regex(/^[a-f0-9]{64}$/),
+    evidenceSnapshotId: z.string().trim().min(1),
+    catalogVersion: z.literal("statistics@1"),
   })
   .strict();
 
-const improvementProposalDecidedEventPayloadSchema = z
+const improvementProposalInvalidatedEventPayloadSchema = z
   .object({
     proposalId: z.string().trim().min(1),
     proposalRevisionId: z.string().trim().min(1),
-    decision: z.enum(["approved", "rejected"]),
   })
   .strict();
 
-const improvementApplicationCompletedEventPayloadSchema = z
+const improvementApplicationInvalidatedEventPayloadSchema = z
   .object({
     applicationOperationId: z.string().trim().min(1),
     proposalId: z.string().trim().min(1),
-    state: z.enum([
-      "applying",
-      "applied",
-      "apply-failed",
-      "validated",
-      "rollback-requested",
-      "rolled-back",
-    ]),
   })
   .strict();
 
@@ -1494,25 +1485,29 @@ const definitions = [
     acpMapping: "custom",
   },
   {
-    type: "improvement.proposal.created",
+    type: "statistics.evidence.invalidated",
     schemaVersion: 1,
-    requiredTopLevelIds: ["companyId", "projectId", "improvementProposalId"],
-    payloadSchema: improvementProposalCreatedEventPayloadSchema,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "statisticsEvidenceSnapshotId",
+    ],
+    payloadSchema: statisticsEvidenceInvalidatedEventPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",
   },
   {
-    type: "improvement.proposal.decided",
+    type: "improvement.proposal.invalidated",
     schemaVersion: 1,
     requiredTopLevelIds: ["companyId", "projectId", "improvementProposalId"],
-    payloadSchema: improvementProposalDecidedEventPayloadSchema,
+    payloadSchema: improvementProposalInvalidatedEventPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",
   },
   {
-    type: "improvement.application.completed",
+    type: "improvement.application.invalidated",
     schemaVersion: 1,
     requiredTopLevelIds: [
       "companyId",
@@ -1520,7 +1515,7 @@ const definitions = [
       "improvementProposalId",
       "improvementApplicationOperationId",
     ],
-    payloadSchema: improvementApplicationCompletedEventPayloadSchema,
+    payloadSchema: improvementApplicationInvalidatedEventPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",

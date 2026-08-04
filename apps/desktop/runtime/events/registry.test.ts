@@ -134,9 +134,9 @@ const agUiRegistryFixture = [
   "delivery.release.changes-requested@1:custom",
   "delivery.release.rework-activated@1:custom",
   "delivery.release-operation.invalidated@1:custom",
-  "improvement.proposal.created@1:custom",
-  "improvement.proposal.decided@1:custom",
-  "improvement.application.completed@1:custom",
+  "statistics.evidence.invalidated@1:custom",
+  "improvement.proposal.invalidated@1:custom",
+  "improvement.application.invalidated@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -616,13 +616,27 @@ describe("Runtime Event registry", () => {
     );
   });
 
-  it("adds v20 invalidation-only Improvement-proposal events without an application adapter", () => {
+  it("adds only honest v20 Statistics and Improvement invalidation events", () => {
     const registry = createRuntimeEventRegistry();
 
     assert.equal(registry.version, 20);
     assert.doesNotThrow(() =>
       registry.validate({
-        type: "improvement.proposal.created",
+        type: "statistics.evidence.invalidated",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          statisticsEvidenceSnapshotId: "statistics-evidence-1",
+        },
+        payload: {
+          evidenceSnapshotId: "statistics-evidence-1",
+          catalogVersion: "statistics@1",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "improvement.proposal.invalidated",
         scope: {
           companyId: "company",
           projectId: "project-1",
@@ -631,28 +645,12 @@ describe("Runtime Event registry", () => {
         payload: {
           proposalId: "improvement-proposal-1",
           proposalRevisionId: "improvement-proposal-revision-1",
-          proposalRevisionHash: "a".repeat(64),
         },
       }),
     );
     assert.doesNotThrow(() =>
       registry.validate({
-        type: "improvement.proposal.decided",
-        scope: {
-          companyId: "company",
-          projectId: "project-1",
-          improvementProposalId: "improvement-proposal-1",
-        },
-        payload: {
-          proposalId: "improvement-proposal-1",
-          proposalRevisionId: "improvement-proposal-revision-1",
-          decision: "approved",
-        },
-      }),
-    );
-    assert.doesNotThrow(() =>
-      registry.validate({
-        type: "improvement.application.completed",
+        type: "improvement.application.invalidated",
         scope: {
           companyId: "company",
           projectId: "project-1",
@@ -662,11 +660,16 @@ describe("Runtime Event registry", () => {
         payload: {
           applicationOperationId: "improvement-application-1",
           proposalId: "improvement-proposal-1",
-          state: "applied",
         },
       }),
     );
-    assert.equal(registry.get("improvement.application.item-running"), undefined);
+    assert.equal(registry.get("improvement.proposal.created"), undefined);
+    assert.equal(registry.get("improvement.proposal.decided"), undefined);
+    assert.equal(registry.get("improvement.application.completed"), undefined);
+    assert.equal(
+      registry.get("improvement.application.item-running"),
+      undefined,
+    );
   });
 
   it("accepts the canonical project.updated contract", () => {

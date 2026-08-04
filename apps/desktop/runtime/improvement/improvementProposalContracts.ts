@@ -1,12 +1,19 @@
 import { z } from "zod";
+import {
+  StatisticsAuthorActorSchema,
+  StatisticsEvidenceSnapshotViewSchema,
+  StatisticsEvidenceValidationOutcomeSchema,
+  StatisticsMetricIdSchema,
+  type StatisticsEvidenceSnapshotView,
+} from "../statistics/statisticsContracts.js";
 
+const IdSchema = z.string().trim().min(1).max(512);
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const IdSchema = z.string().trim().min(1);
 const TimestampSchema = z.string().datetime();
 const ReasonSchema = z.string().trim().min(1).max(4_000);
-const EvidenceRefsSchema = z.array(IdSchema.max(512)).min(1).max(64);
+const EvidenceRefsSchema = z.array(IdSchema).min(1).max(64);
 
-const VerifiedLocalSessionHumanSchema = z
+export const VerifiedLocalSessionHumanSchema = z
   .object({
     type: z.literal("human"),
     id: IdSchema,
@@ -14,18 +21,19 @@ const VerifiedLocalSessionHumanSchema = z
   })
   .strict();
 
-/**
- * The Runtime worker that produced an Improvement proposal from exact evidence.
- * Only a bound Runtime worker may author a proposal revision; the human seam is
- * reserved for the separate append-only decision.
- */
-const RuntimeWorkerActorSchema = z
+export const TrustedRuntimeWorkerSchema = z
   .object({
     type: z.literal("runtime-worker"),
     id: IdSchema,
     authenticatedBy: z.literal("runtime"),
   })
   .strict();
+
+export const ImprovementAuthorActorSchema = StatisticsAuthorActorSchema;
+export const ImprovementValidationActorSchema = z.union([
+  VerifiedLocalSessionHumanSchema,
+  TrustedRuntimeWorkerSchema,
+]);
 
 export const ImprovementProposalStateSchema = z.enum([
   "draft",
@@ -42,9 +50,12 @@ export const ImprovementApplicationStateSchema = z.enum([
   "applying",
   "applied",
   "apply-failed",
+  "reconciling",
+  "unknown",
   "validated",
   "rollback-requested",
   "rolled-back",
+  "rollback-failed",
 ]);
 export type ImprovementApplicationState = z.infer<
   typeof ImprovementApplicationStateSchema
@@ -52,151 +63,330 @@ export type ImprovementApplicationState = z.infer<
 
 export const ImprovementTargetKindSchema = z.enum([
   "harness",
-  "spec",
+  "project-spec",
+  "application-spec",
   "template",
   "skill-flow",
 ]);
 export type ImprovementTargetKind = z.infer<typeof ImprovementTargetKindSchema>;
 
 export const ImprovementProposalErrorCodeSchema = z.enum([
-  "IMPROVEMENT_PROPOSAL_NOT_FOUND",
-  "IMPROVEMENT_PROPOSAL_ID_REUSE",
-  "IMPROVEMENT_PROPOSAL_REVISION_CONFLICT",
-  "IMPROVEMENT_PROPOSAL_TERMINAL",
-  "IMPROVEMENT_PROPOSAL_IDENTITY_CONFLICT",
+  "STATISTICS_EVIDENCE_UNAVAILABLE",
+  "STATISTICS_EVIDENCE_STALE",
+  "IMPROVEMENT_PROPOSAL_SUPERSEDED",
   "IMPROVEMENT_DECISION_EXISTS",
-  "IMPROVEMENT_HUMAN_DECISION_REQUIRED",
-  "IMPROVEMENT_PROPOSAL_NOT_APPROVED",
-  "IMPROVEMENT_APPLY_NOT_AUTHORIZED",
-  "IMPROVEMENT_APPLICATION_ID_REUSE",
-  "IMPROVEMENT_APPLICATION_NOT_FOUND",
-  "IMPROVEMENT_TARGET_INVALID",
-  "IMPROVEMENT_ROLLBACK_INVALID",
-  "IMPROVEMENT_EVIDENCE_INCOMPLETE",
+  "IMPROVEMENT_NOT_APPROVED",
+  "IMPROVEMENT_INVALID_STATE",
+  "IMPROVEMENT_TARGET_UNSUPPORTED",
+  "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+  "IMPROVEMENT_TARGET_CONFLICT",
+  "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+  "IMPROVEMENT_APPLICATION_UNKNOWN",
 ]);
 export type ImprovementProposalErrorCode = z.infer<
   typeof ImprovementProposalErrorCodeSchema
 >;
 
-const ProposedChangeSchema = z.discriminatedUnion("targetKind", [
+export const GovernedRevisionRefSchema = z
+  .object({
+    revisionId: IdSchema,
+    revisionHash: Sha256Schema,
+  })
+  .strict();
+export type GovernedRevisionRef = z.infer<typeof GovernedRevisionRefSchema>;
+
+export const GovernedHeadSchema = z
+  .object({
+    revisionId: IdSchema.nullable(),
+    revisionHash: Sha256Schema.nullable(),
+  })
+  .strict()
+  .superRefine((head, context) => {
+    if ((head.revisionId === null) !== (head.revisionHash === null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Governed head revision ID and hash must be present together.",
+      });
+    }
+  });
+export type GovernedHead = z.infer<typeof GovernedHeadSchema>;
+
+export const HarnessRevisionContentSchema = z
+  .object({
+    principles: z.array(ReasonSchema).min(1).max(128),
+    constitution: ReasonSchema,
+    rules: z.array(ReasonSchema).min(1).max(256),
+    examples: z
+      .object({
+        positive: z.array(ReasonSchema).max(128),
+        negative: z.array(ReasonSchema).max(128),
+      })
+      .strict(),
+    impactScope: z.array(IdSchema).min(1).max(128),
+  })
+  .strict();
+
+export const ImprovementProjectSpecContentSchema = z
+  .object({
+    outcome: ReasonSchema,
+    acceptanceCriteria: z.array(ReasonSchema).min(1),
+    applicationBoundaries: z.array(ReasonSchema),
+    crossApplicationContracts: z.array(ReasonSchema),
+    deliveryConstraints: z.array(ReasonSchema),
+  })
+  .strict();
+
+const ApplicationContractRefSchema = z
+  .object({
+    id: IdSchema,
+    version: IdSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationSpecContentSchema = z
+  .object({
+    lineage: z
+      .object({
+        projectId: IdSchema,
+        applicationId: IdSchema,
+        promotedProjectSpecRevisionId: IdSchema,
+        promotedProjectSpecHash: Sha256Schema,
+      })
+      .strict(),
+    content: z
+      .object({
+        design: ReasonSchema,
+        acceptanceCriteria: z.array(ReasonSchema).min(1),
+        workPackageConstraints: z.array(ReasonSchema),
+        integrationObligations: z.array(ReasonSchema),
+        contractRefs: z.array(ApplicationContractRefSchema),
+      })
+      .strict(),
+  })
+  .strict();
+
+const SafeTemplatePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .superRefine((path, context) => {
+    const segments = path.replaceAll("\\", "/").split("/");
+    if (
+      path.startsWith("/") ||
+      /^[A-Za-z]:/.test(path) ||
+      path.includes("\\") ||
+      segments.some(
+        (segment) => segment === "" || segment === "." || segment === "..",
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Template manifest paths must be safe relative POSIX paths.",
+      });
+    }
+  });
+
+export const RuntimeTemplateRevisionContentSchema = z
+  .object({
+    manifest: z
+      .array(
+        z
+          .object({
+            path: SafeTemplatePathSchema,
+            contentHash: Sha256Schema,
+          })
+          .strict(),
+      )
+      .max(10_000)
+      .superRefine((entries, context) => {
+        const paths = entries.map((entry) => entry.path);
+        if (new Set(paths).size !== paths.length) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Template manifest paths must be unique.",
+          });
+        }
+        const sorted = [...paths].sort((left, right) =>
+          left.localeCompare(right),
+        );
+        if (paths.some((path, index) => path !== sorted[index])) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Template manifest paths must be sorted.",
+          });
+        }
+      }),
+  })
+  .strict();
+
+export const GovernedSkillFlowRevisionContentSchema = z
+  .object({
+    positionId: IdSchema,
+    name: ReasonSchema,
+    instructions: ReasonSchema,
+    skillIds: z.array(IdSchema).min(1).max(256),
+  })
+  .strict();
+
+export const ImprovementTargetSchema = z.discriminatedUnion("targetKind", [
   z
     .object({
       targetKind: z.literal("harness"),
-      targetId: IdSchema,
-      currentRevisionRef: IdSchema.nullable(),
-      summary: ReasonSchema,
-      diffRef: IdSchema.optional(),
+      ownerId: IdSchema,
+      governedHead: GovernedHeadSchema,
+      content: HarnessRevisionContentSchema,
     })
     .strict(),
   z
     .object({
-      targetKind: z.literal("spec"),
-      targetId: IdSchema,
-      currentRevisionRef: IdSchema.nullable(),
-      summary: ReasonSchema,
-      diffRef: IdSchema.optional(),
+      targetKind: z.literal("project-spec"),
+      ownerId: IdSchema,
+      governedHead: GovernedHeadSchema,
+      content: ImprovementProjectSpecContentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      targetKind: z.literal("application-spec"),
+      ownerId: IdSchema,
+      governedHead: GovernedHeadSchema,
+      content: ImprovementApplicationSpecContentSchema,
     })
     .strict(),
   z
     .object({
       targetKind: z.literal("template"),
-      targetId: IdSchema,
-      currentRevisionRef: IdSchema.nullable(),
-      summary: ReasonSchema,
-      diffRef: IdSchema.optional(),
+      ownerId: IdSchema,
+      governedHead: GovernedHeadSchema,
+      content: RuntimeTemplateRevisionContentSchema,
     })
     .strict(),
   z
     .object({
       targetKind: z.literal("skill-flow"),
-      targetId: IdSchema,
-      currentRevisionRef: IdSchema.nullable(),
-      summary: ReasonSchema,
-      diffRef: IdSchema.optional(),
+      ownerId: IdSchema,
+      governedHead: GovernedHeadSchema,
+      content: GovernedSkillFlowRevisionContentSchema,
     })
     .strict(),
 ]);
+export type ImprovementTarget = z.infer<typeof ImprovementTargetSchema>;
 
 const ExpectedMetricSchema = z
   .object({
-    metric: IdSchema,
+    metricId: StatisticsMetricIdSchema,
     direction: z.enum(["increase", "decrease", "hold"]),
-    baselineRef: IdSchema,
   })
   .strict();
 
-/**
- * The full evidence-backed content of one Improvement-proposal revision. It is
- * hashed and frozen per revision; evidence is modeled as abstract Run/Audit/
- * Event/Defect/Artifact refs, never a raw failure log or a hard Statistics-table
- * dependency (no Statistics module exists yet).
- */
 export const ImprovementProposalRevisionContentSchema = z
   .object({
-    evidenceQuery: z.string().trim().min(1).max(4_000),
-    evidenceRefs: EvidenceRefsSchema,
+    evidence: StatisticsEvidenceSnapshotViewSchema,
+    target: ImprovementTargetSchema,
     rootCauseHypothesis: ReasonSchema,
-    proposedChange: ProposedChangeSchema,
     impactScope: z
       .object({
-        departments: z.array(IdSchema).max(64),
-        projects: z.array(IdSchema).max(64),
-        positions: z.array(IdSchema).max(64).optional(),
+        projectIds: z.array(IdSchema).min(1).max(64),
+        departmentIds: z.array(IdSchema).max(64),
+        positionIds: z.array(IdSchema).max(64),
       })
       .strict(),
     expectedMetrics: z.array(ExpectedMetricSchema).min(1).max(64),
-    validationPlan: ReasonSchema,
-    rolloutPath: ReasonSchema,
-    rollbackPath: ReasonSchema,
+    validationPolicy: z
+      .object({
+        metricIds: z.array(StatisticsMetricIdSchema).min(1).max(64),
+        minimumComparableObservations: z.number().int().positive(),
+      })
+      .strict(),
+    rolloutNotes: ReasonSchema,
+    rollbackSource: GovernedRevisionRefSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((content, context) => {
+    if (
+      !content.impactScope.projectIds.includes(content.evidence.query.projectId)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Impact scope must include the frozen evidence Project.",
+      });
+    }
+    const comparisonMetrics = new Set(
+      content.evidence.query.comparisonSet.metricIds,
+    );
+    for (const metricId of content.validationPolicy.metricIds) {
+      if (!comparisonMetrics.has(metricId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Validation metrics must belong to the frozen comparison set.",
+        });
+      }
+    }
+  });
 export type ImprovementProposalRevisionContent = z.infer<
   typeof ImprovementProposalRevisionContentSchema
 >;
 
-export const ImprovementProposalProposeRequestSchema = z
+const ImprovementProposalCreateBaseSchema = z
   .object({
     proposalId: IdSchema,
     revisionId: IdSchema,
     projectId: IdSchema,
-    departmentId: IdSchema,
-    supersedesRevisionId: IdSchema.nullable(),
-    proposedBy: RuntimeWorkerActorSchema,
+    departmentId: IdSchema.nullable(),
     content: ImprovementProposalRevisionContentSchema,
   })
   .strict();
-export type ImprovementProposalProposeRequest = z.infer<
-  typeof ImprovementProposalProposeRequestSchema
->;
 
-export const ImprovementProposalProposeCommandInputSchema = z
+export const ImprovementProposalCreateCommandInputSchema =
+  ImprovementProposalCreateBaseSchema;
+
+export const ImprovementProposalCreateRequestSchema =
+  ImprovementProposalCreateBaseSchema.extend({
+    actor: ImprovementAuthorActorSchema,
+  }).strict();
+
+const ImprovementProposalReviseBaseSchema = z
   .object({
     proposalId: IdSchema,
     revisionId: IdSchema,
-    projectId: IdSchema,
-    departmentId: IdSchema,
-    supersedesRevisionId: IdSchema.nullable(),
+    supersedesRevisionId: IdSchema,
+    expectedSupersededRevisionHash: Sha256Schema,
     content: ImprovementProposalRevisionContentSchema,
   })
   .strict();
-export type ImprovementProposalProposeCommandInput = z.infer<
-  typeof ImprovementProposalProposeCommandInputSchema
->;
 
-export const ImprovementProposalDecisionSchema = z
+export const ImprovementProposalReviseCommandInputSchema =
+  ImprovementProposalReviseBaseSchema;
+
+export const ImprovementProposalReviseRequestSchema =
+  ImprovementProposalReviseBaseSchema.extend({
+    actor: ImprovementAuthorActorSchema,
+  }).strict();
+
+export const ImprovementProposalTransitionCommandInputSchema = z
   .object({
     proposalId: IdSchema,
     proposalRevisionId: IdSchema,
     expectedProposalRevisionHash: Sha256Schema,
-    decision: z.enum(["approved", "rejected"]),
-    actor: VerifiedLocalSessionHumanSchema,
-    reason: ReasonSchema,
-    evidenceRefs: EvidenceRefsSchema,
   })
   .strict();
-export type ImprovementProposalDecision = z.infer<
-  typeof ImprovementProposalDecisionSchema
->;
+
+export const ImprovementProposalTransitionRequestSchema =
+  ImprovementProposalTransitionCommandInputSchema.extend({
+    actor: ImprovementAuthorActorSchema,
+  }).strict();
+
+export const ImprovementProposalRequestDecisionCommandInputSchema =
+  ImprovementProposalTransitionCommandInputSchema.extend({
+    confirmation: ReasonSchema,
+  }).strict();
+
+export const ImprovementProposalRequestDecisionRequestSchema =
+  ImprovementProposalRequestDecisionCommandInputSchema.extend({
+    actor: ImprovementAuthorActorSchema,
+  }).strict();
 
 export const ImprovementProposalDecideCommandInputSchema = z
   .object({
@@ -204,224 +394,210 @@ export const ImprovementProposalDecideCommandInputSchema = z
     proposalRevisionId: IdSchema,
     expectedProposalRevisionHash: Sha256Schema,
     decision: z.enum(["approved", "rejected"]),
+    confirmation: ReasonSchema,
     reason: ReasonSchema,
     evidenceRefs: EvidenceRefsSchema,
   })
   .strict();
-export type ImprovementProposalDecideCommandInput = z.infer<
-  typeof ImprovementProposalDecideCommandInputSchema
->;
 
-export const ImprovementApplicationAuthorizationSchema = z
+export const ImprovementProposalDecisionSchema = z
   .object({
+    id: IdSchema,
+    proposalId: IdSchema,
+    proposalRevisionId: IdSchema,
+    proposalRevisionHash: Sha256Schema,
+    evidenceSnapshotId: IdSchema,
+    evidenceSnapshotHash: Sha256Schema,
+    target: ImprovementTargetSchema,
+    decision: z.enum(["approved", "rejected"]),
+    confirmation: ReasonSchema,
     actor: VerifiedLocalSessionHumanSchema,
     reason: ReasonSchema,
     evidenceRefs: EvidenceRefsSchema,
+    hash: Sha256Schema,
+    createdAt: TimestampSchema,
   })
   .strict();
+export type ImprovementProposalDecision = z.infer<
+  typeof ImprovementProposalDecisionSchema
+>;
 
-export const ImprovementApplicationAuthorizationInputSchema = z
+export const ImprovementProposalDecideRequestSchema =
+  ImprovementProposalDecideCommandInputSchema.extend({
+    decisionId: IdSchema,
+    actor: VerifiedLocalSessionHumanSchema,
+  }).strict();
+
+const ImprovementApplicationApplyBaseSchema = z
   .object({
+    operationId: IdSchema,
+    proposalId: IdSchema,
+    proposalRevisionId: IdSchema,
+    expectedProposalRevisionHash: Sha256Schema,
+    approvedDecisionId: IdSchema,
+    expectedApprovedDecisionHash: Sha256Schema,
+    target: ImprovementTargetSchema,
+    confirmation: ReasonSchema,
     reason: ReasonSchema,
     evidenceRefs: EvidenceRefsSchema,
   })
   .strict();
 
-export const ImprovementApplicationApplyRequestSchema = z
-  .object({
-    applicationOperationId: IdSchema,
-    proposalId: IdSchema,
-    approvedDecisionId: IdSchema,
-    expectedApprovedDecisionHash: Sha256Schema,
-    targetKind: ImprovementTargetKindSchema,
-    targetId: IdSchema,
-    expectedTargetRevisionRef: IdSchema.nullable(),
-    authorization: ImprovementApplicationAuthorizationSchema,
-  })
-  .strict();
-export type ImprovementApplicationApplyRequest = z.infer<
-  typeof ImprovementApplicationApplyRequestSchema
->;
-
-export const ImprovementApplicationApplyCommandInputSchema = z
-  .object({
-    applicationOperationId: IdSchema,
-    proposalId: IdSchema,
-    approvedDecisionId: IdSchema,
-    expectedApprovedDecisionHash: Sha256Schema,
-    targetKind: ImprovementTargetKindSchema,
-    targetId: IdSchema,
-    expectedTargetRevisionRef: IdSchema.nullable(),
-    authorization: ImprovementApplicationAuthorizationInputSchema,
-  })
-  .strict();
+export const ImprovementApplicationApplyCommandInputSchema =
+  ImprovementApplicationApplyBaseSchema;
 export type ImprovementApplicationApplyCommandInput = z.infer<
   typeof ImprovementApplicationApplyCommandInputSchema
 >;
 
-const ImprovementApplicationValidationEvidenceSchema = z
-  .object({
-    metric: IdSchema,
-    beforeRef: IdSchema,
-    afterRef: IdSchema,
-    observedAt: TimestampSchema,
-  })
-  .strict();
-
-/**
- * The append-only outcome of an application operation. Contracts for finalize
- * and rollback are defined now; their Runtime is deferred to a later T26 slice
- * (the foundation ships propose/decide/apply-intent only).
- */
-export const ImprovementApplicationFinalizeSchema = z.discriminatedUnion(
-  "state",
-  [
-    z
-      .object({
-        state: z.literal("applied"),
-        targetRevisionRef: IdSchema,
-        validationEvidence: z
-          .array(ImprovementApplicationValidationEvidenceSchema)
-          .max(64),
-        observedAt: TimestampSchema,
-      })
-      .strict(),
-    z
-      .object({
-        state: z.literal("apply-failed"),
-        failure: z
-          .object({
-            code: ImprovementProposalErrorCodeSchema,
-            message: ReasonSchema,
-          })
-          .strict(),
-        observedAt: TimestampSchema,
-      })
-      .strict(),
-    z
-      .object({
-        state: z.literal("validated"),
-        validationEvidence: z
-          .array(ImprovementApplicationValidationEvidenceSchema)
-          .min(1)
-          .max(64),
-        observedAt: TimestampSchema,
-      })
-      .strict(),
-    z
-      .object({
-        state: z.literal("rollback-requested"),
-        reason: ReasonSchema,
-        observedAt: TimestampSchema,
-      })
-      .strict(),
-    z
-      .object({
-        state: z.literal("rolled-back"),
-        rollbackRevisionRef: IdSchema,
-        observedAt: TimestampSchema,
-      })
-      .strict(),
-  ],
-);
-export type ImprovementApplicationFinalize = z.infer<
-  typeof ImprovementApplicationFinalizeSchema
+export const ImprovementApplicationApplyRequestSchema =
+  ImprovementApplicationApplyBaseSchema.extend({
+    actor: VerifiedLocalSessionHumanSchema,
+  }).strict();
+export type ImprovementApplicationApplyRequest = z.infer<
+  typeof ImprovementApplicationApplyRequestSchema
 >;
 
-export const ImprovementApplicationRollbackRequestSchema = z
+const ImprovementApplicationValidateBaseSchema = z
   .object({
-    applicationOperationId: IdSchema,
-    proposalId: IdSchema,
-    expectedApplicationHash: Sha256Schema,
-    actor: VerifiedLocalSessionHumanSchema,
+    operationId: IdSchema,
+    expectedOperationHash: Sha256Schema,
+    afterEvidence: StatisticsEvidenceSnapshotViewSchema,
     reason: ReasonSchema,
     evidenceRefs: EvidenceRefsSchema,
   })
   .strict();
-export type ImprovementApplicationRollbackRequest = z.infer<
-  typeof ImprovementApplicationRollbackRequestSchema
->;
 
-/**
- * The effect seam a later slice fills with a concrete Harness/Spec/template/
- * Skill-Flow revision writer. The foundation defines the interface only, exactly
- * as T22 defined `ReleaseOperationEffectAdapter` before its real adapters.
- */
-export interface ImprovementApplicationEffectAdapter {
-  readonly apply: (
-    request: ImprovementApplicationApplyRequest,
-  ) => Promise<ImprovementApplicationFinalize>;
-  readonly rollback: (
-    request: ImprovementApplicationRollbackRequest,
-    evidenceRefs: readonly string[],
-  ) => Promise<ImprovementApplicationFinalize>;
-}
+export const ImprovementApplicationValidateCommandInputSchema =
+  ImprovementApplicationValidateBaseSchema;
+export const ImprovementApplicationValidateRequestSchema =
+  ImprovementApplicationValidateBaseSchema.extend({
+    actor: ImprovementValidationActorSchema,
+  }).strict();
 
-const ImprovementProposalRevisionViewSchema = z
+const ImprovementApplicationRollbackBaseSchema = z
+  .object({
+    operationId: IdSchema,
+    expectedOperationHash: Sha256Schema,
+    appliedRevision: GovernedRevisionRefSchema,
+    expectedGovernedHead: GovernedRevisionRefSchema,
+    rollbackSource: GovernedRevisionRefSchema,
+    confirmation: ReasonSchema,
+    reason: ReasonSchema,
+    evidenceRefs: EvidenceRefsSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationRollbackCommandInputSchema =
+  ImprovementApplicationRollbackBaseSchema;
+export const ImprovementApplicationRollbackRequestSchema =
+  ImprovementApplicationRollbackBaseSchema.extend({
+    actor: VerifiedLocalSessionHumanSchema,
+  }).strict();
+
+export const ImprovementApplicationReceiptSchema = z
+  .object({
+    id: IdSchema,
+    phase: z.enum(["apply", "rollback"]),
+    disposition: z.enum(["applied", "no-op", "failed"]),
+    targetRevision: GovernedRevisionRefSchema.nullable(),
+    evidenceRefs: z.array(IdSchema).max(64),
+    hash: Sha256Schema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationObservationSchema = z
+  .object({
+    id: IdSchema,
+    phase: z.enum(["apply", "rollback"]),
+    outcome: z.enum([
+      "exact-match",
+      "proven-absent",
+      "conflict",
+      "insufficient-evidence",
+    ]),
+    evidenceRefs: z.array(IdSchema).min(1).max(64),
+    hash: Sha256Schema,
+    observedAt: TimestampSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationReconciliationSchema = z
+  .object({
+    id: IdSchema,
+    phase: z.enum(["apply", "rollback"]),
+    result: z.enum(["finalized", "retry-permitted", "unknown"]),
+    evidenceRefs: z.array(IdSchema).min(1).max(64),
+    hash: Sha256Schema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationValidationSchema = z
+  .object({
+    id: IdSchema,
+    beforeEvidence: StatisticsEvidenceSnapshotViewSchema,
+    afterEvidence: StatisticsEvidenceSnapshotViewSchema,
+    outcome: StatisticsEvidenceValidationOutcomeSchema,
+    hash: Sha256Schema,
+    validatedBy: ImprovementValidationActorSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+export const ImprovementApplicationRollbackViewSchema = z
+  .object({
+    id: IdSchema,
+    appliedRevision: GovernedRevisionRefSchema,
+    sourceRevision: GovernedRevisionRefSchema,
+    expectedGovernedHead: GovernedRevisionRefSchema,
+    restoringRevision: GovernedRevisionRefSchema.nullable(),
+    state: z.enum(["requested", "rolled-back", "failed", "unknown"]),
+    evidenceRefs: z.array(IdSchema).max(64),
+    hash: Sha256Schema,
+    requestedBy: VerifiedLocalSessionHumanSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+const ImprovementProposalLifecycleEntrySchema = z
+  .object({
+    state: z.enum(["draft", "proposed", "awaiting-human"]),
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+export const ImprovementProposalRevisionViewSchema = z
   .object({
     id: IdSchema,
     revision: z.number().int().positive(),
     supersedesRevisionId: IdSchema.nullable(),
     content: ImprovementProposalRevisionContentSchema,
     hash: Sha256Schema,
-    proposedBy: RuntimeWorkerActorSchema,
+    authoredBy: ImprovementAuthorActorSchema,
+    lifecycle: z.array(ImprovementProposalLifecycleEntrySchema),
+    decision: ImprovementProposalDecisionSchema.nullable(),
     createdAt: TimestampSchema,
   })
   .strict();
-
-const ImprovementProposalDecisionViewSchema = z
-  .object({
-    id: IdSchema,
-    proposalRevisionId: IdSchema,
-    proposalRevisionHash: Sha256Schema,
-    decision: z.enum(["approved", "rejected"]),
-    decidedBy: VerifiedLocalSessionHumanSchema,
-    reason: ReasonSchema,
-    createdAt: TimestampSchema,
-  })
-  .strict();
-
-export const ImprovementApplicationOperationViewSchema = z
-  .object({
-    id: IdSchema,
-    proposalId: IdSchema,
-    approvedDecisionId: IdSchema,
-    approvedDecisionHash: Sha256Schema,
-    targetKind: ImprovementTargetKindSchema,
-    targetId: IdSchema,
-    canonicalRequestHash: Sha256Schema,
-    state: ImprovementApplicationStateSchema,
-    targetRevisionRef: IdSchema.nullable(),
-    rollbackRevisionRef: IdSchema.nullable(),
-    validationEvidence: z.array(ImprovementApplicationValidationEvidenceSchema),
-    createdAt: TimestampSchema,
-    updatedAt: TimestampSchema,
-  })
-  .strict();
-export type ImprovementApplicationOperationView = z.infer<
-  typeof ImprovementApplicationOperationViewSchema
->;
 
 export const ImprovementProposalNextActionSchema = z.enum([
   "revise",
-  "decide",
+  "propose",
+  "request-decision",
+  "approve",
+  "reject",
   "apply",
-  "rollback",
 ]);
-export type ImprovementProposalNextAction = z.infer<
-  typeof ImprovementProposalNextActionSchema
->;
 
 export const ImprovementProposalViewSchema = z
   .object({
     id: IdSchema,
     projectId: IdSchema,
-    departmentId: IdSchema,
-    status: ImprovementProposalStateSchema,
-    revision: z.number().int().positive(),
-    currentRevision: ImprovementProposalRevisionViewSchema,
-    decision: ImprovementProposalDecisionViewSchema.nullable(),
-    applicationOperations: z.array(ImprovementApplicationOperationViewSchema),
+    departmentId: IdSchema.nullable(),
+    currentRevisionId: IdSchema,
+    currentState: ImprovementProposalStateSchema,
+    revisions: z.array(ImprovementProposalRevisionViewSchema).min(1),
     nextActions: z.array(ImprovementProposalNextActionSchema),
     createdAt: TimestampSchema,
     updatedAt: TimestampSchema,
@@ -431,36 +607,117 @@ export type ImprovementProposalView = z.infer<
   typeof ImprovementProposalViewSchema
 >;
 
-/**
- * Persistence seam for the Improvement-proposal aggregates. Every mutator is
- * append-only at the storage layer; the returned Views are projections over the
- * append-only revisions, decision, and application operations. The foundation
- * defines the interface only — no concrete implementation or dispatcher wiring.
- */
+export const ImprovementApplicationNextActionSchema = z.enum([
+  "validate",
+  "rollback",
+  "reconcile",
+]);
+
+export const ImprovementApplicationOperationViewSchema = z
+  .object({
+    id: IdSchema,
+    projectId: IdSchema,
+    proposalId: IdSchema,
+    proposalRevisionId: IdSchema,
+    proposalRevisionHash: Sha256Schema,
+    approvedDecisionId: IdSchema,
+    approvedDecisionHash: Sha256Schema,
+    target: ImprovementTargetSchema,
+    canonicalRequestHash: Sha256Schema,
+    state: ImprovementApplicationStateSchema,
+    deterministicEffectId: IdSchema,
+    receipts: z.array(ImprovementApplicationReceiptSchema),
+    observations: z.array(ImprovementApplicationObservationSchema),
+    reconciliations: z.array(ImprovementApplicationReconciliationSchema),
+    validations: z.array(ImprovementApplicationValidationSchema),
+    rollbacks: z.array(ImprovementApplicationRollbackViewSchema),
+    nextActions: z.array(ImprovementApplicationNextActionSchema),
+    createdAt: TimestampSchema,
+    updatedAt: TimestampSchema,
+  })
+  .strict();
+export type ImprovementApplicationOperationView = z.infer<
+  typeof ImprovementApplicationOperationViewSchema
+>;
+
+export interface ImprovementApplicationEffectAdapter {
+  readonly inspectEffect: (input: {
+    readonly operationId: string;
+    readonly target: ImprovementTarget;
+    readonly phase: "apply" | "rollback";
+  }) => Promise<
+    | {
+        readonly outcome: "exact-match";
+        readonly revision: GovernedRevisionRef;
+        readonly evidenceRefs: readonly string[];
+      }
+    | {
+        readonly outcome:
+          | "proven-absent"
+          | "conflict"
+          | "insufficient-evidence";
+        readonly evidenceRefs: readonly string[];
+      }
+  >;
+  readonly appendRevision: (input: {
+    readonly operationId: string;
+    readonly target: ImprovementTarget;
+    readonly phase: "apply" | "rollback";
+    readonly expectedGovernedHead: GovernedHead;
+  }) => Promise<{
+    readonly revision: GovernedRevisionRef;
+    readonly disposition: "applied" | "no-op";
+    readonly evidenceRefs: readonly string[];
+  }>;
+}
+
 export interface ImprovementProposalPersistence {
-  readonly createProposalIntent: (
-    input: ImprovementProposalView,
+  readonly create: (
+    request: z.infer<typeof ImprovementProposalCreateRequestSchema>,
   ) => ImprovementProposalView;
-  readonly appendRevision: (
-    request: ImprovementProposalProposeRequest,
+  readonly revise: (
+    request: z.infer<typeof ImprovementProposalReviseRequestSchema>,
+  ) => ImprovementProposalView;
+  readonly transition: (
+    request: z.infer<typeof ImprovementProposalTransitionRequestSchema>,
+  ) => ImprovementProposalView;
+  readonly decide: (
+    request: z.infer<typeof ImprovementProposalDecideRequestSchema>,
   ) => ImprovementProposalView;
   readonly inspect: (proposalId: string) => ImprovementProposalView;
-  readonly list: (input: {
-    readonly projectId?: string;
-    readonly departmentId?: string;
-  }) => readonly ImprovementProposalView[];
-  readonly recordDecision: (
-    decision: ImprovementProposalDecision,
-  ) => ImprovementProposalView;
-  readonly createApplicationIntent: (
+  readonly list: (projectId: string) => readonly ImprovementProposalView[];
+}
+
+export interface ImprovementApplicationPersistence {
+  readonly createIntent: (
     request: ImprovementApplicationApplyRequest,
   ) => ImprovementApplicationOperationView;
-  readonly finalizeApplication: (input: {
-    readonly applicationOperationId: string;
-    readonly result: ImprovementApplicationFinalize;
-  }) => ImprovementApplicationOperationView;
-  readonly rollbackApplication: (input: {
-    readonly request: ImprovementApplicationRollbackRequest;
-    readonly result: ImprovementApplicationFinalize;
-  }) => ImprovementApplicationOperationView;
+  readonly appendReceipt: (
+    operationId: string,
+    receipt: z.infer<typeof ImprovementApplicationReceiptSchema>,
+  ) => ImprovementApplicationOperationView;
+  readonly appendObservation: (
+    operationId: string,
+    observation: z.infer<typeof ImprovementApplicationObservationSchema>,
+  ) => ImprovementApplicationOperationView;
+  readonly appendReconciliation: (
+    operationId: string,
+    reconciliation: z.infer<typeof ImprovementApplicationReconciliationSchema>,
+  ) => ImprovementApplicationOperationView;
+  readonly appendValidation: (
+    operationId: string,
+    validation: z.infer<typeof ImprovementApplicationValidationSchema>,
+  ) => ImprovementApplicationOperationView;
+  readonly appendRollback: (
+    operationId: string,
+    rollback: z.infer<typeof ImprovementApplicationRollbackViewSchema>,
+  ) => ImprovementApplicationOperationView;
+  readonly inspect: (
+    operationId: string,
+  ) => ImprovementApplicationOperationView;
+  readonly list: (
+    projectId: string,
+  ) => readonly ImprovementApplicationOperationView[];
 }
+
+export type ImprovementEvidenceSnapshot = StatisticsEvidenceSnapshotView;

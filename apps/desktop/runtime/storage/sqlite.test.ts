@@ -189,7 +189,10 @@ const removeCatalogAuditTriggers = (database: DatabaseSync): void => {
   removeDurableRuntimeEventSubscriptions(database);
   const triggers = database
     .prepare(
-      "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'runtime_%'",
+      `SELECT name FROM sqlite_schema
+        WHERE type = 'trigger'
+          AND name LIKE 'runtime_%'
+          AND name NOT LIKE 'runtime_template_revisions_%'`,
     )
     .all() as Array<{ readonly name: string }>;
   for (const trigger of triggers) {
@@ -2920,6 +2923,344 @@ describe("Test authority schema migration", () => {
       /Release operation item observation is immutable/,
     );
     sqlite.close();
+  });
+
+  it("creates and adopts the complete governed v52 Statistics and Improvement schema", () => {
+    const expectedTables = [
+      "governed_harness_revisions",
+      "governed_skill_flow_revisions",
+      "improvement_application_observations",
+      "improvement_application_operations",
+      "improvement_application_projections",
+      "improvement_application_receipts",
+      "improvement_application_reconciliations",
+      "improvement_application_rollbacks",
+      "improvement_application_validations",
+      "improvement_decisions",
+      "improvement_proposal_lifecycle",
+      "improvement_proposal_revisions",
+      "improvement_proposals",
+      "runtime_template_revisions",
+      "statistics_evidence_snapshots",
+    ];
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const path = initialized.path;
+    initialized.close();
+    const database = new DatabaseSync(path);
+
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE type = 'table'
+              AND name IN (${expectedTables.map(() => "?").join(", ")})
+            ORDER BY name`,
+        )
+        .all(...expectedTables)
+        .map((row) => (row as { readonly name: string }).name),
+      expectedTables,
+    );
+
+    database.exec(`
+      UPDATE schema_metadata SET value = '51' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 52;
+      PRAGMA user_version = 51;
+    `);
+    assert.equal(migrateCompanyDatabase(database), 52);
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT version, name FROM schema_migrations WHERE version = 52",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      [{ version: 52, name: "improvement_proposal_foundation" }],
+    );
+    database.close();
+
+    const upgradeDir = tempCompanyDir();
+    const upgradeOpened = openCompanyDatabase(upgradeDir);
+    const upgradePath = upgradeOpened.path;
+    upgradeOpened.close();
+    const upgrade = new DatabaseSync(upgradePath);
+    upgrade.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TABLE IF EXISTS improvement_application_rollbacks;
+      DROP TABLE IF EXISTS improvement_application_validations;
+      DROP TABLE IF EXISTS improvement_application_reconciliations;
+      DROP TABLE IF EXISTS improvement_application_observations;
+      DROP TABLE IF EXISTS improvement_application_receipts;
+      DROP TABLE IF EXISTS improvement_application_projections;
+      DROP TABLE IF EXISTS improvement_application_operations;
+      DROP TABLE IF EXISTS improvement_decisions;
+      DROP TABLE IF EXISTS improvement_proposal_lifecycle;
+      DROP TABLE IF EXISTS improvement_proposal_revisions;
+      DROP TABLE IF EXISTS improvement_proposals;
+      DROP TABLE IF EXISTS statistics_evidence_snapshots;
+      DROP TABLE IF EXISTS governed_harness_revisions;
+      DROP TABLE IF EXISTS runtime_template_revisions;
+      DROP TABLE IF EXISTS governed_skill_flow_revisions;
+      DELETE FROM schema_migrations WHERE version = 52;
+      UPDATE schema_metadata SET value = '51' WHERE key = 'schema_version';
+      PRAGMA user_version = 51;
+    `);
+    assert.equal(migrateCompanyDatabase(upgrade), 52);
+    assert.deepEqual(
+      upgrade
+        .prepare(
+          `SELECT name FROM sqlite_schema
+            WHERE type = 'table'
+              AND name IN (${expectedTables.map(() => "?").join(", ")})
+            ORDER BY name`,
+        )
+        .all(...expectedTables)
+        .map((row) => (row as { readonly name: string }).name),
+      expectedTables,
+    );
+    upgrade.close();
+  });
+
+  it("rejects a partial v52 schema transactionally", () => {
+    const companyDir = tempCompanyDir();
+    const initialized = openCompanyDatabase(companyDir);
+    const path = initialized.path;
+    initialized.close();
+    const database = new DatabaseSync(path);
+    database.exec(`
+      DROP TRIGGER statistics_evidence_snapshots_immutable_delete;
+      UPDATE schema_metadata SET value = '51' WHERE key = 'schema_version';
+      DELETE FROM schema_migrations WHERE version = 52;
+      PRAGMA user_version = 51;
+    `);
+
+    assert.throws(
+      () => migrateCompanyDatabase(database),
+      /Existing T26 v52 schema is incompatible: statistics_evidence_snapshots_immutable_delete/,
+    );
+    assert.equal(
+      (
+        database
+          .prepare(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+          )
+          .get() as { readonly value: string }
+      ).value,
+      "51",
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT 1 AS present FROM sqlite_schema WHERE name = 'statistics_evidence_snapshots_immutable_delete'",
+        )
+        .get(),
+      undefined,
+    );
+    database.close();
+  });
+
+  it("enforces immutable lineage, exact decisions, authority pairs, and append-only application history in v52", () => {
+    const companyDir = tempCompanyDir();
+    openCompanyDatabase(companyDir).close();
+    const database = new DatabaseSync(
+      join(companyDir, ".sandcastle", "company.sqlite"),
+    );
+    database.exec("PRAGMA foreign_keys = ON");
+    const hash = "a".repeat(64);
+    const otherHash = "b".repeat(64);
+    const timestamp = "2026-08-04T00:00:00.000Z";
+    database
+      .prepare(
+        "INSERT INTO projects(id, company_id, name, goal, status, created_at) VALUES (?, 'company', ?, ?, 'active', ?)",
+      )
+      .run("project:t26", "T26", "Govern improvements", timestamp);
+    database
+      .prepare(
+        "INSERT INTO projects(id, company_id, name, goal, status, created_at) VALUES (?, 'company', ?, ?, 'active', ?)",
+      )
+      .run("project:other", "Other", "Reject cross-project lineage", timestamp);
+
+    const insertEvidence = database.prepare(`
+      INSERT INTO statistics_evidence_snapshots(
+        id, project_id, catalog_version, canonical_query_json, query_hash,
+        as_of_sequence, observations_json, completeness_json,
+        frozen_by_actor_type, frozen_by_actor_id, frozen_by_authenticated_by,
+        snapshot_hash, command_id, created_at
+      ) VALUES (?, ?, 'statistics@1', '{}', ?, 7, '[]', '{}', ?, 'runtime-worker:statistics', ?, ?, ?, ?)
+    `);
+    insertEvidence.run(
+      "statistics-evidence:1",
+      "project:t26",
+      hash,
+      "runtime-worker",
+      "runtime",
+      hash,
+      "command:freeze-1",
+      timestamp,
+    );
+    assert.throws(
+      () =>
+        insertEvidence.run(
+          "statistics-evidence:invalid",
+          "project:t26",
+          hash,
+          "human",
+          "runtime",
+          otherHash,
+          "command:freeze-invalid",
+          timestamp,
+        ),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            "UPDATE statistics_evidence_snapshots SET observations_json = '[]' WHERE id = ?",
+          )
+          .run("statistics-evidence:1"),
+      /Statistics evidence snapshot is immutable/,
+    );
+
+    database.exec(`
+      INSERT INTO improvement_proposals(
+        id, project_id, department_id, current_revision_id, revision, state,
+        created_at, updated_at
+      ) VALUES (
+        'proposal:1', 'project:t26', NULL, 'proposal-revision:1', 1, 'draft',
+        '${timestamp}', '${timestamp}'
+      );
+      INSERT INTO improvement_proposals(
+        id, project_id, department_id, current_revision_id, revision, state,
+        created_at, updated_at
+      ) VALUES (
+        'proposal:other', 'project:other', NULL, 'proposal-revision:other', 1, 'draft',
+        '${timestamp}', '${timestamp}'
+      );
+    `);
+    const insertRevision = database.prepare(`
+      INSERT INTO improvement_proposal_revisions(
+        id, proposal_id, project_id, revision, supersedes_revision_id,
+        evidence_snapshot_id, evidence_snapshot_hash, target_kind, target_owner_id,
+        governed_head_revision_id, governed_head_revision_hash, content_json,
+        content_hash, authored_by_actor_type, authored_by_actor_id,
+        authored_by_authenticated_by, command_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'statistics-evidence:1', ?, 'harness',
+        'harness:software-rnd-review', NULL, NULL, '{}', ?, 'runtime-worker',
+        'runtime-worker:author', 'runtime', ?, ?)
+    `);
+    insertRevision.run(
+      "proposal-revision:1",
+      "proposal:1",
+      "project:t26",
+      1,
+      null,
+      hash,
+      hash,
+      "command:proposal-1",
+      timestamp,
+    );
+    assert.throws(
+      () =>
+        insertRevision.run(
+          "proposal-revision:other",
+          "proposal:other",
+          "project:other",
+          1,
+          "proposal-revision:1",
+          hash,
+          otherHash,
+          "command:proposal-other",
+          timestamp,
+        ),
+      /FOREIGN KEY constraint failed/,
+    );
+
+    const insertDecision = database.prepare(`
+      INSERT INTO improvement_decisions(
+        id, proposal_id, proposal_revision_id, proposal_revision_hash,
+        evidence_snapshot_id, evidence_snapshot_hash, target_kind, target_owner_id,
+        governed_head_revision_id, governed_head_revision_hash, decision,
+        confirmation, actor_type, actor_id, authenticated_by, reason,
+        evidence_refs_json, decision_hash, command_id, created_at
+      ) VALUES (?, 'proposal:1', 'proposal-revision:1', ?,
+        'statistics-evidence:1', ?, 'harness', 'harness:software-rnd-review',
+        NULL, NULL, ?, 'I confirm', 'human', 'human:reviewer', 'local-session',
+        'Evidence supports this decision', '["statistics-evidence:1"]', ?, ?, ?)
+    `);
+    insertDecision.run(
+      "decision:1",
+      hash,
+      hash,
+      "approved",
+      hash,
+      "command:decision-1",
+      timestamp,
+    );
+    assert.throws(
+      () =>
+        insertDecision.run(
+          "decision:duplicate",
+          hash,
+          hash,
+          "rejected",
+          otherHash,
+          "command:decision-2",
+          timestamp,
+        ),
+      /UNIQUE constraint failed: improvement_decisions.proposal_revision_id/,
+    );
+
+    database.exec(`
+      INSERT INTO improvement_application_operations(
+        id, project_id, proposal_id, proposal_revision_id, proposal_revision_hash,
+        approved_decision_id, approved_decision_hash, target_kind, target_owner_id,
+        governed_head_revision_id, governed_head_revision_hash, target_content_json,
+        target_content_hash, canonical_request_json, canonical_request_hash,
+        deterministic_effect_id, confirmation, reason, evidence_refs_json,
+        actor_type, actor_id, authenticated_by, command_id, created_at
+      ) VALUES (
+        'operation:1', 'project:t26', 'proposal:1', 'proposal-revision:1', '${hash}',
+        'decision:1', '${hash}', 'harness', 'harness:software-rnd-review', NULL, NULL,
+        '{}', '${hash}', '{}', '${hash}', 'improvement-effect:operation:1:apply',
+        'I confirm', 'Apply the approved revision', '["decision:1"]',
+        'human', 'human:reviewer', 'local-session', 'command:apply-1', '${timestamp}'
+      );
+      INSERT INTO improvement_application_projections(
+        operation_id, state, latest_error_code, latest_error_message, revision, updated_at
+      ) VALUES ('operation:1', 'applying', NULL, NULL, 0, '${timestamp}');
+      INSERT INTO improvement_application_receipts(
+        id, operation_id, phase, disposition, target_revision_id,
+        target_revision_hash, evidence_refs_json, receipt_hash, created_at
+      ) VALUES (
+        'receipt:1', 'operation:1', 'apply', 'applied', 'harness-revision:1',
+        '${hash}', '["harness-revision:1"]', '${hash}', '${timestamp}'
+      );
+    `);
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            "UPDATE improvement_application_operations SET reason = ? WHERE id = ?",
+          )
+          .run("Changed", "operation:1"),
+      /Improvement application intent is immutable/,
+    );
+    database
+      .prepare(
+        "UPDATE improvement_application_projections SET state = 'applied', revision = revision + 1 WHERE operation_id = ?",
+      )
+      .run("operation:1");
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            "UPDATE improvement_application_receipts SET disposition = 'failed' WHERE id = ?",
+          )
+          .run("receipt:1"),
+      /Improvement application receipt is immutable/,
+    );
+    database.close();
   });
 
   it("rejects a future Test authority schema without rewriting its version", () => {

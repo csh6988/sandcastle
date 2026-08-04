@@ -1,282 +1,441 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  ImprovementApplicationApplyRequestSchema,
-  ImprovementApplicationFinalizeSchema,
+  ImprovementApplicationApplyCommandInputSchema,
   ImprovementApplicationOperationViewSchema,
+  ImprovementApplicationStateSchema,
+  ImprovementApplicationValidateRequestSchema,
   ImprovementProposalDecisionSchema,
   ImprovementProposalErrorCodeSchema,
-  ImprovementProposalProposeRequestSchema,
   ImprovementProposalRevisionContentSchema,
   ImprovementProposalViewSchema,
+  ImprovementTargetSchema,
 } from "./improvementProposalContracts.js";
-import {
-  CompanyQuerySchema,
-  EnvelopeCommandSchema,
-  ImprovementApplicationApplyEnvelopeCommandSchema,
-  ImprovementProposalDecideEnvelopeCommandSchema,
-  ImprovementProposalInspectQuerySchema,
-  ImprovementProposalListQuerySchema,
-  ImprovementProposalProposeEnvelopeCommandSchema,
-} from "../interface.js";
+import { CompanyQuerySchema, EnvelopeCommandSchema } from "../interface.js";
 
 const hash = "a".repeat(64);
-const createdAt = "2026-08-03T00:00:00.000Z";
+const createdAt = "2026-08-04T00:00:00.000Z";
+
+const evidence = {
+  id: "statistics-evidence:1",
+  query: {
+    catalogVersion: "statistics@1" as const,
+    projectId: "project:sandcastle",
+    filters: {
+      departmentIds: ["department:software-rnd"],
+      aiMemberIds: [],
+      modelIds: [],
+      repositoryIds: ["repository:sandcastle"],
+      workPackageIds: [],
+      pipelineVersionIds: ["pipeline:7"],
+    },
+    window: {
+      kind: "explicit-utc-half-open" as const,
+      startInclusive: "2026-07-01T00:00:00.000Z",
+      endExclusive: "2026-08-01T00:00:00.000Z",
+    },
+    cohort: {
+      id: "cohort:before",
+      filters: {
+        departmentIds: ["department:software-rnd"],
+        aiMemberIds: [],
+        modelIds: [],
+        repositoryIds: ["repository:sandcastle"],
+        workPackageIds: [],
+        pipelineVersionIds: ["pipeline:7"],
+      },
+    },
+    comparisonSet: {
+      id: "comparison:retry",
+      metricIds: ["ordinary-retry-count" as const],
+    },
+  },
+  queryHash: hash,
+  asOfSequence: 42,
+  observations: [
+    {
+      metricId: "ordinary-retry-count" as const,
+      status: "available" as const,
+      measurement: { kind: "count" as const, value: 4 },
+      sourceFactFamily: "node-attempt",
+      sourceFactRefs: ["node-attempt:1", "node-attempt:2"],
+    },
+  ],
+  completeness: {
+    status: "complete" as const,
+    incompleteMetricIds: [],
+    unavailableMetricIds: [],
+  },
+  frozenBy: {
+    type: "runtime-worker" as const,
+    id: "runtime-worker:statistics",
+    authenticatedBy: "runtime" as const,
+  },
+  hash,
+  createdAt,
+};
+
+const harnessTarget = {
+  targetKind: "harness" as const,
+  ownerId: "harness:software-rnd-review",
+  governedHead: {
+    revisionId: "harness-revision:7",
+    revisionHash: hash,
+  },
+  content: {
+    principles: ["Prefer exact evidence over inference."],
+    constitution: "Review work against frozen production contracts.",
+    rules: ["Back off before retrying a failed verification."],
+    examples: {
+      positive: ["Retry after a bounded delay with the same operation key."],
+      negative: ["Blindly resend an unknown external effect."],
+    },
+    impactScope: ["department:software-rnd"],
+  },
+};
 
 const content = {
-  evidenceQuery: "runs where verification failed on the same skill flow",
-  evidenceRefs: ["run:1", "defect:2", "audit:3"],
+  evidence,
+  target: harnessTarget,
   rootCauseHypothesis:
-    "The skill flow retries without backing off, exhausting the budget.",
-  proposedChange: {
-    targetKind: "skill-flow" as const,
-    targetId: "skill-flow:verify",
-    currentRevisionRef: "skill-flow-revision:7",
-    summary: "Add exponential backoff between verification retries.",
-    diffRef: "diff:42",
-  },
+    "The verification Harness permits immediate retries after an unknown result.",
   impactScope: {
-    departments: ["software-rnd"],
-    projects: ["project:sandcastle"],
+    projectIds: ["project:sandcastle"],
+    departmentIds: ["department:software-rnd"],
+    positionIds: ["position:reviewer"],
   },
   expectedMetrics: [
     {
-      metric: "verification-retry-count",
+      metricId: "ordinary-retry-count" as const,
       direction: "decrease" as const,
-      baselineRef: "baseline:9",
     },
   ],
-  validationPlan: "Shadow the new flow on the next 20 runs before promoting.",
-  rolloutPath: "Gray-release to software-rnd, then widen once metrics hold.",
-  rollbackPath:
-    "Restore skill-flow-revision:7 and retain the applied revision.",
-};
-
-const proposeRequest = {
-  proposalId: "improvement-proposal-1",
-  revisionId: "improvement-proposal-revision-1",
-  projectId: "project:sandcastle",
-  departmentId: "software-rnd",
-  supersedesRevisionId: null,
-  proposedBy: {
-    type: "runtime-worker" as const,
-    id: "runtime-worker:planner",
-    authenticatedBy: "runtime" as const,
+  validationPolicy: {
+    metricIds: ["ordinary-retry-count" as const],
+    minimumComparableObservations: 1,
   },
-  content,
-};
-
-const proposalView = {
-  id: "improvement-proposal-1",
-  projectId: "project:sandcastle",
-  departmentId: "software-rnd",
-  status: "proposed" as const,
-  revision: 1,
-  currentRevision: {
-    id: "improvement-proposal-revision-1",
-    revision: 1,
-    supersedesRevisionId: null,
-    content,
-    hash,
-    proposedBy: proposeRequest.proposedBy,
-    createdAt,
+  rolloutNotes: "Validate against the next comparable cohort before selection.",
+  rollbackSource: {
+    revisionId: "harness-revision:7",
+    revisionHash: hash,
   },
-  decision: null,
-  applicationOperations: [],
-  nextActions: ["revise", "decide"] as const,
-  createdAt,
-  updatedAt: createdAt,
 };
 
 describe("Improvement proposal contracts", () => {
-  it("rejects unknown fields projected onto an Improvement proposal view", () => {
-    assert.throws(() =>
-      ImprovementProposalViewSchema.parse({
-        ...proposalView,
-        currentRevision: {
-          ...proposalView.currentRevision,
-          unexpected: "must-not-project",
-        },
-      }),
+  it("binds one immutable Statistics evidence snapshot and one strict target", () => {
+    assert.doesNotThrow(() =>
+      ImprovementProposalRevisionContentSchema.parse(content),
     );
+    assert.doesNotThrow(() => ImprovementTargetSchema.parse(harnessTarget));
     assert.throws(() =>
       ImprovementProposalRevisionContentSchema.parse({
         ...content,
-        proposedChange: {
-          ...content.proposedChange,
-          unexpected: "must-not-project",
+        evidenceQuery: "opaque moving query",
+      }),
+    );
+    assert.throws(() =>
+      ImprovementTargetSchema.parse({
+        ...harnessTarget,
+        targetKind: "spec",
+      }),
+    );
+    assert.throws(() =>
+      ImprovementTargetSchema.parse({
+        targetKind: "template",
+        ownerId: "template:unsafe",
+        governedHead: { revisionId: null, revisionHash: null },
+        content: {
+          manifest: [{ path: "../escape", contentHash: hash }],
         },
       }),
     );
   });
 
-  it("freezes a proposal revision with its evidence-backed content and runtime author", () => {
-    const request =
-      ImprovementProposalProposeRequestSchema.parse(proposeRequest);
-    assert.equal(request.proposedBy.type, "runtime-worker");
-    assert.equal(request.content.proposedChange.targetKind, "skill-flow");
-    assert.doesNotThrow(() =>
-      ImprovementProposalViewSchema.parse(proposalView),
-    );
+  it("freezes all approved application states and exact error codes", () => {
+    for (const state of [
+      "applying",
+      "applied",
+      "apply-failed",
+      "reconciling",
+      "unknown",
+      "validated",
+      "rollback-requested",
+      "rolled-back",
+      "rollback-failed",
+    ] as const) {
+      assert.equal(ImprovementApplicationStateSchema.parse(state), state);
+    }
 
-    const applyRequest = ImprovementApplicationApplyRequestSchema.parse({
-      applicationOperationId: "improvement-application-1",
-      proposalId: "improvement-proposal-1",
-      approvedDecisionId: "improvement-decision-1",
-      expectedApprovedDecisionHash: hash,
-      targetKind: "skill-flow",
-      targetId: "skill-flow:verify",
-      expectedTargetRevisionRef: "skill-flow-revision:7",
-      authorization: {
-        actor: {
-          type: "human",
-          id: "human-1",
-          authenticatedBy: "local-session",
-        },
-        reason: "Approve applying the backoff change.",
-        evidenceRefs: ["improvement-decision:1"],
+    for (const code of [
+      "STATISTICS_EVIDENCE_UNAVAILABLE",
+      "STATISTICS_EVIDENCE_STALE",
+      "IMPROVEMENT_PROPOSAL_SUPERSEDED",
+      "IMPROVEMENT_DECISION_EXISTS",
+      "IMPROVEMENT_NOT_APPROVED",
+      "IMPROVEMENT_INVALID_STATE",
+      "IMPROVEMENT_TARGET_UNSUPPORTED",
+      "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+      "IMPROVEMENT_TARGET_CONFLICT",
+      "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+      "IMPROVEMENT_APPLICATION_UNKNOWN",
+    ] as const) {
+      assert.equal(ImprovementProposalErrorCodeSchema.parse(code), code);
+    }
+    assert.throws(() =>
+      ImprovementProposalErrorCodeSchema.parse(
+        "IMPROVEMENT_APPLICATION_ID_REUSE",
+      ),
+    );
+  });
+
+  it("keeps renderer Commands actor-free and exposes every approved discriminator", () => {
+    const queries = [
+      {
+        type: "statistics.inspect",
+        projectId: "project:sandcastle",
+        query: evidence.query,
       },
-    });
-    assert.equal(
-      applyRequest.authorization.actor.authenticatedBy,
-      "local-session",
+      { type: "statistics-evidence.inspect", evidenceSnapshotId: evidence.id },
+      { type: "improvement-proposals.list", projectId: "project:sandcastle" },
+      { type: "improvement-proposal.inspect", proposalId: "proposal:1" },
+      {
+        type: "improvement-applications.list",
+        projectId: "project:sandcastle",
+      },
+      { type: "improvement-application.inspect", operationId: "operation:1" },
+    ] as const;
+    for (const query of queries) {
+      assert.doesNotThrow(() => CompanyQuerySchema.parse(query));
+    }
+    assert.throws(() =>
+      CompanyQuerySchema.parse({
+        type: "improvement-proposals.inspect",
+        proposalId: "proposal:1",
+      }),
     );
 
+    const commands = [
+      {
+        type: "statistics.evidence.freeze",
+        evidenceSnapshotId: evidence.id,
+        query: evidence.query,
+      },
+      {
+        type: "improvement.proposal.create",
+        proposal: {
+          proposalId: "proposal:1",
+          revisionId: "proposal-revision:1",
+          projectId: "project:sandcastle",
+          departmentId: "department:software-rnd",
+          content,
+        },
+      },
+      {
+        type: "improvement.proposal.revise",
+        proposal: {
+          proposalId: "proposal:1",
+          revisionId: "proposal-revision:2",
+          supersedesRevisionId: "proposal-revision:1",
+          expectedSupersededRevisionHash: hash,
+          content,
+        },
+      },
+      {
+        type: "improvement.proposal.propose",
+        proposalId: "proposal:1",
+        proposalRevisionId: "proposal-revision:2",
+        expectedProposalRevisionHash: hash,
+      },
+      {
+        type: "improvement.proposal.request-decision",
+        proposalId: "proposal:1",
+        proposalRevisionId: "proposal-revision:2",
+        expectedProposalRevisionHash: hash,
+        confirmation: "Request an exact human decision.",
+      },
+      {
+        type: "improvement.proposal.decide",
+        proposalId: "proposal:1",
+        proposalRevisionId: "proposal-revision:2",
+        expectedProposalRevisionHash: hash,
+        decision: "approved",
+        confirmation: "Approve this exact revision and governed head.",
+        reason: "Frozen evidence supports the bounded change.",
+        evidenceRefs: ["review:1"],
+      },
+      {
+        type: "improvement.application.apply",
+        application: {
+          operationId: "operation:1",
+          proposalId: "proposal:1",
+          proposalRevisionId: "proposal-revision:2",
+          expectedProposalRevisionHash: hash,
+          approvedDecisionId: "decision:2",
+          expectedApprovedDecisionHash: hash,
+          target: harnessTarget,
+          confirmation: "Append the approved governed Harness revision.",
+          reason: "Apply the approved exact revision.",
+          evidenceRefs: ["decision:2"],
+        },
+      },
+      {
+        type: "improvement.application.validate",
+        validation: {
+          operationId: "operation:1",
+          expectedOperationHash: hash,
+          afterEvidence: evidence,
+          reason: "Compare the approved metric set.",
+          evidenceRefs: ["statistics-evidence:1"],
+        },
+      },
+      {
+        type: "improvement.application.rollback",
+        rollback: {
+          operationId: "operation:1",
+          expectedOperationHash: hash,
+          appliedRevision: {
+            revisionId: "harness-revision:8",
+            revisionHash: hash,
+          },
+          expectedGovernedHead: {
+            revisionId: "harness-revision:8",
+            revisionHash: hash,
+          },
+          rollbackSource: {
+            revisionId: "harness-revision:7",
+            revisionHash: hash,
+          },
+          confirmation: "Append a restoring revision and retain history.",
+          reason: "Comparable evidence regressed.",
+          evidenceRefs: ["validation:1"],
+        },
+      },
+    ] as const;
+    for (const command of commands) {
+      assert.doesNotThrow(() => EnvelopeCommandSchema.parse(command));
+      assert.ok(!("actor" in command));
+    }
+  });
+
+  it("permits one exact decision per revision and keeps application history append-only", () => {
+    const decision = ImprovementProposalDecisionSchema.parse({
+      id: "decision:2",
+      proposalId: "proposal:1",
+      proposalRevisionId: "proposal-revision:2",
+      proposalRevisionHash: hash,
+      evidenceSnapshotId: evidence.id,
+      evidenceSnapshotHash: hash,
+      target: harnessTarget,
+      decision: "approved",
+      confirmation: "Approve this exact revision and governed head.",
+      actor: {
+        type: "human",
+        id: "human:1",
+        authenticatedBy: "local-session",
+      },
+      reason: "Frozen evidence supports the bounded change.",
+      evidenceRefs: ["review:1"],
+      hash,
+      createdAt,
+    });
+    assert.equal(decision.proposalRevisionId, "proposal-revision:2");
+
     assert.doesNotThrow(() =>
-      ImprovementApplicationOperationViewSchema.parse({
-        id: "improvement-application-1",
-        proposalId: "improvement-proposal-1",
-        approvedDecisionId: "improvement-decision-1",
-        approvedDecisionHash: hash,
-        targetKind: "skill-flow",
-        targetId: "skill-flow:verify",
-        canonicalRequestHash: hash,
-        state: "applying",
-        targetRevisionRef: null,
-        rollbackRevisionRef: null,
-        validationEvidence: [],
+      ImprovementProposalViewSchema.parse({
+        id: "proposal:1",
+        projectId: "project:sandcastle",
+        departmentId: "department:software-rnd",
+        currentRevisionId: "proposal-revision:2",
+        currentState: "approved",
+        revisions: [
+          {
+            id: "proposal-revision:2",
+            revision: 2,
+            supersedesRevisionId: "proposal-revision:1",
+            content,
+            hash,
+            authoredBy: {
+              type: "human",
+              id: "human:1",
+              authenticatedBy: "local-session",
+            },
+            lifecycle: [
+              { state: "draft", createdAt },
+              { state: "proposed", createdAt },
+              { state: "awaiting-human", createdAt },
+            ],
+            decision,
+            createdAt,
+          },
+        ],
+        nextActions: ["apply"],
         createdAt,
         updatedAt: createdAt,
       }),
     );
 
     assert.doesNotThrow(() =>
-      ImprovementApplicationFinalizeSchema.parse({
-        state: "applied",
-        targetRevisionRef: "skill-flow-revision:8",
-        validationEvidence: [],
-        observedAt: createdAt,
-      }),
-    );
-    assert.doesNotThrow(() =>
-      ImprovementApplicationFinalizeSchema.parse({
-        state: "rolled-back",
-        rollbackRevisionRef: "skill-flow-revision:9",
-        observedAt: createdAt,
+      ImprovementApplicationOperationViewSchema.parse({
+        id: "operation:1",
+        projectId: "project:sandcastle",
+        proposalId: "proposal:1",
+        proposalRevisionId: "proposal-revision:2",
+        proposalRevisionHash: hash,
+        approvedDecisionId: "decision:2",
+        approvedDecisionHash: hash,
+        target: harnessTarget,
+        canonicalRequestHash: hash,
+        state: "reconciling",
+        deterministicEffectId: "improvement-effect:operation:1:apply",
+        receipts: [],
+        observations: [
+          {
+            id: "observation:1",
+            phase: "apply",
+            outcome: "insufficient-evidence",
+            evidenceRefs: ["target-inspection:1"],
+            hash,
+            observedAt: createdAt,
+          },
+        ],
+        reconciliations: [],
+        validations: [],
+        rollbacks: [],
+        nextActions: ["reconcile"],
+        createdAt,
+        updatedAt: createdAt,
       }),
     );
   });
 
-  it("keeps human actor injection separate from command inputs and freezes expected hashes", () => {
-    const proposeCommand = {
-      type: "improvement.proposal.propose",
-      proposal: {
-        proposalId: "improvement-proposal-1",
-        revisionId: "improvement-proposal-revision-1",
-        projectId: "project:sandcastle",
-        departmentId: "software-rnd",
-        supersedesRevisionId: null,
-        content,
-      },
-    } as const;
-    const decideCommand = {
-      type: "improvement.proposal.decide",
-      proposalId: "improvement-proposal-1",
-      proposalRevisionId: "improvement-proposal-revision-1",
-      expectedProposalRevisionHash: hash,
-      decision: "approved",
-      reason: "Evidence supports the backoff change.",
-      evidenceRefs: ["improvement-review:1"],
-    } as const;
-    const applyCommand = {
-      type: "improvement.application.apply",
-      application: {
-        applicationOperationId: "improvement-application-1",
-        proposalId: "improvement-proposal-1",
-        approvedDecisionId: "improvement-decision-1",
-        expectedApprovedDecisionHash: hash,
-        targetKind: "skill-flow",
-        targetId: "skill-flow:verify",
-        expectedTargetRevisionRef: "skill-flow-revision:7",
-        authorization: {
-          reason: "Apply the approved change.",
-          evidenceRefs: ["improvement-decision:1"],
-        },
-      },
-    } as const;
-
+  it("separates human-only apply from human-or-worker validation authority", () => {
     assert.doesNotThrow(() =>
-      ImprovementProposalProposeEnvelopeCommandSchema.parse(proposeCommand),
-    );
-    assert.doesNotThrow(() =>
-      ImprovementProposalDecideEnvelopeCommandSchema.parse(decideCommand),
-    );
-    assert.doesNotThrow(() =>
-      ImprovementApplicationApplyEnvelopeCommandSchema.parse(applyCommand),
-    );
-    assert.doesNotThrow(() => EnvelopeCommandSchema.parse(proposeCommand));
-    assert.doesNotThrow(() => EnvelopeCommandSchema.parse(decideCommand));
-    assert.doesNotThrow(() => EnvelopeCommandSchema.parse(applyCommand));
-
-    // The renderer-facing propose input carries no actor.
-    assert.ok(!("proposedBy" in proposeCommand.proposal));
-    // The runtime-facing decision requires the verified local-session human.
-    assert.doesNotThrow(() =>
-      ImprovementProposalDecisionSchema.parse({
-        proposalId: "improvement-proposal-1",
-        proposalRevisionId: "improvement-proposal-revision-1",
+      ImprovementApplicationApplyCommandInputSchema.parse({
+        operationId: "operation:1",
+        proposalId: "proposal:1",
+        proposalRevisionId: "proposal-revision:2",
         expectedProposalRevisionHash: hash,
-        decision: "approved",
+        approvedDecisionId: "decision:2",
+        expectedApprovedDecisionHash: hash,
+        target: harnessTarget,
+        confirmation: "Append the approved governed Harness revision.",
+        reason: "Apply the approved exact revision.",
+        evidenceRefs: ["decision:2"],
+      }),
+    );
+    assert.doesNotThrow(() =>
+      ImprovementApplicationValidateRequestSchema.parse({
+        operationId: "operation:1",
+        expectedOperationHash: hash,
+        afterEvidence: evidence,
         actor: {
-          type: "human",
-          id: "human-1",
-          authenticatedBy: "local-session",
+          type: "runtime-worker",
+          id: "runtime-worker:statistics",
+          authenticatedBy: "runtime",
         },
-        reason: "Evidence supports the backoff change.",
-        evidenceRefs: ["improvement-review:1"],
+        reason: "Compare the exact metric set.",
+        evidenceRefs: ["statistics-evidence:1"],
       }),
-    );
-
-    assert.doesNotThrow(() =>
-      ImprovementProposalInspectQuerySchema.parse({
-        type: "improvement-proposals.inspect",
-        proposalId: "improvement-proposal-1",
-      }),
-    );
-    assert.doesNotThrow(() =>
-      ImprovementProposalListQuerySchema.parse({
-        type: "improvement-proposals.list",
-        projectId: "project:sandcastle",
-      }),
-    );
-    assert.doesNotThrow(() =>
-      CompanyQuerySchema.parse({
-        type: "improvement-proposals.inspect",
-        proposalId: "improvement-proposal-1",
-      }),
-    );
-    assert.doesNotThrow(() =>
-      CompanyQuerySchema.parse({
-        type: "improvement-proposals.list",
-        departmentId: "software-rnd",
-      }),
-    );
-
-    assert.equal(
-      ImprovementProposalErrorCodeSchema.parse(
-        "IMPROVEMENT_APPLICATION_ID_REUSE",
-      ),
-      "IMPROVEMENT_APPLICATION_ID_REUSE",
     );
   });
 });
