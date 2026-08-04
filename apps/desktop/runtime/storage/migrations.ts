@@ -6,7 +6,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 51;
+export const CURRENT_SCHEMA_VERSION = 52;
 
 interface CompanyMigration {
   readonly version: number;
@@ -6392,6 +6392,188 @@ const migrations: readonly CompanyMigration[] = [
           if (incompatible.length > 0) {
             throw new Error(
               `Existing Release operation v51 schema is incompatible: ${[
+                ...new Set(incompatible),
+              ]
+                .sort()
+                .join(", ")}`,
+            );
+          }
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
+  {
+    version: 52,
+    name: "improvement_proposal_foundation",
+    migrate: (database) => {
+      const createSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE improvement_proposals (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            department_id TEXT NOT NULL REFERENCES departments(id),
+            current_revision_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            status TEXT NOT NULL CHECK (status IN ('draft', 'proposed', 'awaiting-human', 'approved', 'rejected')),
+            decision_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_proposals_project_idx
+            ON improvement_proposals(project_id, created_at, id);
+          CREATE INDEX improvement_proposals_department_idx
+            ON improvement_proposals(department_id, created_at, id);
+          CREATE TRIGGER improvement_proposals_identity_update
+            BEFORE UPDATE ON improvement_proposals
+            WHEN NEW.id <> OLD.id
+              OR NEW.project_id <> OLD.project_id
+              OR NEW.department_id <> OLD.department_id
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal identity is immutable'); END;
+          CREATE TRIGGER improvement_proposals_immutable_delete
+            BEFORE DELETE ON improvement_proposals
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal is immutable'); END;
+
+          CREATE TABLE improvement_proposal_revisions (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes_revision_id TEXT REFERENCES improvement_proposal_revisions(id),
+            content_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            proposed_by_actor_type TEXT NOT NULL CHECK (proposed_by_actor_type IN ('human', 'runtime-worker')),
+            proposed_by_actor_id TEXT NOT NULL,
+            proposed_by_authenticated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(proposal_id, revision)
+          ) STRICT;
+          CREATE INDEX improvement_proposal_revisions_proposal_idx
+            ON improvement_proposal_revisions(proposal_id, revision, id);
+          CREATE TRIGGER improvement_proposal_revisions_immutable_update
+            BEFORE UPDATE ON improvement_proposal_revisions
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal revision is immutable'); END;
+          CREATE TRIGGER improvement_proposal_revisions_immutable_delete
+            BEFORE DELETE ON improvement_proposal_revisions
+            BEGIN SELECT RAISE(ABORT, 'Improvement proposal revision is immutable'); END;
+
+          CREATE TABLE improvement_decisions (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
+            proposal_revision_id TEXT NOT NULL UNIQUE REFERENCES improvement_proposal_revisions(id),
+            proposal_revision_hash TEXT NOT NULL CHECK (length(proposal_revision_hash) = 64),
+            decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+            actor_type TEXT NOT NULL CHECK (actor_type = 'human'),
+            actor_id TEXT NOT NULL,
+            authenticated_by TEXT NOT NULL CHECK (authenticated_by = 'local-session'),
+            reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
+            evidence_refs_json TEXT NOT NULL,
+            decision_hash TEXT NOT NULL CHECK (length(decision_hash) = 64),
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_decisions_proposal_idx
+            ON improvement_decisions(proposal_id, created_at, id);
+          CREATE TRIGGER improvement_decisions_immutable_update
+            BEFORE UPDATE ON improvement_decisions
+            BEGIN SELECT RAISE(ABORT, 'Improvement decision is immutable'); END;
+          CREATE TRIGGER improvement_decisions_immutable_delete
+            BEFORE DELETE ON improvement_decisions
+            BEGIN SELECT RAISE(ABORT, 'Improvement decision is immutable'); END;
+
+          CREATE TABLE improvement_application_operations (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            proposal_id TEXT NOT NULL REFERENCES improvement_proposals(id),
+            approved_decision_id TEXT NOT NULL REFERENCES improvement_decisions(id),
+            approved_decision_hash TEXT NOT NULL CHECK (length(approved_decision_hash) = 64),
+            target_kind TEXT NOT NULL CHECK (target_kind IN ('harness', 'spec', 'template', 'skill-flow')),
+            target_id TEXT NOT NULL,
+            authorization_json TEXT NOT NULL,
+            authorization_hash TEXT NOT NULL CHECK (length(authorization_hash) = 64),
+            request_json TEXT NOT NULL,
+            canonical_request_hash TEXT NOT NULL CHECK (length(canonical_request_hash) = 64),
+            state TEXT NOT NULL CHECK (state IN ('applying', 'applied', 'apply-failed', 'validated', 'rollback-requested', 'rolled-back')),
+            target_revision_ref TEXT,
+            rollback_revision_ref TEXT,
+            validation_evidence_json TEXT NOT NULL,
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX improvement_application_operations_proposal_idx
+            ON improvement_application_operations(proposal_id, created_at, id);
+          CREATE TRIGGER improvement_application_operations_identity_update
+            BEFORE UPDATE ON improvement_application_operations
+            WHEN NEW.id <> OLD.id
+              OR NEW.idempotency_key <> OLD.idempotency_key
+              OR NEW.proposal_id <> OLD.proposal_id
+              OR NEW.approved_decision_id <> OLD.approved_decision_id
+              OR NEW.approved_decision_hash <> OLD.approved_decision_hash
+              OR NEW.target_kind <> OLD.target_kind
+              OR NEW.target_id <> OLD.target_id
+              OR NEW.authorization_json <> OLD.authorization_json
+              OR NEW.authorization_hash <> OLD.authorization_hash
+              OR NEW.request_json <> OLD.request_json
+              OR NEW.canonical_request_hash <> OLD.canonical_request_hash
+              OR NEW.command_id <> OLD.command_id
+              OR NEW.created_at <> OLD.created_at
+            BEGIN SELECT RAISE(ABORT, 'Improvement application operation identity is immutable'); END;
+          CREATE TRIGGER improvement_application_operations_immutable_delete
+            BEFORE DELETE ON improvement_application_operations
+            BEGIN SELECT RAISE(ABORT, 'Improvement application operation is immutable'); END;
+        `);
+
+      const objects = (target: DatabaseSync) =>
+        target
+          .prepare(
+            `SELECT type, name, sql FROM sqlite_schema
+              WHERE name LIKE 'improvement%'
+              ORDER BY name`,
+          )
+          .all() as Array<{
+          readonly type: string;
+          readonly name: string;
+          readonly sql: string;
+        }>;
+      const normalizeSql = (sql: string): string =>
+        sql
+          .replace(/\s+/g, " ")
+          .replace(/\s*([(),])\s*/g, "$1")
+          .trim()
+          .toLowerCase();
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createSchema(reference);
+        const expected = objects(reference);
+        const actual = objects(database);
+        if (actual.length === 0) {
+          createSchema(database);
+        } else {
+          const actualByName = new Map(
+            actual.map((entry) => [entry.name, entry]),
+          );
+          const expectedNames = new Set(expected.map((entry) => entry.name));
+          const incompatible = expected
+            .filter((entry) => {
+              const found = actualByName.get(entry.name);
+              return (
+                !found ||
+                found.type !== entry.type ||
+                normalizeSql(found.sql) !== normalizeSql(entry.sql)
+              );
+            })
+            .map((entry) => entry.name);
+          incompatible.push(
+            ...actual
+              .filter((entry) => !expectedNames.has(entry.name))
+              .map((entry) => entry.name),
+          );
+          if (incompatible.length > 0) {
+            throw new Error(
+              `Existing Improvement proposal v52 schema is incompatible: ${[
                 ...new Set(incompatible),
               ]
                 .sort()

@@ -3,8 +3,15 @@ import {
   ReleaseOperationCreateCommandInputSchema,
   type ReleaseOperationView,
 } from "./release/releaseOperationContracts.js";
+import {
+  ImprovementApplicationApplyCommandInputSchema,
+  ImprovementProposalProposeCommandInputSchema,
+  type ImprovementApplicationOperationView,
+  type ImprovementProposalView,
+} from "./improvement/improvementProposalContracts.js";
 
 export * from "./release/releaseOperationContracts.js";
+export * from "./improvement/improvementProposalContracts.js";
 
 export const RuntimeHealthSchema = z.object({
   status: z.literal("ok"),
@@ -3606,6 +3613,21 @@ export const ReleaseOperationListQuerySchema = z
   })
   .strict();
 
+export const ImprovementProposalInspectQuerySchema = z
+  .object({
+    type: z.literal("improvement-proposals.inspect"),
+    proposalId: z.string().trim().min(1),
+  })
+  .strict();
+
+export const ImprovementProposalListQuerySchema = z
+  .object({
+    type: z.literal("improvement-proposals.list"),
+    projectId: z.string().trim().min(1).optional(),
+    departmentId: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
 export const CompanyQuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("runtime.health") }),
   z.object({ type: z.literal("agent.catalog.inspect") }),
@@ -3672,6 +3694,8 @@ export const CompanyQuerySchema = z.discriminatedUnion("type", [
   }),
   ReleaseOperationInspectQuerySchema,
   ReleaseOperationListQuerySchema,
+  ImprovementProposalInspectQuerySchema,
+  ImprovementProposalListQuerySchema,
   z.object({
     type: z.literal("product.discovery.inspect"),
     projectId: z.string().trim().min(1),
@@ -3768,6 +3792,16 @@ export type ReleaseOperationQueryResult<Query extends ReleaseOperationQuery> =
 
 export type ReleaseOperationCommandResult = ReleaseOperationView;
 
+export type ImprovementProposalQuery =
+  | z.infer<typeof ImprovementProposalInspectQuerySchema>
+  | z.infer<typeof ImprovementProposalListQuerySchema>;
+
+export type ImprovementProposalQueryResult<
+  Query extends ImprovementProposalQuery,
+> = Query["type"] extends "improvement-proposals.inspect"
+  ? ImprovementProposalView
+  : readonly ImprovementProposalView[];
+
 export const QueryEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
   requestId: z.string().trim().min(1),
@@ -3832,59 +3866,63 @@ export type CompanyQueryResult<Query extends CompanyQuery> =
                                             ? ReleaseOperationView
                                             : Query["type"] extends "release-operations.list"
                                               ? readonly ReleaseOperationView[]
-                                              : Query["type"] extends "product.discovery.inspect"
-                                                ? ProductDiscoveryView
-                                                : Query["type"] extends "product-review.inspect"
-                                                  ? ProductReviewStateView
-                                                  : Query["type"] extends "technical-review.inspect"
-                                                    ? TechnicalReviewStateView
-                                                    : Query["type"] extends "departments.list"
-                                                      ? readonly CompanyDepartment[]
-                                                      : Query["type"] extends "department.inspect"
-                                                        ? DepartmentInspect
-                                                        : Query["type"] extends "department.skill-configuration.inspect"
-                                                          ? SkillConfigurationView
-                                                          : Query["type"] extends "department.pipeline.inspect"
-                                                            ? DepartmentPipelineEditorView
-                                                            : Query["type"] extends "department.pipeline.validate"
-                                                              ? PipelineValidationResult
-                                                              : Query["type"] extends "runs.list"
-                                                                ? readonly DepartmentRunView[]
-                                                                : Query["type"] extends "run.supervision.inspect"
-                                                                  ? RunSupervisionView
-                                                                  : Query["type"] extends "execution.inspect"
-                                                                    ? ExecutionInspectionView
-                                                                    : Query["type"] extends "runtime.audit"
-                                                                      ? readonly RuntimeAuditRecord[]
-                                                                      : Query["type"] extends
-                                                                            | "runtime.events"
-                                                                            | "runtime.events.consumer"
-                                                                        ? readonly RuntimeEventRecord[]
-                                                                        : Query["type"] extends "artifacts.list"
-                                                                          ? readonly ArtifactVersionView[]
-                                                                          : Query["type"] extends "artifact.inspect"
-                                                                            ? ArtifactLineageView
-                                                                            : Query["type"] extends "artifact.lineage.inspect"
-                                                                              ? ArtifactLineageGraphView
-                                                                              : Query["type"] extends "interactions.list"
-                                                                                ? readonly InteractionView[]
-                                                                                : Query["type"] extends "interaction.inspect"
-                                                                                  ? InteractionView
-                                                                                  : Query["type"] extends "ag-ui.events"
-                                                                                    ? AgUiReplayView
-                                                                                    : Query["type"] extends "memory.candidates.list"
-                                                                                      ? readonly MemoryCandidateView[]
-                                                                                      : Query["type"] extends "memory.records.list"
-                                                                                        ? readonly LegacyMemoryRecordView[]
-                                                                                        : Query["type"] extends "memory.entries.list"
-                                                                                          ? readonly MemoryEntryView[]
-                                                                                          : Query["type"] extends "memory.selections.list"
-                                                                                            ? readonly RunMemorySelectionView[]
-                                                                                            : Query["type"] extends "memory.legacy-records.list"
-                                                                                              ? readonly LegacyMemoryRecordView[]
-                                                                                              : Query["type"] extends "runtime.diagnostics"
-                                                                                                ? RuntimeDiagnosticsView
-                                                                                                : DepartmentRunView;
+                                              : Query["type"] extends "improvement-proposals.inspect"
+                                                ? ImprovementProposalView
+                                                : Query["type"] extends "improvement-proposals.list"
+                                                  ? readonly ImprovementProposalView[]
+                                                  : Query["type"] extends "product.discovery.inspect"
+                                                    ? ProductDiscoveryView
+                                                    : Query["type"] extends "product-review.inspect"
+                                                      ? ProductReviewStateView
+                                                      : Query["type"] extends "technical-review.inspect"
+                                                        ? TechnicalReviewStateView
+                                                        : Query["type"] extends "departments.list"
+                                                          ? readonly CompanyDepartment[]
+                                                          : Query["type"] extends "department.inspect"
+                                                            ? DepartmentInspect
+                                                            : Query["type"] extends "department.skill-configuration.inspect"
+                                                              ? SkillConfigurationView
+                                                              : Query["type"] extends "department.pipeline.inspect"
+                                                                ? DepartmentPipelineEditorView
+                                                                : Query["type"] extends "department.pipeline.validate"
+                                                                  ? PipelineValidationResult
+                                                                  : Query["type"] extends "runs.list"
+                                                                    ? readonly DepartmentRunView[]
+                                                                    : Query["type"] extends "run.supervision.inspect"
+                                                                      ? RunSupervisionView
+                                                                      : Query["type"] extends "execution.inspect"
+                                                                        ? ExecutionInspectionView
+                                                                        : Query["type"] extends "runtime.audit"
+                                                                          ? readonly RuntimeAuditRecord[]
+                                                                          : Query["type"] extends
+                                                                                | "runtime.events"
+                                                                                | "runtime.events.consumer"
+                                                                            ? readonly RuntimeEventRecord[]
+                                                                            : Query["type"] extends "artifacts.list"
+                                                                              ? readonly ArtifactVersionView[]
+                                                                              : Query["type"] extends "artifact.inspect"
+                                                                                ? ArtifactLineageView
+                                                                                : Query["type"] extends "artifact.lineage.inspect"
+                                                                                  ? ArtifactLineageGraphView
+                                                                                  : Query["type"] extends "interactions.list"
+                                                                                    ? readonly InteractionView[]
+                                                                                    : Query["type"] extends "interaction.inspect"
+                                                                                      ? InteractionView
+                                                                                      : Query["type"] extends "ag-ui.events"
+                                                                                        ? AgUiReplayView
+                                                                                        : Query["type"] extends "memory.candidates.list"
+                                                                                          ? readonly MemoryCandidateView[]
+                                                                                          : Query["type"] extends "memory.records.list"
+                                                                                            ? readonly LegacyMemoryRecordView[]
+                                                                                            : Query["type"] extends "memory.entries.list"
+                                                                                              ? readonly MemoryEntryView[]
+                                                                                              : Query["type"] extends "memory.selections.list"
+                                                                                                ? readonly RunMemorySelectionView[]
+                                                                                                : Query["type"] extends "memory.legacy-records.list"
+                                                                                                  ? readonly LegacyMemoryRecordView[]
+                                                                                                  : Query["type"] extends "runtime.diagnostics"
+                                                                                                    ? RuntimeDiagnosticsView
+                                                                                                    : DepartmentRunView;
 
 export const ArtifactRegisterEnvelopeCommandSchema = z
   .object({
@@ -5160,6 +5198,37 @@ export type ReleaseOperationEnvelopeCommand =
   | z.infer<typeof ReleaseOperationCreateEnvelopeCommandSchema>
   | z.infer<typeof ReleaseOperationReconcileEnvelopeCommandSchema>;
 
+export const ImprovementProposalProposeEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("improvement.proposal.propose"),
+    proposal: ImprovementProposalProposeCommandInputSchema,
+  })
+  .strict();
+
+export const ImprovementProposalDecideEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("improvement.proposal.decide"),
+    proposalId: z.string().trim().min(1),
+    proposalRevisionId: z.string().trim().min(1),
+    expectedProposalRevisionHash: Sha256Schema,
+    decision: z.enum(["approved", "rejected"]),
+    reason: z.string().trim().min(1).max(4_000),
+    evidenceRefs: z.array(z.string().trim().min(1).max(512)).min(1).max(64),
+  })
+  .strict();
+
+export const ImprovementApplicationApplyEnvelopeCommandSchema = z
+  .object({
+    type: z.literal("improvement.application.apply"),
+    application: ImprovementApplicationApplyCommandInputSchema,
+  })
+  .strict();
+
+export type ImprovementEnvelopeCommand =
+  | z.infer<typeof ImprovementProposalProposeEnvelopeCommandSchema>
+  | z.infer<typeof ImprovementProposalDecideEnvelopeCommandSchema>
+  | z.infer<typeof ImprovementApplicationApplyEnvelopeCommandSchema>;
+
 export type DeliveryQualityEnvelopeCommand =
   | z.infer<typeof DeliveryCandidateInputFreezeEnvelopeCommandSchema>
   | z.infer<typeof CandidateGateInputPrepareEnvelopeCommandSchema>
@@ -5339,6 +5408,9 @@ export const EnvelopeCommandSchema = z.discriminatedUnion("type", [
   HumanReleaseRecoverEnvelopeCommandSchema,
   ReleaseOperationCreateEnvelopeCommandSchema,
   ReleaseOperationReconcileEnvelopeCommandSchema,
+  ImprovementProposalProposeEnvelopeCommandSchema,
+  ImprovementProposalDecideEnvelopeCommandSchema,
+  ImprovementApplicationApplyEnvelopeCommandSchema,
   ArtifactRegisterEnvelopeCommandSchema,
   ArtifactFinalizeEnvelopeCommandSchema,
   ArtifactSupersedeEnvelopeCommandSchema,
@@ -5379,60 +5451,66 @@ export type EnvelopeCommandResult<Command extends EnvelopeCommand> =
                 ? CriticalRiskEscalationDecisionView
                 : Command["type"] extends ReleaseOperationEnvelopeCommand["type"]
                   ? ReleaseOperationCommandResult
-                  : Command["type"] extends DeliveryEnvelopeCommand["type"]
-                    ? DeliveryCandidateView
-                    : Command["type"] extends WorkspaceEnvelopeCommand["type"]
-                      ? WorkspaceAllocationView
-                      : Command["type"] extends WorkPackageEnvelopeCommand["type"]
-                        ? WorkPackageGraphView
-                        : Command["type"] extends CodeReviewEnvelopeCommand["type"]
-                          ? CodeReviewView
-                          : Command["type"] extends IntegrationEnvelopeCommand["type"]
-                            ? IntegrationGenerationView
-                            : Command["type"] extends "test.case-revision.register"
-                              ? TestCaseRevisionView
-                              : Command["type"] extends TestEnvelopeCommand["type"]
-                                ? TestRunView
-                                : Command["type"] extends "application.register"
-                                  ? ApplicationView
-                                  : Command["type"] extends
-                                        | "application-spec.revise"
-                                        | "technical-baseline-proposal.revise"
-                                        | "technical-review.start"
-                                        | "technical-gate.promote"
-                                    ? TechnicalReviewStateView
-                                    : Command["type"] extends "interaction.prompt"
-                                      ? InteractionTurnView
+                  : Command["type"] extends
+                        | "improvement.proposal.propose"
+                        | "improvement.proposal.decide"
+                    ? ImprovementProposalView
+                    : Command["type"] extends "improvement.application.apply"
+                      ? ImprovementApplicationOperationView
+                      : Command["type"] extends DeliveryEnvelopeCommand["type"]
+                        ? DeliveryCandidateView
+                        : Command["type"] extends WorkspaceEnvelopeCommand["type"]
+                          ? WorkspaceAllocationView
+                          : Command["type"] extends WorkPackageEnvelopeCommand["type"]
+                            ? WorkPackageGraphView
+                            : Command["type"] extends CodeReviewEnvelopeCommand["type"]
+                              ? CodeReviewView
+                              : Command["type"] extends IntegrationEnvelopeCommand["type"]
+                                ? IntegrationGenerationView
+                                : Command["type"] extends "test.case-revision.register"
+                                  ? TestCaseRevisionView
+                                  : Command["type"] extends TestEnvelopeCommand["type"]
+                                    ? TestRunView
+                                    : Command["type"] extends "application.register"
+                                      ? ApplicationView
                                       : Command["type"] extends
-                                            | "node-attempt.cancel"
-                                            | "interaction-turn.cancel"
-                                            | "run.governed-intervention"
-                                        ? RunSupervisionView
-                                        : Command["type"] extends "interaction.turn.cancel"
+                                            | "application-spec.revise"
+                                            | "technical-baseline-proposal.revise"
+                                            | "technical-review.start"
+                                            | "technical-gate.promote"
+                                        ? TechnicalReviewStateView
+                                        : Command["type"] extends "interaction.prompt"
                                           ? InteractionTurnView
-                                          : Command["type"] extends "permission.decide"
-                                            ? PermissionRequestView
-                                            : Command["type"] extends
-                                                  | "memory.candidate.propose"
-                                                  | "memory.review.start"
-                                              ? MemoryCandidateView
-                                              : Command["type"] extends "memory.candidate.decide"
-                                                ? MemoryDecisionView
-                                                : Command["type"] extends "memory.entry.select-for-run"
-                                                  ? RunMemorySelectionView
-                                                  : Command["type"] extends ReviewEnvelopeCommand["type"]
-                                                    ? ReviewTopicView
-                                                    : Command["type"] extends ProductReviewEnvelopeCommand["type"]
-                                                      ? ProductReviewStateView
-                                                      : Command["type"] extends ProductEnvelopeCommand["type"]
-                                                        ? ProductDiscoveryView
-                                                        : Command["type"] extends "artifact.version.register"
-                                                          ? ArtifactRegistrationView
-                                                          : Command["type"] extends
-                                                                | "artifact.version.finalize"
-                                                                | "artifact.version.supersede"
-                                                            ? ArtifactVersionView
-                                                            : ProjectEditorView;
+                                          : Command["type"] extends
+                                                | "node-attempt.cancel"
+                                                | "interaction-turn.cancel"
+                                                | "run.governed-intervention"
+                                            ? RunSupervisionView
+                                            : Command["type"] extends "interaction.turn.cancel"
+                                              ? InteractionTurnView
+                                              : Command["type"] extends "permission.decide"
+                                                ? PermissionRequestView
+                                                : Command["type"] extends
+                                                      | "memory.candidate.propose"
+                                                      | "memory.review.start"
+                                                  ? MemoryCandidateView
+                                                  : Command["type"] extends "memory.candidate.decide"
+                                                    ? MemoryDecisionView
+                                                    : Command["type"] extends "memory.entry.select-for-run"
+                                                      ? RunMemorySelectionView
+                                                      : Command["type"] extends ReviewEnvelopeCommand["type"]
+                                                        ? ReviewTopicView
+                                                        : Command["type"] extends ProductReviewEnvelopeCommand["type"]
+                                                          ? ProductReviewStateView
+                                                          : Command["type"] extends ProductEnvelopeCommand["type"]
+                                                            ? ProductDiscoveryView
+                                                            : Command["type"] extends "artifact.version.register"
+                                                              ? ArtifactRegistrationView
+                                                              : Command["type"] extends
+                                                                    | "artifact.version.finalize"
+                                                                    | "artifact.version.supersede"
+                                                                ? ArtifactVersionView
+                                                                : ProjectEditorView;
 
 export const CommandEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),

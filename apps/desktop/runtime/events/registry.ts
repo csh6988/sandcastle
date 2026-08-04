@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RUNTIME_EVENT_REGISTRY_VERSION = 19;
+export const RUNTIME_EVENT_REGISTRY_VERSION = 20;
 
 export type RuntimeEventRetentionClass = "transient" | "standard" | "durable";
 
@@ -40,6 +40,8 @@ export interface RuntimeEventScope {
   readonly deliveryCandidateId?: string;
   readonly releaseDecisionId?: string;
   readonly releaseOperationId?: string;
+  readonly improvementProposalId?: string;
+  readonly improvementApplicationOperationId?: string;
   readonly candidateGateInputId?: string;
   readonly defectId?: string;
   readonly permissionRequestId?: string;
@@ -699,6 +701,37 @@ const releaseOperationInvalidatedEventPayloadSchema = z
   .object({
     releaseOperationId: z.string().trim().min(1),
     candidateId: z.string().trim().min(1),
+  })
+  .strict();
+
+const improvementProposalCreatedEventPayloadSchema = z
+  .object({
+    proposalId: z.string().trim().min(1),
+    proposalRevisionId: z.string().trim().min(1),
+    proposalRevisionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const improvementProposalDecidedEventPayloadSchema = z
+  .object({
+    proposalId: z.string().trim().min(1),
+    proposalRevisionId: z.string().trim().min(1),
+    decision: z.enum(["approved", "rejected"]),
+  })
+  .strict();
+
+const improvementApplicationCompletedEventPayloadSchema = z
+  .object({
+    applicationOperationId: z.string().trim().min(1),
+    proposalId: z.string().trim().min(1),
+    state: z.enum([
+      "applying",
+      "applied",
+      "apply-failed",
+      "validated",
+      "rollback-requested",
+      "rolled-back",
+    ]),
   })
   .strict();
 
@@ -1456,6 +1489,38 @@ const definitions = [
       "releaseOperationId",
     ],
     payloadSchema: releaseOperationInvalidatedEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "improvement.proposal.created",
+    schemaVersion: 1,
+    requiredTopLevelIds: ["companyId", "projectId", "improvementProposalId"],
+    payloadSchema: improvementProposalCreatedEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "improvement.proposal.decided",
+    schemaVersion: 1,
+    requiredTopLevelIds: ["companyId", "projectId", "improvementProposalId"],
+    payloadSchema: improvementProposalDecidedEventPayloadSchema,
+    retentionClass: "durable",
+    agUiMapping: "custom",
+    acpMapping: "custom",
+  },
+  {
+    type: "improvement.application.completed",
+    schemaVersion: 1,
+    requiredTopLevelIds: [
+      "companyId",
+      "projectId",
+      "improvementProposalId",
+      "improvementApplicationOperationId",
+    ],
+    payloadSchema: improvementApplicationCompletedEventPayloadSchema,
     retentionClass: "durable",
     agUiMapping: "custom",
     acpMapping: "custom",

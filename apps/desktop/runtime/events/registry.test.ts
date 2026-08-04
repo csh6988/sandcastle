@@ -134,6 +134,9 @@ const agUiRegistryFixture = [
   "delivery.release.changes-requested@1:custom",
   "delivery.release.rework-activated@1:custom",
   "delivery.release-operation.invalidated@1:custom",
+  "improvement.proposal.created@1:custom",
+  "improvement.proposal.decided@1:custom",
+  "improvement.application.completed@1:custom",
   "interaction.turn.started@1:custom",
   "interaction.turn.reconciling@1:custom",
   "message.delta@1:mapped",
@@ -179,7 +182,7 @@ describe("Runtime Event registry", () => {
   it("keeps a golden AG-UI policy fixture for every mapped schema version", () => {
     const registry = createRuntimeEventRegistry();
     assert.equal(registry.version, RUNTIME_EVENT_REGISTRY_VERSION);
-    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 19);
+    assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 20);
 
     assert.deepEqual(
       registry
@@ -590,7 +593,7 @@ describe("Runtime Event registry", () => {
   it("adds v19 release-operation invalidation without publishing effect progress", () => {
     const registry = createRuntimeEventRegistry();
 
-    assert.equal(registry.version, 19);
+    assert.equal(registry.version, 20);
     assert.doesNotThrow(() =>
       registry.validate({
         type: "delivery.release-operation.invalidated",
@@ -611,6 +614,59 @@ describe("Runtime Event registry", () => {
       registry.get("delivery.release-operation.item-running"),
       undefined,
     );
+  });
+
+  it("adds v20 invalidation-only Improvement-proposal events without an application adapter", () => {
+    const registry = createRuntimeEventRegistry();
+
+    assert.equal(registry.version, 20);
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "improvement.proposal.created",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          improvementProposalId: "improvement-proposal-1",
+        },
+        payload: {
+          proposalId: "improvement-proposal-1",
+          proposalRevisionId: "improvement-proposal-revision-1",
+          proposalRevisionHash: "a".repeat(64),
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "improvement.proposal.decided",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          improvementProposalId: "improvement-proposal-1",
+        },
+        payload: {
+          proposalId: "improvement-proposal-1",
+          proposalRevisionId: "improvement-proposal-revision-1",
+          decision: "approved",
+        },
+      }),
+    );
+    assert.doesNotThrow(() =>
+      registry.validate({
+        type: "improvement.application.completed",
+        scope: {
+          companyId: "company",
+          projectId: "project-1",
+          improvementProposalId: "improvement-proposal-1",
+          improvementApplicationOperationId: "improvement-application-1",
+        },
+        payload: {
+          applicationOperationId: "improvement-application-1",
+          proposalId: "improvement-proposal-1",
+          state: "applied",
+        },
+      }),
+    );
+    assert.equal(registry.get("improvement.application.item-running"), undefined);
   });
 
   it("accepts the canonical project.updated contract", () => {

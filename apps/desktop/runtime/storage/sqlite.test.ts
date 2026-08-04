@@ -492,6 +492,10 @@ describe("Company database migrations", () => {
               version: 51,
               name: "idempotent_release_operations",
             },
+            {
+              version: 52,
+              name: "improvement_proposal_foundation",
+            },
           ],
         );
         assert.deepEqual(
@@ -2450,8 +2454,8 @@ describe("Test authority schema migration", () => {
   it("upgrades through the historical v47 contract to the complete immutable v48 Test schema", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 51);
-    assert.equal(opened.schemaVersion(), 51);
+    assert.equal(CURRENT_SCHEMA_VERSION, 52);
+    assert.equal(opened.schemaVersion(), 52);
     opened.close();
 
     const database = new DatabaseSync(
@@ -2546,7 +2550,7 @@ describe("Test authority schema migration", () => {
     const historical = new DatabaseSync(path);
     restoreHistoricalV47Contract(historical);
 
-    assert.equal(migrateCompanyDatabase(historical), 51);
+    assert.equal(migrateCompanyDatabase(historical), 52);
     assert.deepEqual(
       historical
         .prepare(
@@ -2594,7 +2598,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 48;
       PRAGMA user_version = 47;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 51);
+    assert.equal(migrateCompanyDatabase(compatible), 52);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2664,7 +2668,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 49;
       PRAGMA user_version = 48;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 51);
+    assert.equal(migrateCompanyDatabase(compatible), 52);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2712,7 +2716,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(forward), 51);
+    assert.equal(migrateCompanyDatabase(forward), 52);
     assert.deepEqual(
       forward
         .prepare(
@@ -2751,7 +2755,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 51);
+    assert.equal(migrateCompanyDatabase(compatible), 52);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2785,8 +2789,8 @@ describe("Test authority schema migration", () => {
   it("adds the immutable v51 release-operation claim and observation schema", () => {
     const companyDir = tempCompanyDir();
     const database = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 51);
-    assert.equal(database.schemaVersion(), 51);
+    assert.equal(CURRENT_SCHEMA_VERSION, 52);
+    assert.equal(database.schemaVersion(), 52);
     database.close();
 
     const sqlite = new DatabaseSync(
@@ -2925,12 +2929,12 @@ describe("Test authority schema migration", () => {
     initialized.close();
     const future = new DatabaseSync(path);
     future.exec(`
-      UPDATE schema_metadata SET value = '52' WHERE key = 'schema_version';
-      PRAGMA user_version = 52;
+      UPDATE schema_metadata SET value = '53' WHERE key = 'schema_version';
+      PRAGMA user_version = 53;
     `);
     assert.throws(
       () => migrateCompanyDatabase(future),
-      /Unsupported company database schema version 52/,
+      /Unsupported company database schema version 53/,
     );
     assert.equal(
       (
@@ -2940,7 +2944,7 @@ describe("Test authority schema migration", () => {
           )
           .get() as { readonly value: string }
       ).value,
-      "52",
+      "53",
     );
     future.close();
   });
