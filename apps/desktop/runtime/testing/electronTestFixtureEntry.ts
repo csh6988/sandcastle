@@ -87,8 +87,22 @@ const t26BootstrapHarnessContent = {
 };
 
 const ensureT26BootstrapHarnessRevision = (
-  database: Pick<CompanyDatabase, "governedRevisions">,
+  database: Pick<CompanyDatabase, "governedRevisions" | "path">,
 ): void => {
+  const sqlite = new DatabaseSync(database.path);
+  try {
+    const existing = sqlite
+      .prepare(
+        `SELECT 1 AS present
+           FROM governed_harness_revisions
+          WHERE owner_id = ?
+          LIMIT 1`,
+      )
+      .get("harness:t26-electron");
+    if (existing) return;
+  } finally {
+    sqlite.close();
+  }
   database.governedRevisions.initializeTarget({
     target: {
       targetKind: "harness",
