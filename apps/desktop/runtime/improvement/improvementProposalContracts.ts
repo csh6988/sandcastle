@@ -651,6 +651,14 @@ export const ImprovementApplicationOperationViewSchema = z
     canonicalRequestHash: Sha256Schema,
     state: ImprovementApplicationStateSchema,
     deterministicEffectId: IdSchema,
+    confirmation: ReasonSchema,
+    reason: ReasonSchema,
+    evidenceRefs: EvidenceRefsSchema,
+    appliedBy: VerifiedLocalSessionHumanSchema,
+    latestError: z
+      .object({ code: IdSchema, message: z.string().trim().min(1).max(4_000) })
+      .strict()
+      .nullable(),
     receipts: z.array(ImprovementApplicationReceiptSchema),
     observations: z.array(ImprovementApplicationObservationSchema),
     reconciliations: z.array(ImprovementApplicationReconciliationSchema),

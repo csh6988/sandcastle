@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type {
+  ImprovementApplicationOperationView,
   ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
@@ -87,6 +88,22 @@ const observationText = (
   return `${observation.status === "incomplete" ? t.statisticsIncomplete : t.statisticsUnavailable}: ${observation.reason}`;
 };
 
+const applicationStateLabel = (
+  t: Messages,
+  state: ImprovementApplicationOperationView["state"],
+): string =>
+  ({
+    applying: t.improvementApplicationStateApplying,
+    applied: t.improvementApplicationStateApplied,
+    "apply-failed": t.improvementApplicationStateApplyFailed,
+    reconciling: t.improvementApplicationStateReconciling,
+    unknown: t.improvementApplicationStateUnknown,
+    validated: t.improvementApplicationStateValidated,
+    "rollback-requested": t.improvementApplicationStateRollbackRequested,
+    "rolled-back": t.improvementApplicationStateRolledBack,
+    "rollback-failed": t.improvementApplicationStateRollbackFailed,
+  })[state];
+
 function StatisticsObservations({
   t,
   observations,
@@ -136,6 +153,9 @@ export function ProjectImprovementsPanel({
   onProposeProposal,
   onRequestDecision,
   onDecideProposal,
+  applications,
+  onApplyProposal,
+  onReconcileApplication,
 }: {
   readonly t: Messages;
   readonly query: StatisticsInspectInput;
@@ -166,6 +186,16 @@ export function ProjectImprovementsPanel({
     confirmation: string,
     reason: string,
   ) => void;
+  readonly applications?: readonly ImprovementApplicationOperationView[];
+  readonly onApplyProposal?: (
+    proposal: ImprovementProposalView,
+    operationId: string,
+    confirmation: string,
+    reason: string,
+  ) => void;
+  readonly onReconcileApplication?: (
+    application: ImprovementApplicationOperationView,
+  ) => void;
 }) {
   const [proposalDraft, setProposalDraft] = useState<ImprovementProposalDraft>({
     metricId: "",
@@ -186,6 +216,9 @@ export function ProjectImprovementsPanel({
   ): void => setProposalDraft((current) => ({ ...current, [key]: value }));
   const [decisionConfirmation, setDecisionConfirmation] = useState("");
   const [decisionReason, setDecisionReason] = useState("");
+  const [applicationOperationId, setApplicationOperationId] = useState("");
+  const [applicationConfirmation, setApplicationConfirmation] = useState("");
+  const [applicationReason, setApplicationReason] = useState("");
   const isHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
   const hasGovernedHead =
     proposalDraft.governedHeadRevisionId.trim().length > 0 ||
@@ -491,6 +524,38 @@ export function ProjectImprovementsPanel({
             />
           </label>
         </div>
+        <div className="field-grid two-column">
+          <label>
+            <span>{t.improvementApplicationOperationId}</span>
+            <input
+              id="improvement-application-operation-id"
+              value={applicationOperationId}
+              onChange={(event) =>
+                setApplicationOperationId(event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementApplicationConfirmation}</span>
+            <textarea
+              id="improvement-application-confirmation"
+              value={applicationConfirmation}
+              onChange={(event) =>
+                setApplicationConfirmation(event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementApplicationReason}</span>
+            <textarea
+              id="improvement-application-reason"
+              value={applicationReason}
+              onChange={(event) =>
+                setApplicationReason(event.currentTarget.value)
+              }
+            />
+          </label>
+        </div>
         <div className="overview-inventory" data-improvement-proposal-history>
           {(proposals ?? []).map((proposal) => {
             const currentRevision = proposal.revisions.find(
@@ -651,12 +716,137 @@ export function ProjectImprovementsPanel({
                       {t.improvementReject}
                     </button>
                   ) : null}
+                  {proposal.nextActions.includes("apply") ? (
+                    <button
+                      data-improvement-apply-proposal={proposal.id}
+                      disabled={
+                        busy ||
+                        applicationOperationId.trim().length === 0 ||
+                        applicationConfirmation.trim().length === 0 ||
+                        applicationReason.trim().length === 0 ||
+                        !onApplyProposal
+                      }
+                      onClick={() =>
+                        onApplyProposal?.(
+                          proposal,
+                          applicationOperationId.trim(),
+                          applicationConfirmation.trim(),
+                          applicationReason.trim(),
+                        )
+                      }
+                      type="button"
+                    >
+                      {t.improvementApplicationApply}
+                    </button>
+                  ) : null}
                 </div>
               </article>
             );
           })}
           {(proposals ?? []).length === 0 ? (
             <p>{t.improvementNoProposals}</p>
+          ) : null}
+        </div>
+      </section>
+      <section className="create-panel" data-improvement-applications>
+        <h3>{t.improvementApplicationsTitle}</h3>
+        <div className="overview-inventory">
+          {(applications ?? []).map((application) => (
+            <article
+              data-improvement-application={application.id}
+              key={application.id}
+            >
+              <div className="project-card-top">
+                <strong>{application.id}</strong>
+                <span className="pill">
+                  {applicationStateLabel(t, application.state)}
+                </span>
+              </div>
+              <dl>
+                <div>
+                  <dt>{t.improvementRevision}</dt>
+                  <dd>
+                    {application.proposalRevisionId} ·{" "}
+                    {application.proposalRevisionHash}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t.improvementTarget}</dt>
+                  <dd>
+                    {application.target.targetKind} ·{" "}
+                    {application.target.ownerId}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationState}</dt>
+                  <dd>{applicationStateLabel(t, application.state)}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationEffect}</dt>
+                  <dd>{application.deterministicEffectId}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationConfirmation}</dt>
+                  <dd>{application.confirmation}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationReason}</dt>
+                  <dd>{application.reason}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementEvidence}</dt>
+                  <dd>{application.evidenceRefs.join(" · ")}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationAppliedBy}</dt>
+                  <dd>{application.appliedBy.id}</dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationReceipts}</dt>
+                  <dd>
+                    {application.receipts
+                      .map(
+                        (receipt) =>
+                          `${receipt.phase}:${receipt.disposition}:${receipt.targetRevision?.revisionId ?? "none"}`,
+                      )
+                      .join(" · ") || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t.improvementApplicationObservations}</dt>
+                  <dd>
+                    {application.observations
+                      .map(
+                        (observation) =>
+                          `${observation.phase}:${observation.outcome}`,
+                      )
+                      .join(" · ") || "—"}
+                  </dd>
+                </div>
+                {application.latestError ? (
+                  <div>
+                    <dt>{t.improvementApplicationError}</dt>
+                    <dd>
+                      {application.latestError.code}:{" "}
+                      {application.latestError.message}
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
+              {application.nextActions.includes("reconcile") ? (
+                <button
+                  data-improvement-reconcile-application={application.id}
+                  disabled={busy || !onReconcileApplication}
+                  onClick={() => onReconcileApplication?.(application)}
+                  type="button"
+                >
+                  {t.improvementApplicationReconcile}
+                </button>
+              ) : null}
+            </article>
+          ))}
+          {(applications ?? []).length === 0 ? (
+            <p>{t.improvementNoApplications}</p>
           ) : null}
         </div>
       </section>

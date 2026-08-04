@@ -391,6 +391,18 @@ describe("Improvement proposal contracts", () => {
         canonicalRequestHash: hash,
         state: "reconciling",
         deterministicEffectId: "improvement-effect:operation:1:apply",
+        confirmation: "I confirm this exact approved revision.",
+        reason: "Apply the bounded Harness revision.",
+        evidenceRefs: ["decision:2"],
+        appliedBy: {
+          type: "human",
+          id: "human:1",
+          authenticatedBy: "local-session",
+        },
+        latestError: {
+          code: "IMPROVEMENT_APPLICATION_UNKNOWN",
+          message: "The target effect cannot yet be proven.",
+        },
         receipts: [],
         observations: [
           {

@@ -46,6 +46,7 @@ import {
   inspectProjectRunCodeReviews,
   confirmProjectProductBaseline,
   recoveryOverrideInputProvided,
+  improvementApplicationApplyInput,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -2120,6 +2121,334 @@ describe("Project detail", () => {
     assert.match(markup, /UTC window start \(inclusive\)/);
     assert.match(markup, /UTC window end \(exclusive\)/);
     assert.match(markup, /Freeze exact evidence/);
+  });
+
+  it("rebuilds Improvement applications from authoritative Views and builds one actor-free exact apply input", async (context) => {
+    const hash = "a".repeat(64);
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "Preserve the payment-provider contract.",
+      repositoryReferences: ["/work/checkout-web"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const evidence = {
+      id: "statistics-evidence-1",
+      query: {
+        catalogVersion: "statistics@1" as const,
+        projectId: project.id,
+        filters: {
+          departmentIds: [],
+          aiMemberIds: [],
+          modelIds: [],
+          repositoryIds: [],
+          workPackageIds: [],
+          pipelineVersionIds: [],
+        },
+        window: {
+          kind: "explicit-utc-half-open" as const,
+          startInclusive: "2026-08-01T00:00:00.000Z",
+          endExclusive: "2026-08-02T00:00:00.000Z",
+        },
+        cohort: {
+          id: "cohort:review",
+          filters: {
+            departmentIds: [],
+            aiMemberIds: [],
+            modelIds: [],
+            repositoryIds: [],
+            workPackageIds: [],
+            pipelineVersionIds: [],
+          },
+        },
+        comparisonSet: {
+          id: "comparison:review",
+          metricIds: ["review-finding-count" as const],
+        },
+      },
+      queryHash: hash,
+      asOfSequence: 1,
+      observations: [
+        {
+          metricId: "review-finding-count" as const,
+          status: "available" as const,
+          measurement: { kind: "count" as const, value: 1 },
+          sourceFactFamily: "review-finding",
+          sourceFactRefs: ["finding:1"],
+        },
+      ],
+      completeness: {
+        status: "complete" as const,
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      frozenBy: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvements",
+        authenticatedBy: "runtime" as const,
+      },
+      hash,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    };
+    const target = {
+      targetKind: "harness" as const,
+      ownerId: "harness:review",
+      governedHead: { revisionId: null, revisionHash: null },
+      content: {
+        principles: ["Use exact evidence."],
+        constitution: "Review immutable contracts.",
+        rules: ["Bind recommendations to frozen evidence."],
+        examples: { positive: [], negative: [] },
+        impactScope: [project.id],
+      },
+    };
+    const decision = {
+      id: "improvement-decision:1",
+      proposalId: "improvement-proposal:1",
+      proposalRevisionId: "improvement-proposal-revision:1",
+      proposalRevisionHash: hash,
+      evidenceSnapshotId: evidence.id,
+      evidenceSnapshotHash: evidence.hash,
+      target,
+      decision: "approved" as const,
+      confirmation: "I confirm this exact approved revision.",
+      actor: {
+        type: "human" as const,
+        id: "human:reviewer",
+        authenticatedBy: "local-session" as const,
+      },
+      reason: "The bounded Harness change is ready.",
+      evidenceRefs: [evidence.id],
+      hash,
+      createdAt: "2026-08-04T00:01:00.000Z",
+    };
+    const proposal = {
+      id: decision.proposalId,
+      projectId: project.id,
+      departmentId: null,
+      currentRevisionId: decision.proposalRevisionId,
+      currentState: "approved" as const,
+      revisions: [
+        {
+          id: decision.proposalRevisionId,
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            evidence,
+            target,
+            rootCauseHypothesis: "Review guidance can drift.",
+            impactScope: {
+              projectIds: [project.id],
+              departmentIds: [],
+              positionIds: [],
+            },
+            expectedMetrics: [
+              {
+                metricId: "review-finding-count" as const,
+                direction: "decrease" as const,
+              },
+            ],
+            validationPolicy: {
+              metricIds: ["review-finding-count" as const],
+              minimumComparableObservations: 1,
+            },
+            rolloutNotes: "Validate the next cohort.",
+            rollbackSource: {
+              revisionId: "harness:source",
+              revisionHash: hash,
+            },
+          },
+          hash,
+          authoredBy: evidence.frozenBy,
+          lifecycle: [
+            {
+              state: "awaiting-human" as const,
+              confirmation: decision.confirmation,
+              createdAt: "2026-08-04T00:00:30.000Z",
+            },
+          ],
+          decision,
+          createdAt: "2026-08-04T00:00:00.000Z",
+        },
+      ],
+      nextActions: ["apply" as const],
+      createdAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:01:00.000Z",
+    };
+    const existingApplication = {
+      id: "improvement-application:unknown",
+      projectId: project.id,
+      proposalId: proposal.id,
+      proposalRevisionId: decision.proposalRevisionId,
+      proposalRevisionHash: hash,
+      approvedDecisionId: decision.id,
+      approvedDecisionHash: hash,
+      target,
+      canonicalRequestHash: hash,
+      state: "unknown" as const,
+      deterministicEffectId: "improvement-effect:harness:unknown",
+      confirmation: decision.confirmation,
+      reason: "Inspect the previous exact effect.",
+      evidenceRefs: [evidence.id, decision.id],
+      appliedBy: decision.actor,
+      latestError: {
+        code: "IMPROVEMENT_APPLICATION_UNKNOWN",
+        message: "Exact effect evidence is incomplete.",
+      },
+      receipts: [],
+      observations: [],
+      reconciliations: [],
+      validations: [],
+      rollbacks: [],
+      nextActions: ["reconcile" as const],
+      createdAt: "2026-08-04T00:02:00.000Z",
+      updatedAt: "2026-08-04T00:02:00.000Z",
+    };
+    const statisticsView = {
+      query: evidence.query,
+      asOfSequence: 1,
+      observations: evidence.observations,
+      completeness: evidence.completeness,
+      generatedAt: "2026-08-04T00:00:00.000Z",
+    };
+    const bridge = {
+      query: async (query: { readonly type: string }) => {
+        if (query.type === "statistics.inspect") {
+          return {
+            view: statisticsView,
+            asOfSequence: 1,
+            viewSyncToken: "statistics-view-token",
+          };
+        }
+        if (query.type === "improvement-proposals.list") {
+          return {
+            view: [proposal],
+            asOfSequence: 1,
+            viewSyncToken: "proposal-view-token",
+          };
+        }
+        if (query.type === "improvement-applications.list") {
+          return {
+            view: [existingApplication],
+            asOfSequence: 1,
+            viewSyncToken: "application-view-token",
+          };
+        }
+        throw new Error(`Unexpected query ${query.type}`);
+      },
+      execute: async (envelope: {
+        readonly command: { readonly type: string };
+      }) => {
+        if (envelope.command.type === "ack-runtime-events") {
+          return {
+            status: "succeeded" as const,
+            value: {
+              acknowledged: true,
+              subscriptionGeneration: 1,
+              barrierSequence: 1,
+              auditId: "audit:ack",
+            },
+            effectIds: [],
+          };
+        }
+        return {
+          status: "succeeded" as const,
+          value: existingApplication,
+          effectIds: ["audit:apply"],
+        };
+      },
+      openEventStream: async () => ({
+        subscriptionId: "subscription:improvements",
+        subscriptionGeneration: 1,
+        barrierSequence: 1,
+      }),
+      closeEventStream: async () => undefined,
+      runtime: {
+        departments: async () => [],
+        runs: async () => [],
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [],
+      },
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      HTMLInputElement: dom.window.HTMLInputElement,
+      HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    });
+
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          initialTab="improvements"
+          onArchive={async () => project}
+          onBack={() => undefined}
+          onSave={async () => project}
+          project={project}
+          t={messages.en}
+        />,
+      );
+    });
+    await act(async () => undefined);
+
+    assert.match(container.innerHTML, /improvement-application:unknown/);
+    const application = improvementApplicationApplyInput(
+      proposal,
+      "improvement-application:new",
+      "I confirm applying this exact approved revision.",
+      "Apply the bounded Harness revision.",
+    );
+    assert.deepEqual(application, {
+      operationId: "improvement-application:new",
+      proposalId: proposal.id,
+      proposalRevisionId: decision.proposalRevisionId,
+      expectedProposalRevisionHash: hash,
+      approvedDecisionId: decision.id,
+      expectedApprovedDecisionHash: hash,
+      target,
+      confirmation: "I confirm applying this exact approved revision.",
+      reason: "Apply the bounded Harness revision.",
+      evidenceRefs: [evidence.id, decision.id],
+    });
+    assert.equal(application && "actor" in application, false);
   });
 
   it("queries and mounts the selected Run Work Package graph without retaining failed data", async () => {

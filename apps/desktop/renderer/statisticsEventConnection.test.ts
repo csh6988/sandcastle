@@ -27,6 +27,7 @@ describe("Statistics Runtime event connection", () => {
       readonly count: number;
       readonly evidenceId: string | null;
       readonly proposalCount: number;
+      readonly applicationCount: number;
     }> = [];
     const invalidationFrame = {
       subscriptionId: "statistics-subscription-1",
@@ -71,6 +72,30 @@ describe("Statistics Runtime event connection", () => {
             proposalRevisionId: "improvement-proposal-revision-1",
           },
           timestamp: "2026-08-04T00:02:00.000Z",
+        },
+      },
+    } as RuntimeEventFrame;
+    const applicationInvalidationFrame = {
+      subscriptionId: "statistics-subscription-1",
+      subscriptionGeneration: 3,
+      barrierSequence: 10,
+      value: {
+        kind: "event",
+        event: {
+          registryVersion: 20,
+          schemaVersion: 1,
+          sequence: 13,
+          eventId: "improvement-application-event-13",
+          type: "improvement.application.invalidated",
+          companyId: "company",
+          projectId: "project-1",
+          improvementProposalId: "improvement-proposal-1",
+          improvementApplicationOperationId: "improvement-application-1",
+          payload: {
+            applicationOperationId: "improvement-application-1",
+            proposalId: "improvement-proposal-1",
+          },
+          timestamp: "2026-08-04T00:03:00.000Z",
         },
       },
     } as RuntimeEventFrame;
@@ -134,6 +159,16 @@ describe("Statistics Runtime event connection", () => {
               queryCount === 1 ? "proposals-token-10" : "proposals-token-11",
           };
         }
+        if (input.type === "improvement-applications.list") {
+          return {
+            view: [],
+            asOfSequence: queryCount === 1 ? 10 : 11,
+            viewSyncToken:
+              queryCount === 1
+                ? "applications-token-10"
+                : "applications-token-11",
+          };
+        }
         return {
           view: {
             id: "statistics-evidence-1",
@@ -165,6 +200,7 @@ describe("Statistics Runtime event connection", () => {
       ) => {
         await sink(invalidationFrame);
         await sink(proposalInvalidationFrame);
+        await sink(applicationInvalidationFrame);
         return {
           subscriptionId: "statistics-subscription-1",
           subscriptionGeneration: 3,
@@ -191,6 +227,7 @@ describe("Statistics Runtime event connection", () => {
               : -1,
           evidenceId: next.evidence?.id ?? null,
           proposalCount: next.proposals.length,
+          applicationCount: next.applications.length,
         });
       },
       projectId: "project-1",
@@ -201,19 +238,47 @@ describe("Statistics Runtime event connection", () => {
       "statistics.inspect",
       "statistics-evidence.inspect",
       "improvement-proposals.list",
+      "improvement-applications.list",
       "statistics.inspect",
       "statistics-evidence.inspect",
       "improvement-proposals.list",
+      "improvement-applications.list",
       "statistics.inspect",
       "statistics-evidence.inspect",
       "improvement-proposals.list",
+      "improvement-applications.list",
+      "statistics.inspect",
+      "statistics-evidence.inspect",
+      "improvement-proposals.list",
+      "improvement-applications.list",
     ]);
     assert.deepEqual(views, [
-      { count: 1, evidenceId: "statistics-evidence-1", proposalCount: 0 },
-      { count: 2, evidenceId: "statistics-evidence-1", proposalCount: 0 },
-      { count: 3, evidenceId: "statistics-evidence-1", proposalCount: 0 },
+      {
+        count: 1,
+        evidenceId: "statistics-evidence-1",
+        proposalCount: 0,
+        applicationCount: 0,
+      },
+      {
+        count: 2,
+        evidenceId: "statistics-evidence-1",
+        proposalCount: 0,
+        applicationCount: 0,
+      },
+      {
+        count: 3,
+        evidenceId: "statistics-evidence-1",
+        proposalCount: 0,
+        applicationCount: 0,
+      },
+      {
+        count: 4,
+        evidenceId: "statistics-evidence-1",
+        proposalCount: 0,
+        applicationCount: 0,
+      },
     ]);
-    assert.equal(acknowledgements.length, 3);
+    assert.equal(acknowledgements.length, 4);
     await connection.close();
   });
 });

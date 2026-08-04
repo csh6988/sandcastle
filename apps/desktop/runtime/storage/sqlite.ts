@@ -176,6 +176,12 @@ import {
   openImprovementProposalRuntime,
   type ImprovementProposalRuntime,
 } from "../improvement/improvementProposalRuntime.js";
+import {
+  openImprovementApplicationRuntime,
+  type ImprovementApplicationRuntime,
+} from "../improvement/improvementApplicationRuntime.js";
+import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
+import type { ImprovementApplicationEffectAdapter } from "../improvement/improvementProposalContracts.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -209,6 +215,7 @@ export interface CompanyDatabase {
   readonly releaseOperations: ReleaseOperationRuntime;
   readonly statistics: StatisticsRuntime;
   readonly improvementProposals: ImprovementProposalRuntime;
+  readonly improvementApplications: ImprovementApplicationRuntime;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -358,6 +365,12 @@ export const openCompanyDatabase = (
     };
     readonly releaseOperationRuntime?: {
       readonly adapter?: ReleaseOperationEffectAdapter;
+      readonly failureInjection?: (
+        point: "after-intent" | "after-effect-before-finalize",
+      ) => void;
+    };
+    readonly improvementApplicationRuntime?: {
+      readonly adapter?: ImprovementApplicationEffectAdapter;
       readonly failureInjection?: (
         point: "after-intent" | "after-effect-before-finalize",
       ) => void;
@@ -688,6 +701,22 @@ export const openCompanyDatabase = (
       });
     },
   });
+  const improvementApplications = openImprovementApplicationRuntime(database, {
+    statistics,
+    adapter:
+      options.improvementApplicationRuntime?.adapter ??
+      openSqliteGovernedRevisionAdapter(database, {
+        ...(options.clock ? { clock: options.clock } : {}),
+      }),
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+    ...(options.improvementApplicationRuntime?.failureInjection
+      ? {
+          failureInjection:
+            options.improvementApplicationRuntime.failureInjection,
+        }
+      : {}),
+  });
   memory = openRuntimeMemory(database, {
     events,
     artifacts: artifactRegistry,
@@ -723,6 +752,7 @@ export const openCompanyDatabase = (
     releaseOperations,
     statistics,
     improvementProposals,
+    improvementApplications,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -844,6 +874,7 @@ export const openCompanyDatabase = (
     releaseOperations,
     statistics,
     improvementProposals,
+    improvementApplications,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

@@ -183,6 +183,12 @@ describe("Company Runtime server startup", () => {
           return [];
         },
       },
+      improvementApplications: {
+        reconcilePending: async () => {
+          calls.push("improvement-application");
+          return [];
+        },
+      },
     } as unknown as CompanyDatabase;
 
     await prepareCompanyRuntimeStartup(database, () => {
@@ -197,6 +203,7 @@ describe("Company Runtime server startup", () => {
       "integration",
       "test",
       "release",
+      "improvement-application",
     ]);
   });
 
@@ -801,6 +808,69 @@ describe("Company Runtime server startup", () => {
       });
       assert.deepEqual(listed.view, [approved.value]);
       assert.deepEqual(inspected.view, approved.value);
+
+      const decision = approved.value.revisions[0]?.decision;
+      if (!decision) assert.fail("approved decision must exist");
+      const appliedIntent = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:apply-improvement-proposal-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.application.apply",
+          application: {
+            operationId: "improvement-application:server",
+            proposalId: approved.value.id,
+            proposalRevisionId: revision.id,
+            expectedProposalRevisionHash: revision.hash,
+            approvedDecisionId: decision.id,
+            expectedApprovedDecisionHash: decision.hash,
+            target: revision.content.target,
+            confirmation:
+              "I confirm applying this exact approved Harness revision.",
+            reason: "Apply the bounded reviewed Harness improvement.",
+            evidenceRefs: [frozen.value.id, decision.id],
+          },
+        },
+      });
+      assert.equal(appliedIntent.status, "succeeded");
+      if (appliedIntent.status !== "succeeded") {
+        assert.fail("apply intent must succeed");
+      }
+
+      let applied = appliedIntent.value;
+      for (
+        let attempt = 0;
+        attempt < 40 && applied.state !== "applied";
+        attempt += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        applied = (
+          await client.queryEnvelope({
+            schemaVersion: 1,
+            requestId: `query-improvement-application-${attempt}`,
+            principal: actor,
+            consumerId: "improvement-proposal-server-test",
+            query: {
+              type: "improvement-application.inspect",
+              operationId: appliedIntent.value.id,
+            },
+          })
+        ).view;
+      }
+      assert.equal(applied.state, "applied");
+      assert.equal(applied.receipts.length, 1);
+      const applications = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "query-improvement-applications",
+        principal: actor,
+        consumerId: "improvement-proposal-server-test",
+        query: {
+          type: "improvement-applications.list",
+          projectId: project.id,
+        },
+      });
+      assert.deepEqual(applications.view, [applied]);
     } finally {
       await server.close();
     }

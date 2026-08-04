@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
+  ImprovementApplicationOperationView,
   ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
@@ -322,6 +323,68 @@ describe("Project Improvements panel", () => {
       ),
       nextActions: ["revise", "approve", "reject"],
     };
+    const approvedRevision = awaitingProposal.revisions.at(-1);
+    if (!approvedRevision) assert.fail("approved revision must exist");
+    const decision = {
+      id: "improvement-decision:approved",
+      proposalId: "improvement-proposal:approved",
+      proposalRevisionId: approvedRevision.id,
+      proposalRevisionHash: approvedRevision.hash,
+      evidenceSnapshotId: evidence.id,
+      evidenceSnapshotHash: evidence.hash,
+      target: approvedRevision.content.target,
+      decision: "approved" as const,
+      confirmation: awaitingConfirmation,
+      actor: {
+        type: "human" as const,
+        id: "human:reviewer",
+        authenticatedBy: "local-session" as const,
+      },
+      reason: "The exact Harness revision is bounded and evidence-backed.",
+      evidenceRefs: [evidence.id],
+      hash,
+      createdAt: "2026-08-04T00:05:00.000Z",
+    };
+    const approvedProposal: ImprovementProposalView = {
+      ...awaitingProposal,
+      id: "improvement-proposal:approved",
+      currentState: "approved",
+      revisions: awaitingProposal.revisions.map((revision, index) =>
+        index === awaitingProposal.revisions.length - 1
+          ? { ...revision, decision }
+          : revision,
+      ),
+      nextActions: ["revise", "apply"],
+    };
+    const application: ImprovementApplicationOperationView = {
+      id: "improvement-application:1",
+      projectId: "project-1",
+      proposalId: approvedProposal.id,
+      proposalRevisionId: approvedRevision.id,
+      proposalRevisionHash: approvedRevision.hash,
+      approvedDecisionId: decision.id,
+      approvedDecisionHash: decision.hash,
+      target: approvedRevision.content.target,
+      canonicalRequestHash: hash,
+      state: "unknown",
+      deterministicEffectId: "improvement-effect:harness:1",
+      confirmation: "I confirm applying this exact approved revision.",
+      reason: "Apply the bounded Harness revision.",
+      evidenceRefs: [evidence.id, decision.id],
+      appliedBy: decision.actor,
+      latestError: {
+        code: "IMPROVEMENT_APPLICATION_UNKNOWN",
+        message: "The target effect cannot yet be proven exactly.",
+      },
+      receipts: [],
+      observations: [],
+      reconciliations: [],
+      validations: [],
+      rollbacks: [],
+      nextActions: ["reconcile"],
+      createdAt: "2026-08-04T00:06:00.000Z",
+      updatedAt: "2026-08-04T00:06:00.000Z",
+    };
     const render = (t: Messages) =>
       renderToStaticMarkup(
         <ProjectImprovementsPanel
@@ -334,7 +397,13 @@ describe("Project Improvements panel", () => {
           onInspect={() => undefined}
           onInspectEvidence={() => undefined}
           onWindowChange={() => undefined}
-          proposals={[proposal, proposedProposal, awaitingProposal]}
+          applications={[application]}
+          proposals={[
+            proposal,
+            proposedProposal,
+            awaitingProposal,
+            approvedProposal,
+          ]}
           query={query}
           t={t}
           view={null}
@@ -357,6 +426,12 @@ describe("Project Improvements panel", () => {
     assert.match(english, /Decision reason/);
     assert.match(english, /Approve exact revision/);
     assert.match(english, /Reject exact revision/);
+    assert.match(english, /Application operation ID/);
+    assert.match(english, /Apply exact approved revision/);
+    assert.match(english, /Application operations/);
+    assert.match(english, /Unknown outcome/);
+    assert.match(english, /Inspect exact effect again/);
+    assert.match(english, /IMPROVEMENT_APPLICATION_UNKNOWN/);
     assert.match(english, /improvement-proposal-revision:1/);
     assert.match(english, /improvement-proposal-revision:2/);
     assert.match(english, /statistics-evidence-proposal/);
@@ -374,6 +449,11 @@ describe("Project Improvements panel", () => {
     assert.match(chinese, /决定理由/);
     assert.match(chinese, /批准精确修订版/);
     assert.match(chinese, /拒绝精确修订版/);
+    assert.match(chinese, /应用操作 ID/);
+    assert.match(chinese, /应用精确的已批准修订版/);
+    assert.match(chinese, /应用操作/);
+    assert.match(chinese, /结果未知/);
+    assert.match(chinese, /再次检查精确 effect/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {

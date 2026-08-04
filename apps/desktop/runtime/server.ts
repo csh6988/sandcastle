@@ -116,6 +116,7 @@ export const reconcileCompanyRuntimeStartup = async (
     | "integrationNodeHandler"
     | "testNodeHandler"
     | "releaseOperations"
+    | "improvementApplications"
   >,
 ): Promise<void> => {
   await database.pipelineRuntime.reconcilePendingExecutions();
@@ -124,6 +125,7 @@ export const reconcileCompanyRuntimeStartup = async (
   await database.integrationNodeHandler.reconcilePending();
   await database.testNodeHandler.reconcilePending();
   await database.releaseOperations.reconcilePending();
+  await database.improvementApplications.reconcilePending();
 };
 
 export const prepareCompanyRuntimeStartup = async (
@@ -303,6 +305,7 @@ export const startCompanyRuntimeServer = async (
     closing = (async () => {
       let closeError: Error | undefined;
       try {
+        await database.improvementApplications.prepareForShutdown();
         await database.releaseOperations.prepareForShutdown();
         await Promise.all([
           database.pipelineRuntime.prepareForShutdown(),
@@ -473,6 +476,13 @@ export const startCompanyRuntimeServer = async (
                     .catch(() => undefined);
                 } else if (
                   request.envelope.command.type ===
+                  "improvement.application.apply"
+                ) {
+                  void database.improvementApplications
+                    .dispatch(request.envelope.command.application.operationId)
+                    .catch(() => undefined);
+                } else if (
+                  request.envelope.command.type ===
                   "workspace-allocation.provision"
                 ) {
                   database.workspaces.executeProvision(
@@ -626,6 +636,16 @@ export const startCompanyRuntimeServer = async (
                   case "improvement-proposals.list":
                     assertStatisticsReader(principal);
                     return database.improvementProposals.list(query.projectId);
+                  case "improvement-application.inspect":
+                    assertStatisticsReader(principal);
+                    return database.improvementApplications.inspect(
+                      query.operationId,
+                    );
+                  case "improvement-applications.list":
+                    assertStatisticsReader(principal);
+                    return database.improvementApplications.list(
+                      query.projectId,
+                    );
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -760,6 +780,16 @@ export const startCompanyRuntimeServer = async (
                 case "improvement-proposals.list":
                   assertStatisticsReader(principal);
                   return database.improvementProposals.list(
+                    request.query.projectId,
+                  );
+                case "improvement-application.inspect":
+                  assertStatisticsReader(principal);
+                  return database.improvementApplications.inspect(
+                    request.query.operationId,
+                  );
+                case "improvement-applications.list":
+                  assertStatisticsReader(principal);
+                  return database.improvementApplications.list(
                     request.query.projectId,
                   );
                 case "departments.list":

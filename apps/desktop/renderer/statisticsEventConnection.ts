@@ -1,6 +1,7 @@
 import type { RuntimeEventFrame, SandcastleBridge } from "../preload/bridge.js";
 import type {
   RuntimeSubscriptionHandle,
+  ImprovementApplicationOperationView,
   ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
@@ -26,6 +27,7 @@ export const connectStatisticsEventStream = async (input: {
     readonly statistics: StatisticsView;
     readonly evidence: StatisticsEvidenceSnapshotView | null;
     readonly proposals: readonly ImprovementProposalView[];
+    readonly applications: readonly ImprovementApplicationOperationView[];
   }) => void;
   readonly onDiagnostic: (diagnostic: string | null) => void;
 }): Promise<StatisticsEventConnection> => {
@@ -42,7 +44,7 @@ export const connectStatisticsEventStream = async (input: {
   };
 
   const queryViews = async () => {
-    const [statistics, evidence, proposals] = await Promise.all([
+    const [statistics, evidence, proposals, applications] = await Promise.all([
       input.bridge.query({
         type: "statistics.inspect" as const,
         projectId: input.projectId,
@@ -58,8 +60,12 @@ export const connectStatisticsEventStream = async (input: {
         type: "improvement-proposals.list" as const,
         projectId: input.projectId,
       }),
+      input.bridge.query({
+        type: "improvement-applications.list" as const,
+        projectId: input.projectId,
+      }),
     ]);
-    return { statistics, evidence, proposals };
+    return { statistics, evidence, proposals, applications };
   };
 
   const acknowledge = async (inputSequence: {
@@ -93,6 +99,7 @@ export const connectStatisticsEventStream = async (input: {
       statistics: next.statistics.view,
       evidence: next.evidence?.view ?? null,
       proposals: next.proposals.view,
+      applications: next.applications.view,
     });
   };
 
@@ -113,6 +120,7 @@ export const connectStatisticsEventStream = async (input: {
       statistics: next.statistics.view,
       evidence: next.evidence?.view ?? null,
       proposals: next.proposals.view,
+      applications: next.applications.view,
     });
     await acknowledge({
       sequence: anchor.asOfSequence,
@@ -142,7 +150,8 @@ export const connectStatisticsEventStream = async (input: {
         }
         if (
           (event.type === "statistics.evidence.invalidated" ||
-            event.type === "improvement.proposal.invalidated") &&
+            event.type === "improvement.proposal.invalidated" ||
+            event.type === "improvement.application.invalidated") &&
           event.projectId === input.projectId
         ) {
           await refresh();

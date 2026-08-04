@@ -60,6 +60,7 @@ import {
   type PermissionRequestView,
   StatisticsEvidenceSnapshotViewSchema,
   ImprovementProposalViewSchema,
+  ImprovementApplicationOperationViewSchema,
 } from "./interface.js";
 import {
   ProjectConfigurationError,
@@ -139,6 +140,10 @@ import {
   ImprovementProposalRuntimeError,
   type ImprovementProposalRuntime,
 } from "./improvement/improvementProposalRuntime.js";
+import {
+  ImprovementApplicationRuntimeError,
+  type ImprovementApplicationRuntime,
+} from "./improvement/improvementApplicationRuntime.js";
 
 export interface CompanyCommandRegistry {
   readonly execute: <Command extends EnvelopeCommand>(
@@ -181,6 +186,10 @@ export const companyCommandDefinitions = {
   },
   "improvement.proposal.decide": {
     primaryAggregate: "improvement-proposal",
+    expectedRevisionRequired: false,
+  },
+  "improvement.application.apply": {
+    primaryAggregate: "improvement-application",
     expectedRevisionRequired: false,
   },
   "project.update": {
@@ -486,6 +495,9 @@ const deterministicError = (
     return { code: error.code, message: error.message };
   }
   if (error instanceof ImprovementProposalRuntimeError) {
+    return { code: error.code, message: error.message };
+  }
+  if (error instanceof ImprovementApplicationRuntimeError) {
     return { code: error.code, message: error.message };
   }
   if (error instanceof RuntimeMemoryError) {
@@ -842,6 +854,166 @@ const executeImprovementProposalCommand = (
       } catch (error) {
         const rejection = deterministicError(error);
         if (!rejection) throw error;
+        result = { status: "rejected", error: rejection, effectIds: [] };
+      }
+    }
+    database
+      .prepare("DELETE FROM runtime_unit_of_work_context WHERE slot = 1")
+      .run();
+    const resultJson = canonicalJson(result);
+    database
+      .prepare(
+        `INSERT INTO command_deduplication(
+           command_id, actor_type, actor_id, authenticated_by, consumer_id,
+           schema_version, request_hash, status, result_json, result_hash,
+           effect_ids_json, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+        requestHash,
+        resultJson,
+        sha256(resultJson),
+        canonicalJson(result.effectIds),
+        clock().toISOString(),
+      );
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
+const executeImprovementApplicationCommand = (
+  database: DatabaseSync,
+  improvementApplications: ImprovementApplicationRuntime,
+  envelope: CommandEnvelope<EnvelopeCommand>,
+  clock: () => Date,
+): CommandResult<unknown> => {
+  if (envelope.command.type !== "improvement.application.apply") {
+    throw new CompanyCommandError(
+      "COMMAND_UNSUPPORTED",
+      `Command ${envelope.command.type} is not supported by this Improvement Application Runtime slice.`,
+    );
+  }
+  const requestHash = sha256(
+    canonicalJson({
+      schemaVersion: envelope.schemaVersion,
+      actor: envelope.actor,
+      consumerId: envelope.consumerId ?? null,
+      expectedRevision: envelope.expectedRevision ?? null,
+      command: envelope.command,
+    }),
+  );
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const receipt = database
+      .prepare(
+        `SELECT actor_type AS actorType, actor_id AS actorId,
+                authenticated_by AS authenticatedBy,
+                consumer_id AS consumerId, schema_version AS schemaVersion,
+                request_hash AS requestHash, result_json AS resultJson
+           FROM command_deduplication WHERE command_id = ?`,
+      )
+      .get(envelope.commandId) as
+      | {
+          readonly actorType: string;
+          readonly actorId: string;
+          readonly authenticatedBy: string;
+          readonly consumerId: string | null;
+          readonly schemaVersion: number;
+          readonly requestHash: string;
+          readonly resultJson: string;
+        }
+      | undefined;
+    if (receipt) {
+      const sameRequest =
+        receipt.actorType === envelope.actor.type &&
+        receipt.actorId === envelope.actor.id &&
+        receipt.authenticatedBy === envelope.actor.authenticatedBy &&
+        receipt.consumerId === (envelope.consumerId ?? null) &&
+        receipt.schemaVersion === envelope.schemaVersion &&
+        receipt.requestHash === requestHash;
+      database.exec("COMMIT");
+      if (!sameRequest) return commandIdReuse(envelope.commandId);
+      const parsed = CommandResultSchema.parse(
+        JSON.parse(receipt.resultJson),
+      ) as CommandResult<unknown>;
+      return parsed.status === "succeeded"
+        ? {
+            ...parsed,
+            value: ImprovementApplicationOperationViewSchema.parse(
+              parsed.value,
+            ),
+          }
+        : parsed;
+    }
+    database
+      .prepare(
+        `INSERT INTO runtime_unit_of_work_context(
+           slot, command_id, actor_type, actor_id, authenticated_by,
+           consumer_id, schema_version
+         ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelope.commandId,
+        envelope.actor.type,
+        envelope.actor.id,
+        envelope.actor.authenticatedBy,
+        envelope.consumerId ?? null,
+        envelope.schemaVersion,
+      );
+    const validActor =
+      envelope.actor.type === "human" &&
+      envelope.actor.authenticatedBy === "local-session";
+    let result: CommandResult<unknown>;
+    database.exec("SAVEPOINT improvement_application_command");
+    if (!validActor) {
+      database.exec("ROLLBACK TO improvement_application_command");
+      database.exec("RELEASE improvement_application_command");
+      result = {
+        status: "rejected",
+        error: {
+          code: "FORBIDDEN",
+          message:
+            "Improvement application apply requires a verified local-session human.",
+        },
+        effectIds: [],
+      };
+    } else {
+      try {
+        const value = improvementApplications.createInTransaction({
+          commandId: envelope.commandId,
+          request: {
+            ...envelope.command.application,
+            actor: {
+              type: "human",
+              id: envelope.actor.id,
+              authenticatedBy: "local-session",
+            },
+          },
+        });
+        database.exec("RELEASE improvement_application_command");
+        const effectIds = (
+          database
+            .prepare(
+              `SELECT id FROM runtime_audit_records
+                WHERE command_id = ? ORDER BY created_at, id`,
+            )
+            .all(envelope.commandId) as Array<{ readonly id: string }>
+        ).map((row) => row.id);
+        result = { status: "succeeded", value, effectIds };
+      } catch (error) {
+        const rejection = deterministicError(error);
+        if (!rejection) throw error;
+        database.exec("ROLLBACK TO improvement_application_command");
+        database.exec("RELEASE improvement_application_command");
         result = { status: "rejected", error: rejection, effectIds: [] };
       }
     }
@@ -4207,6 +4379,7 @@ export const openCompanyCommandRegistry = (
   releaseOperations?: ReleaseOperationRuntime,
   statistics?: StatisticsRuntime,
   improvementProposals?: ImprovementProposalRuntime,
+  improvementApplications?: ImprovementApplicationRuntime,
 ): CompanyCommandRegistry => ({
   execute: ((input: CommandEnvelope<EnvelopeCommand>) => {
     const envelope = CommandEnvelopeSchema.parse(
@@ -4242,6 +4415,20 @@ export const openCompanyCommandRegistry = (
       return executeImprovementProposalCommand(
         database,
         improvementProposals,
+        envelope,
+        clock,
+      ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
+    }
+    if (envelope.command.type === "improvement.application.apply") {
+      if (!improvementApplications) {
+        throw new CompanyCommandError(
+          "IMPROVEMENT_APPLICATION_RUNTIME_UNAVAILABLE",
+          "Improvement Application Runtime is unavailable for this Command Registry.",
+        );
+      }
+      return executeImprovementApplicationCommand(
+        database,
+        improvementApplications,
         envelope,
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;

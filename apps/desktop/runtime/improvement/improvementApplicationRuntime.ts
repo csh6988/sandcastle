@@ -1,0 +1,1065 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+import type { RuntimeEvents } from "../events/subscription.js";
+import type { StatisticsRuntime } from "../statistics/statisticsRuntime.js";
+import {
+  ImprovementApplicationApplyRequestSchema,
+  ImprovementApplicationObservationSchema,
+  ImprovementApplicationOperationViewSchema,
+  ImprovementApplicationReceiptSchema,
+  ImprovementApplicationReconciliationSchema,
+  ImprovementApplicationRollbackViewSchema,
+  ImprovementApplicationValidationSchema,
+  ImprovementTargetSchema,
+  type ImprovementApplicationApplyRequest,
+  type ImprovementApplicationEffectAdapter,
+  type ImprovementApplicationOperationView,
+  type ImprovementApplicationState,
+  type ImprovementTarget,
+} from "./improvementProposalContracts.js";
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(canonicalize(value));
+const sha256 = (value: unknown): string =>
+  createHash("sha256")
+    .update(typeof value === "string" ? value : canonicalJson(value))
+    .digest("hex");
+
+const parseJson = (value: string, description: string): unknown => {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new ImprovementApplicationRuntimeError(
+      "STORAGE_CORRUPT",
+      `${description} is invalid JSON: ${String(error)}`,
+    );
+  }
+};
+
+export class ImprovementApplicationRuntimeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ImprovementApplicationRuntimeError";
+  }
+}
+
+export interface ImprovementApplicationRuntime {
+  readonly createInTransaction: (input: {
+    readonly commandId: string;
+    readonly request: ImprovementApplicationApplyRequest;
+  }) => ImprovementApplicationOperationView;
+  readonly inspect: (
+    operationId: string,
+  ) => ImprovementApplicationOperationView;
+  readonly list: (
+    projectId: string,
+  ) => readonly ImprovementApplicationOperationView[];
+  readonly dispatch: (
+    operationId: string,
+  ) => Promise<ImprovementApplicationOperationView>;
+  readonly reconcilePending: () => Promise<
+    readonly ImprovementApplicationOperationView[]
+  >;
+  readonly prepareForShutdown: () => Promise<void>;
+}
+
+export const openImprovementApplicationRuntime = (
+  database: DatabaseSync,
+  options: {
+    readonly statistics: StatisticsRuntime;
+    readonly adapter: ImprovementApplicationEffectAdapter;
+    readonly events: Pick<RuntimeEvents, "append">;
+    readonly clock?: () => Date;
+    readonly failureInjection?: (
+      point: "after-intent" | "after-effect-before-finalize",
+    ) => void;
+  },
+): ImprovementApplicationRuntime => {
+  const clock = options.clock ?? (() => new Date());
+  const active = new Map<
+    string,
+    Promise<ImprovementApplicationOperationView>
+  >();
+  let stopping = false;
+
+  const transaction = <Value>(work: () => Value): Value => {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const value = work();
+      database.exec("COMMIT");
+      return value;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  };
+
+  const invalidate = (input: {
+    readonly operationId: string;
+    readonly projectId: string;
+    readonly proposalId: string;
+    readonly state: ImprovementApplicationState;
+    readonly timestamp: string;
+    readonly commandId: string;
+  }): void => {
+    options.events.append({
+      type: "improvement.application.invalidated",
+      scope: {
+        companyId: "company",
+        projectId: input.projectId,
+        improvementProposalId: input.proposalId,
+        improvementApplicationOperationId: input.operationId,
+        commandId: input.commandId,
+      },
+      payload: {
+        applicationOperationId: input.operationId,
+        proposalId: input.proposalId,
+      },
+      timestamp: input.timestamp,
+    });
+  };
+
+  const appendAudit = (input: {
+    readonly action: string;
+    readonly operationId: string;
+    readonly actor: ImprovementApplicationApplyRequest["actor"];
+    readonly before: unknown;
+    readonly after: unknown;
+    readonly timestamp: string;
+    readonly commandId: string;
+  }): void => {
+    const context = database
+      .prepare(
+        `SELECT consumer_id AS consumerId
+           FROM runtime_unit_of_work_context WHERE slot = 1`,
+      )
+      .get() as { readonly consumerId: string | null } | undefined;
+    database
+      .prepare(
+        `INSERT INTO runtime_audit_records(
+           id, action, entity_type, entity_id, run_id, node_run_id,
+           before_json, after_json, created_at, command_id, actor_type,
+           actor_id, authenticated_by, consumer_id
+         ) VALUES (?, ?, 'improvement-application', ?, NULL, NULL, ?, ?, ?, ?,
+                   'human', ?, 'local-session', ?)`,
+      )
+      .run(
+        randomUUID(),
+        input.action,
+        input.operationId,
+        input.before === null ? null : canonicalJson(input.before),
+        canonicalJson(input.after),
+        input.timestamp,
+        input.commandId,
+        input.actor.id,
+        context?.consumerId ?? null,
+      );
+  };
+
+  const inspect = (
+    operationId: string,
+  ): ImprovementApplicationOperationView => {
+    const row = database
+      .prepare(
+        `SELECT operation.id, operation.project_id AS projectId,
+                operation.proposal_id AS proposalId,
+                operation.proposal_revision_id AS proposalRevisionId,
+                operation.proposal_revision_hash AS proposalRevisionHash,
+                operation.approved_decision_id AS approvedDecisionId,
+                operation.approved_decision_hash AS approvedDecisionHash,
+                operation.target_kind AS targetKind,
+                operation.target_owner_id AS targetOwnerId,
+                operation.governed_head_revision_id AS governedHeadRevisionId,
+                operation.governed_head_revision_hash AS governedHeadRevisionHash,
+                operation.target_content_json AS targetContentJson,
+                operation.canonical_request_hash AS canonicalRequestHash,
+                operation.deterministic_effect_id AS deterministicEffectId,
+                operation.confirmation, operation.reason,
+                operation.evidence_refs_json AS evidenceRefsJson,
+                operation.actor_id AS actorId,
+                operation.created_at AS createdAt,
+                projection.state, projection.latest_error_code AS latestErrorCode,
+                projection.latest_error_message AS latestErrorMessage,
+                projection.updated_at AS updatedAt
+           FROM improvement_application_operations operation
+           JOIN improvement_application_projections projection
+             ON projection.operation_id = operation.id
+          WHERE operation.id = ?`,
+      )
+      .get(operationId) as
+      | {
+          readonly id: string;
+          readonly projectId: string;
+          readonly proposalId: string;
+          readonly proposalRevisionId: string;
+          readonly proposalRevisionHash: string;
+          readonly approvedDecisionId: string;
+          readonly approvedDecisionHash: string;
+          readonly targetKind: ImprovementTarget["targetKind"];
+          readonly targetOwnerId: string;
+          readonly governedHeadRevisionId: string | null;
+          readonly governedHeadRevisionHash: string | null;
+          readonly targetContentJson: string;
+          readonly canonicalRequestHash: string;
+          readonly deterministicEffectId: string;
+          readonly confirmation: string;
+          readonly reason: string;
+          readonly evidenceRefsJson: string;
+          readonly actorId: string;
+          readonly createdAt: string;
+          readonly state: ImprovementApplicationState;
+          readonly latestErrorCode: string | null;
+          readonly latestErrorMessage: string | null;
+          readonly updatedAt: string;
+        }
+      | undefined;
+    if (!row) {
+      throw new ImprovementApplicationRuntimeError(
+        "IMPROVEMENT_APPLICATION_NOT_FOUND",
+        `Improvement application operation ${operationId} was not found.`,
+      );
+    }
+    const target = ImprovementTargetSchema.parse({
+      targetKind: row.targetKind,
+      ownerId: row.targetOwnerId,
+      governedHead: {
+        revisionId: row.governedHeadRevisionId,
+        revisionHash: row.governedHeadRevisionHash,
+      },
+      content: parseJson(
+        row.targetContentJson,
+        `Improvement application ${operationId} target content`,
+      ),
+    });
+    const receipts = (
+      database
+        .prepare(
+          `SELECT id, phase, disposition,
+                  target_revision_id AS targetRevisionId,
+                  target_revision_hash AS targetRevisionHash,
+                  evidence_refs_json AS evidenceRefsJson,
+                  receipt_hash AS hash, created_at AS createdAt
+             FROM improvement_application_receipts
+            WHERE operation_id = ? ORDER BY created_at, id`,
+        )
+        .all(operationId) as Array<{
+        readonly id: string;
+        readonly phase: "apply" | "rollback";
+        readonly disposition: "applied" | "no-op" | "failed";
+        readonly targetRevisionId: string | null;
+        readonly targetRevisionHash: string | null;
+        readonly evidenceRefsJson: string;
+        readonly hash: string;
+        readonly createdAt: string;
+      }>
+    ).map((receipt) =>
+      ImprovementApplicationReceiptSchema.parse({
+        id: receipt.id,
+        phase: receipt.phase,
+        disposition: receipt.disposition,
+        targetRevision:
+          receipt.targetRevisionId && receipt.targetRevisionHash
+            ? {
+                revisionId: receipt.targetRevisionId,
+                revisionHash: receipt.targetRevisionHash,
+              }
+            : null,
+        evidenceRefs: parseJson(
+          receipt.evidenceRefsJson,
+          `Improvement application receipt ${receipt.id} evidence`,
+        ),
+        hash: receipt.hash,
+        createdAt: receipt.createdAt,
+      }),
+    );
+    const observations = (
+      database
+        .prepare(
+          `SELECT id, phase, outcome, evidence_refs_json AS evidenceRefsJson,
+                  observation_hash AS hash, observed_at AS observedAt
+             FROM improvement_application_observations
+            WHERE operation_id = ? ORDER BY observed_at, id`,
+        )
+        .all(operationId) as Array<{
+        readonly id: string;
+        readonly phase: "apply" | "rollback";
+        readonly outcome:
+          | "exact-match"
+          | "proven-absent"
+          | "conflict"
+          | "insufficient-evidence";
+        readonly evidenceRefsJson: string;
+        readonly hash: string;
+        readonly observedAt: string;
+      }>
+    ).map((observation) =>
+      ImprovementApplicationObservationSchema.parse({
+        id: observation.id,
+        phase: observation.phase,
+        outcome: observation.outcome,
+        evidenceRefs: parseJson(
+          observation.evidenceRefsJson,
+          `Improvement application observation ${observation.id} evidence`,
+        ),
+        hash: observation.hash,
+        observedAt: observation.observedAt,
+      }),
+    );
+    const reconciliations = (
+      database
+        .prepare(
+          `SELECT id, phase, result, evidence_refs_json AS evidenceRefsJson,
+                  reconciliation_hash AS hash, created_at AS createdAt
+             FROM improvement_application_reconciliations
+            WHERE operation_id = ? ORDER BY created_at, id`,
+        )
+        .all(operationId) as Array<{
+        readonly id: string;
+        readonly phase: "apply" | "rollback";
+        readonly result: "finalized" | "retry-permitted" | "unknown";
+        readonly evidenceRefsJson: string;
+        readonly hash: string;
+        readonly createdAt: string;
+      }>
+    ).map((reconciliation) =>
+      ImprovementApplicationReconciliationSchema.parse({
+        id: reconciliation.id,
+        phase: reconciliation.phase,
+        result: reconciliation.result,
+        evidenceRefs: parseJson(
+          reconciliation.evidenceRefsJson,
+          `Improvement application reconciliation ${reconciliation.id} evidence`,
+        ),
+        hash: reconciliation.hash,
+        createdAt: reconciliation.createdAt,
+      }),
+    );
+    const validations = (
+      database
+        .prepare(
+          `SELECT id, before_evidence_snapshot_id AS beforeEvidenceId,
+                  after_evidence_snapshot_id AS afterEvidenceId, outcome,
+                  actor_type AS actorType, actor_id AS actorId,
+                  authenticated_by AS authenticatedBy,
+                  validation_hash AS hash, created_at AS createdAt
+             FROM improvement_application_validations
+            WHERE operation_id = ? ORDER BY created_at, id`,
+        )
+        .all(operationId) as Array<{
+        readonly id: string;
+        readonly beforeEvidenceId: string;
+        readonly afterEvidenceId: string;
+        readonly outcome: "improved" | "unchanged" | "regressed";
+        readonly actorType: "human" | "runtime-worker";
+        readonly actorId: string;
+        readonly authenticatedBy: "local-session" | "runtime";
+        readonly hash: string;
+        readonly createdAt: string;
+      }>
+    ).map((validation) =>
+      ImprovementApplicationValidationSchema.parse({
+        id: validation.id,
+        beforeEvidence: options.statistics.inspectEvidence(
+          validation.beforeEvidenceId,
+        ),
+        afterEvidence: options.statistics.inspectEvidence(
+          validation.afterEvidenceId,
+        ),
+        outcome: validation.outcome,
+        hash: validation.hash,
+        validatedBy: {
+          type: validation.actorType,
+          id: validation.actorId,
+          authenticatedBy: validation.authenticatedBy,
+        },
+        createdAt: validation.createdAt,
+      }),
+    );
+    const rollbacks = (
+      database
+        .prepare(
+          `SELECT id, applied_revision_id AS appliedRevisionId,
+                  applied_revision_hash AS appliedRevisionHash,
+                  source_revision_id AS sourceRevisionId,
+                  source_revision_hash AS sourceRevisionHash,
+                  expected_governed_head_revision_id AS expectedHeadRevisionId,
+                  expected_governed_head_revision_hash AS expectedHeadRevisionHash,
+                  restoring_revision_id AS restoringRevisionId,
+                  restoring_revision_hash AS restoringRevisionHash, state,
+                  evidence_refs_json AS evidenceRefsJson,
+                  rollback_hash AS hash, actor_id AS actorId,
+                  created_at AS createdAt
+             FROM improvement_application_rollbacks
+            WHERE operation_id = ? ORDER BY created_at, id`,
+        )
+        .all(operationId) as Array<{
+        readonly id: string;
+        readonly appliedRevisionId: string;
+        readonly appliedRevisionHash: string;
+        readonly sourceRevisionId: string;
+        readonly sourceRevisionHash: string;
+        readonly expectedHeadRevisionId: string;
+        readonly expectedHeadRevisionHash: string;
+        readonly restoringRevisionId: string | null;
+        readonly restoringRevisionHash: string | null;
+        readonly state: "requested" | "rolled-back" | "failed" | "unknown";
+        readonly evidenceRefsJson: string;
+        readonly hash: string;
+        readonly actorId: string;
+        readonly createdAt: string;
+      }>
+    ).map((rollback) =>
+      ImprovementApplicationRollbackViewSchema.parse({
+        id: rollback.id,
+        appliedRevision: {
+          revisionId: rollback.appliedRevisionId,
+          revisionHash: rollback.appliedRevisionHash,
+        },
+        sourceRevision: {
+          revisionId: rollback.sourceRevisionId,
+          revisionHash: rollback.sourceRevisionHash,
+        },
+        expectedGovernedHead: {
+          revisionId: rollback.expectedHeadRevisionId,
+          revisionHash: rollback.expectedHeadRevisionHash,
+        },
+        restoringRevision:
+          rollback.restoringRevisionId && rollback.restoringRevisionHash
+            ? {
+                revisionId: rollback.restoringRevisionId,
+                revisionHash: rollback.restoringRevisionHash,
+              }
+            : null,
+        state: rollback.state,
+        evidenceRefs: parseJson(
+          rollback.evidenceRefsJson,
+          `Improvement application rollback ${rollback.id} evidence`,
+        ),
+        hash: rollback.hash,
+        requestedBy: {
+          type: "human",
+          id: rollback.actorId,
+          authenticatedBy: "local-session",
+        },
+        createdAt: rollback.createdAt,
+      }),
+    );
+    const nextActions =
+      row.state === "applied"
+        ? (["validate", "rollback"] as const)
+        : row.state === "validated"
+          ? (["rollback"] as const)
+          : row.state === "unknown" || row.state === "reconciling"
+            ? (["reconcile"] as const)
+            : ([] as const);
+    return ImprovementApplicationOperationViewSchema.parse({
+      id: row.id,
+      projectId: row.projectId,
+      proposalId: row.proposalId,
+      proposalRevisionId: row.proposalRevisionId,
+      proposalRevisionHash: row.proposalRevisionHash,
+      approvedDecisionId: row.approvedDecisionId,
+      approvedDecisionHash: row.approvedDecisionHash,
+      target,
+      canonicalRequestHash: row.canonicalRequestHash,
+      state: row.state,
+      deterministicEffectId: row.deterministicEffectId,
+      confirmation: row.confirmation,
+      reason: row.reason,
+      evidenceRefs: parseJson(
+        row.evidenceRefsJson,
+        `Improvement application ${operationId} evidence`,
+      ),
+      appliedBy: {
+        type: "human",
+        id: row.actorId,
+        authenticatedBy: "local-session",
+      },
+      latestError:
+        row.latestErrorCode && row.latestErrorMessage
+          ? { code: row.latestErrorCode, message: row.latestErrorMessage }
+          : null,
+      receipts,
+      observations,
+      reconciliations,
+      validations,
+      rollbacks,
+      nextActions,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  };
+
+  const list = (
+    projectId: string,
+  ): readonly ImprovementApplicationOperationView[] =>
+    (
+      database
+        .prepare(
+          `SELECT id FROM improvement_application_operations
+            WHERE project_id = ? ORDER BY created_at, id`,
+        )
+        .all(projectId) as Array<{ readonly id: string }>
+    ).map((row) => inspect(row.id));
+
+  const createInTransaction: ImprovementApplicationRuntime["createInTransaction"] =
+    (input) => {
+      const request = ImprovementApplicationApplyRequestSchema.parse(
+        input.request,
+      );
+      const canonicalRequestJson = canonicalJson(request);
+      const canonicalRequestHash = sha256(canonicalRequestJson);
+      const existing = database
+        .prepare(
+          `SELECT canonical_request_hash AS canonicalRequestHash
+             FROM improvement_application_operations WHERE id = ?`,
+        )
+        .get(request.operationId) as
+        | { readonly canonicalRequestHash: string }
+        | undefined;
+      if (existing) {
+        if (existing.canonicalRequestHash === canonicalRequestHash) {
+          return inspect(request.operationId);
+        }
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+          `Improvement application operation ${request.operationId} already binds different input.`,
+        );
+      }
+      const proposal = database
+        .prepare(
+          `SELECT project_id AS projectId, current_revision_id AS currentRevisionId,
+                  state
+             FROM improvement_proposals WHERE id = ?`,
+        )
+        .get(request.proposalId) as
+        | {
+            readonly projectId: string;
+            readonly currentRevisionId: string;
+            readonly state: string;
+          }
+        | undefined;
+      if (!proposal) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_NOT_APPROVED",
+          `Improvement proposal ${request.proposalId} was not found.`,
+        );
+      }
+      if (
+        proposal.currentRevisionId !== request.proposalRevisionId ||
+        proposal.state !== "approved"
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          proposal.currentRevisionId !== request.proposalRevisionId
+            ? "IMPROVEMENT_PROPOSAL_SUPERSEDED"
+            : "IMPROVEMENT_NOT_APPROVED",
+          `Improvement proposal ${request.proposalId} is not the exact approved current revision.`,
+        );
+      }
+      const revision = database
+        .prepare(
+          `SELECT content_json AS contentJson, content_hash AS contentHash
+             FROM improvement_proposal_revisions
+            WHERE proposal_id = ? AND id = ?`,
+        )
+        .get(request.proposalId, request.proposalRevisionId) as
+        | { readonly contentJson: string; readonly contentHash: string }
+        | undefined;
+      if (
+        !revision ||
+        revision.contentHash !== request.expectedProposalRevisionHash
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_PROPOSAL_SUPERSEDED",
+          `Improvement proposal revision ${request.proposalRevisionId} no longer matches the approved hash.`,
+        );
+      }
+      const revisionContent = parseJson(
+        revision.contentJson,
+        `Improvement proposal revision ${request.proposalRevisionId}`,
+      ) as { readonly target?: unknown };
+      const approvedTarget = ImprovementTargetSchema.parse(
+        revisionContent.target,
+      );
+      if (canonicalJson(approvedTarget) !== canonicalJson(request.target)) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          "Improvement application target does not match the approved proposal revision.",
+        );
+      }
+      const decision = database
+        .prepare(
+          `SELECT id, decision_hash AS decisionHash, decision
+             FROM improvement_decisions
+            WHERE proposal_id = ? AND proposal_revision_id = ?`,
+        )
+        .get(request.proposalId, request.proposalRevisionId) as
+        | {
+            readonly id: string;
+            readonly decisionHash: string;
+            readonly decision: "approved" | "rejected";
+          }
+        | undefined;
+      if (
+        !decision ||
+        decision.decision !== "approved" ||
+        decision.id !== request.approvedDecisionId ||
+        decision.decisionHash !== request.expectedApprovedDecisionHash
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_NOT_APPROVED",
+          `Improvement proposal revision ${request.proposalRevisionId} lacks the exact approved decision.`,
+        );
+      }
+      if (request.target.targetKind !== "harness") {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_UNSUPPORTED",
+          `Target kind ${request.target.targetKind} is not supported by this application slice.`,
+        );
+      }
+      const createdAt = clock().toISOString();
+      const deterministicEffectId = `improvement-effect:${sha256({
+        operationId: request.operationId,
+        targetKind: request.target.targetKind,
+        phase: "apply",
+      }).slice(0, 48)}`;
+      database
+        .prepare(
+          `INSERT INTO improvement_application_operations(
+             id, project_id, proposal_id, proposal_revision_id,
+             proposal_revision_hash, approved_decision_id,
+             approved_decision_hash, target_kind, target_owner_id,
+             governed_head_revision_id, governed_head_revision_hash,
+             target_content_json, target_content_hash, canonical_request_json,
+             canonical_request_hash, deterministic_effect_id, confirmation,
+             reason, evidence_refs_json, actor_type, actor_id, authenticated_by,
+             command_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     'human', ?, 'local-session', ?, ?)`,
+        )
+        .run(
+          request.operationId,
+          proposal.projectId,
+          request.proposalId,
+          request.proposalRevisionId,
+          request.expectedProposalRevisionHash,
+          request.approvedDecisionId,
+          request.expectedApprovedDecisionHash,
+          request.target.targetKind,
+          request.target.ownerId,
+          request.target.governedHead.revisionId,
+          request.target.governedHead.revisionHash,
+          canonicalJson(request.target.content),
+          sha256(request.target.content),
+          canonicalRequestJson,
+          canonicalRequestHash,
+          deterministicEffectId,
+          request.confirmation,
+          request.reason,
+          canonicalJson(request.evidenceRefs),
+          request.actor.id,
+          input.commandId,
+          createdAt,
+        );
+      database
+        .prepare(
+          `INSERT INTO improvement_application_projections(
+             operation_id, state, latest_error_code, latest_error_message,
+             revision, updated_at
+           ) VALUES (?, 'applying', NULL, NULL, 0, ?)`,
+        )
+        .run(request.operationId, createdAt);
+      appendAudit({
+        action: "improvement.application.apply",
+        operationId: request.operationId,
+        actor: request.actor,
+        before: null,
+        after: { state: "applying", deterministicEffectId },
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      invalidate({
+        operationId: request.operationId,
+        projectId: proposal.projectId,
+        proposalId: request.proposalId,
+        state: "applying",
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      return inspect(request.operationId);
+    };
+
+  const appendObservation = (input: {
+    readonly operationId: string;
+    readonly outcome:
+      | "exact-match"
+      | "proven-absent"
+      | "conflict"
+      | "insufficient-evidence";
+    readonly evidenceRefs: readonly string[];
+    readonly observedAt: string;
+  }): void => {
+    const record = {
+      id: `improvement-observation:${randomUUID()}`,
+      phase: "apply" as const,
+      outcome: input.outcome,
+      evidenceRefs: [...input.evidenceRefs],
+      observedAt: input.observedAt,
+    };
+    database
+      .prepare(
+        `INSERT INTO improvement_application_observations(
+           id, operation_id, phase, outcome, evidence_refs_json,
+           observation_hash, observed_at
+         ) VALUES (?, ?, 'apply', ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        input.operationId,
+        record.outcome,
+        canonicalJson(record.evidenceRefs),
+        sha256(record),
+        record.observedAt,
+      );
+  };
+
+  const appendReconciliation = (input: {
+    readonly operationId: string;
+    readonly result: "finalized" | "retry-permitted" | "unknown";
+    readonly evidenceRefs: readonly string[];
+    readonly createdAt: string;
+  }): void => {
+    const record = {
+      id: `improvement-reconciliation:${randomUUID()}`,
+      phase: "apply" as const,
+      result: input.result,
+      evidenceRefs: [...input.evidenceRefs],
+      createdAt: input.createdAt,
+    };
+    database
+      .prepare(
+        `INSERT INTO improvement_application_reconciliations(
+           id, operation_id, phase, result, evidence_refs_json,
+           reconciliation_hash, created_at
+         ) VALUES (?, ?, 'apply', ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        input.operationId,
+        record.result,
+        canonicalJson(record.evidenceRefs),
+        sha256(record),
+        record.createdAt,
+      );
+  };
+
+  const appendReceipt = (input: {
+    readonly operationId: string;
+    readonly disposition: "applied" | "no-op" | "failed";
+    readonly targetRevision: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    } | null;
+    readonly evidenceRefs: readonly string[];
+    readonly createdAt: string;
+  }): void => {
+    const record = {
+      id: `improvement-receipt:${randomUUID()}`,
+      phase: "apply" as const,
+      disposition: input.disposition,
+      targetRevision: input.targetRevision,
+      evidenceRefs: [...input.evidenceRefs],
+      createdAt: input.createdAt,
+    };
+    database
+      .prepare(
+        `INSERT INTO improvement_application_receipts(
+           id, operation_id, phase, disposition, target_revision_id,
+           target_revision_hash, evidence_refs_json, receipt_hash, created_at
+         ) VALUES (?, ?, 'apply', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        input.operationId,
+        record.disposition,
+        record.targetRevision?.revisionId ?? null,
+        record.targetRevision?.revisionHash ?? null,
+        canonicalJson(record.evidenceRefs),
+        sha256(record),
+        record.createdAt,
+      );
+  };
+
+  const setProjection = (input: {
+    readonly operationId: string;
+    readonly state: ImprovementApplicationState;
+    readonly error: { readonly code: string; readonly message: string } | null;
+    readonly updatedAt: string;
+  }): void => {
+    database
+      .prepare(
+        `UPDATE improvement_application_projections
+            SET state = ?, latest_error_code = ?, latest_error_message = ?,
+                revision = revision + 1, updated_at = ?
+          WHERE operation_id = ?`,
+      )
+      .run(
+        input.state,
+        input.error?.code ?? null,
+        input.error?.message ?? null,
+        input.updatedAt,
+        input.operationId,
+      );
+  };
+
+  const worker = async (
+    operationId: string,
+  ): Promise<ImprovementApplicationOperationView> => {
+    const view = inspect(operationId);
+    if (!["applying", "reconciling"].includes(view.state)) return view;
+    if (stopping) return view;
+    options.failureInjection?.("after-intent");
+    const observation = await options.adapter.inspectEffect({
+      operationId,
+      target: view.target,
+      phase: "apply",
+    });
+    const observedAt = clock().toISOString();
+    if (observation.outcome === "exact-match") {
+      return transaction(() => {
+        appendObservation({
+          operationId,
+          outcome: observation.outcome,
+          evidenceRefs: observation.evidenceRefs,
+          observedAt,
+        });
+        appendReconciliation({
+          operationId,
+          result: "finalized",
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        appendReceipt({
+          operationId,
+          disposition: "no-op",
+          targetRevision: observation.revision,
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        setProjection({
+          operationId,
+          state: "applied",
+          error: null,
+          updatedAt: observedAt,
+        });
+        invalidate({
+          operationId,
+          projectId: view.projectId,
+          proposalId: view.proposalId,
+          state: "applied",
+          timestamp: observedAt,
+          commandId: `${operationId}:reconcile-apply`,
+        });
+        return inspect(operationId);
+      });
+    }
+    if (
+      observation.outcome === "conflict" ||
+      observation.outcome === "insufficient-evidence"
+    ) {
+      return transaction(() => {
+        appendObservation({
+          operationId,
+          outcome: observation.outcome,
+          evidenceRefs: observation.evidenceRefs,
+          observedAt,
+        });
+        appendReconciliation({
+          operationId,
+          result: "unknown",
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        setProjection({
+          operationId,
+          state: "unknown",
+          error: {
+            code: "IMPROVEMENT_APPLICATION_UNKNOWN",
+            message:
+              "The governed target effect cannot be proven exactly and was not resent.",
+          },
+          updatedAt: observedAt,
+        });
+        invalidate({
+          operationId,
+          projectId: view.projectId,
+          proposalId: view.proposalId,
+          state: "unknown",
+          timestamp: observedAt,
+          commandId: `${operationId}:unknown-apply`,
+        });
+        return inspect(operationId);
+      });
+    }
+    transaction(() => {
+      appendObservation({
+        operationId,
+        outcome: "proven-absent",
+        evidenceRefs: observation.evidenceRefs,
+        observedAt,
+      });
+      appendReconciliation({
+        operationId,
+        result: "retry-permitted",
+        evidenceRefs: observation.evidenceRefs,
+        createdAt: observedAt,
+      });
+    });
+    let result;
+    try {
+      result = await options.adapter.appendRevision({
+        operationId,
+        target: view.target,
+        phase: "apply",
+        expectedGovernedHead: view.target.governedHead,
+      });
+    } catch (error) {
+      const code =
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : "IMPROVEMENT_TARGET_CONFLICT";
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Governed revision append failed.";
+      return transaction(() => {
+        const failedAt = clock().toISOString();
+        appendReceipt({
+          operationId,
+          disposition: "failed",
+          targetRevision: null,
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: failedAt,
+        });
+        setProjection({
+          operationId,
+          state: "apply-failed",
+          error: { code, message },
+          updatedAt: failedAt,
+        });
+        invalidate({
+          operationId,
+          projectId: view.projectId,
+          proposalId: view.proposalId,
+          state: "apply-failed",
+          timestamp: failedAt,
+          commandId: `${operationId}:failed-apply`,
+        });
+        return inspect(operationId);
+      });
+    }
+    options.failureInjection?.("after-effect-before-finalize");
+    return transaction(() => {
+      const completedAt = clock().toISOString();
+      appendReceipt({
+        operationId,
+        disposition: result.disposition,
+        targetRevision: result.revision,
+        evidenceRefs: result.evidenceRefs,
+        createdAt: completedAt,
+      });
+      setProjection({
+        operationId,
+        state: "applied",
+        error: null,
+        updatedAt: completedAt,
+      });
+      invalidate({
+        operationId,
+        projectId: view.projectId,
+        proposalId: view.proposalId,
+        state: "applied",
+        timestamp: completedAt,
+        commandId: `${operationId}:completed-apply`,
+      });
+      return inspect(operationId);
+    });
+  };
+
+  const dispatch = (
+    operationId: string,
+  ): Promise<ImprovementApplicationOperationView> => {
+    const existing = active.get(operationId);
+    if (existing) return existing;
+    const run = worker(operationId).finally(() => active.delete(operationId));
+    active.set(operationId, run);
+    return run;
+  };
+
+  const reconcilePending = async (): Promise<
+    readonly ImprovementApplicationOperationView[]
+  > => {
+    const ids = database
+      .prepare(
+        `SELECT operation_id AS id FROM improvement_application_projections
+          WHERE state IN ('applying', 'reconciling') ORDER BY updated_at, operation_id`,
+      )
+      .all() as Array<{ readonly id: string }>;
+    const views: ImprovementApplicationOperationView[] = [];
+    for (const row of ids) views.push(await dispatch(row.id));
+    return views;
+  };
+
+  const prepareForShutdown = async (): Promise<void> => {
+    stopping = true;
+    for (const operationId of active.keys()) {
+      transaction(() => {
+        const view = inspect(operationId);
+        if (view.state === "applying") {
+          const updatedAt = clock().toISOString();
+          setProjection({
+            operationId,
+            state: "reconciling",
+            error: null,
+            updatedAt,
+          });
+          invalidate({
+            operationId,
+            projectId: view.projectId,
+            proposalId: view.proposalId,
+            state: "reconciling",
+            timestamp: updatedAt,
+            commandId: `${operationId}:shutdown-reconcile`,
+          });
+        }
+      });
+    }
+    await Promise.all([...active.values()]);
+  };
+
+  return {
+    createInTransaction,
+    inspect,
+    list,
+    dispatch,
+    reconcilePending,
+    prepareForShutdown,
+  };
+};

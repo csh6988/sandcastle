@@ -38,6 +38,7 @@ import type {
   ReleaseOperationView,
   ImprovementProposalRevisionContent,
   ImprovementProposalView,
+  ImprovementApplicationOperationView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
   StatisticsView,
@@ -94,6 +95,31 @@ type ProjectRuntimeViewConnection =
       readonly connection: StatisticsEventConnection;
       readonly close: () => Promise<void>;
     };
+
+export const improvementApplicationApplyInput = (
+  proposal: ImprovementProposalView,
+  operationId: string,
+  confirmation: string,
+  reason: string,
+) => {
+  const revision = proposal.revisions.find(
+    (candidate) => candidate.id === proposal.currentRevisionId,
+  );
+  const decision = revision?.decision;
+  if (!revision || !decision || decision.decision !== "approved") return null;
+  return {
+    operationId,
+    proposalId: proposal.id,
+    proposalRevisionId: revision.id,
+    expectedProposalRevisionHash: revision.hash,
+    approvedDecisionId: decision.id,
+    expectedApprovedDecisionHash: decision.hash,
+    target: revision.content.target,
+    confirmation,
+    reason,
+    evidenceRefs: [revision.content.evidence.id, decision.id],
+  };
+};
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error
@@ -3187,6 +3213,9 @@ export function ProjectDetailView({
   const [improvementProposals, setImprovementProposals] = useState<
     readonly ImprovementProposalView[]
   >([]);
+  const [improvementApplications, setImprovementApplications] = useState<
+    readonly ImprovementApplicationOperationView[]
+  >([]);
   const [statisticsEvidenceIdInput, setStatisticsEvidenceIdInput] =
     useState("");
   const [statisticsEvidenceSnapshotId, setStatisticsEvidenceSnapshotId] =
@@ -3210,6 +3239,7 @@ export function ProjectDetailView({
       }
     >(),
   );
+  const improvementApplicationGestures = useRef(new Map<string, string>());
   const [consultation, setConsultation] = useState<InteractionView | null>(
     null,
   );
@@ -3342,6 +3372,7 @@ export function ProjectDetailView({
               setStatisticsView(views.statistics);
               setStatisticsEvidence(views.evidence);
               setImprovementProposals(views.proposals);
+              setImprovementApplications(views.applications);
               setStatisticsDiagnostic(null);
             },
             onDiagnostic: (diagnostic) => {
@@ -4636,6 +4667,92 @@ export function ProjectDetailView({
     }
   };
 
+  const executeImprovementApplication = async (input: {
+    readonly operationId: string;
+    readonly proposalId: string;
+    readonly proposalRevisionId: string;
+    readonly expectedProposalRevisionHash: string;
+    readonly approvedDecisionId: string;
+    readonly expectedApprovedDecisionHash: string;
+    readonly target: ImprovementProposalRevisionContent["target"];
+    readonly confirmation: string;
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+    readonly gestureKey: string;
+  }): Promise<void> => {
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const commandId =
+        improvementApplicationGestures.current.get(input.gestureKey) ??
+        `improvement-application-apply:${globalThis.crypto.randomUUID()}`;
+      improvementApplicationGestures.current.set(input.gestureKey, commandId);
+      const result = await window.sandcastle.execute({
+        commandId,
+        command: {
+          type: "improvement.application.apply",
+          application: {
+            operationId: input.operationId,
+            proposalId: input.proposalId,
+            proposalRevisionId: input.proposalRevisionId,
+            expectedProposalRevisionHash: input.expectedProposalRevisionHash,
+            approvedDecisionId: input.approvedDecisionId,
+            expectedApprovedDecisionHash: input.expectedApprovedDecisionHash,
+            target: input.target,
+            confirmation: input.confirmation,
+            reason: input.reason,
+            evidenceRefs: [...input.evidenceRefs],
+          },
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
+  const applyImprovementProposal = async (
+    proposal: ImprovementProposalView,
+    operationId: string,
+    confirmation: string,
+    reason: string,
+  ): Promise<void> => {
+    const application = improvementApplicationApplyInput(
+      proposal,
+      operationId,
+      confirmation,
+      reason,
+    );
+    if (!application) return;
+    await executeImprovementApplication({
+      ...application,
+      gestureKey: `apply:${operationId}:${application.expectedProposalRevisionHash}:${application.expectedApprovedDecisionHash}:${confirmation}:${reason}`,
+    });
+  };
+
+  const reconcileImprovementApplication = async (
+    application: ImprovementApplicationOperationView,
+  ): Promise<void> => {
+    await executeImprovementApplication({
+      operationId: application.id,
+      proposalId: application.proposalId,
+      proposalRevisionId: application.proposalRevisionId,
+      expectedProposalRevisionHash: application.proposalRevisionHash,
+      approvedDecisionId: application.approvedDecisionId,
+      expectedApprovedDecisionHash: application.approvedDecisionHash,
+      target: application.target,
+      confirmation: application.confirmation,
+      reason: application.reason,
+      evidenceRefs: application.evidenceRefs,
+      gestureKey: `reconcile:${application.id}:${application.canonicalRequestHash}`,
+    });
+  };
+
   return (
     <section
       className="page"
@@ -5036,6 +5153,18 @@ export function ProjectDetailView({
               confirmation,
               reason,
             )
+          }
+          applications={improvementApplications}
+          onApplyProposal={(proposal, operationId, confirmation, reason) =>
+            void applyImprovementProposal(
+              proposal,
+              operationId,
+              confirmation,
+              reason,
+            )
+          }
+          onReconcileApplication={(application) =>
+            void reconcileImprovementApplication(application)
           }
           onInspect={inspectStatistics}
           onInspectEvidence={inspectStatisticsEvidence}
