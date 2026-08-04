@@ -139,6 +139,52 @@ describe("durable Runtime Event subscription", () => {
     }
   });
 
+  it("binds cursors and View-sync tokens to actor identity without authorization metadata", () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+    const actor: ActorRef = {
+      type: "human",
+      id: "local-user",
+      authenticatedBy: "local-session",
+    };
+    const projectReader = {
+      ...actor,
+      projectReadAuthority: ["project-1"],
+    };
+    try {
+      const query = database.events.querySnapshot({
+        principal: projectReader,
+        consumerId: "consumer-reader",
+        queryHash: "query-hash",
+        read: () => ({ projects: [] }),
+      });
+      assert.equal(
+        database.events.acknowledge({
+          consumerId: "consumer-reader",
+          principal: actor,
+          viewSyncToken: query.viewSyncToken,
+          sequence: query.asOfSequence,
+        }).acknowledged,
+        true,
+      );
+      database.events.openSubscription({
+        principal: projectReader,
+        consumerId: "consumer-reader",
+      });
+      assert.throws(
+        () =>
+          database.events.openSubscription({
+            principal: { ...actor, id: "different-user" },
+            consumerId: "consumer-reader",
+          }),
+        (error: unknown) =>
+          error instanceof RuntimeEventCursorError &&
+          error.code === "SUBSCRIPTION_OWNER_MISMATCH",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("rejects expired or principal-mismatched View-sync tokens", () => {
     let now = new Date("2026-07-15T00:00:00.000Z");
     const database = openCompanyDatabase(tempCompanyDir(), {
