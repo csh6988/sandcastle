@@ -252,4 +252,146 @@ describe("Project Improvements panel", () => {
     assert.match(english, />2 \/ 3</);
     assert.match(english, />600000 ms</);
   });
+
+  it("renders live and frozen quality, delivery, Memory, and unsupported catalog evidence bilingually", () => {
+    const metricIds = [
+      "code-review-defect-incidence",
+      "complete-model-attribution",
+      "delivery-candidate-acceptance-rate",
+      "electron-ui-runtime-mismatch-rate",
+      "heterogeneous-defect-aggregate-rate",
+      "integration-conflict-rate",
+      "memory-promotion-rate",
+      "memory-selection-rate",
+      "release-item-success-rate",
+      "security-operability-high-risk-closure-rate",
+      "test-pass-rate",
+      "whole-run-token-cost",
+    ] as const;
+    const qualityQuery = {
+      ...canonicalQuery,
+      comparisonSet: {
+        id: "comparison:quality-delivery-memory",
+        metricIds: [...metricIds],
+      },
+    };
+    const observations: StatisticsView["observations"] = metricIds.map(
+      (metricId) =>
+        [
+          "complete-model-attribution",
+          "heterogeneous-defect-aggregate-rate",
+          "security-operability-high-risk-closure-rate",
+          "whole-run-token-cost",
+        ].includes(metricId)
+          ? {
+              metricId,
+              status: "unavailable" as const,
+              reason: "Not supported by statistics@1.",
+              unavailableReasonCode: "unsupported-by-statistics-at-1" as const,
+              sourceFactFamily: "statistics@1",
+              sourceFactRefs: [],
+            }
+          : {
+              metricId,
+              status: "available" as const,
+              measurement: {
+                kind: "rate" as const,
+                numerator: metricId === "code-review-defect-incidence" ? 0 : 1,
+                denominator:
+                  metricId === "code-review-defect-incidence" ? 1 : 2,
+                value: metricId === "code-review-defect-incidence" ? 0 : 0.5,
+              },
+              sourceFactFamily: "authoritative-fact",
+              sourceFactRefs: ["fact:1", "fact:2"],
+            },
+    );
+    const view: StatisticsView = {
+      query: qualityQuery,
+      asOfSequence: 44,
+      observations,
+      completeness: {
+        status: "unavailable",
+        incompleteMetricIds: [],
+        unavailableMetricIds: [
+          "complete-model-attribution",
+          "heterogeneous-defect-aggregate-rate",
+          "security-operability-high-risk-closure-rate",
+          "whole-run-token-cost",
+        ],
+      },
+      generatedAt: "2026-08-04T00:00:00.000Z",
+    };
+    const evidence: StatisticsEvidenceSnapshotView = {
+      id: "statistics-evidence-quality-delivery-memory",
+      query: qualityQuery,
+      queryHash: hash,
+      asOfSequence: 44,
+      observations,
+      completeness: view.completeness,
+      frozenBy: {
+        type: "runtime-worker",
+        id: "runtime-worker:statistics",
+        authenticatedBy: "runtime",
+      },
+      hash,
+      createdAt: "2026-08-04T00:01:00.000Z",
+    };
+    const render = (t: Messages) =>
+      renderToStaticMarkup(
+        <ProjectImprovementsPanel
+          busy={false}
+          diagnostic={null}
+          evidence={evidence}
+          evidenceSnapshotId={evidence.id}
+          onEvidenceSnapshotIdChange={() => undefined}
+          onFreeze={() => undefined}
+          onInspect={() => undefined}
+          onInspectEvidence={() => undefined}
+          onWindowChange={() => undefined}
+          query={qualityQuery}
+          t={t}
+          view={view}
+        />,
+      );
+
+    const english = render(messages.en);
+    const chinese = render(messages.zh);
+    assert.match(english, /Code Review defect incidence/);
+    assert.match(english, /Delivery candidate acceptance rate/);
+    assert.match(english, /Electron UI\/Runtime mismatch rate/);
+    assert.match(english, /Integration conflict rate/);
+    assert.match(english, /Memory promotion rate/);
+    assert.match(english, /Memory selection rate/);
+    assert.match(english, /Release item success rate/);
+    assert.match(english, /Test pass rate/);
+    assert.match(english, /Complete Model attribution/);
+    assert.match(english, /Heterogeneous Defect aggregate rate/);
+    assert.match(english, /Security\/Operability high-risk closure rate/);
+    assert.match(english, /Whole-Run Token\/cost/);
+    assert.match(chinese, /代码评审缺陷发生率/);
+    assert.match(chinese, /交付候选接受率/);
+    assert.match(chinese, /Electron 界面\/Runtime 不匹配率/);
+    assert.match(chinese, /集成冲突率/);
+    assert.match(chinese, /记忆晋升率/);
+    assert.match(chinese, /记忆选择率/);
+    assert.match(chinese, /发布项成功率/);
+    assert.match(chinese, /测试通过率/);
+    assert.match(chinese, /完整模型归因/);
+    assert.match(chinese, /异构缺陷聚合率/);
+    assert.match(chinese, /安全性\/可运维性高风险关闭率/);
+    assert.match(chinese, /整次运行 Token\/成本/);
+    assert.match(english, />0 \/ 1 \(0%\)</);
+    assert.match(english, />1 \/ 2 \(50%\)</);
+    assert.match(english, /Unavailable: Not supported by statistics@1\./);
+    assert.match(chinese, /不可用: Not supported by statistics@1\./);
+    assert.equal(
+      (english.match(/data-statistics-observation-status/g) ?? []).length,
+      12,
+    );
+    assert.equal(
+      (english.match(/data-statistics-evidence-observation-status/g) ?? [])
+        .length,
+      12,
+    );
+  });
 });

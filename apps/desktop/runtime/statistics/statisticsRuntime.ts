@@ -731,6 +731,453 @@ export const openStatisticsRuntime = (
           ],
         );
       }
+      case "code-review-defect-incidence": {
+        const rows = database
+          .prepare(
+            `SELECT manifests.id AS manifestId, defects.id AS defectId
+               FROM code_review_manifests AS manifests
+               JOIN department_runs AS runs ON runs.id = manifests.run_id
+               LEFT JOIN code_review_defects AS defects
+                 ON defects.code_review_manifest_id = manifests.id
+              WHERE ${run.sql}
+                AND manifests.created_at >= ?
+                AND manifests.created_at < ?
+              ORDER BY manifests.created_at, manifests.id, defects.created_at,
+                       defects.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly manifestId: string;
+          readonly defectId: string | null;
+        }>;
+        const manifestIds = new Set(rows.map((row) => row.manifestId));
+        if (manifestIds.size === 0) {
+          return missingDenominator(
+            metricId,
+            "code-review-manifest",
+            "No Code Review manifest denominator exists.",
+          );
+        }
+        const defectiveManifestIds = new Set(
+          rows
+            .filter((row) => row.defectId !== null)
+            .map((row) => row.manifestId),
+        );
+        return rateObservation(
+          metricId,
+          "code-review-manifest",
+          defectiveManifestIds.size,
+          manifestIds.size,
+          canonicalIds(
+            rows.flatMap((row) =>
+              row.defectId === null
+                ? [row.manifestId]
+                : [row.manifestId, row.defectId],
+            ),
+          ),
+        );
+      }
+      case "integration-conflict-rate": {
+        const unattributed = database
+          .prepare(
+            `SELECT defects.id
+               FROM integration_defects AS defects
+               JOIN integration_generations AS generations
+                 ON generations.id = defects.generation_id
+               JOIN department_runs AS runs ON runs.id = generations.run_id
+              WHERE ${run.sql}
+                AND defects.kind = 'git-conflict'
+                AND defects.integration_operation_id IS NULL
+                AND defects.created_at >= ?
+                AND defects.created_at < ?
+              ORDER BY defects.created_at, defects.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+        }>;
+        if (unattributed.length > 0) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason:
+              "An Integration conflict does not identify its exact Integration operation.",
+            missingFactKinds: ["integration-conflict-operation-attribution"],
+            sourceFactFamily: "integration-operation",
+            sourceFactRefs: unattributed.map((row) => row.id),
+          };
+        }
+        const rows = database
+          .prepare(
+            `SELECT operations.id AS operationId, defects.id AS defectId
+               FROM integration_operations AS operations
+               JOIN integration_generations AS generations
+                 ON generations.id = operations.generation_id
+               JOIN department_runs AS runs ON runs.id = generations.run_id
+               LEFT JOIN integration_defects AS defects
+                 ON defects.integration_operation_id = operations.id
+                AND defects.kind = 'git-conflict'
+                AND defects.created_at >= ?
+                AND defects.created_at < ?
+              WHERE ${run.sql}
+                AND operations.created_at >= ?
+                AND operations.created_at < ?
+              ORDER BY operations.created_at, operations.id, defects.created_at,
+                       defects.id`,
+          )
+          .all(
+            startInclusive,
+            endExclusive,
+            ...run.values,
+            startInclusive,
+            endExclusive,
+          ) as Array<{
+          readonly operationId: string;
+          readonly defectId: string | null;
+        }>;
+        const operationIds = new Set(rows.map((row) => row.operationId));
+        if (operationIds.size === 0) {
+          return missingDenominator(
+            metricId,
+            "integration-operation",
+            "No Integration operation denominator exists.",
+          );
+        }
+        const conflictedOperationIds = new Set(
+          rows
+            .filter((row) => row.defectId !== null)
+            .map((row) => row.operationId),
+        );
+        return rateObservation(
+          metricId,
+          "integration-operation",
+          conflictedOperationIds.size,
+          operationIds.size,
+          canonicalIds(
+            rows.flatMap((row) =>
+              row.defectId === null
+                ? [row.operationId]
+                : [row.operationId, row.defectId],
+            ),
+          ),
+        );
+      }
+      case "test-pass-rate": {
+        const rows = database
+          .prepare(
+            `SELECT tests.id, tests.state
+               FROM test_runs AS tests
+               JOIN department_runs AS runs ON runs.id = tests.run_id
+              WHERE ${run.sql}
+                AND tests.state IN ('passed', 'failed')
+                AND tests.updated_at >= ?
+                AND tests.updated_at < ?
+              ORDER BY tests.updated_at, tests.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly state: string;
+        }>;
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "test-run",
+            "No passed or failed Test run denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "test-run",
+          rows.filter((row) => row.state === "passed").length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "electron-ui-runtime-mismatch-rate": {
+        const rows = database
+          .prepare(
+            `SELECT assertions.id, assertions.ui_status AS uiStatus,
+                    assertions.runtime_status AS runtimeStatus
+               FROM test_assertion_results AS assertions
+               JOIN test_runs AS tests ON tests.id = assertions.test_run_id
+               JOIN department_runs AS runs ON runs.id = tests.run_id
+              WHERE ${run.sql}
+                AND assertions.created_at >= ?
+                AND assertions.created_at < ?
+              ORDER BY assertions.created_at, assertions.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly uiStatus: "passed" | "failed" | "missing" | "unknown";
+          readonly runtimeStatus: "passed" | "failed" | "missing" | "unknown";
+        }>;
+        const incomplete = rows.filter(
+          (row) =>
+            row.uiStatus === "missing" ||
+            row.uiStatus === "unknown" ||
+            row.runtimeStatus === "missing" ||
+            row.runtimeStatus === "unknown",
+        );
+        if (incomplete.length > 0) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason:
+              "An Electron assertion lacks an exact UI and Runtime result pair.",
+            missingFactKinds: ["exact-electron-ui-runtime-result-pair"],
+            sourceFactFamily: "test-assertion-result",
+            sourceFactRefs: incomplete.map((row) => row.id),
+          };
+        }
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "test-assertion-result",
+            "No exact Electron UI and Runtime assertion denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "test-assertion-result",
+          rows.filter((row) => row.uiStatus !== row.runtimeStatus).length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "delivery-candidate-acceptance-rate": {
+        const rows = database
+          .prepare(
+            `SELECT decisions.id, decisions.decision
+               FROM human_release_decisions AS decisions
+               JOIN delivery_candidates AS candidates
+                 ON candidates.id = decisions.candidate_id
+               JOIN department_runs AS runs ON runs.id = candidates.run_id
+              WHERE ${run.sql}
+                AND decisions.created_at >= ?
+                AND decisions.created_at < ?
+              ORDER BY decisions.created_at, decisions.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly decision: string;
+        }>;
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "human-release-decision",
+            "No human Release decision denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "human-release-decision",
+          rows.filter((row) => row.decision === "accepted").length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "release-item-success-rate": {
+        const rows = database
+          .prepare(
+            `SELECT items.id, items.state
+               FROM release_operation_items AS items
+               JOIN release_operations AS operations
+                 ON operations.id = items.operation_id
+               JOIN delivery_candidates AS candidates
+                 ON candidates.id = operations.candidate_id
+               JOIN department_runs AS runs ON runs.id = candidates.run_id
+              WHERE ${run.sql}
+                AND items.updated_at >= ?
+                AND items.updated_at < ?
+              ORDER BY items.updated_at, items.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly state: string;
+        }>;
+        const unknown = rows.filter((row) => row.state === "unknown");
+        if (unknown.length > 0) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason: "A Release item has an unknown terminal outcome.",
+            missingFactKinds: ["release-item-terminal-outcome"],
+            sourceFactFamily: "release-operation-item",
+            sourceFactRefs: unknown.map((row) => row.id),
+          };
+        }
+        const terminal = rows.filter((row) =>
+          ["succeeded", "failed", "destination-conflict"].includes(row.state),
+        );
+        if (terminal.length === 0) {
+          return missingDenominator(
+            metricId,
+            "release-operation-item",
+            "No terminal Release item denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "release-operation-item",
+          terminal.filter((row) => row.state === "succeeded").length,
+          terminal.length,
+          terminal.map((row) => row.id),
+        );
+      }
+      case "memory-promotion-rate": {
+        if (
+          query.filters.departmentIds.length > 0 ||
+          query.filters.pipelineVersionIds.length > 0
+        ) {
+          return dimensionAttributionUnavailable(metricId);
+        }
+        const rows = database
+          .prepare(
+            `SELECT decisions.id, decisions.decision, entries.id AS entryId
+               FROM reviewed_memory_decisions AS decisions
+               JOIN reviewed_memory_candidate_revisions AS revisions
+                 ON revisions.id = decisions.candidate_revision_id
+               LEFT JOIN reviewed_memory_entries AS entries
+                 ON entries.decision_id = decisions.id
+              WHERE revisions.project_id = ?
+                AND decisions.created_at >= ?
+                AND decisions.created_at < ?
+              ORDER BY decisions.created_at, decisions.id`,
+          )
+          .all(query.projectId, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly decision: string;
+          readonly entryId: string | null;
+        }>;
+        const missingEntries = rows.filter(
+          (row) => row.decision === "accepted" && row.entryId === null,
+        );
+        if (missingEntries.length > 0) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason:
+              "An accepted reviewed Memory decision lacks its promoted Memory entry.",
+            missingFactKinds: ["accepted-memory-entry"],
+            sourceFactFamily: "reviewed-memory-decision",
+            sourceFactRefs: missingEntries.map((row) => row.id),
+          };
+        }
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "reviewed-memory-decision",
+            "No reviewed Memory decision denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "reviewed-memory-decision",
+          rows.filter((row) => row.decision === "accepted").length,
+          rows.length,
+          canonicalIds(
+            rows.flatMap((row) =>
+              row.entryId === null ? [row.id] : [row.id, row.entryId],
+            ),
+          ),
+        );
+      }
+      case "memory-selection-rate": {
+        if (
+          query.filters.departmentIds.length > 0 ||
+          query.filters.pipelineVersionIds.length > 0
+        ) {
+          return dimensionAttributionUnavailable(metricId);
+        }
+        const rows = database
+          .prepare(
+            `SELECT entries.id AS entryId, selections.id AS selectionId
+               FROM reviewed_memory_entries AS entries
+               LEFT JOIN run_memory_selections AS selections
+                 ON selections.entry_id = entries.id
+                AND selections.created_at >= ?
+                AND selections.created_at < ?
+              WHERE entries.project_id = ?
+                AND entries.created_at >= ?
+                AND entries.created_at < ?
+              ORDER BY entries.created_at, entries.id, selections.created_at,
+                       selections.id`,
+          )
+          .all(
+            startInclusive,
+            endExclusive,
+            query.projectId,
+            startInclusive,
+            endExclusive,
+          ) as Array<{
+          readonly entryId: string;
+          readonly selectionId: string | null;
+        }>;
+        const entryIds = new Set(rows.map((row) => row.entryId));
+        if (entryIds.size === 0) {
+          return missingDenominator(
+            metricId,
+            "reviewed-memory-entry",
+            "No promoted Memory entry denominator exists.",
+          );
+        }
+        const selectedEntryIds = new Set(
+          rows
+            .filter((row) => row.selectionId !== null)
+            .map((row) => row.entryId),
+        );
+        return rateObservation(
+          metricId,
+          "reviewed-memory-entry",
+          selectedEntryIds.size,
+          entryIds.size,
+          canonicalIds(
+            rows.flatMap((row) =>
+              row.selectionId === null
+                ? [row.entryId]
+                : [row.entryId, row.selectionId],
+            ),
+          ),
+        );
+      }
+      case "security-operability-high-risk-closure-rate":
+        return {
+          metricId,
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks exact Security and Operability high-risk closure lineage.",
+          unavailableReasonCode: "unsupported-by-statistics-at-1",
+          sourceFactFamily: "security-operability-risk",
+          sourceFactRefs: [],
+        };
+      case "whole-run-token-cost":
+        return {
+          metricId,
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks complete immutable whole-Run Token and cost facts.",
+          unavailableReasonCode: "unsupported-by-statistics-at-1",
+          sourceFactFamily: "run-token-cost",
+          sourceFactRefs: [],
+        };
+      case "complete-model-attribution":
+        return {
+          metricId,
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks complete exact Model attribution across governed executions.",
+          unavailableReasonCode: "unsupported-by-statistics-at-1",
+          sourceFactFamily: "model-attribution",
+          sourceFactRefs: [],
+        };
+      case "heterogeneous-defect-aggregate-rate":
+        return {
+          metricId,
+          status: "unavailable",
+          reason:
+            "statistics@1 has no comparable denominator across heterogeneous Defect kinds.",
+          unavailableReasonCode: "unsupported-by-statistics-at-1",
+          sourceFactFamily: "heterogeneous-defect",
+          sourceFactRefs: [],
+        };
       default:
         return {
           metricId,

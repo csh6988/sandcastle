@@ -23,25 +23,27 @@ const metricLabel = (t: Messages, metricId: StatisticsMetricId): string => {
       t.statisticsMetricGovernedExecutionConcurrency,
     "ordinary-retry-count": t.statisticsMetricOrdinaryRetryCount,
     "recovery-attempt-count": t.statisticsMetricRecoveryAttemptCount,
-    "code-review-defect-incidence": "code-review-defect-incidence",
-    "integration-conflict-rate": "integration-conflict-rate",
-    "test-pass-rate": "test-pass-rate",
-    "electron-ui-runtime-mismatch-rate": "electron-ui-runtime-mismatch-rate",
+    "code-review-defect-incidence": t.statisticsMetricCodeReviewDefectIncidence,
+    "integration-conflict-rate": t.statisticsMetricIntegrationConflictRate,
+    "test-pass-rate": t.statisticsMetricTestPassRate,
+    "electron-ui-runtime-mismatch-rate":
+      t.statisticsMetricElectronUiRuntimeMismatchRate,
     "department-run-failure-rate": t.statisticsMetricDepartmentRunFailureRate,
     "node-attempt-failure-rate": t.statisticsMetricNodeAttemptFailureRate,
     "lease-interruption-rate": t.statisticsMetricLeaseInterruptionRate,
     "human-approval-wait": t.statisticsMetricHumanApprovalWait,
     "governed-intervention-rate": t.statisticsMetricGovernedInterventionRate,
-    "delivery-candidate-acceptance-rate": "delivery-candidate-acceptance-rate",
-    "release-item-success-rate": "release-item-success-rate",
-    "memory-promotion-rate": "memory-promotion-rate",
-    "memory-selection-rate": "memory-selection-rate",
+    "delivery-candidate-acceptance-rate":
+      t.statisticsMetricDeliveryCandidateAcceptanceRate,
+    "release-item-success-rate": t.statisticsMetricReleaseItemSuccessRate,
+    "memory-promotion-rate": t.statisticsMetricMemoryPromotionRate,
+    "memory-selection-rate": t.statisticsMetricMemorySelectionRate,
     "security-operability-high-risk-closure-rate":
-      "security-operability-high-risk-closure-rate",
-    "whole-run-token-cost": "whole-run-token-cost",
-    "complete-model-attribution": "complete-model-attribution",
+      t.statisticsMetricSecurityOperabilityHighRiskClosureRate,
+    "whole-run-token-cost": t.statisticsMetricWholeRunTokenCost,
+    "complete-model-attribution": t.statisticsMetricCompleteModelAttribution,
     "heterogeneous-defect-aggregate-rate":
-      "heterogeneous-defect-aggregate-rate",
+      t.statisticsMetricHeterogeneousDefectAggregateRate,
   };
   return labels[metricId];
 };

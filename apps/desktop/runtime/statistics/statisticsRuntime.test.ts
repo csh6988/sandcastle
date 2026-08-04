@@ -269,6 +269,229 @@ const seedExecutionReliabilityFacts = (path: string): void => {
   database.close();
 };
 
+const seedQualityDeliveryMemoryFacts = (path: string): void => {
+  const database = new DatabaseSync(path);
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    INSERT INTO code_review_manifests(
+      id, topic_id, project_id, run_id, snapshot_revision_id, work_package_id,
+      work_package_version_id, assignment_id, node_attempt_id,
+      workspace_import_id, diff_artifact_version_id, manifest_json,
+      manifest_hash, created_at
+    ) VALUES
+      ('code-review:clean', 'topic:code-review:clean', 'project:statistics',
+       'run:statistics', 'snapshot:statistics', 'work-package:clean',
+       'work-package-version:clean', 'assignment:clean', 'attempt:clean',
+       'workspace-import:clean', 'artifact:diff:clean', '{}', '${hash}',
+       '2026-08-01T07:00:00.000Z'),
+      ('code-review:defect', 'topic:code-review:defect', 'project:statistics',
+       'run:statistics', 'snapshot:statistics', 'work-package:defect',
+       'work-package-version:defect', 'assignment:defect', 'attempt:defect',
+       'workspace-import:defect', 'artifact:diff:defect', '{}', '${hash}',
+       '2026-08-01T07:10:00.000Z');
+    INSERT INTO code_review_defects(
+      id, code_review_manifest_id, quality_gate_result_id, work_package_id,
+      result, finding_ids_json, obligation_json, status, created_at
+    ) VALUES (
+      'code-review-defect:1', 'code-review:defect', 'quality-gate:code-review',
+      'work-package:defect', 'FAIL', '[]', '{}', 'open',
+      '2026-08-01T07:15:00.000Z'
+    );
+    INSERT INTO integration_generations(
+      id, project_id, run_id, snapshot_revision_id, node_run_id, generation,
+      coverage_id, coverage_node_run_id, coverage_node_attempt_id,
+      coverage_hash, manifest_json, manifest_hash, state,
+      pass_authority_hash, created_at, updated_at
+    ) VALUES (
+      'integration-generation:statistics', 'project:statistics',
+      'run:statistics', 'snapshot:statistics', 'node-run:integration', 1,
+      'coverage:statistics', 'node-run:coverage', 'attempt:coverage', '${hash}',
+      '{}', '${hash}', 'passed', '${hash}',
+      '2026-08-01T08:00:00.000Z', '2026-08-01T08:30:00.000Z'
+    );
+    INSERT INTO integration_operations(
+      id, generation_id, repository_result_id, work_package_id,
+      work_package_version_id, authority_id, quality_gate_result_id, ordinal,
+      source_branch, source_commit, diff_hash, expected_tip, request_json,
+      request_hash, idempotency_key, state, receipt_json, receipt_hash,
+      resulting_commit, created_at, updated_at
+    ) VALUES
+      ('integration-operation:clean', 'integration-generation:statistics',
+       'repository-result:statistics', 'work-package:clean',
+       'work-package-version:clean', 'code-review-authority:clean',
+       'quality-gate:clean', 0, 'branch:clean', '${"a".repeat(40)}', '${hash}',
+       '${"b".repeat(40)}', '{}', '${hash}', 'integration:clean', 'succeeded',
+       '{}', '${hash}', '${"c".repeat(40)}',
+       '2026-08-01T08:05:00.000Z', '2026-08-01T08:15:00.000Z'),
+      ('integration-operation:conflict', 'integration-generation:statistics',
+       'repository-result:statistics', 'work-package:defect',
+       'work-package-version:defect', 'code-review-authority:defect',
+       'quality-gate:defect', 1, 'branch:defect', '${"d".repeat(40)}', '${hash}',
+       '${"e".repeat(40)}', '{}', '${hash}', 'integration:conflict', 'failed',
+       NULL, NULL, NULL,
+       '2026-08-01T08:10:00.000Z', '2026-08-01T08:20:00.000Z');
+    INSERT INTO integration_defects(
+      id, generation_id, integration_operation_id, kind, responsibility_json,
+      evidence_json, status, created_at
+    ) VALUES (
+      'integration-defect:conflict', 'integration-generation:statistics',
+      'integration-operation:conflict', 'git-conflict', '{}', '{}', 'open',
+      '2026-08-01T08:12:00.000Z'
+    );
+    INSERT INTO test_runs(
+      id, request_id, project_id, run_id, snapshot_revision_id, node_run_id,
+      node_attempt_id, session_id, integration_generation_id,
+      integration_manifest_hash, integration_pass_authority_hash,
+      manifest_json, manifest_hash, request_hash, state, pass_authority_hash,
+      created_at, updated_at
+    ) VALUES
+      ('test-run:passed', 'test-request:passed', 'project:statistics',
+       'run:statistics', 'snapshot:statistics', 'node-run:test:passed',
+       'attempt:test:passed', 'session:test:passed',
+       'integration-generation:statistics', '${hash}', '${hash}', '{}',
+       '${hash}', '${hash}', 'running', NULL,
+       '2026-08-01T09:00:00.000Z', '2026-08-01T09:00:00.000Z'),
+      ('test-run:failed', 'test-request:failed', 'project:statistics',
+       'run:statistics', 'snapshot:statistics', 'node-run:test:failed',
+       'attempt:test:failed', 'session:test:failed',
+       'integration-generation:statistics', '${hash}', '${hash}', '{}',
+       '${hash}', '${hash}', 'running', NULL,
+       '2026-08-01T09:10:00.000Z', '2026-08-01T09:10:00.000Z');
+    INSERT INTO test_assertion_results(
+      id, test_run_id, operation_id, test_case_revision_id, assertion_id,
+      required, ui_status, runtime_status, correlation_json, result_hash,
+      created_at, ui_observation_json, runtime_observation_json
+    ) VALUES
+      ('assertion:matched', 'test-run:passed', 'test-operation:passed',
+       'test-case-revision:matched', 'matched', 1, 'passed', 'passed', '{}',
+       '${hash}', '2026-08-01T09:15:00.000Z', '{}', '{}'),
+      ('assertion:mismatch', 'test-run:failed', 'test-operation:failed',
+       'test-case-revision:mismatch', 'mismatch', 1, 'failed', 'passed', '{}',
+       '${hash}', '2026-08-01T09:25:00.000Z', '{}', '{}');
+    UPDATE test_runs
+       SET state = 'passed', pass_authority_hash = '${hash}',
+           updated_at = '2026-08-01T09:20:00.000Z'
+     WHERE id = 'test-run:passed';
+    UPDATE test_runs
+       SET state = 'failed', updated_at = '2026-08-01T09:30:00.000Z'
+     WHERE id = 'test-run:failed';
+    INSERT INTO delivery_candidates(
+      id, request_id, project_id, run_id, snapshot_revision_id,
+      candidate_input_id, candidate_input_hash, gate_authority_id,
+      gate_authority_hash, source_node_run_id, source_node_attempt_id,
+      lineage_hash, manifest_json, manifest_hash, request_hash, created_at
+    ) VALUES
+      ('delivery-candidate:accepted', 'delivery-request:accepted',
+       'project:statistics', 'run:statistics', 'snapshot:statistics',
+       'candidate-input:accepted', '${hash}', 'gate-authority:accepted',
+       '${hash}', 'node-run:delivery:accepted', 'attempt:delivery:accepted',
+       '${hash}', '{}', '${hash}', '${hash}',
+       '2026-08-01T10:00:00.000Z'),
+      ('delivery-candidate:rejected', 'delivery-request:rejected',
+       'project:statistics', 'run:statistics', 'snapshot:statistics',
+       'candidate-input:rejected', '${hash}', 'gate-authority:rejected',
+       '${hash}', 'node-run:delivery:rejected', 'attempt:delivery:rejected',
+       '${hash}', '{}', '${hash}', '${hash}',
+       '2026-08-01T10:05:00.000Z');
+    INSERT INTO human_release_decisions(
+      id, candidate_id, candidate_hash, run_id, snapshot_revision_id,
+      decision, actor_type, actor_id, authenticated_by, reason,
+      evidence_refs_json, decision_hash, created_at
+    ) VALUES
+      ('release-decision:accepted', 'delivery-candidate:accepted', '${hash}',
+       'run:statistics', 'snapshot:statistics', 'accepted', 'human',
+       'human:statistics', 'local-session', 'Accepted exact candidate', '[]',
+       '${hash}', '2026-08-01T10:10:00.000Z'),
+      ('release-decision:rejected', 'delivery-candidate:rejected', '${hash}',
+       'run:statistics', 'snapshot:statistics', 'rejected', 'human',
+       'human:statistics', 'local-session', 'Rejected exact candidate', '[]',
+       '${hash}', '2026-08-01T10:15:00.000Z');
+    INSERT INTO release_operations(
+      id, idempotency_key, candidate_id, accepted_authority_id, kind,
+      authorization_json, authorization_hash, request_json,
+      canonical_request_hash, aggregate_state, created_at, updated_at
+    ) VALUES (
+      'release-operation:statistics', 'release-operation-key:statistics',
+      'delivery-candidate:accepted', 'accepted-authority:statistics', 'export',
+      '{}', '${hash}', '{}', '${hash}', 'partially-succeeded',
+      '2026-08-01T11:00:00.000Z', '2026-08-01T11:30:00.000Z'
+    );
+    INSERT INTO release_operation_items(
+      id, operation_id, item_key, ordinal, kind, request_json, request_hash,
+      state, receipt_json, receipt_hash, evidence_json, created_at, updated_at
+    ) VALUES
+      ('release-item:succeeded:1', 'release-operation:statistics', 'item:1', 0,
+       'export', '{}', '${hash}', 'succeeded', '{}', '${hash}', '{}',
+       '2026-08-01T11:05:00.000Z', '2026-08-01T11:10:00.000Z'),
+      ('release-item:succeeded:2', 'release-operation:statistics', 'item:2', 1,
+       'export', '{}', '${hash}', 'succeeded', '{}', '${hash}', '{}',
+       '2026-08-01T11:06:00.000Z', '2026-08-01T11:11:00.000Z'),
+      ('release-item:failed', 'release-operation:statistics', 'item:3', 2,
+       'export', '{}', '${hash}', 'failed', NULL, NULL, '{}',
+       '2026-08-01T11:07:00.000Z', '2026-08-01T11:12:00.000Z');
+    INSERT INTO reviewed_memory_candidate_revisions(
+      id, candidate_id, project_id, scope, revision, content, content_hash,
+      redaction_policy_version, redaction_policy_hash,
+      source_artifact_versions_json, source_event_ranges_json,
+      producer_ai_member_id, producer_position_id, producer_session_id,
+      created_at
+    ) VALUES
+      ('memory-revision:accepted:1', 'memory-candidate:accepted:1',
+       'project:statistics', 'project', 1, 'First memory', '${hash}', '1',
+       '${hash}', '[]', '[]', 'producer:memory', 'position:memory',
+       'session:memory:1', '2026-08-01T12:00:00.000Z'),
+      ('memory-revision:accepted:2', 'memory-candidate:accepted:2',
+       'project:statistics', 'project', 1, 'Second memory', '${hash}', '1',
+       '${hash}', '[]', '[]', 'producer:memory', 'position:memory',
+       'session:memory:2', '2026-08-01T12:01:00.000Z'),
+      ('memory-revision:rejected', 'memory-candidate:rejected',
+       'project:statistics', 'project', 1, 'Rejected memory', '${hash}', '1',
+       '${hash}', '[]', '[]', 'producer:memory', 'position:memory',
+       'session:memory:3', '2026-08-01T12:02:00.000Z');
+    INSERT INTO reviewed_memory_decisions(
+      id, candidate_revision_id, candidate_revision_hash, topic_id,
+      quality_gate_result_id, decision, actor_type, actor_id,
+      authenticated_by, command_id, created_at
+    ) VALUES
+      ('memory-decision:accepted:1', 'memory-revision:accepted:1', '${hash}',
+       'topic:memory:1', 'quality-gate:memory:1', 'accepted', 'human',
+       'human:statistics', 'local-session', 'command:memory:1',
+       '2026-08-01T12:10:00.000Z'),
+      ('memory-decision:accepted:2', 'memory-revision:accepted:2', '${hash}',
+       'topic:memory:2', 'quality-gate:memory:2', 'accepted', 'human',
+       'human:statistics', 'local-session', 'command:memory:2',
+       '2026-08-01T12:11:00.000Z'),
+      ('memory-decision:rejected', 'memory-revision:rejected', '${hash}',
+       'topic:memory:3', 'quality-gate:memory:3', 'rejected', 'human',
+       'human:statistics', 'local-session', 'command:memory:3',
+       '2026-08-01T12:12:00.000Z');
+    INSERT INTO reviewed_memory_entries(
+      id, decision_id, candidate_revision_id, project_id, scope, owner_id,
+      version, content, content_hash, redaction_policy_version,
+      redaction_policy_hash, quality_gate_result_id, created_at
+    ) VALUES
+      ('memory-entry:1', 'memory-decision:accepted:1',
+       'memory-revision:accepted:1', 'project:statistics', 'project',
+       'project:statistics', 1, 'First memory', '${hash}', '1', '${hash}',
+       'quality-gate:memory:1', '2026-08-01T12:10:00.000Z'),
+      ('memory-entry:2', 'memory-decision:accepted:2',
+       'memory-revision:accepted:2', 'project:statistics', 'project',
+       'project:statistics', 2, 'Second memory', '${hash}', '1', '${hash}',
+       'quality-gate:memory:2', '2026-08-01T12:11:00.000Z');
+    INSERT INTO run_memory_selections(
+      id, project_id, run_id, source_snapshot_revision_id,
+      snapshot_revision_id, entry_id, entry_version, entry_hash,
+      selection_reason, policy_hash, created_at
+    ) VALUES (
+      'memory-selection:1', 'project:statistics', 'run:statistics',
+      'snapshot:source', 'snapshot:selected', 'memory-entry:1', 1, '${hash}',
+      'Selected exact reviewed memory', '${hash}',
+      '2026-08-01T12:20:00.000Z'
+    );
+  `);
+  database.close();
+};
+
 describe("Statistics Runtime", () => {
   it("inspects deterministic baseline quality facts without writing", () => {
     const companyDir = tempCompanyDir();
@@ -709,6 +932,724 @@ describe("Statistics Runtime", () => {
     assert.deepEqual(
       database.statistics.inspectEvidence(result.value.id),
       result.value,
+    );
+    database.close();
+  });
+
+  it("reports literal quality, delivery, and governed Memory rates", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+    const beforeSequence = database.eventSequence();
+
+    const view = database.statistics.inspect({
+      ...baselineQuery,
+      filters: {},
+      comparisonSet: {
+        id: "comparison:quality-delivery-memory",
+        metricIds: [
+          "test-pass-rate",
+          "release-item-success-rate",
+          "memory-selection-rate",
+          "memory-promotion-rate",
+          "integration-conflict-rate",
+          "electron-ui-runtime-mismatch-rate",
+          "delivery-candidate-acceptance-rate",
+          "code-review-defect-incidence",
+        ],
+      },
+    });
+
+    assert.deepEqual(
+      view.observations.map((observation) => ({
+        metricId: observation.metricId,
+        status: observation.status,
+        measurement:
+          observation.status === "available" ? observation.measurement : null,
+      })),
+      [
+        {
+          metricId: "code-review-defect-incidence",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "delivery-candidate-acceptance-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "electron-ui-runtime-mismatch-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "integration-conflict-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "memory-promotion-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 2,
+            denominator: 3,
+            value: 2 / 3,
+          },
+        },
+        {
+          metricId: "memory-selection-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "release-item-success-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 2,
+            denominator: 3,
+            value: 2 / 3,
+          },
+        },
+        {
+          metricId: "test-pass-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+      ],
+    );
+    assert.equal(view.completeness.status, "complete");
+    assert.equal(database.eventSequence(), beforeSequence);
+    database.close();
+  });
+
+  it("keeps exact zero rates distinct from a missing denominator for every completed metric family", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+    const cases = [
+      [
+        "code-review-defect-incidence",
+        "2026-08-01T07:00:00.000Z",
+        "2026-08-01T07:05:00.000Z",
+      ],
+      [
+        "integration-conflict-rate",
+        "2026-08-01T08:05:00.000Z",
+        "2026-08-01T08:09:00.000Z",
+      ],
+      [
+        "test-pass-rate",
+        "2026-08-01T09:29:00.000Z",
+        "2026-08-01T09:31:00.000Z",
+      ],
+      [
+        "electron-ui-runtime-mismatch-rate",
+        "2026-08-01T09:14:00.000Z",
+        "2026-08-01T09:16:00.000Z",
+      ],
+      [
+        "delivery-candidate-acceptance-rate",
+        "2026-08-01T10:14:00.000Z",
+        "2026-08-01T10:16:00.000Z",
+      ],
+      [
+        "release-item-success-rate",
+        "2026-08-01T11:11:30.000Z",
+        "2026-08-01T11:12:30.000Z",
+      ],
+      [
+        "memory-promotion-rate",
+        "2026-08-01T12:12:00.000Z",
+        "2026-08-01T12:13:00.000Z",
+      ],
+      [
+        "memory-selection-rate",
+        "2026-08-01T12:11:00.000Z",
+        "2026-08-01T12:12:00.000Z",
+      ],
+    ] as const;
+
+    for (const [metricId, startInclusive, endExclusive] of cases) {
+      const observation = database.statistics.inspect({
+        ...baselineQuery,
+        filters: {},
+        window: {
+          kind: "explicit-utc-half-open",
+          startInclusive,
+          endExclusive,
+        },
+        comparisonSet: {
+          id: `comparison:exact-zero:${metricId}`,
+          metricIds: [metricId],
+        },
+      }).observations[0];
+      if (!observation) assert.fail(`${metricId} observation must exist`);
+      if (observation.status !== "available") {
+        assert.fail(`${metricId} must be an available exact zero`);
+      }
+      assert.deepEqual(
+        observation.measurement,
+        { kind: "rate", numerator: 0, denominator: 1, value: 0 },
+        metricId,
+      );
+    }
+    database.close();
+  });
+
+  it("fails closed when quality, delivery, or governed Memory source facts are incomplete", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+    const sqlite = new DatabaseSync(database.path);
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      INSERT INTO integration_defects(
+        id, generation_id, integration_operation_id, kind, responsibility_json,
+        evidence_json, status, created_at
+      ) VALUES (
+        'integration-defect:unbound', 'integration-generation:statistics', NULL,
+        'git-conflict', '{}', '{}', 'open', '2026-08-01T08:13:00.000Z'
+      );
+      INSERT INTO test_runs(
+        id, request_id, project_id, run_id, snapshot_revision_id, node_run_id,
+        node_attempt_id, session_id, integration_generation_id,
+        integration_manifest_hash, integration_pass_authority_hash,
+        manifest_json, manifest_hash, request_hash, state, pass_authority_hash,
+        created_at, updated_at
+      ) VALUES (
+        'test-run:incomplete-electron', 'test-request:incomplete-electron',
+        'project:statistics', 'run:statistics', 'snapshot:statistics',
+        'node-run:test:incomplete-electron', 'attempt:test:incomplete-electron',
+        'session:test:incomplete-electron', 'integration-generation:statistics',
+        '${hash}', '${hash}', '{}', '${hash}', '${hash}', 'running', NULL,
+        '2026-08-01T09:40:00.000Z', '2026-08-01T09:40:00.000Z'
+      );
+      INSERT INTO test_assertion_results(
+        id, test_run_id, operation_id, test_case_revision_id, assertion_id,
+        required, ui_status, runtime_status, correlation_json, result_hash,
+        created_at, ui_observation_json, runtime_observation_json
+      ) VALUES (
+        'assertion:missing-ui', 'test-run:incomplete-electron',
+        'test-operation:incomplete-electron',
+        'test-case-revision:incomplete-electron', 'missing-ui', 1, 'missing',
+        'passed', '{}', '${hash}', '2026-08-01T09:41:00.000Z', '{}', '{}'
+      );
+      INSERT INTO release_operation_items(
+        id, operation_id, item_key, ordinal, kind, request_json, request_hash,
+        state, receipt_json, receipt_hash, evidence_json, created_at, updated_at
+      ) VALUES (
+        'release-item:unknown', 'release-operation:statistics', 'item:unknown',
+        3, 'export', '{}', '${hash}', 'unknown', NULL, NULL, '{}',
+        '2026-08-01T11:08:00.000Z', '2026-08-01T11:13:00.000Z'
+      );
+      INSERT INTO reviewed_memory_candidate_revisions(
+        id, candidate_id, project_id, scope, revision, content, content_hash,
+        redaction_policy_version, redaction_policy_hash,
+        source_artifact_versions_json, source_event_ranges_json,
+        producer_ai_member_id, producer_position_id, producer_session_id,
+        created_at
+      ) VALUES (
+        'memory-revision:accepted-without-entry',
+        'memory-candidate:accepted-without-entry', 'project:statistics',
+        'project', 1, 'Missing promoted entry', '${hash}', '1', '${hash}', '[]',
+        '[]', 'producer:memory', 'position:memory', 'session:memory:missing',
+        '2026-08-01T12:03:00.000Z'
+      );
+      INSERT INTO reviewed_memory_decisions(
+        id, candidate_revision_id, candidate_revision_hash, topic_id,
+        quality_gate_result_id, decision, actor_type, actor_id,
+        authenticated_by, command_id, created_at
+      ) VALUES (
+        'memory-decision:accepted-without-entry',
+        'memory-revision:accepted-without-entry', '${hash}',
+        'topic:memory:missing', 'quality-gate:memory:missing', 'accepted',
+        'human', 'human:statistics', 'local-session', 'command:memory:missing',
+        '2026-08-01T12:13:00.000Z'
+      );
+    `);
+    sqlite.close();
+
+    const inspectOne = (
+      metricId: StatisticsInspectInput["comparisonSet"]["metricIds"][number],
+    ) =>
+      database.statistics.inspect({
+        ...baselineQuery,
+        filters: {},
+        comparisonSet: {
+          id: `comparison:gap:${metricId}`,
+          metricIds: [metricId],
+        },
+      }).observations[0];
+
+    assert.deepEqual(inspectOne("integration-conflict-rate"), {
+      metricId: "integration-conflict-rate",
+      status: "incomplete",
+      reason:
+        "An Integration conflict does not identify its exact Integration operation.",
+      missingFactKinds: ["integration-conflict-operation-attribution"],
+      sourceFactFamily: "integration-operation",
+      sourceFactRefs: ["integration-defect:unbound"],
+    });
+    assert.deepEqual(inspectOne("electron-ui-runtime-mismatch-rate"), {
+      metricId: "electron-ui-runtime-mismatch-rate",
+      status: "incomplete",
+      reason:
+        "An Electron assertion lacks an exact UI and Runtime result pair.",
+      missingFactKinds: ["exact-electron-ui-runtime-result-pair"],
+      sourceFactFamily: "test-assertion-result",
+      sourceFactRefs: ["assertion:missing-ui"],
+    });
+    assert.deepEqual(inspectOne("release-item-success-rate"), {
+      metricId: "release-item-success-rate",
+      status: "incomplete",
+      reason: "A Release item has an unknown terminal outcome.",
+      missingFactKinds: ["release-item-terminal-outcome"],
+      sourceFactFamily: "release-operation-item",
+      sourceFactRefs: ["release-item:unknown"],
+    });
+    assert.deepEqual(inspectOne("memory-promotion-rate"), {
+      metricId: "memory-promotion-rate",
+      status: "incomplete",
+      reason:
+        "An accepted reviewed Memory decision lacks its promoted Memory entry.",
+      missingFactKinds: ["accepted-memory-entry"],
+      sourceFactFamily: "reviewed-memory-decision",
+      sourceFactRefs: ["memory-decision:accepted-without-entry"],
+    });
+    database.close();
+  });
+
+  it("reports stable unavailable reasons for unsupported catalog metrics and Memory dimensions", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+
+    const unsupported = database.statistics.inspect({
+      ...baselineQuery,
+      filters: {},
+      comparisonSet: {
+        id: "comparison:unsupported-statistics-at-1",
+        metricIds: [
+          "whole-run-token-cost",
+          "security-operability-high-risk-closure-rate",
+          "heterogeneous-defect-aggregate-rate",
+          "complete-model-attribution",
+        ],
+      },
+    });
+    assert.deepEqual(
+      unsupported.observations.map((observation) => ({
+        metricId: observation.metricId,
+        status: observation.status,
+        reason:
+          observation.status === "unavailable" ? observation.reason : null,
+        code:
+          observation.status === "unavailable"
+            ? observation.unavailableReasonCode
+            : null,
+      })),
+      [
+        {
+          metricId: "complete-model-attribution",
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks complete exact Model attribution across governed executions.",
+          code: "unsupported-by-statistics-at-1",
+        },
+        {
+          metricId: "heterogeneous-defect-aggregate-rate",
+          status: "unavailable",
+          reason:
+            "statistics@1 has no comparable denominator across heterogeneous Defect kinds.",
+          code: "unsupported-by-statistics-at-1",
+        },
+        {
+          metricId: "security-operability-high-risk-closure-rate",
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks exact Security and Operability high-risk closure lineage.",
+          code: "unsupported-by-statistics-at-1",
+        },
+        {
+          metricId: "whole-run-token-cost",
+          status: "unavailable",
+          reason:
+            "statistics@1 lacks complete immutable whole-Run Token and cost facts.",
+          code: "unsupported-by-statistics-at-1",
+        },
+      ],
+    );
+
+    for (const filters of [
+      { departmentIds: ["software-rnd"] },
+      { pipelineVersionIds: ["software-rnd-pipeline-v1"] },
+    ]) {
+      const filtered = database.statistics.inspect({
+        ...baselineQuery,
+        filters,
+        comparisonSet: {
+          id: "comparison:memory-missing-dimension",
+          metricIds: ["memory-promotion-rate", "memory-selection-rate"],
+        },
+      });
+      assert.equal(
+        filtered.observations.every(
+          (observation) =>
+            observation.status === "unavailable" &&
+            observation.unavailableReasonCode ===
+              "missing-dimension-attribution",
+        ),
+        true,
+      );
+    }
+    database.close();
+  });
+
+  it("excludes every quality, delivery, and governed Memory fact at endExclusive", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+    const sqlite = new DatabaseSync(database.path);
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      INSERT INTO code_review_manifests(
+        id, topic_id, project_id, run_id, snapshot_revision_id, work_package_id,
+        work_package_version_id, assignment_id, node_attempt_id,
+        workspace_import_id, diff_artifact_version_id, manifest_json,
+        manifest_hash, created_at
+      ) VALUES (
+        'code-review:end-exclusive', 'topic:code-review:end-exclusive',
+        'project:statistics', 'run:statistics', 'snapshot:statistics',
+        'work-package:end-exclusive', 'work-package-version:end-exclusive',
+        'assignment:end-exclusive', 'attempt:end-exclusive',
+        'workspace-import:end-exclusive', 'artifact:diff:end-exclusive', '{}',
+        '${hash}', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO integration_operations(
+        id, generation_id, repository_result_id, work_package_id,
+        work_package_version_id, authority_id, quality_gate_result_id, ordinal,
+        source_branch, source_commit, diff_hash, expected_tip, request_json,
+        request_hash, idempotency_key, state, receipt_json, receipt_hash,
+        resulting_commit, created_at, updated_at
+      ) VALUES (
+        'integration-operation:end-exclusive',
+        'integration-generation:statistics', 'repository-result:statistics',
+        'work-package:end-exclusive', 'work-package-version:end-exclusive',
+        'code-review-authority:end-exclusive',
+        'quality-gate:end-exclusive', 2, 'branch:end-exclusive',
+        '${"f".repeat(40)}', '${hash}', '${"1".repeat(40)}', '{}', '${hash}',
+        'integration:end-exclusive', 'failed', NULL, NULL, NULL,
+        '2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO integration_defects(
+        id, generation_id, integration_operation_id, kind, responsibility_json,
+        evidence_json, status, created_at
+      ) VALUES (
+        'integration-defect:end-exclusive',
+        'integration-generation:statistics',
+        'integration-operation:end-exclusive', 'git-conflict', '{}', '{}',
+        'open', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO test_runs(
+        id, request_id, project_id, run_id, snapshot_revision_id, node_run_id,
+        node_attempt_id, session_id, integration_generation_id,
+        integration_manifest_hash, integration_pass_authority_hash,
+        manifest_json, manifest_hash, request_hash, state, pass_authority_hash,
+        created_at, updated_at
+      ) VALUES (
+        'test-run:end-exclusive', 'test-request:end-exclusive',
+        'project:statistics', 'run:statistics', 'snapshot:statistics',
+        'node-run:test:end-exclusive', 'attempt:test:end-exclusive',
+        'session:test:end-exclusive', 'integration-generation:statistics',
+        '${hash}', '${hash}', '{}', '${hash}', '${hash}', 'running', NULL,
+        '2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO test_assertion_results(
+        id, test_run_id, operation_id, test_case_revision_id, assertion_id,
+        required, ui_status, runtime_status, correlation_json, result_hash,
+        created_at, ui_observation_json, runtime_observation_json
+      ) VALUES (
+        'assertion:end-exclusive', 'test-run:end-exclusive',
+        'test-operation:end-exclusive', 'test-case-revision:end-exclusive',
+        'end-exclusive', 1, 'failed', 'passed', '{}', '${hash}',
+        '2026-08-02T00:00:00.000Z', '{}', '{}'
+      );
+      UPDATE test_runs
+         SET state = 'failed', updated_at = '2026-08-02T00:00:00.000Z'
+       WHERE id = 'test-run:end-exclusive';
+      INSERT INTO delivery_candidates(
+        id, request_id, project_id, run_id, snapshot_revision_id,
+        candidate_input_id, candidate_input_hash, gate_authority_id,
+        gate_authority_hash, source_node_run_id, source_node_attempt_id,
+        lineage_hash, manifest_json, manifest_hash, request_hash, created_at
+      ) VALUES (
+        'delivery-candidate:end-exclusive', 'delivery-request:end-exclusive',
+        'project:statistics', 'run:statistics', 'snapshot:statistics',
+        'candidate-input:end-exclusive', '${hash}',
+        'gate-authority:end-exclusive', '${hash}',
+        'node-run:delivery:end-exclusive', 'attempt:delivery:end-exclusive',
+        '${hash}', '{}', '${hash}', '${hash}', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO human_release_decisions(
+        id, candidate_id, candidate_hash, run_id, snapshot_revision_id,
+        decision, actor_type, actor_id, authenticated_by, reason,
+        evidence_refs_json, decision_hash, created_at
+      ) VALUES (
+        'release-decision:end-exclusive',
+        'delivery-candidate:end-exclusive', '${hash}', 'run:statistics',
+        'snapshot:statistics', 'accepted', 'human', 'human:statistics',
+        'local-session', 'Boundary decision', '[]', '${hash}',
+        '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO release_operation_items(
+        id, operation_id, item_key, ordinal, kind, request_json, request_hash,
+        state, receipt_json, receipt_hash, evidence_json, created_at, updated_at
+      ) VALUES (
+        'release-item:end-exclusive', 'release-operation:statistics',
+        'item:end-exclusive', 3, 'export', '{}', '${hash}', 'succeeded', '{}',
+        '${hash}', '{}', '2026-08-02T00:00:00.000Z',
+        '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO reviewed_memory_candidate_revisions(
+        id, candidate_id, project_id, scope, revision, content, content_hash,
+        redaction_policy_version, redaction_policy_hash,
+        source_artifact_versions_json, source_event_ranges_json,
+        producer_ai_member_id, producer_position_id, producer_session_id,
+        created_at
+      ) VALUES (
+        'memory-revision:end-exclusive', 'memory-candidate:end-exclusive',
+        'project:statistics', 'project', 1, 'Boundary memory', '${hash}', '1',
+        '${hash}', '[]', '[]', 'producer:memory', 'position:memory',
+        'session:memory:end-exclusive', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO reviewed_memory_decisions(
+        id, candidate_revision_id, candidate_revision_hash, topic_id,
+        quality_gate_result_id, decision, actor_type, actor_id,
+        authenticated_by, command_id, created_at
+      ) VALUES (
+        'memory-decision:end-exclusive', 'memory-revision:end-exclusive',
+        '${hash}', 'topic:memory:end-exclusive',
+        'quality-gate:memory:end-exclusive', 'rejected', 'human',
+        'human:statistics', 'local-session', 'command:memory:end-exclusive',
+        '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO reviewed_memory_entries(
+        id, decision_id, candidate_revision_id, project_id, scope, owner_id,
+        version, content, content_hash, redaction_policy_version,
+        redaction_policy_hash, quality_gate_result_id, created_at
+      ) VALUES (
+        'memory-entry:end-exclusive', 'memory-decision:end-exclusive',
+        'memory-revision:end-exclusive', 'project:statistics', 'project',
+        'project:statistics', 3, 'Boundary memory', '${hash}', '1', '${hash}',
+        'quality-gate:memory:end-exclusive', '2026-08-02T00:00:00.000Z'
+      );
+      INSERT INTO run_memory_selections(
+        id, project_id, run_id, source_snapshot_revision_id,
+        snapshot_revision_id, entry_id, entry_version, entry_hash,
+        selection_reason, policy_hash, created_at
+      ) VALUES (
+        'memory-selection:end-exclusive', 'project:statistics',
+        'run:statistics', 'snapshot:source', 'snapshot:selected:end-exclusive',
+        'memory-entry:2', 2, '${hash}', 'Boundary selection', '${hash}',
+        '2026-08-02T00:00:00.000Z'
+      );
+    `);
+    sqlite.close();
+
+    const view = database.statistics.inspect({
+      ...baselineQuery,
+      filters: {},
+      comparisonSet: {
+        id: "comparison:quality-delivery-memory-boundary",
+        metricIds: [
+          "code-review-defect-incidence",
+          "delivery-candidate-acceptance-rate",
+          "electron-ui-runtime-mismatch-rate",
+          "integration-conflict-rate",
+          "memory-promotion-rate",
+          "memory-selection-rate",
+          "release-item-success-rate",
+          "test-pass-rate",
+        ],
+      },
+    });
+    assert.deepEqual(
+      view.observations.map((observation) =>
+        observation.status === "available"
+          ? [observation.metricId, observation.measurement]
+          : [observation.metricId, observation.status],
+      ),
+      [
+        [
+          "code-review-defect-incidence",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+        [
+          "delivery-candidate-acceptance-rate",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+        [
+          "electron-ui-runtime-mismatch-rate",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+        [
+          "integration-conflict-rate",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+        [
+          "memory-promotion-rate",
+          { kind: "rate", numerator: 2, denominator: 3, value: 2 / 3 },
+        ],
+        [
+          "memory-selection-rate",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+        [
+          "release-item-success-rate",
+          { kind: "rate", numerator: 2, denominator: 3, value: 2 / 3 },
+        ],
+        [
+          "test-pass-rate",
+          { kind: "rate", numerator: 1, denominator: 2, value: 0.5 },
+        ],
+      ],
+    );
+    database.close();
+  });
+
+  it("freezes and replays the completed statistics@1 catalog with a restart-stable hash", () => {
+    const companyDir = tempCompanyDir();
+    let database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedExecutionReliabilityFacts(database.path);
+    seedQualityDeliveryMemoryFacts(database.path);
+    const completedCatalogQuery: StatisticsInspectInput = {
+      ...baselineQuery,
+      filters: {},
+      comparisonSet: {
+        id: "comparison:statistics-at-1-complete-catalog",
+        metricIds: [
+          "code-review-defect-incidence",
+          "complete-model-attribution",
+          "delivery-candidate-acceptance-rate",
+          "department-run-failure-rate",
+          "electron-ui-runtime-mismatch-rate",
+          "governed-execution-concurrency",
+          "governed-intervention-rate",
+          "heterogeneous-defect-aggregate-rate",
+          "human-approval-wait",
+          "integration-conflict-rate",
+          "lease-interruption-rate",
+          "memory-promotion-rate",
+          "memory-selection-rate",
+          "node-attempt-failure-rate",
+          "ordinary-retry-count",
+          "product-baseline-confirmation-count",
+          "product-baseline-confirmation-latency",
+          "readiness-blocker-count",
+          "recovery-attempt-count",
+          "release-item-success-rate",
+          "review-discussion-round-count",
+          "review-finding-count",
+          "review-recheck-pass-rate",
+          "security-operability-high-risk-closure-rate",
+          "test-pass-rate",
+          "whole-run-token-cost",
+        ],
+      },
+    };
+    const envelope = {
+      schemaVersion: 1 as const,
+      commandId: "command:freeze-completed-statistics-catalog",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:statistics",
+        authenticatedBy: "runtime" as const,
+      },
+      consumerId: "statistics-runtime-test",
+      command: {
+        type: "statistics.evidence.freeze" as const,
+        evidenceSnapshotId: "statistics-evidence:completed-catalog",
+        query: completedCatalogQuery,
+      },
+    };
+
+    const first = database.commandRegistry.execute(envelope);
+    const sameProcessReplay = database.commandRegistry.execute(envelope);
+    assert.equal(first.status, "succeeded");
+    assert.deepEqual(sameProcessReplay, first);
+    if (first.status !== "succeeded") assert.fail("freeze must succeed");
+    assert.equal(first.value.observations.length, 26);
+    assert.deepEqual(first.value.completeness.unavailableMetricIds, [
+      "complete-model-attribution",
+      "heterogeneous-defect-aggregate-rate",
+      "security-operability-high-risk-closure-rate",
+      "whole-run-token-cost",
+    ]);
+    database.close();
+
+    database = openCompanyDatabase(companyDir, {
+      clock: () => new Date("2026-08-05T00:00:00.000Z"),
+    });
+    const restartReplay = database.commandRegistry.execute(envelope);
+    assert.deepEqual(restartReplay, first);
+    assert.deepEqual(
+      database.statistics.inspectEvidence(first.value.id),
+      first.value,
+    );
+    assert.equal(
+      database.statistics.inspectEvidence(first.value.id).hash,
+      first.value.hash,
     );
     database.close();
   });
