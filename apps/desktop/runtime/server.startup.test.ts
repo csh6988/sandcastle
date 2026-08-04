@@ -47,6 +47,12 @@ describe("Company Runtime startup reconciliation", () => {
           return 1;
         },
       },
+      improvementApplications: {
+        reconcilePending: async () => {
+          order.push("improvement-application");
+          return 1;
+        },
+      },
     } as unknown as CompanyDatabase;
     let settled = false;
     const startup = reconcileCompanyRuntimeStartup(database).then(() => {
@@ -63,10 +69,11 @@ describe("Company Runtime startup reconciliation", () => {
     integration.resolve();
     await startup;
     assert.equal(settled, true);
-    assert.deepEqual(order.slice(-3), [
+    assert.deepEqual(order.slice(-4), [
       "integration-complete",
       "test",
       "release",
+      "improvement-application",
     ]);
   });
 
