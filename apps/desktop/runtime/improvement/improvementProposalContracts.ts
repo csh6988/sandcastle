@@ -488,6 +488,12 @@ export const ImprovementApplicationValidateRequestSchema =
   ImprovementApplicationValidateBaseSchema.extend({
     actor: ImprovementValidationActorSchema,
   }).strict();
+export type ImprovementApplicationValidateRequest = z.infer<
+  typeof ImprovementApplicationValidateRequestSchema
+>;
+export type ImprovementValidationActor = z.infer<
+  typeof ImprovementValidationActorSchema
+>;
 
 const ImprovementApplicationRollbackBaseSchema = z
   .object({

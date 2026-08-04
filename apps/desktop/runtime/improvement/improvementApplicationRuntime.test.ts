@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,12 +14,29 @@ import type {
 const timestamp = "2026-08-04T00:00:00.000Z";
 const hash = "a".repeat(64);
 
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(canonicalize(value));
+const sha256 = (value: unknown): string =>
+  createHash("sha256")
+    .update(typeof value === "string" ? value : canonicalJson(value))
+    .digest("hex");
+
 const tempCompanyDir = (): string =>
   mkdtempSync(join(tmpdir(), "sandcastle-improvement-application-runtime-"));
 
 const createApprovedHarnessProposal = (
   database: ReturnType<typeof openCompanyDatabase>,
   suffix = "1",
+  direction: "increase" | "decrease" | "hold" = "decrease",
 ): {
   readonly proposalId: string;
   readonly revisionId: string;
@@ -84,9 +102,7 @@ const createApprovedHarnessProposal = (
       departmentIds: [],
       positionIds: [],
     },
-    expectedMetrics: [
-      { metricId: "review-finding-count", direction: "decrease" },
-    ],
+    expectedMetrics: [{ metricId: "review-finding-count", direction }],
     validationPolicy: {
       metricIds: ["review-finding-count"],
       minimumComparableObservations: 1,
@@ -174,6 +190,104 @@ const createApprovedHarnessProposal = (
     decisionHash: decision.hash,
     content,
   };
+};
+
+const persistEvidenceVariant = (
+  databasePath: string,
+  before: StatisticsEvidenceSnapshotView,
+  input: {
+    readonly id: string;
+    readonly count?: number;
+    readonly comparisonSetId?: string;
+    readonly unavailable?: boolean;
+  },
+): StatisticsEvidenceSnapshotView => {
+  const query = {
+    ...before.query,
+    window: {
+      ...before.query.window,
+      startInclusive: "2026-08-02T00:00:00.000Z",
+      endExclusive: "2026-08-03T00:00:00.000Z",
+    },
+    comparisonSet: {
+      ...before.query.comparisonSet,
+      id: input.comparisonSetId ?? before.query.comparisonSet.id,
+    },
+  };
+  const observations = before.observations.map((observation) =>
+    observation.metricId === "review-finding-count"
+      ? input.unavailable
+        ? {
+            metricId: "review-finding-count" as const,
+            status: "unavailable" as const,
+            reason: "The exact after denominator is unavailable.",
+            unavailableReasonCode: "missing-denominator-authority" as const,
+            sourceFactFamily: "review-finding",
+            sourceFactRefs: [],
+          }
+        : {
+            metricId: "review-finding-count" as const,
+            status: "available" as const,
+            measurement: { kind: "count" as const, value: input.count ?? 0 },
+            sourceFactFamily: "review-finding",
+            sourceFactRefs: [],
+          }
+      : observation,
+  );
+  const queryJson = canonicalJson(query);
+  const createdAt = "2026-08-04T00:10:00.000Z";
+  const snapshotWithoutHash = {
+    id: input.id,
+    query,
+    queryHash: sha256(queryJson),
+    asOfSequence: before.asOfSequence + 1,
+    observations,
+    completeness: {
+      status: input.unavailable
+        ? ("unavailable" as const)
+        : ("complete" as const),
+      incompleteMetricIds: [],
+      unavailableMetricIds: input.unavailable
+        ? ["review-finding-count" as const]
+        : [],
+    },
+    frozenBy: {
+      type: "runtime-worker" as const,
+      id: "runtime-worker:improvement-validation",
+      authenticatedBy: "runtime" as const,
+    },
+    createdAt,
+  };
+  const snapshot: StatisticsEvidenceSnapshotView = {
+    ...snapshotWithoutHash,
+    hash: sha256(canonicalJson(snapshotWithoutHash)),
+  };
+  const sqlite = new DatabaseSync(databasePath);
+  sqlite
+    .prepare(
+      `INSERT INTO statistics_evidence_snapshots(
+         id, project_id, catalog_version, canonical_query_json, query_hash,
+         as_of_sequence, observations_json, completeness_json,
+         frozen_by_actor_type, frozen_by_actor_id, frozen_by_authenticated_by,
+         snapshot_hash, command_id, created_at
+       ) VALUES (?, ?, 'statistics@1', ?, ?, ?, ?, ?, 'runtime-worker', ?,
+                 'runtime', ?, ?, ?)`,
+    )
+    .run(
+      snapshot.id,
+      snapshot.query.projectId,
+      queryJson,
+      snapshot.queryHash,
+      snapshot.asOfSequence,
+      canonicalJson(snapshot.observations),
+      canonicalJson(snapshot.completeness),
+      snapshot.frozenBy.id,
+      snapshot.hash,
+      `fixture:${snapshot.id}`,
+      snapshot.createdAt,
+    );
+  sqlite.close();
+  return snapshot;
 };
 
 const harnessApplyEnvelope = (
@@ -533,6 +647,330 @@ describe("Improvement Application Runtime", () => {
       1,
     );
     sqlite.close();
+    database.close();
+  });
+
+  it("validates an applied operation with exact comparable frozen evidence and no second target effect", async () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    const approved = createApprovedHarnessProposal(database, "validation");
+    const applyEnvelope = harnessApplyEnvelope(approved, {
+      operationId: "improvement-application:harness:validation",
+      commandId: "command:apply-harness-validation",
+    });
+    const intent = database.commandRegistry.execute(applyEnvelope);
+    assert.equal(intent.status, "succeeded");
+    if (intent.status !== "succeeded") assert.fail("apply intent must succeed");
+    const applied = await database.improvementApplications.dispatch(
+      intent.value.id,
+    );
+    assert.equal(applied.state, "applied");
+
+    const afterEvidence = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:freeze-harness-validation-after",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "statistics.evidence.freeze" as const,
+        evidenceSnapshotId: "statistics-evidence:harness-validation:after",
+        query: {
+          projectId: approved.content.evidence.query.projectId,
+          filters: approved.content.evidence.query.filters,
+          window: {
+            kind: "explicit-utc-half-open" as const,
+            startInclusive: "2026-08-02T00:00:00.000Z",
+            endExclusive: "2026-08-03T00:00:00.000Z",
+          },
+          cohort: approved.content.evidence.query.cohort,
+          comparisonSet: approved.content.evidence.query.comparisonSet,
+        },
+      },
+    });
+    assert.equal(afterEvidence.status, "succeeded");
+    if (afterEvidence.status !== "succeeded") {
+      assert.fail("after evidence freeze must succeed");
+    }
+    const validationEnvelope = {
+      schemaVersion: 1 as const,
+      commandId: "command:validate-harness-improvement",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidence: afterEvidence.value,
+          reason: "Compare the next exact governed cohort.",
+          evidenceRefs: [approved.content.evidence.id, afterEvidence.value.id],
+        },
+      },
+    };
+    const validated = database.commandRegistry.execute(validationEnvelope);
+    assert.equal(validated.status, "succeeded");
+    if (validated.status !== "succeeded") {
+      assert.fail("validation must succeed");
+    }
+    assert.equal(validated.value.state, "validated");
+    assert.equal(validated.value.validations.length, 1);
+    assert.equal(validated.value.validations[0]?.outcome, "unchanged");
+    assert.deepEqual(
+      database.commandRegistry.execute(validationEnvelope),
+      validated,
+    );
+    const changedReplay = database.commandRegistry.execute({
+      ...validationEnvelope,
+      command: {
+        ...validationEnvelope.command,
+        validation: {
+          ...validationEnvelope.command.validation,
+          reason: "Changed validation input under the same Command ID.",
+        },
+      },
+    });
+    assert.equal(changedReplay.status, "rejected");
+    if (changedReplay.status !== "rejected") {
+      assert.fail("changed validation replay must be rejected");
+    }
+    assert.equal(changedReplay.error.code, "COMMAND_ID_REUSE");
+
+    const sqlite = new DatabaseSync(database.path);
+    assert.equal(
+      (
+        sqlite
+          .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
+          .get() as { readonly count: number }
+      ).count,
+      1,
+    );
+    sqlite.close();
+    database.close();
+  });
+
+  it("records improved and regressed outcomes from approved metric directions", async () => {
+    for (const scenario of [
+      {
+        suffix: "improved",
+        direction: "increase" as const,
+        outcome: "improved",
+      },
+      {
+        suffix: "regressed",
+        direction: "decrease" as const,
+        outcome: "regressed",
+      },
+    ]) {
+      const database = openCompanyDatabase(tempCompanyDir(), {
+        clock: () => new Date(timestamp),
+      });
+      const approved = createApprovedHarnessProposal(
+        database,
+        scenario.suffix,
+        scenario.direction,
+      );
+      const apply = database.commandRegistry.execute(
+        harnessApplyEnvelope(approved, {
+          operationId: `improvement-application:harness:${scenario.suffix}`,
+          commandId: `command:apply-harness-${scenario.suffix}`,
+        }),
+      );
+      assert.equal(apply.status, "succeeded");
+      if (apply.status !== "succeeded") assert.fail("apply must succeed");
+      const applied = await database.improvementApplications.dispatch(
+        apply.value.id,
+      );
+      const afterEvidence = persistEvidenceVariant(
+        database.path,
+        approved.content.evidence,
+        {
+          id: `statistics-evidence:${scenario.suffix}:after`,
+          count: 1,
+        },
+      );
+      const validated = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `command:validate-harness-${scenario.suffix}`,
+        actor: {
+          type: "human",
+          id: "human:improvement-owner",
+          authenticatedBy: "local-session",
+        },
+        command: {
+          type: "improvement.application.validate",
+          validation: {
+            operationId: applied.id,
+            expectedOperationHash: applied.canonicalRequestHash,
+            afterEvidence,
+            reason: `Record the ${scenario.outcome} validation outcome.`,
+            evidenceRefs: [approved.content.evidence.id, afterEvidence.id],
+          },
+        },
+      });
+      assert.equal(validated.status, "succeeded");
+      if (validated.status !== "succeeded") {
+        assert.fail("validation must succeed");
+      }
+      assert.equal(validated.value.validations[0]?.outcome, scenario.outcome);
+      database.close();
+    }
+  });
+
+  it("rejects non-comparable or unauthorized validation without changing applied state", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date(timestamp),
+    });
+    const approved = createApprovedHarnessProposal(
+      database,
+      "invalid-validation",
+    );
+    const apply = database.commandRegistry.execute(
+      harnessApplyEnvelope(approved, {
+        operationId: "improvement-application:harness:invalid-validation",
+        commandId: "command:apply-harness-invalid-validation",
+      }),
+    );
+    assert.equal(apply.status, "succeeded");
+    if (apply.status !== "succeeded") assert.fail("apply must succeed");
+    const applied = await database.improvementApplications.dispatch(
+      apply.value.id,
+    );
+    const comparable = persistEvidenceVariant(
+      database.path,
+      approved.content.evidence,
+      { id: "statistics-evidence:validation:comparable", count: 0 },
+    );
+    const unauthorized = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-unauthorized",
+      actor: {
+        type: "test-driver" as const,
+        id: "fixture-only",
+        authenticatedBy: "ipc-token" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidence: comparable,
+          reason: "Fixture authority must not validate production state.",
+          evidenceRefs: [approved.content.evidence.id, comparable.id],
+        },
+      },
+    });
+    assert.equal(unauthorized.status, "rejected");
+    if (unauthorized.status !== "rejected") {
+      assert.fail("unauthorized validation must be rejected");
+    }
+    assert.equal(unauthorized.error.code, "FORBIDDEN");
+
+    const stale = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-stale-evidence",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidence: { ...comparable, hash: "b".repeat(64) },
+          reason: "Reject changed frozen evidence content.",
+          evidenceRefs: [approved.content.evidence.id, comparable.id],
+        },
+      },
+    });
+    assert.equal(stale.status, "rejected");
+    if (stale.status !== "rejected") {
+      assert.fail("stale validation evidence must be rejected");
+    }
+    assert.equal(stale.error.code, "STATISTICS_EVIDENCE_STALE");
+
+    const unavailable = persistEvidenceVariant(
+      database.path,
+      approved.content.evidence,
+      {
+        id: "statistics-evidence:validation:unavailable",
+        unavailable: true,
+      },
+    );
+    const unavailableResult = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-unavailable-evidence",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidence: unavailable,
+          reason: "Reject unavailable after evidence.",
+          evidenceRefs: [approved.content.evidence.id, unavailable.id],
+        },
+      },
+    });
+    assert.equal(unavailableResult.status, "rejected");
+    if (unavailableResult.status !== "rejected") {
+      assert.fail("unavailable validation evidence must be rejected");
+    }
+    assert.equal(
+      unavailableResult.error.code,
+      "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+    );
+
+    const nonComparable = persistEvidenceVariant(
+      database.path,
+      approved.content.evidence,
+      {
+        id: "statistics-evidence:validation:non-comparable",
+        count: 0,
+        comparisonSetId: "comparison:different",
+      },
+    );
+    const rejected = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:validate-harness-non-comparable",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: applied.id,
+          expectedOperationHash: applied.canonicalRequestHash,
+          afterEvidence: nonComparable,
+          reason: "Reject a changed comparison set.",
+          evidenceRefs: [approved.content.evidence.id, nonComparable.id],
+        },
+      },
+    });
+    assert.equal(rejected.status, "rejected");
+    if (rejected.status !== "rejected") {
+      assert.fail("non-comparable validation must be rejected");
+    }
+    assert.equal(rejected.error.code, "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE");
+    assert.equal(
+      database.improvementApplications.inspect(applied.id).state,
+      "applied",
+    );
     database.close();
   });
 });

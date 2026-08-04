@@ -104,6 +104,16 @@ const applicationStateLabel = (
     "rollback-failed": t.improvementApplicationStateRollbackFailed,
   })[state];
 
+const validationOutcomeLabel = (
+  t: Messages,
+  outcome: ImprovementApplicationOperationView["validations"][number]["outcome"],
+): string =>
+  ({
+    improved: t.improvementValidationImproved,
+    unchanged: t.improvementValidationUnchanged,
+    regressed: t.improvementValidationRegressed,
+  })[outcome];
+
 function StatisticsObservations({
   t,
   observations,
@@ -156,6 +166,7 @@ export function ProjectImprovementsPanel({
   applications,
   onApplyProposal,
   onReconcileApplication,
+  onValidateApplication,
 }: {
   readonly t: Messages;
   readonly query: StatisticsInspectInput;
@@ -196,6 +207,11 @@ export function ProjectImprovementsPanel({
   readonly onReconcileApplication?: (
     application: ImprovementApplicationOperationView,
   ) => void;
+  readonly onValidateApplication?: (
+    application: ImprovementApplicationOperationView,
+    afterEvidence: StatisticsEvidenceSnapshotView,
+    reason: string,
+  ) => void;
 }) {
   const [proposalDraft, setProposalDraft] = useState<ImprovementProposalDraft>({
     metricId: "",
@@ -219,6 +235,7 @@ export function ProjectImprovementsPanel({
   const [applicationOperationId, setApplicationOperationId] = useState("");
   const [applicationConfirmation, setApplicationConfirmation] = useState("");
   const [applicationReason, setApplicationReason] = useState("");
+  const [validationReason, setValidationReason] = useState("");
   const isHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
   const hasGovernedHead =
     proposalDraft.governedHeadRevisionId.trim().length > 0 ||
@@ -832,7 +849,56 @@ export function ProjectImprovementsPanel({
                     </dd>
                   </div>
                 ) : null}
+                {application.validations.map((validation) => (
+                  <div key={validation.id}>
+                    <dt>{t.improvementValidationOutcome}</dt>
+                    <dd>
+                      {validationOutcomeLabel(t, validation.outcome)} ·{" "}
+                      {validation.beforeEvidence.id} (
+                      {validation.beforeEvidence.hash}) →{" "}
+                      {validation.afterEvidence.id} (
+                      {validation.afterEvidence.hash}) ·{" "}
+                      {t.improvementValidatedBy} {validation.validatedBy.id}
+                    </dd>
+                  </div>
+                ))}
               </dl>
+              {application.nextActions.includes("validate") ? (
+                <div className="field-grid two-column">
+                  <label>
+                    <span>{t.improvementValidationAfterEvidence}</span>
+                    <input readOnly value={evidence?.id ?? ""} />
+                  </label>
+                  <label>
+                    <span>{t.improvementValidationReason}</span>
+                    <textarea
+                      value={validationReason}
+                      onChange={(event) =>
+                        setValidationReason(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <button
+                    disabled={
+                      busy ||
+                      !evidence ||
+                      validationReason.trim().length === 0 ||
+                      !onValidateApplication
+                    }
+                    onClick={() =>
+                      evidence &&
+                      onValidateApplication?.(
+                        application,
+                        evidence,
+                        validationReason.trim(),
+                      )
+                    }
+                    type="button"
+                  >
+                    {t.improvementValidationAction}
+                  </button>
+                </div>
+              ) : null}
               {application.nextActions.includes("reconcile") ? (
                 <button
                   data-improvement-reconcile-application={application.id}

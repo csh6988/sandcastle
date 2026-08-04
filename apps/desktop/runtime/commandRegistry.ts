@@ -192,6 +192,10 @@ export const companyCommandDefinitions = {
     primaryAggregate: "improvement-application",
     expectedRevisionRequired: false,
   },
+  "improvement.application.validate": {
+    primaryAggregate: "improvement-application",
+    expectedRevisionRequired: false,
+  },
   "project.update": {
     primaryAggregate: "project",
     expectedRevisionRequired: true,
@@ -896,7 +900,10 @@ const executeImprovementApplicationCommand = (
   envelope: CommandEnvelope<EnvelopeCommand>,
   clock: () => Date,
 ): CommandResult<unknown> => {
-  if (envelope.command.type !== "improvement.application.apply") {
+  if (
+    envelope.command.type !== "improvement.application.apply" &&
+    envelope.command.type !== "improvement.application.validate"
+  ) {
     throw new CompanyCommandError(
       "COMMAND_UNSUPPORTED",
       `Command ${envelope.command.type} is not supported by this Improvement Application Runtime slice.`,
@@ -970,8 +977,13 @@ const executeImprovementApplicationCommand = (
         envelope.schemaVersion,
       );
     const validActor =
-      envelope.actor.type === "human" &&
-      envelope.actor.authenticatedBy === "local-session";
+      envelope.command.type === "improvement.application.apply"
+        ? envelope.actor.type === "human" &&
+          envelope.actor.authenticatedBy === "local-session"
+        : (envelope.actor.type === "human" &&
+            envelope.actor.authenticatedBy === "local-session") ||
+          (envelope.actor.type === "runtime-worker" &&
+            envelope.actor.authenticatedBy === "runtime");
     let result: CommandResult<unknown>;
     database.exec("SAVEPOINT improvement_application_command");
     if (!validActor) {
@@ -982,23 +994,45 @@ const executeImprovementApplicationCommand = (
         error: {
           code: "FORBIDDEN",
           message:
-            "Improvement application apply requires a verified local-session human.",
+            envelope.command.type === "improvement.application.apply"
+              ? "Improvement application apply requires a verified local-session human."
+              : "Improvement application validation requires a verified local-session human or trusted Runtime worker.",
         },
         effectIds: [],
       };
     } else {
       try {
-        const value = improvementApplications.createInTransaction({
-          commandId: envelope.commandId,
-          request: {
-            ...envelope.command.application,
-            actor: {
-              type: "human",
-              id: envelope.actor.id,
-              authenticatedBy: "local-session",
-            },
-          },
-        });
+        const value =
+          envelope.command.type === "improvement.application.apply"
+            ? improvementApplications.createInTransaction({
+                commandId: envelope.commandId,
+                request: {
+                  ...envelope.command.application,
+                  actor: {
+                    type: "human",
+                    id: envelope.actor.id,
+                    authenticatedBy: "local-session",
+                  },
+                },
+              })
+            : improvementApplications.validateInTransaction({
+                commandId: envelope.commandId,
+                request: {
+                  ...envelope.command.validation,
+                  actor:
+                    envelope.actor.type === "human"
+                      ? {
+                          type: "human",
+                          id: envelope.actor.id,
+                          authenticatedBy: "local-session",
+                        }
+                      : {
+                          type: "runtime-worker",
+                          id: envelope.actor.id,
+                          authenticatedBy: "runtime",
+                        },
+                },
+              });
         database.exec("RELEASE improvement_application_command");
         const effectIds = (
           database
@@ -4419,7 +4453,10 @@ export const openCompanyCommandRegistry = (
         clock,
       ) as CommandResult<EnvelopeCommandResult<typeof envelope.command>>;
     }
-    if (envelope.command.type === "improvement.application.apply") {
+    if (
+      envelope.command.type === "improvement.application.apply" ||
+      envelope.command.type === "improvement.application.validate"
+    ) {
       if (!improvementApplications) {
         throw new CompanyCommandError(
           "IMPROVEMENT_APPLICATION_RUNTIME_UNAVAILABLE",

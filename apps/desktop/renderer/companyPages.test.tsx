@@ -47,6 +47,7 @@ import {
   confirmProjectProductBaseline,
   recoveryOverrideInputProvided,
   improvementApplicationApplyInput,
+  improvementApplicationValidateInput,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -2449,6 +2450,19 @@ describe("Project detail", () => {
       evidenceRefs: [evidence.id, decision.id],
     });
     assert.equal(application && "actor" in application, false);
+    const validation = improvementApplicationValidateInput(
+      { ...existingApplication, state: "applied", nextActions: ["validate"] },
+      evidence,
+      "Compare the exact next cohort.",
+    );
+    assert.deepEqual(validation, {
+      operationId: existingApplication.id,
+      expectedOperationHash: hash,
+      afterEvidence: evidence,
+      reason: "Compare the exact next cohort.",
+      evidenceRefs: [evidence.id, decision.id],
+    });
+    assert.equal("actor" in validation, false);
   });
 
   it("queries and mounts the selected Run Work Package graph without retaining failed data", async () => {

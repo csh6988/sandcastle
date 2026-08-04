@@ -2,19 +2,27 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvents } from "../events/subscription.js";
 import type { StatisticsRuntime } from "../statistics/statisticsRuntime.js";
+import type {
+  StatisticsEvidenceSnapshotView,
+  StatisticsMetricObservation,
+} from "../statistics/statisticsContracts.js";
 import {
   ImprovementApplicationApplyRequestSchema,
+  ImprovementApplicationValidateRequestSchema,
   ImprovementApplicationObservationSchema,
   ImprovementApplicationOperationViewSchema,
   ImprovementApplicationReceiptSchema,
   ImprovementApplicationReconciliationSchema,
   ImprovementApplicationRollbackViewSchema,
   ImprovementApplicationValidationSchema,
+  ImprovementProposalRevisionContentSchema,
   ImprovementTargetSchema,
   type ImprovementApplicationApplyRequest,
   type ImprovementApplicationEffectAdapter,
   type ImprovementApplicationOperationView,
   type ImprovementApplicationState,
+  type ImprovementApplicationValidateRequest,
+  type ImprovementValidationActor,
   type ImprovementTarget,
 } from "./improvementProposalContracts.js";
 
@@ -61,6 +69,10 @@ export interface ImprovementApplicationRuntime {
   readonly createInTransaction: (input: {
     readonly commandId: string;
     readonly request: ImprovementApplicationApplyRequest;
+  }) => ImprovementApplicationOperationView;
+  readonly validateInTransaction: (input: {
+    readonly commandId: string;
+    readonly request: ImprovementApplicationValidateRequest;
   }) => ImprovementApplicationOperationView;
   readonly inspect: (
     operationId: string,
@@ -136,7 +148,9 @@ export const openImprovementApplicationRuntime = (
   const appendAudit = (input: {
     readonly action: string;
     readonly operationId: string;
-    readonly actor: ImprovementApplicationApplyRequest["actor"];
+    readonly actor:
+      | ImprovementApplicationApplyRequest["actor"]
+      | ImprovementValidationActor;
     readonly before: unknown;
     readonly after: unknown;
     readonly timestamp: string;
@@ -155,7 +169,7 @@ export const openImprovementApplicationRuntime = (
            before_json, after_json, created_at, command_id, actor_type,
            actor_id, authenticated_by, consumer_id
          ) VALUES (?, ?, 'improvement-application', ?, NULL, NULL, ?, ?, ?, ?,
-                   'human', ?, 'local-session', ?)`,
+                   ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -165,7 +179,9 @@ export const openImprovementApplicationRuntime = (
         canonicalJson(input.after),
         input.timestamp,
         input.commandId,
+        input.actor.type,
         input.actor.id,
+        input.actor.authenticatedBy,
         context?.consumerId ?? null,
       );
   };
@@ -703,6 +719,237 @@ export const openImprovementApplicationRuntime = (
       return inspect(request.operationId);
     };
 
+  const measurementValue = (
+    observation: Extract<
+      StatisticsMetricObservation,
+      { readonly status: "available" }
+    >,
+  ): number => {
+    switch (observation.measurement.kind) {
+      case "count":
+        return observation.measurement.value;
+      case "duration":
+        return observation.measurement.milliseconds;
+      case "rate":
+        return observation.measurement.value;
+      case "concurrency":
+        return observation.measurement.maximum;
+    }
+  };
+
+  const windowDuration = (start: string, end: string): number =>
+    new Date(end).getTime() - new Date(start).getTime();
+
+  const comparableEvidence = (
+    before: StatisticsEvidenceSnapshotView,
+    after: StatisticsEvidenceSnapshotView,
+  ): boolean =>
+    before.query.catalogVersion === after.query.catalogVersion &&
+    before.query.projectId === after.query.projectId &&
+    canonicalJson(before.query.filters) ===
+      canonicalJson(after.query.filters) &&
+    canonicalJson(before.query.cohort) === canonicalJson(after.query.cohort) &&
+    canonicalJson(before.query.comparisonSet) ===
+      canonicalJson(after.query.comparisonSet) &&
+    before.query.window.kind === after.query.window.kind &&
+    windowDuration(
+      before.query.window.startInclusive,
+      before.query.window.endExclusive,
+    ) ===
+      windowDuration(
+        after.query.window.startInclusive,
+        after.query.window.endExclusive,
+      );
+
+  const validateInTransaction: ImprovementApplicationRuntime["validateInTransaction"] =
+    (input) => {
+      const request = ImprovementApplicationValidateRequestSchema.parse(
+        input.request,
+      );
+      const operation = inspect(request.operationId);
+      if (operation.canonicalRequestHash !== request.expectedOperationHash) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+          `Improvement application ${operation.id} does not match the expected immutable operation hash.`,
+        );
+      }
+      if (operation.state !== "applied") {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_INVALID_STATE",
+          `Improvement application ${operation.id} cannot be validated from ${operation.state}.`,
+        );
+      }
+      let afterEvidence;
+      try {
+        afterEvidence = options.statistics.inspectEvidence(
+          request.afterEvidence.id,
+        );
+      } catch {
+        throw new ImprovementApplicationRuntimeError(
+          "STATISTICS_EVIDENCE_STALE",
+          `After evidence ${request.afterEvidence.id} is not a persisted immutable Statistics snapshot.`,
+        );
+      }
+      if (
+        afterEvidence.hash !== request.afterEvidence.hash ||
+        canonicalJson(afterEvidence) !== canonicalJson(request.afterEvidence)
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "STATISTICS_EVIDENCE_STALE",
+          `After evidence ${request.afterEvidence.id} does not match its persisted snapshot.`,
+        );
+      }
+      const proposalRow = database
+        .prepare(
+          `SELECT content_json AS contentJson
+             FROM improvement_proposal_revisions
+            WHERE proposal_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.proposalId,
+          operation.proposalRevisionId,
+          operation.proposalRevisionHash,
+        ) as { readonly contentJson: string } | undefined;
+      if (!proposalRow) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_NOT_APPROVED",
+          `Approved proposal revision ${operation.proposalRevisionId} is unavailable.`,
+        );
+      }
+      const content = ImprovementProposalRevisionContentSchema.parse(
+        parseJson(
+          proposalRow.contentJson,
+          `Improvement proposal revision ${operation.proposalRevisionId}`,
+        ),
+      );
+      const beforeEvidence = content.evidence;
+      if (!comparableEvidence(beforeEvidence, afterEvidence)) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+          "Before and after Statistics evidence do not share the exact catalog, metric set, comparison set, cohort, filters, and window policy.",
+        );
+      }
+      const directions = new Map(
+        content.expectedMetrics.map((metric) => [
+          metric.metricId,
+          metric.direction,
+        ]),
+      );
+      let improved = 0;
+      let regressed = 0;
+      for (const metricId of content.validationPolicy.metricIds) {
+        const before = beforeEvidence.observations.find(
+          (observation) => observation.metricId === metricId,
+        );
+        const after = afterEvidence.observations.find(
+          (observation) => observation.metricId === metricId,
+        );
+        const direction = directions.get(metricId);
+        if (
+          !before ||
+          !after ||
+          before.status !== "available" ||
+          after.status !== "available" ||
+          !direction
+        ) {
+          throw new ImprovementApplicationRuntimeError(
+            "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+            `Metric ${metricId} is not exactly comparable in both evidence snapshots.`,
+          );
+        }
+        const beforeValue = measurementValue(before);
+        const afterValue = measurementValue(after);
+        if (direction === "hold") {
+          if (afterValue !== beforeValue) regressed += 1;
+        } else if (
+          (direction === "increase" && afterValue > beforeValue) ||
+          (direction === "decrease" && afterValue < beforeValue)
+        ) {
+          improved += 1;
+        } else if (afterValue !== beforeValue) {
+          regressed += 1;
+        }
+      }
+      if (
+        content.validationPolicy.metricIds.length <
+        content.validationPolicy.minimumComparableObservations
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_EVIDENCE_NOT_COMPARABLE",
+          "Comparable metric evidence does not satisfy the approved minimum.",
+        );
+      }
+      const outcome =
+        regressed > 0
+          ? ("regressed" as const)
+          : improved > 0
+            ? ("improved" as const)
+            : ("unchanged" as const);
+      const createdAt = clock().toISOString();
+      const record = {
+        id: `improvement-validation:${randomUUID()}`,
+        beforeEvidence,
+        afterEvidence,
+        outcome,
+        validatedBy: request.actor,
+        reason: request.reason,
+        evidenceRefs: request.evidenceRefs,
+        createdAt,
+      };
+      database
+        .prepare(
+          `INSERT INTO improvement_application_validations(
+             id, operation_id, before_evidence_snapshot_id,
+             before_evidence_snapshot_hash, after_evidence_snapshot_id,
+             after_evidence_snapshot_hash, outcome, actor_type, actor_id,
+             authenticated_by, validation_hash, command_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          record.id,
+          operation.id,
+          beforeEvidence.id,
+          beforeEvidence.hash,
+          afterEvidence.id,
+          afterEvidence.hash,
+          outcome,
+          request.actor.type,
+          request.actor.id,
+          request.actor.authenticatedBy,
+          sha256(record),
+          input.commandId,
+          createdAt,
+        );
+      setProjection({
+        operationId: operation.id,
+        state: "validated",
+        error: null,
+        updatedAt: createdAt,
+      });
+      appendAudit({
+        action: "improvement.application.validate",
+        operationId: operation.id,
+        actor: request.actor,
+        before: { state: operation.state },
+        after: {
+          state: "validated",
+          outcome,
+          afterEvidenceHash: afterEvidence.hash,
+        },
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      invalidate({
+        operationId: operation.id,
+        projectId: operation.projectId,
+        proposalId: operation.proposalId,
+        state: "validated",
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      return inspect(operation.id);
+    };
+
   const appendObservation = (input: {
     readonly operationId: string;
     readonly outcome:
@@ -1056,6 +1303,7 @@ export const openImprovementApplicationRuntime = (
 
   return {
     createInTransaction,
+    validateInTransaction,
     inspect,
     list,
     dispatch,

@@ -121,6 +121,18 @@ export const improvementApplicationApplyInput = (
   };
 };
 
+export const improvementApplicationValidateInput = (
+  application: ImprovementApplicationOperationView,
+  afterEvidence: StatisticsEvidenceSnapshotView,
+  reason: string,
+) => ({
+  operationId: application.id,
+  expectedOperationHash: application.canonicalRequestHash,
+  afterEvidence,
+  reason,
+  evidenceRefs: [...new Set([...application.evidenceRefs, afterEvidence.id])],
+});
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error
     ? error.message
@@ -4753,6 +4765,42 @@ export function ProjectDetailView({
     });
   };
 
+  const validateImprovementApplication = async (
+    application: ImprovementApplicationOperationView,
+    afterEvidence: StatisticsEvidenceSnapshotView,
+    reason: string,
+  ): Promise<void> => {
+    const validation = improvementApplicationValidateInput(
+      application,
+      afterEvidence,
+      reason,
+    );
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `validate:${application.id}:${application.canonicalRequestHash}:${afterEvidence.hash}:${reason}`;
+      const commandId =
+        improvementApplicationGestures.current.get(key) ??
+        `improvement-application-validate:${globalThis.crypto.randomUUID()}`;
+      improvementApplicationGestures.current.set(key, commandId);
+      const result = await window.sandcastle.execute({
+        commandId,
+        command: {
+          type: "improvement.application.validate",
+          validation,
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
   return (
     <section
       className="page"
@@ -5165,6 +5213,13 @@ export function ProjectDetailView({
           }
           onReconcileApplication={(application) =>
             void reconcileImprovementApplication(application)
+          }
+          onValidateApplication={(application, afterEvidence, reason) =>
+            void validateImprovementApplication(
+              application,
+              afterEvidence,
+              reason,
+            )
           }
           onInspect={inspectStatistics}
           onInspectEvidence={inspectStatisticsEvidence}

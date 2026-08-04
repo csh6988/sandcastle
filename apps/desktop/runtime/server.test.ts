@@ -871,6 +871,54 @@ describe("Company Runtime server startup", () => {
         },
       });
       assert.deepEqual(applications.view, [applied]);
+
+      const afterEvidence = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:freeze-improvement-validation-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "statistics.evidence.freeze",
+          evidenceSnapshotId: "statistics-evidence:validation-server",
+          query: {
+            projectId: project.id,
+            filters: frozen.value.query.filters,
+            window: {
+              kind: "explicit-utc-half-open",
+              startInclusive: "2026-08-02T00:00:00.000Z",
+              endExclusive: "2026-08-03T00:00:00.000Z",
+            },
+            cohort: frozen.value.query.cohort,
+            comparisonSet: frozen.value.query.comparisonSet,
+          },
+        },
+      });
+      assert.equal(afterEvidence.status, "succeeded");
+      if (afterEvidence.status !== "succeeded") {
+        assert.fail("after evidence freeze must succeed");
+      }
+      const validated = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:validate-improvement-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.application.validate",
+          validation: {
+            operationId: applied.id,
+            expectedOperationHash: applied.canonicalRequestHash,
+            afterEvidence: afterEvidence.value,
+            reason: "Compare the next exact server cohort.",
+            evidenceRefs: [frozen.value.id, afterEvidence.value.id],
+          },
+        },
+      });
+      assert.equal(validated.status, "succeeded");
+      if (validated.status !== "succeeded") {
+        assert.fail("validation must succeed");
+      }
+      assert.equal(validated.value.state, "validated");
+      assert.equal(validated.value.validations[0]?.outcome, "unchanged");
     } finally {
       await server.close();
     }

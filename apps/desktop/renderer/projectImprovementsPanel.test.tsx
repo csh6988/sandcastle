@@ -385,6 +385,54 @@ describe("Project Improvements panel", () => {
       createdAt: "2026-08-04T00:06:00.000Z",
       updatedAt: "2026-08-04T00:06:00.000Z",
     };
+    const appliedApplication: ImprovementApplicationOperationView = {
+      ...application,
+      id: "improvement-application:applied",
+      state: "applied",
+      latestError: null,
+      receipts: [
+        {
+          id: "improvement-receipt:applied",
+          phase: "apply",
+          disposition: "applied",
+          targetRevision: {
+            revisionId: "governed-harness-revision:applied",
+            revisionHash: hash,
+          },
+          evidenceRefs: [evidence.id],
+          hash,
+          createdAt: "2026-08-04T00:07:00.000Z",
+        },
+      ],
+      nextActions: ["validate", "rollback"],
+      updatedAt: "2026-08-04T00:07:00.000Z",
+    };
+    const validatedApplication: ImprovementApplicationOperationView = {
+      ...appliedApplication,
+      id: "improvement-application:validated",
+      state: "validated",
+      validations: [
+        {
+          id: "improvement-validation:1",
+          beforeEvidence: evidence,
+          afterEvidence: {
+            ...evidence,
+            id: "statistics-evidence:after",
+            createdAt: "2026-08-05T00:00:00.000Z",
+          },
+          outcome: "unchanged",
+          hash,
+          validatedBy: {
+            type: "runtime-worker",
+            id: "runtime-worker:improvement-validation",
+            authenticatedBy: "runtime",
+          },
+          createdAt: "2026-08-05T00:01:00.000Z",
+        },
+      ],
+      nextActions: ["rollback"],
+      updatedAt: "2026-08-05T00:01:00.000Z",
+    };
     const render = (t: Messages) =>
       renderToStaticMarkup(
         <ProjectImprovementsPanel
@@ -397,7 +445,7 @@ describe("Project Improvements panel", () => {
           onInspect={() => undefined}
           onInspectEvidence={() => undefined}
           onWindowChange={() => undefined}
-          applications={[application]}
+          applications={[application, appliedApplication, validatedApplication]}
           proposals={[
             proposal,
             proposedProposal,
@@ -431,6 +479,11 @@ describe("Project Improvements panel", () => {
     assert.match(english, /Application operations/);
     assert.match(english, /Unknown outcome/);
     assert.match(english, /Inspect exact effect again/);
+    assert.match(english, /After evidence snapshot/);
+    assert.match(english, /Validate exact comparable evidence/);
+    assert.match(english, /Validation outcome/);
+    assert.match(english, /Unchanged/);
+    assert.match(english, /runtime-worker:improvement-validation/);
     assert.match(english, /IMPROVEMENT_APPLICATION_UNKNOWN/);
     assert.match(english, /improvement-proposal-revision:1/);
     assert.match(english, /improvement-proposal-revision:2/);
@@ -454,6 +507,10 @@ describe("Project Improvements panel", () => {
     assert.match(chinese, /应用操作/);
     assert.match(chinese, /结果未知/);
     assert.match(chinese, /再次检查精确 effect/);
+    assert.match(chinese, /验证后证据快照/);
+    assert.match(chinese, /验证精确可比证据/);
+    assert.match(chinese, /验证结果/);
+    assert.match(chinese, /未变化/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {
