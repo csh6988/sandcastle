@@ -246,7 +246,11 @@ describe("Project Improvements panel", () => {
             authenticatedBy: "runtime" as const,
           },
           lifecycle: [
-            { state: "draft" as const, createdAt: "2026-08-04T00:02:00.000Z" },
+            {
+              state: "draft" as const,
+              confirmation: null,
+              createdAt: "2026-08-04T00:02:00.000Z",
+            },
           ],
           decision: null,
           createdAt: "2026-08-04T00:02:00.000Z",
@@ -269,6 +273,55 @@ describe("Project Improvements panel", () => {
           "Review guidance lacks a stable evidence identity.",
       },
     });
+    const awaitingConfirmation =
+      "I confirm this exact proposal revision, evidence, target head, and Harness content.";
+    const proposedProposal: ImprovementProposalView = {
+      ...proposal,
+      id: "improvement-proposal:proposed",
+      currentState: "proposed",
+      revisions: proposal.revisions.map((revision, index) =>
+        index === proposal.revisions.length - 1
+          ? {
+              ...revision,
+              lifecycle: [
+                ...revision.lifecycle,
+                {
+                  state: "proposed" as const,
+                  confirmation: null,
+                  createdAt: "2026-08-04T00:03:00.000Z",
+                },
+              ],
+            }
+          : revision,
+      ),
+      nextActions: ["revise", "request-decision"],
+    };
+    const awaitingProposal: ImprovementProposalView = {
+      ...proposal,
+      id: "improvement-proposal:awaiting-human",
+      currentState: "awaiting-human",
+      revisions: proposal.revisions.map((revision, index) =>
+        index === proposal.revisions.length - 1
+          ? {
+              ...revision,
+              lifecycle: [
+                ...revision.lifecycle,
+                {
+                  state: "proposed" as const,
+                  confirmation: null,
+                  createdAt: "2026-08-04T00:03:00.000Z",
+                },
+                {
+                  state: "awaiting-human" as const,
+                  confirmation: awaitingConfirmation,
+                  createdAt: "2026-08-04T00:04:00.000Z",
+                },
+              ],
+            }
+          : revision,
+      ),
+      nextActions: ["revise", "approve", "reject"],
+    };
     const render = (t: Messages) =>
       renderToStaticMarkup(
         <ProjectImprovementsPanel
@@ -281,7 +334,7 @@ describe("Project Improvements panel", () => {
           onInspect={() => undefined}
           onInspectEvidence={() => undefined}
           onWindowChange={() => undefined}
-          proposals={[proposal]}
+          proposals={[proposal, proposedProposal, awaitingProposal]}
           query={query}
           t={t}
           view={null}
@@ -297,6 +350,13 @@ describe("Project Improvements panel", () => {
     assert.match(english, /Create proposal draft/);
     assert.match(english, /Create revised draft/);
     assert.match(english, /Propose exact revision/);
+    assert.match(english, /Decision confirmation/);
+    assert.match(english, /Request exact human decision/);
+    assert.match(english, /Requested confirmation/);
+    assert.match(english, new RegExp(awaitingConfirmation));
+    assert.match(english, /Decision reason/);
+    assert.match(english, /Approve exact revision/);
+    assert.match(english, /Reject exact revision/);
     assert.match(english, /improvement-proposal-revision:1/);
     assert.match(english, /improvement-proposal-revision:2/);
     assert.match(english, /statistics-evidence-proposal/);
@@ -308,6 +368,12 @@ describe("Project Improvements panel", () => {
     assert.match(chinese, /创建提案草稿/);
     assert.match(chinese, /创建修订草稿/);
     assert.match(chinese, /提交精确修订版/);
+    assert.match(chinese, /决定确认文本/);
+    assert.match(chinese, /请求精确人工决定/);
+    assert.match(chinese, /请求时确认文本/);
+    assert.match(chinese, /决定理由/);
+    assert.match(chinese, /批准精确修订版/);
+    assert.match(chinese, /拒绝精确修订版/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {

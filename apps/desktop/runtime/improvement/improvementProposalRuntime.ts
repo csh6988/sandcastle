@@ -3,12 +3,16 @@ import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeEvents } from "../events/subscription.js";
 import {
   ImprovementProposalCreateRequestSchema,
+  ImprovementProposalDecideRequestSchema,
   ImprovementProposalDecisionSchema,
+  ImprovementProposalRequestDecisionRequestSchema,
   ImprovementProposalReviseRequestSchema,
   ImprovementProposalRevisionContentSchema,
   ImprovementProposalTransitionRequestSchema,
   ImprovementProposalViewSchema,
   type ImprovementProposalCreateRequest,
+  type ImprovementProposalDecideRequest,
+  type ImprovementProposalRequestDecisionRequest,
   type ImprovementProposalRevisionContent,
   type ImprovementProposalReviseRequest,
   type ImprovementProposalState,
@@ -43,6 +47,14 @@ export interface ImprovementProposalRuntime {
     readonly commandId: string;
     readonly request: ImprovementProposalTransitionRequest;
     readonly state: "proposed" | "awaiting-human";
+  }) => ImprovementProposalView;
+  readonly requestDecisionInTransaction: (input: {
+    readonly commandId: string;
+    readonly request: ImprovementProposalRequestDecisionRequest;
+  }) => ImprovementProposalView;
+  readonly decideInTransaction: (input: {
+    readonly commandId: string;
+    readonly request: ImprovementProposalDecideRequest;
   }) => ImprovementProposalView;
   readonly inspect: (proposalId: string) => ImprovementProposalView;
   readonly list: (projectId: string) => readonly ImprovementProposalView[];
@@ -248,12 +260,13 @@ export const openImprovementProposalRuntime = (
       );
       const lifecycle = database
         .prepare(
-          `SELECT state, created_at AS createdAt
+          `SELECT state, confirmation, created_at AS createdAt
              FROM improvement_proposal_lifecycle
             WHERE proposal_revision_id = ? ORDER BY rowid`,
         )
         .all(revision.id) as Array<{
         readonly state: "draft" | "proposed" | "awaiting-human";
+        readonly confirmation: string | null;
         readonly createdAt: string;
       }>;
       const decisionRow = database
@@ -403,8 +416,8 @@ export const openImprovementProposalRuntime = (
       .prepare(
         `INSERT INTO improvement_proposal_lifecycle(
            id, proposal_id, proposal_revision_id, state, actor_type, actor_id,
-           authenticated_by, command_id, created_at
-         ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+           authenticated_by, confirmation, command_id, created_at
+         ) VALUES (?, ?, ?, 'draft', ?, ?, ?, NULL, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -577,8 +590,8 @@ export const openImprovementProposalRuntime = (
         .prepare(
           `INSERT INTO improvement_proposal_lifecycle(
            id, proposal_id, proposal_revision_id, state, actor_type, actor_id,
-           authenticated_by, command_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           authenticated_by, confirmation, command_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
         )
         .run(
           randomUUID(),
@@ -610,10 +623,201 @@ export const openImprovementProposalRuntime = (
       return inspect(request.proposalId);
     };
 
+  const currentRevisionForExactTransition = (input: {
+    readonly proposalId: string;
+    readonly proposalRevisionId: string;
+    readonly expectedProposalRevisionHash: string;
+    readonly expectedState: ImprovementProposalState;
+  }) => {
+    const current = inspect(input.proposalId);
+    const revision = current.revisions.find(
+      (entry) => entry.id === current.currentRevisionId,
+    );
+    if (
+      !revision ||
+      revision.id !== input.proposalRevisionId ||
+      revision.hash !== input.expectedProposalRevisionHash
+    ) {
+      throw new ImprovementProposalRuntimeError(
+        "IMPROVEMENT_PROPOSAL_SUPERSEDED",
+        `Improvement proposal ${input.proposalId} no longer has the expected current revision.`,
+      );
+    }
+    if (current.currentState !== input.expectedState) {
+      throw new ImprovementProposalRuntimeError(
+        "IMPROVEMENT_INVALID_STATE",
+        `Improvement proposal ${input.proposalId} is ${current.currentState}, not ${input.expectedState}.`,
+      );
+    }
+    return { current, revision };
+  };
+
+  const requestDecisionInTransaction: ImprovementProposalRuntime["requestDecisionInTransaction"] =
+    (input) => {
+      const request = ImprovementProposalRequestDecisionRequestSchema.parse(
+        input.request,
+      );
+      const { current } = currentRevisionForExactTransition({
+        proposalId: request.proposalId,
+        proposalRevisionId: request.proposalRevisionId,
+        expectedProposalRevisionHash: request.expectedProposalRevisionHash,
+        expectedState: "proposed",
+      });
+      const createdAt = clock().toISOString();
+      database
+        .prepare(
+          `INSERT INTO improvement_proposal_lifecycle(
+             id, proposal_id, proposal_revision_id, state, actor_type, actor_id,
+             authenticated_by, confirmation, command_id, created_at
+           ) VALUES (?, ?, ?, 'awaiting-human', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          request.proposalId,
+          request.proposalRevisionId,
+          request.actor.type,
+          request.actor.id,
+          request.actor.authenticatedBy,
+          request.confirmation,
+          input.commandId,
+          createdAt,
+        );
+      database
+        .prepare(
+          `UPDATE improvement_proposals
+              SET state = 'awaiting-human', updated_at = ? WHERE id = ?`,
+        )
+        .run(createdAt, request.proposalId);
+      appendAuditAndInvalidation({
+        commandId: input.commandId,
+        action: "improvement.proposal.request-decision",
+        proposalId: request.proposalId,
+        proposalRevisionId: request.proposalRevisionId,
+        projectId: current.projectId,
+        actor: request.actor,
+        createdAt,
+        before: { state: current.currentState },
+        after: { state: "awaiting-human", confirmation: request.confirmation },
+      });
+      return inspect(request.proposalId);
+    };
+
+  const decideInTransaction: ImprovementProposalRuntime["decideInTransaction"] =
+    (input) => {
+      const request = ImprovementProposalDecideRequestSchema.parse(
+        input.request,
+      );
+      const current = inspect(request.proposalId);
+      const revision = current.revisions.find(
+        (entry) => entry.id === current.currentRevisionId,
+      );
+      if (
+        !revision ||
+        revision.id !== request.proposalRevisionId ||
+        revision.hash !== request.expectedProposalRevisionHash
+      ) {
+        throw new ImprovementProposalRuntimeError(
+          "IMPROVEMENT_PROPOSAL_SUPERSEDED",
+          `Improvement proposal ${request.proposalId} no longer has the expected current revision.`,
+        );
+      }
+      if (revision.decision) {
+        throw new ImprovementProposalRuntimeError(
+          "IMPROVEMENT_DECISION_EXISTS",
+          `Improvement proposal revision ${revision.id} already has an exact decision.`,
+        );
+      }
+      if (current.currentState !== "awaiting-human") {
+        throw new ImprovementProposalRuntimeError(
+          "IMPROVEMENT_INVALID_STATE",
+          `Improvement proposal ${request.proposalId} is ${current.currentState}, not awaiting-human.`,
+        );
+      }
+      const requestedConfirmation = revision.lifecycle.at(-1)?.confirmation;
+      if (requestedConfirmation !== request.confirmation) {
+        throw new ImprovementProposalRuntimeError(
+          "CONFLICT",
+          `Improvement proposal revision ${revision.id} requires the exact requested confirmation.`,
+        );
+      }
+      const createdAt = clock().toISOString();
+      const decisionWithoutHash = {
+        id: request.decisionId,
+        proposalId: current.id,
+        proposalRevisionId: revision.id,
+        proposalRevisionHash: revision.hash,
+        evidenceSnapshotId: revision.content.evidence.id,
+        evidenceSnapshotHash: revision.content.evidence.hash,
+        target: revision.content.target,
+        decision: request.decision,
+        confirmation: request.confirmation,
+        actor: request.actor,
+        reason: request.reason,
+        evidenceRefs: request.evidenceRefs,
+        createdAt,
+      };
+      const decisionHash = sha256(canonicalJson(decisionWithoutHash));
+      database
+        .prepare(
+          `INSERT INTO improvement_decisions(
+             id, proposal_id, proposal_revision_id, proposal_revision_hash,
+             evidence_snapshot_id, evidence_snapshot_hash, target_kind,
+             target_owner_id, governed_head_revision_id,
+             governed_head_revision_hash, decision, confirmation, actor_type,
+             actor_id, authenticated_by, reason, evidence_refs_json,
+             decision_hash, command_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'human', ?,
+                     'local-session', ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          request.decisionId,
+          current.id,
+          revision.id,
+          revision.hash,
+          revision.content.evidence.id,
+          revision.content.evidence.hash,
+          revision.content.target.targetKind,
+          revision.content.target.ownerId,
+          revision.content.target.governedHead.revisionId,
+          revision.content.target.governedHead.revisionHash,
+          request.decision,
+          request.confirmation,
+          request.actor.id,
+          request.reason,
+          canonicalJson(request.evidenceRefs),
+          decisionHash,
+          input.commandId,
+          createdAt,
+        );
+      database
+        .prepare(
+          `UPDATE improvement_proposals SET state = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(request.decision, createdAt, current.id);
+      appendAuditAndInvalidation({
+        commandId: input.commandId,
+        action: "improvement.proposal.decide",
+        proposalId: current.id,
+        proposalRevisionId: revision.id,
+        projectId: current.projectId,
+        actor: request.actor,
+        createdAt,
+        before: { state: current.currentState },
+        after: {
+          state: request.decision,
+          decisionId: request.decisionId,
+          decisionHash,
+        },
+      });
+      return inspect(current.id);
+    };
+
   return {
     createInTransaction,
     reviseInTransaction,
     transitionInTransaction,
+    requestDecisionInTransaction,
+    decideInTransaction,
     inspect,
     list,
   };

@@ -4557,6 +4557,85 @@ export function ProjectDetailView({
     }
   };
 
+  const requestImprovementProposalDecision = async (
+    proposal: ImprovementProposalView,
+    confirmation: string,
+  ): Promise<void> => {
+    const currentRevision = proposal.revisions.find(
+      (revision) => revision.id === proposal.currentRevisionId,
+    );
+    if (!currentRevision) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `request-decision:${proposal.id}:${currentRevision.id}:${currentRevision.hash}:${confirmation}`;
+      const gesture = improvementProposalGestures.current.get(key) ?? {
+        commandId: `improvement-proposal-request-decision:${globalThis.crypto.randomUUID()}`,
+      };
+      improvementProposalGestures.current.set(key, gesture);
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "improvement.proposal.request-decision",
+          proposalId: proposal.id,
+          proposalRevisionId: currentRevision.id,
+          expectedProposalRevisionHash: currentRevision.hash,
+          confirmation,
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
+  const decideImprovementProposal = async (
+    proposal: ImprovementProposalView,
+    decision: "approved" | "rejected",
+    confirmation: string,
+    reason: string,
+  ): Promise<void> => {
+    const currentRevision = proposal.revisions.find(
+      (revision) => revision.id === proposal.currentRevisionId,
+    );
+    if (!currentRevision) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `decide:${proposal.id}:${currentRevision.id}:${currentRevision.hash}:${decision}:${confirmation}:${reason}`;
+      const gesture = improvementProposalGestures.current.get(key) ?? {
+        commandId: `improvement-proposal-decide:${globalThis.crypto.randomUUID()}`,
+      };
+      improvementProposalGestures.current.set(key, gesture);
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "improvement.proposal.decide",
+          proposalId: proposal.id,
+          proposalRevisionId: currentRevision.id,
+          expectedProposalRevisionHash: currentRevision.hash,
+          decision,
+          confirmation,
+          reason,
+          evidenceRefs: [currentRevision.content.evidence.id],
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
   return (
     <section
       className="page"
@@ -4946,6 +5025,17 @@ export function ProjectDetailView({
           }
           onProposeProposal={(proposal) =>
             void proposeImprovementProposal(proposal)
+          }
+          onRequestDecision={(proposal, confirmation) =>
+            void requestImprovementProposalDecision(proposal, confirmation)
+          }
+          onDecideProposal={(proposal, decision, confirmation, reason) =>
+            void decideImprovementProposal(
+              proposal,
+              decision,
+              confirmation,
+              reason,
+            )
           }
           onInspect={inspectStatistics}
           onInspectEvidence={inspectStatisticsEvidence}

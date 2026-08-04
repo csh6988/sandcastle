@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, it } from "node:test";
 import { companyRuntimeAddress } from "./address.js";
 import {
@@ -705,6 +706,82 @@ describe("Company Runtime server startup", () => {
       assert.equal(created.status, "succeeded");
       if (created.status !== "succeeded") assert.fail("create must succeed");
 
+      const revision = created.value.revisions[0];
+      if (!revision) assert.fail("proposal revision must exist");
+      const proposed = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:propose-improvement-proposal-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.proposal.propose",
+          proposalId: created.value.id,
+          proposalRevisionId: revision.id,
+          expectedProposalRevisionHash: revision.hash,
+        },
+      });
+      assert.equal(proposed.status, "succeeded");
+      if (proposed.status !== "succeeded") assert.fail("propose must succeed");
+      const confirmation =
+        "I confirm this exact proposal revision, evidence, target head, and Harness content.";
+      const requested = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:request-improvement-proposal-server-decision",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.proposal.request-decision",
+          proposalId: proposed.value.id,
+          proposalRevisionId: revision.id,
+          expectedProposalRevisionHash: revision.hash,
+          confirmation,
+        },
+      });
+      assert.equal(requested.status, "succeeded");
+      if (requested.status !== "succeeded") {
+        assert.fail("request decision must succeed");
+      }
+      const approved = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:approve-improvement-proposal-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.proposal.decide",
+          proposalId: requested.value.id,
+          proposalRevisionId: revision.id,
+          expectedProposalRevisionHash: revision.hash,
+          decision: "approved",
+          confirmation,
+          reason: "The frozen proposal boundary is exact.",
+          evidenceRefs: [frozen.value.id],
+        },
+      });
+      assert.equal(approved.status, "succeeded");
+      if (approved.status !== "succeeded") assert.fail("approve must succeed");
+      assert.equal(approved.value.currentState, "approved");
+
+      const sqlite = new DatabaseSync(
+        join(companyDir, ".sandcastle", "company.sqlite"),
+      );
+      for (const table of [
+        "governed_harness_revisions",
+        "runtime_template_revisions",
+        "governed_skill_flow_revisions",
+        "improvement_application_operations",
+      ]) {
+        assert.equal(
+          (
+            sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
+              readonly count: number;
+            }
+          ).count,
+          0,
+          table,
+        );
+      }
+      sqlite.close();
+
       const listed = await client.queryEnvelope({
         schemaVersion: 1,
         requestId: "query-improvement-proposals",
@@ -722,8 +799,8 @@ describe("Company Runtime server startup", () => {
           proposalId: created.value.id,
         },
       });
-      assert.deepEqual(listed.view, [created.value]);
-      assert.deepEqual(inspected.view, created.value);
+      assert.deepEqual(listed.view, [approved.value]);
+      assert.deepEqual(inspected.view, approved.value);
     } finally {
       await server.close();
     }

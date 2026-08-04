@@ -236,6 +236,151 @@ describe("Improvement Proposal Runtime", () => {
       "request-decision",
     ]);
 
+    const decisionConfirmation =
+      "I confirm this exact proposal revision, evidence, target head, and Harness content.";
+    const requestDecisionEnvelope = {
+      schemaVersion: 1,
+      commandId: "command:request-improvement-proposal-decision",
+      actor: createEnvelope.actor,
+      command: {
+        type: "improvement.proposal.request-decision",
+        proposalId: proposed.value.id,
+        proposalRevisionId: secondRevision.id,
+        expectedProposalRevisionHash: secondRevision.hash,
+        confirmation: decisionConfirmation,
+      },
+    } as const;
+    const awaitingHuman = database.commandRegistry.execute(
+      requestDecisionEnvelope,
+    );
+    const awaitingHumanReplay = database.commandRegistry.execute(
+      requestDecisionEnvelope,
+    );
+    assert.equal(awaitingHuman.status, "succeeded");
+    assert.deepEqual(awaitingHumanReplay, awaitingHuman);
+    if (awaitingHuman.status !== "succeeded") {
+      assert.fail("request decision must succeed");
+    }
+    assert.equal(awaitingHuman.value.currentState, "awaiting-human");
+    assert.deepEqual(awaitingHuman.value.revisions[1]?.lifecycle.at(-1), {
+      state: "awaiting-human",
+      confirmation: decisionConfirmation,
+      createdAt: timestamp,
+    });
+
+    const changedRequestDecision = database.commandRegistry.execute({
+      ...requestDecisionEnvelope,
+      command: {
+        ...requestDecisionEnvelope.command,
+        confirmation: "A changed confirmation under the same Command ID.",
+      },
+    });
+    assert.equal(changedRequestDecision.status, "rejected");
+    if (changedRequestDecision.status !== "rejected") {
+      assert.fail("changed request-decision input must be rejected");
+    }
+    assert.equal(changedRequestDecision.error.code, "COMMAND_ID_REUSE");
+
+    const unauthorizedDecision = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:runtime-worker-cannot-decide-improvement-proposal",
+      actor: createEnvelope.actor,
+      command: {
+        type: "improvement.proposal.decide",
+        proposalId: awaitingHuman.value.id,
+        proposalRevisionId: secondRevision.id,
+        expectedProposalRevisionHash: secondRevision.hash,
+        decision: "approved",
+        confirmation: decisionConfirmation,
+        reason: "A Runtime worker cannot grant human authority.",
+        evidenceRefs: [evidence.id],
+      },
+    });
+    assert.equal(unauthorizedDecision.status, "rejected");
+    if (unauthorizedDecision.status !== "rejected") {
+      assert.fail("Runtime worker decision must be rejected");
+    }
+    assert.equal(unauthorizedDecision.error.code, "FORBIDDEN");
+
+    const mismatchedConfirmation = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:mismatched-improvement-confirmation",
+      actor: {
+        type: "human",
+        id: "human:improvement-reviewer",
+        authenticatedBy: "local-session",
+      },
+      command: {
+        type: "improvement.proposal.decide",
+        proposalId: awaitingHuman.value.id,
+        proposalRevisionId: secondRevision.id,
+        expectedProposalRevisionHash: secondRevision.hash,
+        decision: "approved",
+        confirmation: "I confirm a different proposal boundary.",
+        reason: "This confirmation must not drift.",
+        evidenceRefs: [evidence.id],
+      },
+    });
+    assert.equal(mismatchedConfirmation.status, "rejected");
+    if (mismatchedConfirmation.status !== "rejected") {
+      assert.fail("mismatched confirmation must be rejected");
+    }
+    assert.equal(mismatchedConfirmation.error.code, "CONFLICT");
+
+    const decideEnvelope = {
+      schemaVersion: 1 as const,
+      commandId: "command:approve-improvement-proposal",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-reviewer",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.proposal.decide" as const,
+        proposalId: awaitingHuman.value.id,
+        proposalRevisionId: secondRevision.id,
+        expectedProposalRevisionHash: secondRevision.hash,
+        decision: "approved" as const,
+        confirmation: decisionConfirmation,
+        reason: "The frozen evidence and proposed Harness revision are exact.",
+        evidenceRefs: [evidence.id],
+      },
+    };
+    const approved = database.commandRegistry.execute(decideEnvelope);
+    const approvedReplay = database.commandRegistry.execute(decideEnvelope);
+    assert.equal(approved.status, "succeeded");
+    assert.deepEqual(approvedReplay, approved);
+    if (approved.status !== "succeeded") assert.fail("approve must succeed");
+    assert.equal(approved.value.currentState, "approved");
+    assert.deepEqual(approved.value.nextActions, ["revise", "apply"]);
+    assert.equal(
+      approved.value.revisions[1]?.decision?.proposalRevisionHash,
+      secondRevision.hash,
+    );
+    assert.equal(
+      approved.value.revisions[1]?.decision?.evidenceSnapshotHash,
+      evidence.hash,
+    );
+    assert.deepEqual(
+      approved.value.revisions[1]?.decision?.target,
+      secondRevision.content.target,
+    );
+    assert.equal(
+      approved.value.revisions[1]?.decision?.confirmation,
+      decisionConfirmation,
+    );
+
+    const secondDecision = database.commandRegistry.execute({
+      ...decideEnvelope,
+      commandId: "command:reject-already-decided-improvement-proposal",
+      command: { ...decideEnvelope.command, decision: "rejected" as const },
+    });
+    assert.equal(secondDecision.status, "rejected");
+    if (secondDecision.status !== "rejected") {
+      assert.fail("a second decision must be rejected");
+    }
+    assert.equal(secondDecision.error.code, "IMPROVEMENT_DECISION_EXISTS");
+
     const sqlite = new DatabaseSync(database.path);
     for (const table of [
       "governed_harness_revisions",
@@ -261,7 +406,7 @@ describe("Improvement Proposal Runtime", () => {
     });
     assert.deepEqual(
       database.improvementProposals.inspect("improvement-proposal:1"),
-      proposed.value,
+      approved.value,
     );
     database.close();
   });

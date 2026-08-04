@@ -396,6 +396,9 @@ export const ImprovementProposalRequestDecisionRequestSchema =
   ImprovementProposalRequestDecisionCommandInputSchema.extend({
     actor: ImprovementAuthorActorSchema,
   }).strict();
+export type ImprovementProposalRequestDecisionRequest = z.infer<
+  typeof ImprovementProposalRequestDecisionRequestSchema
+>;
 
 export const ImprovementProposalDecideCommandInputSchema = z
   .object({
@@ -436,6 +439,9 @@ export const ImprovementProposalDecideRequestSchema =
     decisionId: IdSchema,
     actor: VerifiedLocalSessionHumanSchema,
   }).strict();
+export type ImprovementProposalDecideRequest = z.infer<
+  typeof ImprovementProposalDecideRequestSchema
+>;
 
 const ImprovementApplicationApplyBaseSchema = z
   .object({
@@ -572,9 +578,19 @@ export const ImprovementApplicationRollbackViewSchema = z
 const ImprovementProposalLifecycleEntrySchema = z
   .object({
     state: z.enum(["draft", "proposed", "awaiting-human"]),
+    confirmation: ReasonSchema.nullable(),
     createdAt: TimestampSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((entry, context) => {
+    if ((entry.state === "awaiting-human") !== (entry.confirmation !== null)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Only awaiting-human lifecycle entries bind an exact confirmation.",
+      });
+    }
+  });
 
 export const ImprovementProposalRevisionViewSchema = z
   .object({

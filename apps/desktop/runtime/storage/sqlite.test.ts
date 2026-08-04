@@ -3160,6 +3160,57 @@ describe("Test authority schema migration", () => {
       "command:proposal-1",
       timestamp,
     );
+    database
+      .prepare(
+        `INSERT INTO improvement_proposal_lifecycle(
+           id, proposal_id, proposal_revision_id, state, actor_type, actor_id,
+           authenticated_by, confirmation, command_id, created_at
+         ) VALUES (?, 'proposal:1', 'proposal-revision:1', 'proposed',
+                   'runtime-worker', 'runtime-worker:author', 'runtime', NULL,
+                   ?, ?)`,
+      )
+      .run("proposal-lifecycle:proposed", "command:propose-1", timestamp);
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `INSERT INTO improvement_proposal_lifecycle(
+               id, proposal_id, proposal_revision_id, state, actor_type,
+               actor_id, authenticated_by, confirmation, command_id, created_at
+             ) VALUES (?, 'proposal:1', 'proposal-revision:1', 'awaiting-human',
+                       'runtime-worker', 'runtime-worker:author', 'runtime', NULL,
+                       ?, ?)`,
+          )
+          .run(
+            "proposal-lifecycle:invalid-awaiting",
+            "command:invalid-awaiting",
+            timestamp,
+          ),
+      /CHECK constraint failed/,
+    );
+    database
+      .prepare(
+        `INSERT INTO improvement_proposal_lifecycle(
+           id, proposal_id, proposal_revision_id, state, actor_type, actor_id,
+           authenticated_by, confirmation, command_id, created_at
+         ) VALUES (?, 'proposal:1', 'proposal-revision:1', 'awaiting-human',
+                   'runtime-worker', 'runtime-worker:author', 'runtime', ?, ?, ?)`,
+      )
+      .run(
+        "proposal-lifecycle:awaiting",
+        "I confirm this exact proposal revision.",
+        "command:awaiting-1",
+        timestamp,
+      );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            "UPDATE improvement_proposal_lifecycle SET confirmation = ? WHERE id = ?",
+          )
+          .run("Changed confirmation", "proposal-lifecycle:awaiting"),
+      /Improvement proposal lifecycle is immutable/,
+    );
     assert.throws(
       () =>
         insertRevision.run(

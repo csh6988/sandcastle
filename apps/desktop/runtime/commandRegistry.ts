@@ -175,6 +175,14 @@ export const companyCommandDefinitions = {
     primaryAggregate: "improvement-proposal",
     expectedRevisionRequired: false,
   },
+  "improvement.proposal.request-decision": {
+    primaryAggregate: "improvement-proposal",
+    expectedRevisionRequired: false,
+  },
+  "improvement.proposal.decide": {
+    primaryAggregate: "improvement-proposal",
+    expectedRevisionRequired: false,
+  },
   "project.update": {
     primaryAggregate: "project",
     expectedRevisionRequired: true,
@@ -656,7 +664,9 @@ const executeImprovementProposalCommand = (
   if (
     envelope.command.type !== "improvement.proposal.create" &&
     envelope.command.type !== "improvement.proposal.revise" &&
-    envelope.command.type !== "improvement.proposal.propose"
+    envelope.command.type !== "improvement.proposal.propose" &&
+    envelope.command.type !== "improvement.proposal.request-decision" &&
+    envelope.command.type !== "improvement.proposal.decide"
   ) {
     throw new CompanyCommandError(
       "COMMAND_UNSUPPORTED",
@@ -729,18 +739,25 @@ const executeImprovementProposalCommand = (
         envelope.schemaVersion,
       );
     let result: CommandResult<unknown>;
-    const validActor =
+    const validAuthor =
       (envelope.actor.type === "human" &&
         envelope.actor.authenticatedBy === "local-session") ||
       (envelope.actor.type === "runtime-worker" &&
         envelope.actor.authenticatedBy === "runtime");
+    const validActor =
+      envelope.command.type === "improvement.proposal.decide"
+        ? envelope.actor.type === "human" &&
+          envelope.actor.authenticatedBy === "local-session"
+        : validAuthor;
     if (!validActor) {
       result = {
         status: "rejected",
         error: {
           code: "FORBIDDEN",
           message:
-            "Improvement proposal authoring requires a trusted Runtime worker or verified local-session human.",
+            envelope.command.type === "improvement.proposal.decide"
+              ? "Improvement proposal decisions require a verified local-session human."
+              : "Improvement proposal authoring requires a trusted Runtime worker or verified local-session human.",
         },
         effectIds: [],
       };
@@ -769,17 +786,50 @@ const executeImprovementProposalCommand = (
                   commandId: envelope.commandId,
                   request: { ...envelope.command.proposal, actor },
                 })
-              : improvementProposals.transitionInTransaction({
-                  commandId: envelope.commandId,
-                  request: {
-                    proposalId: envelope.command.proposalId,
-                    proposalRevisionId: envelope.command.proposalRevisionId,
-                    expectedProposalRevisionHash:
-                      envelope.command.expectedProposalRevisionHash,
-                    actor,
-                  },
-                  state: "proposed",
-                });
+              : envelope.command.type === "improvement.proposal.propose"
+                ? improvementProposals.transitionInTransaction({
+                    commandId: envelope.commandId,
+                    request: {
+                      proposalId: envelope.command.proposalId,
+                      proposalRevisionId: envelope.command.proposalRevisionId,
+                      expectedProposalRevisionHash:
+                        envelope.command.expectedProposalRevisionHash,
+                      actor,
+                    },
+                    state: "proposed",
+                  })
+                : envelope.command.type ===
+                    "improvement.proposal.request-decision"
+                  ? improvementProposals.requestDecisionInTransaction({
+                      commandId: envelope.commandId,
+                      request: {
+                        proposalId: envelope.command.proposalId,
+                        proposalRevisionId: envelope.command.proposalRevisionId,
+                        expectedProposalRevisionHash:
+                          envelope.command.expectedProposalRevisionHash,
+                        confirmation: envelope.command.confirmation,
+                        actor,
+                      },
+                    })
+                  : improvementProposals.decideInTransaction({
+                      commandId: envelope.commandId,
+                      request: {
+                        proposalId: envelope.command.proposalId,
+                        proposalRevisionId: envelope.command.proposalRevisionId,
+                        expectedProposalRevisionHash:
+                          envelope.command.expectedProposalRevisionHash,
+                        decision: envelope.command.decision,
+                        confirmation: envelope.command.confirmation,
+                        reason: envelope.command.reason,
+                        evidenceRefs: envelope.command.evidenceRefs,
+                        decisionId: `improvement-decision:${envelope.commandId}`,
+                        actor: {
+                          type: "human",
+                          id: envelope.actor.id,
+                          authenticatedBy: "local-session",
+                        },
+                      },
+                    });
         const effectIds = (
           database
             .prepare(
@@ -4179,7 +4229,9 @@ export const openCompanyCommandRegistry = (
     if (
       envelope.command.type === "improvement.proposal.create" ||
       envelope.command.type === "improvement.proposal.revise" ||
-      envelope.command.type === "improvement.proposal.propose"
+      envelope.command.type === "improvement.proposal.propose" ||
+      envelope.command.type === "improvement.proposal.request-decision" ||
+      envelope.command.type === "improvement.proposal.decide"
     ) {
       if (!improvementProposals) {
         throw new CompanyCommandError(

@@ -134,6 +134,8 @@ export function ProjectImprovementsPanel({
   onCreateProposal,
   onReviseProposal,
   onProposeProposal,
+  onRequestDecision,
+  onDecideProposal,
 }: {
   readonly t: Messages;
   readonly query: StatisticsInspectInput;
@@ -154,6 +156,16 @@ export function ProjectImprovementsPanel({
     draft: ImprovementProposalDraft,
   ) => void;
   readonly onProposeProposal?: (proposal: ImprovementProposalView) => void;
+  readonly onRequestDecision?: (
+    proposal: ImprovementProposalView,
+    confirmation: string,
+  ) => void;
+  readonly onDecideProposal?: (
+    proposal: ImprovementProposalView,
+    decision: "approved" | "rejected",
+    confirmation: string,
+    reason: string,
+  ) => void;
 }) {
   const [proposalDraft, setProposalDraft] = useState<ImprovementProposalDraft>({
     metricId: "",
@@ -172,6 +184,8 @@ export function ProjectImprovementsPanel({
     key: Key,
     value: ImprovementProposalDraft[Key],
   ): void => setProposalDraft((current) => ({ ...current, [key]: value }));
+  const [decisionConfirmation, setDecisionConfirmation] = useState("");
+  const [decisionReason, setDecisionReason] = useState("");
   const isHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
   const hasGovernedHead =
     proposalDraft.governedHeadRevisionId.trim().length > 0 ||
@@ -459,11 +473,35 @@ export function ProjectImprovementsPanel({
             {t.improvementCreateDraft}
           </button>
         </div>
+        <div className="field-grid two-column">
+          <label>
+            <span>{t.improvementDecisionConfirmation}</span>
+            <textarea
+              value={decisionConfirmation}
+              onChange={(event) =>
+                setDecisionConfirmation(event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementDecisionReason}</span>
+            <textarea
+              value={decisionReason}
+              onChange={(event) => setDecisionReason(event.currentTarget.value)}
+            />
+          </label>
+        </div>
         <div className="overview-inventory" data-improvement-proposal-history>
           {(proposals ?? []).map((proposal) => {
             const currentRevision = proposal.revisions.find(
               (revision) => revision.id === proposal.currentRevisionId,
             );
+            const requestedConfirmation =
+              currentRevision?.lifecycle
+                .slice()
+                .reverse()
+                .find((entry) => entry.state === "awaiting-human")
+                ?.confirmation ?? null;
             return (
               <article
                 data-improvement-proposal={proposal.id}
@@ -499,6 +537,24 @@ export function ProjectImprovementsPanel({
                       <dt>{t.improvementRootCause}</dt>
                       <dd>{currentRevision.content.rootCauseHypothesis}</dd>
                     </div>
+                    {requestedConfirmation ? (
+                      <div>
+                        <dt>{t.improvementRequestedConfirmation}</dt>
+                        <dd>{requestedConfirmation}</dd>
+                      </div>
+                    ) : null}
+                    {currentRevision.decision ? (
+                      <div>
+                        <dt>{t.improvementDecisionOutcome}</dt>
+                        <dd>
+                          {currentRevision.decision.decision === "approved"
+                            ? t.improvementDecisionApproved
+                            : t.improvementDecisionRejected}
+                          {" · "}
+                          {currentRevision.decision.reason}
+                        </dd>
+                      </div>
+                    ) : null}
                   </dl>
                 ) : null}
                 <ol data-improvement-revision-timeline>
@@ -533,6 +589,66 @@ export function ProjectImprovementsPanel({
                       type="button"
                     >
                       {t.improvementPropose}
+                    </button>
+                  ) : null}
+                  {proposal.nextActions.includes("request-decision") ? (
+                    <button
+                      disabled={
+                        busy ||
+                        decisionConfirmation.trim().length === 0 ||
+                        !onRequestDecision
+                      }
+                      onClick={() =>
+                        onRequestDecision?.(
+                          proposal,
+                          decisionConfirmation.trim(),
+                        )
+                      }
+                      type="button"
+                    >
+                      {t.improvementRequestDecision}
+                    </button>
+                  ) : null}
+                  {proposal.nextActions.includes("approve") &&
+                  requestedConfirmation ? (
+                    <button
+                      disabled={
+                        busy ||
+                        decisionReason.trim().length === 0 ||
+                        !onDecideProposal
+                      }
+                      onClick={() =>
+                        onDecideProposal?.(
+                          proposal,
+                          "approved",
+                          requestedConfirmation,
+                          decisionReason.trim(),
+                        )
+                      }
+                      type="button"
+                    >
+                      {t.improvementApprove}
+                    </button>
+                  ) : null}
+                  {proposal.nextActions.includes("reject") &&
+                  requestedConfirmation ? (
+                    <button
+                      disabled={
+                        busy ||
+                        decisionReason.trim().length === 0 ||
+                        !onDecideProposal
+                      }
+                      onClick={() =>
+                        onDecideProposal?.(
+                          proposal,
+                          "rejected",
+                          requestedConfirmation,
+                          decisionReason.trim(),
+                        )
+                      }
+                      type="button"
+                    >
+                      {t.improvementReject}
                     </button>
                   ) : null}
                 </div>

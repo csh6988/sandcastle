@@ -6534,6 +6534,7 @@ const migrations: readonly CompanyMigration[] = [
             actor_type TEXT NOT NULL CHECK (actor_type IN ('human', 'runtime-worker')),
             actor_id TEXT NOT NULL,
             authenticated_by TEXT NOT NULL,
+            confirmation TEXT CHECK (confirmation IS NULL OR length(confirmation) BETWEEN 1 AND 4000),
             command_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
             FOREIGN KEY (proposal_id, proposal_revision_id)
@@ -6541,7 +6542,8 @@ const migrations: readonly CompanyMigration[] = [
             CHECK (
               (actor_type = 'human' AND authenticated_by = 'local-session')
               OR (actor_type = 'runtime-worker' AND authenticated_by = 'runtime')
-            )
+            ),
+            CHECK ((state = 'awaiting-human') = (confirmation IS NOT NULL))
           ) STRICT;
           CREATE INDEX improvement_proposal_lifecycle_revision_idx
             ON improvement_proposal_lifecycle(proposal_revision_id, created_at, id);

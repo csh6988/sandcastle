@@ -360,9 +360,13 @@ describe("Improvement proposal contracts", () => {
               authenticatedBy: "local-session",
             },
             lifecycle: [
-              { state: "draft", createdAt },
-              { state: "proposed", createdAt },
-              { state: "awaiting-human", createdAt },
+              { state: "draft", confirmation: null, createdAt },
+              { state: "proposed", confirmation: null, createdAt },
+              {
+                state: "awaiting-human",
+                confirmation: "I confirm this exact proposal revision.",
+                createdAt,
+              },
             ],
             decision,
             createdAt,
