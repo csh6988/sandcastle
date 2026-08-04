@@ -39,6 +39,9 @@ const createApprovedHarnessProposal = (
   suffix = "1",
   direction: "increase" | "decrease" | "hold" = "decrease",
   targetOptions: {
+    readonly target?: (
+      projectId: string,
+    ) => ImprovementProposalRevisionContent["target"];
     readonly governedHead?: {
       readonly revisionId: string;
       readonly revisionHash: string;
@@ -93,7 +96,7 @@ const createApprovedHarnessProposal = (
   const evidence: StatisticsEvidenceSnapshotView = frozen.value;
   const content: ImprovementProposalRevisionContent = {
     evidence,
-    target: {
+    target: targetOptions.target?.(project.id) ?? {
       targetKind: "harness",
       ownerId: "harness:software-rnd-review",
       governedHead: targetOptions.governedHead ?? {
@@ -556,6 +559,140 @@ describe("Improvement Application Runtime", () => {
     );
     sqlite.close();
     database.close();
+  });
+
+  it("applies Project and Application Spec targets through restart reconciliation without duplicate effects", async () => {
+    const targetCases = [
+      {
+        kind: "project-spec" as const,
+        target: (projectId: string) => ({
+          targetKind: "project-spec" as const,
+          ownerId: "project-spec:checkout",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            outcome: "Ship the accepted Project outcome.",
+            acceptanceCriteria: ["The Project outcome remains verifiable."],
+            applicationBoundaries: ["application:checkout"],
+            crossApplicationContracts: ["checkout-api@1"],
+            deliveryConstraints: [`Remain scoped to ${projectId}.`],
+          },
+        }),
+      },
+      {
+        kind: "application-spec" as const,
+        target: (projectId: string) => ({
+          targetKind: "application-spec" as const,
+          ownerId: "application-spec:checkout",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            lineage: {
+              projectId,
+              applicationId: "application:checkout",
+              promotedProjectSpecRevisionId: "project-spec-revision:accepted",
+              promotedProjectSpecHash: "b".repeat(64),
+            },
+            content: {
+              design: "Use the accepted checkout contract.",
+              acceptanceCriteria: ["Checkout requests are idempotent."],
+              workPackageConstraints: ["Keep writes isolated."],
+              integrationObligations: ["Produce checkout-api@1."],
+              contractRefs: [{ id: "checkout-api", version: "1" }],
+            },
+          },
+        }),
+      },
+    ];
+    for (const targetCase of targetCases) {
+      const companyDir = tempCompanyDir();
+      let appendCalls = 0;
+      let effect:
+        | { readonly revisionId: string; readonly revisionHash: string }
+        | undefined;
+      const adapter = {
+        inspectEffect: async (input: {
+          readonly operationId: string;
+          readonly target: ImprovementProposalRevisionContent["target"];
+          readonly phase: "apply" | "rollback";
+        }) =>
+          effect
+            ? ({
+                outcome: "exact-match" as const,
+                revision: effect,
+                evidenceRefs: [`fixture:${effect.revisionId}`],
+              } as const)
+            : ({
+                outcome: "proven-absent" as const,
+                evidenceRefs: [
+                  `fixture:${input.operationId}:${input.phase}:absent`,
+                ],
+              } as const),
+        appendRevision: async (input: {
+          readonly operationId: string;
+          readonly target: ImprovementProposalRevisionContent["target"];
+          readonly phase: "apply" | "rollback";
+        }) => {
+          appendCalls += 1;
+          effect = {
+            revisionId: deterministicGovernedRevisionId({
+              operationId: input.operationId,
+              targetKind: input.target.targetKind,
+              phase: input.phase,
+            }),
+            revisionHash: sha256(input.target.content),
+          };
+          return {
+            revision: effect,
+            disposition: "applied" as const,
+            evidenceRefs: [`fixture:${effect.revisionId}`],
+          };
+        },
+      };
+      let failAfterEffect = true;
+      let database = openCompanyDatabase(companyDir, {
+        clock: () => new Date(timestamp),
+        improvementApplicationRuntime: {
+          adapter,
+          failureInjection: (point) => {
+            if (failAfterEffect && point === "after-effect-before-finalize") {
+              throw new Error(`simulated ${targetCase.kind} finalize crash`);
+            }
+          },
+        },
+      });
+      const approved = createApprovedHarnessProposal(
+        database,
+        `spec-restart:${targetCase.kind}`,
+        "decrease",
+        { target: targetCase.target },
+      );
+      const envelope = harnessApplyEnvelope(approved, {
+        operationId: `improvement-application:${targetCase.kind}:restart`,
+        commandId: `command:apply-${targetCase.kind}-restart`,
+      });
+      const intent = database.commandRegistry.execute(envelope);
+      assert.equal(intent.status, "succeeded");
+      if (intent.status !== "succeeded") assert.fail("intent must succeed");
+      await assert.rejects(
+        database.improvementApplications.dispatch(intent.value.id),
+        new RegExp(`simulated ${targetCase.kind} finalize crash`),
+      );
+      assert.equal(appendCalls, 1);
+      database.close();
+
+      failAfterEffect = false;
+      database = openCompanyDatabase(companyDir, {
+        clock: () => new Date(timestamp),
+        improvementApplicationRuntime: { adapter },
+      });
+      const recovered = await database.improvementApplications.dispatch(
+        intent.value.id,
+      );
+      assert.equal(recovered.state, "applied");
+      assert.equal(recovered.target.targetKind, targetCase.kind);
+      assert.equal(recovered.receipts.at(-1)?.disposition, "no-op");
+      assert.equal(appendCalls, 1);
+      database.close();
+    }
   });
 
   it("fails closed for unauthorized apply and insufficient target evidence without invoking append", async () => {

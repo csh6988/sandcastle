@@ -652,7 +652,10 @@ export const openImprovementApplicationRuntime = (
           `Improvement proposal revision ${request.proposalRevisionId} lacks the exact approved decision.`,
         );
       }
-      if (request.target.targetKind !== "harness") {
+      if (
+        request.target.targetKind === "template" ||
+        request.target.targetKind === "skill-flow"
+      ) {
         throw new ImprovementApplicationRuntimeError(
           "IMPROVEMENT_TARGET_UNSUPPORTED",
           `Target kind ${request.target.targetKind} is not supported by this application slice.`,
@@ -1171,11 +1174,85 @@ export const openImprovementApplicationRuntime = (
       readonly revisionHash: string;
     },
   ): ImprovementTarget => {
-    if (operation.target.targetKind !== "harness") {
+    if (
+      operation.target.targetKind === "template" ||
+      operation.target.targetKind === "skill-flow"
+    ) {
       throw new ImprovementApplicationRuntimeError(
         "IMPROVEMENT_TARGET_UNSUPPORTED",
         `Target kind ${operation.target.targetKind} does not yet support rollback.`,
       );
+    }
+    if (operation.target.targetKind === "project-spec") {
+      const source = database
+        .prepare(
+          `SELECT content_json AS contentJson
+             FROM project_spec_revisions
+            WHERE project_spec_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.target.ownerId,
+          sourceRevision.revisionId,
+          sourceRevision.revisionHash,
+        ) as { readonly contentJson: string } | undefined;
+      if (!source) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Rollback source ${sourceRevision.revisionId} is not an exact Project Spec Revision.`,
+        );
+      }
+      return ImprovementTargetSchema.parse({
+        ...operation.target,
+        content: parseJson(
+          source.contentJson,
+          `Project Spec rollback source ${sourceRevision.revisionId}`,
+        ),
+      });
+    }
+    if (operation.target.targetKind === "application-spec") {
+      const source = database
+        .prepare(
+          `SELECT application_id AS applicationId, project_id AS projectId,
+                  promoted_project_spec_revision_id AS promotedProjectSpecRevisionId,
+                  promoted_project_spec_hash AS promotedProjectSpecHash,
+                  content_json AS contentJson
+             FROM application_spec_revisions
+            WHERE application_spec_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.target.ownerId,
+          sourceRevision.revisionId,
+          sourceRevision.revisionHash,
+        ) as
+        | {
+            readonly applicationId: string;
+            readonly projectId: string;
+            readonly promotedProjectSpecRevisionId: string;
+            readonly promotedProjectSpecHash: string;
+            readonly contentJson: string;
+          }
+        | undefined;
+      if (!source) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Rollback source ${sourceRevision.revisionId} is not an exact Application Spec Revision.`,
+        );
+      }
+      return ImprovementTargetSchema.parse({
+        ...operation.target,
+        content: {
+          lineage: {
+            projectId: source.projectId,
+            applicationId: source.applicationId,
+            promotedProjectSpecRevisionId: source.promotedProjectSpecRevisionId,
+            promotedProjectSpecHash: source.promotedProjectSpecHash,
+          },
+          content: parseJson(
+            source.contentJson,
+            `Application Spec rollback source ${sourceRevision.revisionId}`,
+          ),
+        },
+      });
     }
     const source = database
       .prepare(

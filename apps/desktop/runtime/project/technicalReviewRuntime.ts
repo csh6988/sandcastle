@@ -676,7 +676,15 @@ export const openTechnicalReviewRuntime = (
       const now = clock().toISOString();
       const applicationSpecId = current?.id ?? randomUUID();
       const revisionId = randomUUID();
-      const nextRevision = currentRevision + 1;
+      const nextRevision = (
+        database
+          .prepare(
+            `SELECT COALESCE(MAX(revision), 0) + 1 AS revision
+               FROM application_spec_revisions
+              WHERE application_spec_id = ?`,
+          )
+          .get(applicationSpecId) as { readonly revision: number }
+      ).revision;
       const contentJson = canonicalJson(content);
       const contentHash = sha256(
         canonicalJson({

@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
+import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
 
 const humanActor = {
   type: "human" as const,
@@ -357,6 +359,92 @@ describe("Product Review Runtime", () => {
       assert.equal(conflicting.status, "rejected");
       if (conflicting.status !== "rejected") return;
       assert.equal(conflicting.error.code, "COMMAND_ID_REUSE");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("allocates the next formal Project Spec revision after a governed no-pointer append", async () => {
+    const database = openCompanyDatabase(
+      mkdtempSync(join(tmpdir(), "sandcastle-product-review-governed-head-")),
+    );
+    try {
+      const fixture = createFormalProductRun(database);
+      const first = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "t26-project-spec-formal-r1",
+        actor: runtimeActor("product-planner-member"),
+        consumerId: "runtime-product-manager",
+        expectedRevision: 0,
+        command: {
+          type: "project-spec.revise" as const,
+          runId: fixture.baseline.runId,
+          producerSessionId: fixture.ownerSession.id,
+          content: {
+            outcome: "Customers submit checkout exactly once.",
+            acceptanceCriteria: ["Duplicate submission creates one order."],
+            applicationBoundaries: ["checkout-web", "orders-api"],
+            crossApplicationContracts: ["checkout-submit-v1"],
+            deliveryConstraints: ["Remain local-first."],
+          },
+        },
+      });
+      assert.equal(first.status, "succeeded");
+      if (first.status !== "succeeded") throw new Error("unreachable");
+      const firstRevision = first.value.specRevisions[0]!;
+      const sqlite = new DatabaseSync(database.path);
+      try {
+        const adapter = openSqliteGovernedRevisionAdapter(sqlite);
+        await adapter.appendRevision({
+          operationId: "improvement-application:project-spec:formal-followup",
+          target: {
+            targetKind: "project-spec",
+            ownerId: firstRevision.projectSpecId,
+            governedHead: {
+              revisionId: firstRevision.id,
+              revisionHash: firstRevision.hash,
+            },
+            content: {
+              ...firstRevision.content,
+              deliveryConstraints: [
+                ...firstRevision.content.deliveryConstraints,
+                "Retain exact improvement evidence.",
+              ],
+            },
+          },
+          phase: "apply",
+          expectedGovernedHead: {
+            revisionId: firstRevision.id,
+            revisionHash: firstRevision.hash,
+          },
+        });
+      } finally {
+        sqlite.close();
+      }
+
+      const next = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "t26-project-spec-formal-r3",
+        actor: runtimeActor("product-planner-member"),
+        consumerId: "runtime-product-manager",
+        expectedRevision: 1,
+        command: {
+          type: "project-spec.revise" as const,
+          runId: fixture.baseline.runId,
+          producerSessionId: fixture.ownerSession.id,
+          content: {
+            ...firstRevision.content,
+            outcome: "Customers submit and confirm checkout exactly once.",
+          },
+        },
+      });
+      assert.equal(next.status, "succeeded");
+      if (next.status !== "succeeded") throw new Error("unreachable");
+      assert.equal(next.value.specRevisions.at(-1)?.revision, 3);
+      assert.equal(
+        next.value.specRevisions.at(-1)?.supersedesRevisionId,
+        firstRevision.id,
+      );
     } finally {
       database.close();
     }

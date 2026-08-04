@@ -559,6 +559,145 @@ describe("Project Improvements panel", () => {
     assert.match(chinese, /回滚精确的已应用修订版/);
   });
 
+  it("renders Project and Application Spec target content and exact lineage", () => {
+    const evidence: StatisticsEvidenceSnapshotView = {
+      id: "statistics-evidence-spec-targets",
+      query: canonicalQuery,
+      queryHash: hash,
+      asOfSequence: 42,
+      observations: [],
+      completeness: {
+        status: "complete",
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      frozenBy: {
+        type: "human",
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session",
+      },
+      hash,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    };
+    const proposalFor = (
+      id: string,
+      target: ImprovementProposalView["revisions"][number]["content"]["target"],
+    ): ImprovementProposalView => ({
+      id,
+      projectId: "project-1",
+      departmentId: null,
+      currentRevisionId: `${id}:revision:1`,
+      currentState: "approved",
+      revisions: [
+        {
+          id: `${id}:revision:1`,
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            evidence,
+            target,
+            rootCauseHypothesis: "The governed Spec needs one exact revision.",
+            impactScope: {
+              projectIds: ["project-1"],
+              departmentIds: [],
+              positionIds: [],
+            },
+            expectedMetrics: [
+              { metricId: "review-finding-count", direction: "decrease" },
+            ],
+            validationPolicy: {
+              metricIds: ["review-finding-count"],
+              minimumComparableObservations: 1,
+            },
+            rolloutNotes: "Validate the next exact cohort.",
+            rollbackSource: { revisionId: `${id}:source`, revisionHash: hash },
+          },
+          hash,
+          authoredBy: {
+            type: "human",
+            id: "human:improvement-owner",
+            authenticatedBy: "local-session",
+          },
+          lifecycle: [
+            {
+              state: "draft",
+              confirmation: null,
+              createdAt: evidence.createdAt,
+            },
+          ],
+          decision: null,
+          createdAt: evidence.createdAt,
+        },
+      ],
+      nextActions: ["apply"],
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.createdAt,
+    });
+    const proposals = [
+      proposalFor("improvement-proposal:project-spec", {
+        targetKind: "project-spec",
+        ownerId: "project-spec:checkout",
+        governedHead: {
+          revisionId: "project-spec-revision:accepted",
+          revisionHash: hash,
+        },
+        content: {
+          outcome: "Ship the accepted checkout outcome.",
+          acceptanceCriteria: ["One checkout creates one order."],
+          applicationBoundaries: ["application:checkout"],
+          crossApplicationContracts: ["checkout-api@1"],
+          deliveryConstraints: ["Remain local-first."],
+        },
+      }),
+      proposalFor("improvement-proposal:application-spec", {
+        targetKind: "application-spec",
+        ownerId: "application-spec:checkout",
+        governedHead: {
+          revisionId: "application-spec-revision:accepted",
+          revisionHash: hash,
+        },
+        content: {
+          lineage: {
+            projectId: "project-1",
+            applicationId: "application:checkout",
+            promotedProjectSpecRevisionId: "project-spec-revision:accepted",
+            promotedProjectSpecHash: hash,
+          },
+          content: {
+            design: "Use the accepted checkout contract.",
+            acceptanceCriteria: ["Checkout requests are idempotent."],
+            workPackageConstraints: ["Keep writes isolated."],
+            integrationObligations: ["Produce checkout-api@1."],
+            contractRefs: [{ id: "checkout-api", version: "1" }],
+          },
+        },
+      }),
+    ];
+    const markup = renderToStaticMarkup(
+      <ProjectImprovementsPanel
+        busy={false}
+        diagnostic={null}
+        evidence={evidence}
+        evidenceSnapshotId={evidence.id}
+        onEvidenceSnapshotIdChange={() => undefined}
+        onFreeze={() => undefined}
+        onInspect={() => undefined}
+        onInspectEvidence={() => undefined}
+        onWindowChange={() => undefined}
+        proposals={proposals}
+        query={query}
+        t={messages.en}
+        view={null}
+      />,
+    );
+    assert.match(markup, /data-improvement-target-content="project-spec"/);
+    assert.match(markup, /Ship the accepted checkout outcome/);
+    assert.match(markup, /data-improvement-target-content="application-spec"/);
+    assert.match(markup, /application:checkout/);
+    assert.match(markup, /project-spec-revision:accepted/);
+    assert.match(markup, /Use the accepted checkout contract/);
+  });
+
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {
     const reliabilityQuery = {
       ...canonicalQuery,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,22 @@ import {
   GovernedRevisionAdapterError,
   openSqliteGovernedRevisionAdapter,
 } from "./governedRevisionAdapter.js";
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+};
+
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(canonicalize(value));
+
+const hash = (value: unknown): string =>
+  createHash("sha256").update(canonicalJson(value)).digest("hex");
 
 const target = {
   targetKind: "harness" as const,
@@ -240,5 +257,302 @@ describe("Governed revision Adapter", () => {
     );
     sqlite.close();
     company.close();
+  });
+
+  it("appends Project and Application Spec revisions without moving current pointers", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    sqlite.exec(`
+      CREATE TABLE project_specs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        product_baseline_id TEXT NOT NULL,
+        current_revision_id TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE project_spec_revisions (
+        id TEXT PRIMARY KEY,
+        project_spec_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        product_baseline_id TEXT NOT NULL,
+        product_baseline_hash TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        supersedes_revision_id TEXT,
+        content_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        producer_ai_member_id TEXT NOT NULL,
+        producer_position_id TEXT NOT NULL,
+        producer_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(project_spec_id, revision)
+      ) STRICT;
+      CREATE TABLE application_specs (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        current_revision_id TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE application_spec_revisions (
+        id TEXT PRIMARY KEY,
+        application_spec_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        promoted_project_spec_revision_id TEXT NOT NULL,
+        promoted_project_spec_hash TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        supersedes_revision_id TEXT,
+        content_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        producer_ai_member_id TEXT NOT NULL,
+        producer_position_id TEXT NOT NULL,
+        producer_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(application_spec_id, revision)
+      ) STRICT;
+    `);
+    const sourceProjectContent = {
+      outcome: "Ship the accepted Project outcome.",
+      acceptanceCriteria: ["The accepted outcome remains verifiable."],
+      applicationBoundaries: ["application:checkout"],
+      crossApplicationContracts: ["checkout-api@1"],
+      deliveryConstraints: ["Remain local-first."],
+    };
+    const sourceProjectHash = hash(sourceProjectContent);
+    sqlite
+      .prepare(
+        `INSERT INTO project_specs VALUES (
+           'project-spec:checkout', 'project:checkout', 'run:checkout',
+           'baseline:checkout', 'project-spec-revision:source', 1,
+           '2026-08-04T00:00:00.000Z', '2026-08-04T00:00:00.000Z'
+         )`,
+      )
+      .run();
+    sqlite
+      .prepare(
+        `INSERT INTO project_spec_revisions VALUES (
+           'project-spec-revision:source', 'project-spec:checkout',
+           'project:checkout', 'run:checkout', 'baseline:checkout', ?, 1, NULL,
+           ?, ?, 'member:product', 'position:product', 'session:product',
+           '2026-08-04T00:00:00.000Z'
+         )`,
+      )
+      .run(
+        "a".repeat(64),
+        canonicalJson(sourceProjectContent),
+        sourceProjectHash,
+      );
+    const sourceApplicationContent = {
+      design: "Use the accepted checkout contract.",
+      acceptanceCriteria: ["Checkout requests are idempotent."],
+      workPackageConstraints: ["Keep writes isolated."],
+      integrationObligations: ["Produce checkout-api@1."],
+      contractRefs: [{ id: "checkout-api", version: "1" }],
+    };
+    const sourceApplicationHash = hash({
+      applicationId: "application:checkout",
+      promotedProjectSpecRevisionId: "project-spec-revision:source",
+      promotedProjectSpecHash: sourceProjectHash,
+      content: sourceApplicationContent,
+    });
+    sqlite
+      .prepare(
+        `INSERT INTO application_specs VALUES (
+           'application-spec:checkout', 'application:checkout', 'project:checkout',
+           'run:checkout', 'application-spec-revision:source', 1,
+           '2026-08-04T00:00:00.000Z', '2026-08-04T00:00:00.000Z'
+         )`,
+      )
+      .run();
+    sqlite
+      .prepare(
+        `INSERT INTO application_spec_revisions VALUES (
+           'application-spec-revision:source', 'application-spec:checkout',
+           'application:checkout', 'project:checkout', 'run:checkout',
+           'project-spec-revision:source', ?, 1, NULL, ?, ?,
+           'member:architect', 'position:architect', 'session:architect',
+           '2026-08-04T00:00:00.000Z'
+         )`,
+      )
+      .run(
+        sourceProjectHash,
+        canonicalJson(sourceApplicationContent),
+        sourceApplicationHash,
+      );
+
+    const adapter = openSqliteGovernedRevisionAdapter(sqlite, {
+      clock: () => new Date("2026-08-04T00:00:00.000Z"),
+    });
+    const projectTarget = {
+      targetKind: "project-spec" as const,
+      ownerId: "project-spec:checkout",
+      governedHead: {
+        revisionId: "project-spec-revision:source",
+        revisionHash: sourceProjectHash,
+      },
+      content: {
+        ...sourceProjectContent,
+        deliveryConstraints: ["Remain local-first.", "Retain exact evidence."],
+      },
+    };
+    const projectApplied = await adapter.appendRevision({
+      operationId: "improvement-application:project-spec",
+      target: projectTarget,
+      phase: "apply",
+      expectedGovernedHead: projectTarget.governedHead,
+    });
+    assert.equal(projectApplied.disposition, "applied");
+    assert.equal(
+      (
+        sqlite
+          .prepare(
+            "SELECT current_revision_id AS id FROM project_specs WHERE id = ?",
+          )
+          .get(projectTarget.ownerId) as { readonly id: string }
+      ).id,
+      "project-spec-revision:source",
+    );
+    const projectReplay = await adapter.appendRevision({
+      operationId: "improvement-application:project-spec",
+      target: projectTarget,
+      phase: "apply",
+      expectedGovernedHead: projectTarget.governedHead,
+    });
+    assert.equal(projectReplay.disposition, "no-op");
+    const projectRestored = await adapter.appendRevision({
+      operationId: "improvement-application:project-spec:rollback",
+      target: { ...projectTarget, content: sourceProjectContent },
+      phase: "rollback",
+      expectedGovernedHead: projectApplied.revision,
+    });
+    assert.equal(projectRestored.disposition, "applied");
+    assert.equal(
+      (
+        sqlite
+          .prepare(
+            "SELECT content_json AS contentJson FROM project_spec_revisions WHERE id = ?",
+          )
+          .get(projectRestored.revision.revisionId) as {
+          readonly contentJson: string;
+        }
+      ).contentJson,
+      canonicalJson(sourceProjectContent),
+    );
+    await assert.rejects(
+      adapter.appendRevision({
+        operationId: "improvement-application:project-spec:stale-head",
+        target: projectTarget,
+        phase: "apply",
+        expectedGovernedHead: projectTarget.governedHead,
+      }),
+      (error: unknown) =>
+        error instanceof GovernedRevisionAdapterError &&
+        error.code === "IMPROVEMENT_TARGET_CONFLICT",
+    );
+
+    const applicationTarget = {
+      targetKind: "application-spec" as const,
+      ownerId: "application-spec:checkout",
+      governedHead: {
+        revisionId: "application-spec-revision:source",
+        revisionHash: sourceApplicationHash,
+      },
+      content: {
+        lineage: {
+          projectId: "project:checkout",
+          applicationId: "application:checkout",
+          promotedProjectSpecRevisionId: "project-spec-revision:source",
+          promotedProjectSpecHash: sourceProjectHash,
+        },
+        content: {
+          ...sourceApplicationContent,
+          workPackageConstraints: [
+            "Keep writes isolated.",
+            "Retain exact evidence.",
+          ],
+        },
+      },
+    };
+    const applicationApplied = await adapter.appendRevision({
+      operationId: "improvement-application:application-spec",
+      target: applicationTarget,
+      phase: "apply",
+      expectedGovernedHead: applicationTarget.governedHead,
+    });
+    assert.equal(applicationApplied.disposition, "applied");
+    assert.equal(
+      (
+        sqlite
+          .prepare(
+            "SELECT current_revision_id AS id FROM application_specs WHERE id = ?",
+          )
+          .get(applicationTarget.ownerId) as { readonly id: string }
+      ).id,
+      "application-spec-revision:source",
+    );
+    const applicationRestored = await adapter.appendRevision({
+      operationId: "improvement-application:application-spec:rollback",
+      target: {
+        ...applicationTarget,
+        content: {
+          ...applicationTarget.content,
+          content: sourceApplicationContent,
+        },
+      },
+      phase: "rollback",
+      expectedGovernedHead: applicationApplied.revision,
+    });
+    assert.equal(applicationRestored.disposition, "applied");
+    assert.equal(
+      (
+        sqlite
+          .prepare(
+            "SELECT content_json AS contentJson FROM application_spec_revisions WHERE id = ?",
+          )
+          .get(applicationRestored.revision.revisionId) as {
+          readonly contentJson: string;
+        }
+      ).contentJson,
+      canonicalJson(sourceApplicationContent),
+    );
+    await assert.rejects(
+      adapter.appendRevision({
+        operationId: "improvement-application:application-spec:stale-head",
+        target: applicationTarget,
+        phase: "apply",
+        expectedGovernedHead: applicationTarget.governedHead,
+      }),
+      (error: unknown) =>
+        error instanceof GovernedRevisionAdapterError &&
+        error.code === "IMPROVEMENT_TARGET_CONFLICT",
+    );
+    await assert.rejects(
+      adapter.appendRevision({
+        operationId: "improvement-application:application-spec:bad-lineage",
+        target: {
+          ...applicationTarget,
+          content: {
+            ...applicationTarget.content,
+            lineage: {
+              ...applicationTarget.content.lineage,
+              promotedProjectSpecHash: "f".repeat(64),
+            },
+          },
+        },
+        phase: "apply",
+        expectedGovernedHead: applicationRestored.revision,
+      }),
+      (error: unknown) =>
+        error instanceof GovernedRevisionAdapterError &&
+        error.code === "IMPROVEMENT_TARGET_CONFLICT",
+    );
+    sqlite.close();
   });
 });

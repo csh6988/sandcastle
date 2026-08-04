@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { openSqliteGovernedRevisionAdapter } from "../improvement/governedRevisionAdapter.js";
 import { openCompanyDatabase } from "../storage/sqlite.js";
 
 const humanActor = {
@@ -775,6 +777,115 @@ describe("Technical Review Runtime", () => {
       if (mismatch.status === "rejected") {
         assert.equal(mismatch.error.code, "SPEC_CONTRACT_MISMATCH");
       }
+    } finally {
+      database.close();
+    }
+  });
+
+  it("allocates the next formal Application Spec revision after a governed no-pointer append", async () => {
+    const database = openCompanyDatabase(tempCompanyDir());
+    try {
+      const fixture = createPromotedProductRun(database, "governed-head");
+      const architectSession = addAiSession(
+        database,
+        fixture.project.id,
+        "software-architect-member",
+      );
+      const first = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "t26-application-spec-formal-r1",
+        actor: runtimeActor("software-architect-member"),
+        consumerId: "runtime-software-architect",
+        expectedRevision: 0,
+        command: {
+          type: "application-spec.revise" as const,
+          runId: fixture.baseline.runId,
+          applicationId: "checkout-web-governed-head",
+          promotedProjectSpecRevisionId: fixture.spec.id,
+          promotedProjectSpecHash: fixture.spec.hash,
+          producerSessionId: architectSession,
+          content: {
+            design: "Submit checkout commands through the Orders API.",
+            acceptanceCriteria: ["A checkout receives one order ID."],
+            workPackageConstraints: ["Keep writes isolated."],
+            integrationObligations: ["Consume checkout-submit-v1."],
+            contractRefs: [{ id: "checkout-submit", version: "1" }],
+          },
+        },
+      });
+      assert.equal(first.status, "succeeded");
+      if (first.status !== "succeeded") throw new Error("unreachable");
+      const firstRevision = first.value.applicationSpecRevisions.find(
+        (revision) => revision.applicationId === "checkout-web-governed-head",
+      )!;
+      const sqlite = new DatabaseSync(database.path);
+      try {
+        const adapter = openSqliteGovernedRevisionAdapter(sqlite);
+        await adapter.appendRevision({
+          operationId:
+            "improvement-application:application-spec:formal-followup",
+          target: {
+            targetKind: "application-spec",
+            ownerId: firstRevision.applicationSpecId,
+            governedHead: {
+              revisionId: firstRevision.id,
+              revisionHash: firstRevision.hash,
+            },
+            content: {
+              lineage: {
+                projectId: fixture.project.id,
+                applicationId: firstRevision.applicationId,
+                promotedProjectSpecRevisionId:
+                  firstRevision.promotedProjectSpecRevisionId,
+                promotedProjectSpecHash: firstRevision.promotedProjectSpecHash,
+              },
+              content: {
+                ...firstRevision.content,
+                workPackageConstraints: [
+                  ...firstRevision.content.workPackageConstraints,
+                  "Retain exact improvement evidence.",
+                ],
+              },
+            },
+          },
+          phase: "apply",
+          expectedGovernedHead: {
+            revisionId: firstRevision.id,
+            revisionHash: firstRevision.hash,
+          },
+        });
+      } finally {
+        sqlite.close();
+      }
+
+      const next = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: "t26-application-spec-formal-r3",
+        actor: runtimeActor("software-architect-member"),
+        consumerId: "runtime-software-architect",
+        expectedRevision: 1,
+        command: {
+          type: "application-spec.revise" as const,
+          runId: fixture.baseline.runId,
+          applicationId: firstRevision.applicationId,
+          promotedProjectSpecRevisionId:
+            firstRevision.promotedProjectSpecRevisionId,
+          promotedProjectSpecHash: firstRevision.promotedProjectSpecHash,
+          producerSessionId: architectSession,
+          content: {
+            ...firstRevision.content,
+            design:
+              "Submit idempotent checkout commands through the Orders API.",
+          },
+        },
+      });
+      assert.equal(next.status, "succeeded");
+      if (next.status !== "succeeded") throw new Error("unreachable");
+      const revisions = next.value.applicationSpecRevisions.filter(
+        (revision) => revision.applicationId === firstRevision.applicationId,
+      );
+      assert.equal(revisions.at(-1)?.revision, 3);
+      assert.equal(revisions.at(-1)?.supersedesRevisionId, firstRevision.id);
     } finally {
       database.close();
     }

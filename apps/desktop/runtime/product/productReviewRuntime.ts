@@ -425,7 +425,15 @@ export const openProductReviewRuntime = (
       const now = clock().toISOString();
       const projectSpecId = current?.id ?? randomUUID();
       const projectSpecRevisionId = randomUUID();
-      const nextRevision = currentRevision + 1;
+      const nextRevision = (
+        database
+          .prepare(
+            `SELECT COALESCE(MAX(revision), 0) + 1 AS revision
+               FROM project_spec_revisions
+              WHERE project_spec_id = ?`,
+          )
+          .get(projectSpecId) as { readonly revision: number }
+      ).revision;
       const contentJson = canonicalJson(content);
       const contentHash = sha256(contentJson);
 

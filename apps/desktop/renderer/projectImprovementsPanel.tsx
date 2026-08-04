@@ -114,6 +114,57 @@ const validationOutcomeLabel = (
     regressed: t.improvementValidationRegressed,
   })[outcome];
 
+function ImprovementTargetContent({
+  target,
+}: {
+  readonly target: ImprovementProposalView["revisions"][number]["content"]["target"];
+}) {
+  switch (target.targetKind) {
+    case "harness":
+      return (
+        <div data-improvement-target-content={target.targetKind}>
+          {target.content.principles.join(" · ")} ·{" "}
+          {target.content.constitution}
+        </div>
+      );
+    case "project-spec":
+      return (
+        <div data-improvement-target-content={target.targetKind}>
+          {target.content.outcome} ·{" "}
+          {target.content.acceptanceCriteria.join(" · ")}
+        </div>
+      );
+    case "application-spec":
+      return (
+        <div data-improvement-target-content={target.targetKind}>
+          <span data-improvement-target-lineage>
+            {target.content.lineage.projectId} ·{" "}
+            {target.content.lineage.applicationId} ·{" "}
+            {target.content.lineage.promotedProjectSpecRevisionId} ·{" "}
+            {target.content.lineage.promotedProjectSpecHash}
+          </span>
+          {" · "}
+          {target.content.content.design}
+        </div>
+      );
+    case "template":
+      return (
+        <div data-improvement-target-content={target.targetKind}>
+          {target.content.manifest
+            .map((file) => `${file.path} · ${file.contentHash}`)
+            .join(" · ")}
+        </div>
+      );
+    case "skill-flow":
+      return (
+        <div data-improvement-target-content={target.targetKind}>
+          {target.content.positionId} · {target.content.name} ·{" "}
+          {target.content.skillIds.join(" → ")}
+        </div>
+      );
+  }
+}
+
 function StatisticsObservations({
   t,
   observations,
@@ -621,6 +672,9 @@ export function ProjectImprovementsPanel({
                       <dd>
                         {currentRevision.content.target.targetKind} ·{" "}
                         {currentRevision.content.target.ownerId}
+                        <ImprovementTargetContent
+                          target={currentRevision.content.target}
+                        />
                       </dd>
                     </div>
                     <div>
@@ -800,6 +854,7 @@ export function ProjectImprovementsPanel({
                   <dd>
                     {application.target.targetKind} ·{" "}
                     {application.target.ownerId}
+                    <ImprovementTargetContent target={application.target} />
                   </dd>
                 </div>
                 <div>
