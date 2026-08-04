@@ -332,6 +332,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.statisticsWindowStart}</span>
             <input
+              data-statistics-window-start
               disabled={busy}
               onChange={(event) =>
                 onWindowChange({
@@ -346,6 +347,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.statisticsWindowEnd}</span>
             <input
+              data-statistics-window-end
               disabled={busy}
               onChange={(event) =>
                 onWindowChange({
@@ -359,11 +361,17 @@ export function ProjectImprovementsPanel({
           </label>
         </div>
         <div className="form-actions">
-          <button disabled={busy} onClick={onInspect} type="button">
+          <button
+            data-statistics-inspect
+            disabled={busy}
+            onClick={onInspect}
+            type="button"
+          >
             {t.statisticsInspect}
           </button>
           <button
             className="primary-button"
+            data-statistics-freeze
             disabled={busy || view === null}
             onClick={onFreeze}
             type="button"
@@ -378,6 +386,8 @@ export function ProjectImprovementsPanel({
           data-statistics-as-of-sequence={view.asOfSequence}
           data-statistics-catalog={view.query.catalogVersion}
           data-statistics-completeness={view.completeness.status}
+          data-statistics-view-window-end={view.query.window.endExclusive}
+          data-statistics-view-window-start={view.query.window.startInclusive}
         >
           <h3>{t.statisticsLiveView}</h3>
           <p>
@@ -396,6 +406,7 @@ export function ProjectImprovementsPanel({
         <label>
           <span>{t.statisticsEvidenceId}</span>
           <input
+            data-statistics-evidence-id
             disabled={busy}
             onChange={(event) => onEvidenceSnapshotIdChange(event.target.value)}
             type="text"
@@ -403,6 +414,7 @@ export function ProjectImprovementsPanel({
           />
         </label>
         <button
+          data-statistics-evidence-inspect
           disabled={busy || evidenceSnapshotId.trim() === ""}
           onClick={onInspectEvidence}
           type="button"
@@ -446,6 +458,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementValidationMetric}</span>
             <select
+              data-improvement-proposal-field="metricId"
               value={proposalDraft.metricId}
               onChange={(event) =>
                 updateProposalDraft(
@@ -470,6 +483,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementTargetOwner}</span>
             <input
+              data-improvement-proposal-field="targetOwnerId"
               value={proposalDraft.targetOwnerId}
               onChange={(event) =>
                 updateProposalDraft("targetOwnerId", event.currentTarget.value)
@@ -479,6 +493,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementGovernedHeadRevisionId}</span>
             <input
+              data-improvement-proposal-field="governedHeadRevisionId"
               value={proposalDraft.governedHeadRevisionId}
               onChange={(event) =>
                 updateProposalDraft(
@@ -491,6 +506,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementGovernedHeadRevisionHash}</span>
             <input
+              data-improvement-proposal-field="governedHeadRevisionHash"
               value={proposalDraft.governedHeadRevisionHash}
               onChange={(event) =>
                 updateProposalDraft(
@@ -503,6 +519,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementHarnessPrinciple}</span>
             <input
+              data-improvement-proposal-field="principle"
               value={proposalDraft.principle}
               onChange={(event) =>
                 updateProposalDraft("principle", event.currentTarget.value)
@@ -512,6 +529,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementHarnessConstitution}</span>
             <textarea
+              data-improvement-proposal-field="constitution"
               value={proposalDraft.constitution}
               onChange={(event) =>
                 updateProposalDraft("constitution", event.currentTarget.value)
@@ -521,6 +539,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementHarnessRule}</span>
             <textarea
+              data-improvement-proposal-field="rule"
               value={proposalDraft.rule}
               onChange={(event) =>
                 updateProposalDraft("rule", event.currentTarget.value)
@@ -530,6 +549,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementRootCause}</span>
             <textarea
+              data-improvement-proposal-field="rootCauseHypothesis"
               value={proposalDraft.rootCauseHypothesis}
               onChange={(event) =>
                 updateProposalDraft(
@@ -542,6 +562,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementRolloutNotes}</span>
             <textarea
+              data-improvement-proposal-field="rolloutNotes"
               value={proposalDraft.rolloutNotes}
               onChange={(event) =>
                 updateProposalDraft("rolloutNotes", event.currentTarget.value)
@@ -551,6 +572,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementRollbackRevisionId}</span>
             <input
+              data-improvement-proposal-field="rollbackRevisionId"
               value={proposalDraft.rollbackRevisionId}
               onChange={(event) =>
                 updateProposalDraft(
@@ -563,6 +585,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementRollbackRevisionHash}</span>
             <input
+              data-improvement-proposal-field="rollbackRevisionHash"
               value={proposalDraft.rollbackRevisionHash}
               onChange={(event) =>
                 updateProposalDraft(
@@ -575,6 +598,7 @@ export function ProjectImprovementsPanel({
         </div>
         <div className="form-actions">
           <button
+            data-improvement-proposal-create
             disabled={busy || !proposalDraftValid || !onCreateProposal}
             onClick={() => onCreateProposal?.(proposalDraft)}
             type="button"
@@ -586,6 +610,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementDecisionConfirmation}</span>
             <textarea
+              data-improvement-decision-confirmation
               value={decisionConfirmation}
               onChange={(event) =>
                 setDecisionConfirmation(event.currentTarget.value)
@@ -595,6 +620,7 @@ export function ProjectImprovementsPanel({
           <label>
             <span>{t.improvementDecisionReason}</span>
             <textarea
+              data-improvement-decision-reason
               value={decisionReason}
               onChange={(event) => setDecisionReason(event.currentTarget.value)}
             />
@@ -646,6 +672,7 @@ export function ProjectImprovementsPanel({
             return (
               <article
                 data-improvement-proposal={proposal.id}
+                data-improvement-proposal-state={proposal.currentState}
                 key={proposal.id}
               >
                 <div className="project-card-top">
@@ -715,6 +742,7 @@ export function ProjectImprovementsPanel({
                 <div className="form-actions">
                   {proposal.nextActions.includes("revise") ? (
                     <button
+                      data-improvement-revise-proposal={proposal.id}
                       disabled={
                         busy || !proposalDraftValid || !onReviseProposal
                       }
@@ -728,6 +756,7 @@ export function ProjectImprovementsPanel({
                   ) : null}
                   {proposal.nextActions.includes("propose") ? (
                     <button
+                      data-improvement-propose-proposal={proposal.id}
                       disabled={busy || !onProposeProposal}
                       onClick={() => onProposeProposal?.(proposal)}
                       type="button"
@@ -737,6 +766,7 @@ export function ProjectImprovementsPanel({
                   ) : null}
                   {proposal.nextActions.includes("request-decision") ? (
                     <button
+                      data-improvement-request-decision={proposal.id}
                       disabled={
                         busy ||
                         decisionConfirmation.trim().length === 0 ||
@@ -756,6 +786,7 @@ export function ProjectImprovementsPanel({
                   {proposal.nextActions.includes("approve") &&
                   requestedConfirmation ? (
                     <button
+                      data-improvement-approve-proposal={proposal.id}
                       disabled={
                         busy ||
                         decisionReason.trim().length === 0 ||
@@ -777,6 +808,7 @@ export function ProjectImprovementsPanel({
                   {proposal.nextActions.includes("reject") &&
                   requestedConfirmation ? (
                     <button
+                      data-improvement-reject-proposal={proposal.id}
                       disabled={
                         busy ||
                         decisionReason.trim().length === 0 ||
@@ -833,6 +865,7 @@ export function ProjectImprovementsPanel({
           {(applications ?? []).map((application) => (
             <article
               data-improvement-application={application.id}
+              data-improvement-application-state={application.state}
               key={application.id}
             >
               <div className="project-card-top">
@@ -949,6 +982,7 @@ export function ProjectImprovementsPanel({
                   <label>
                     <span>{t.improvementValidationReason}</span>
                     <textarea
+                      data-improvement-validation-reason={application.id}
                       value={validationReason}
                       onChange={(event) =>
                         setValidationReason(event.currentTarget.value)
@@ -956,6 +990,7 @@ export function ProjectImprovementsPanel({
                     />
                   </label>
                   <button
+                    data-improvement-validate-application={application.id}
                     disabled={
                       busy ||
                       !evidence ||
@@ -981,6 +1016,7 @@ export function ProjectImprovementsPanel({
                   <label>
                     <span>{t.improvementRollbackConfirmation}</span>
                     <textarea
+                      data-improvement-rollback-confirmation={application.id}
                       value={rollbackConfirmation}
                       onChange={(event) =>
                         setRollbackConfirmation(event.currentTarget.value)
@@ -990,6 +1026,7 @@ export function ProjectImprovementsPanel({
                   <label>
                     <span>{t.improvementRollbackReason}</span>
                     <textarea
+                      data-improvement-rollback-reason={application.id}
                       value={rollbackReason}
                       onChange={(event) =>
                         setRollbackReason(event.currentTarget.value)
@@ -997,6 +1034,7 @@ export function ProjectImprovementsPanel({
                     />
                   </label>
                   <button
+                    data-improvement-rollback-application={application.id}
                     disabled={
                       busy ||
                       rollbackConfirmation.trim().length === 0 ||

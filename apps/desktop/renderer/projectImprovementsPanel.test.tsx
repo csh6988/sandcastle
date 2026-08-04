@@ -139,6 +139,14 @@ describe("Project Improvements panel", () => {
     assert.match(markup, /statistics-evidence-1/);
     assert.match(markup, new RegExp(hash));
     assert.match(markup, /Freeze exact evidence/);
+    assert.match(markup, /data-statistics-window-start/);
+    assert.match(markup, /data-statistics-window-end/);
+    assert.match(markup, /data-statistics-inspect/);
+    assert.match(markup, /data-statistics-freeze/);
+    assert.match(markup, /data-statistics-evidence-id/);
+    assert.match(markup, /data-improvement-proposal-field="metricId"/);
+    assert.match(markup, /data-improvement-proposal-field="targetOwnerId"/);
+    assert.match(markup, /data-improvement-proposal-create/);
   });
 
   it("renders the Project Improvements workflow in Chinese", () => {

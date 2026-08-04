@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   applyElectronTestFixtureExitCode,
+  createT26ElectronTestResult,
   createElectronTestFixture,
   electronTestFixtureRuntimePrincipal,
   ElectronTestFixtureError,
@@ -128,6 +129,93 @@ const cleanupTargetPath = (
 };
 
 describe("Electron Test fixture", () => {
+  it("creates fail-closed T26-only structured evidence", () => {
+    const result = createT26ElectronTestResult({
+      schemaVersion: 52,
+      eventRegistryVersion: 20,
+      statistics: {
+        catalogVersion: "statistics@1",
+        metricId: "product-baseline-confirmation-count",
+        beforeEvidenceId: "statistics-evidence:before",
+        beforeEvidenceHash: "a".repeat(64),
+        beforeAsOfSequence: 10,
+        beforeValue: 0,
+        beforeCompleteness: "unavailable",
+        afterEvidenceId: "statistics-evidence:after",
+        afterEvidenceHash: "b".repeat(64),
+        afterAsOfSequence: 20,
+        afterValue: 0,
+        afterCompleteness: "unavailable",
+      },
+      proposal: {
+        proposalId: "improvement-proposal:t26",
+        proposalRevisionId: "improvement-proposal-revision:t26:1",
+        proposalRevisionHash: "c".repeat(64),
+        decisionId: "improvement-decision:t26",
+        decisionHash: "d".repeat(64),
+        approvalCreatedTargetRevision: false,
+      },
+      application: {
+        operationId: "improvement-application:t26",
+        canonicalRequestHash: "9".repeat(64),
+        deterministicEffectId: "improvement-effect:t26",
+        appliedReceiptId: "improvement-receipt:t26:apply",
+        appliedReceiptHash: "8".repeat(64),
+        appliedRevisionId: "governed-harness-revision:t26:applied",
+        appliedRevisionHash: "e".repeat(64),
+        rollbackReceiptId: "improvement-receipt:t26:rollback",
+        rollbackReceiptHash: "7".repeat(64),
+        restoringRevisionId: "governed-harness-revision:t26:restoring",
+        restoringRevisionHash: "f".repeat(64),
+        sourceRevisionId: "governed-harness-revision:t26:source",
+        sourceRevisionHash: "f".repeat(64),
+        validationOutcome: "unchanged",
+      },
+      invariants: {
+        runUnchanged: true,
+        snapshotUnchanged: true,
+        publishedConfigurationUnchanged: true,
+        activeConfigurationUnchanged: true,
+        repositoryFilesUnchanged: true,
+      },
+      resilience: {
+        rendererReloaded: true,
+        runtimeRestarted: true,
+        eventAckRecovered: true,
+        duplicateReplayRevisionCountStable: true,
+        applicationIdentityStable: true,
+        receiptStable: true,
+      },
+      cleanup: {
+        rootFingerprint: "1".repeat(64),
+        disposableResourcesOnly: true,
+      },
+    });
+
+    assert.equal(result.status, "ok");
+    assert.equal(result.scope, "T26 only");
+    assert.deepEqual(result.effects, {
+      T27: false,
+      deployment: false,
+      network: false,
+    });
+    assert.equal(result.evidence.schemaVersion, 52);
+    assert.equal(result.evidence.eventRegistryVersion, 20);
+    assert.throws(
+      () =>
+        createT26ElectronTestResult({
+          ...result.evidence,
+          invariants: {
+            ...result.evidence.invariants,
+            repositoryFilesUnchanged: false,
+          },
+        }),
+      (error: unknown) =>
+        error instanceof ElectronTestFixtureError &&
+        error.code === "FIXTURE_T26_EVIDENCE_INVALID",
+    );
+  });
+
   it("authenticates fixture Runtime commands as a Runtime worker", () => {
     assert.deepEqual(electronTestFixtureRuntimePrincipal, {
       type: "runtime-worker",

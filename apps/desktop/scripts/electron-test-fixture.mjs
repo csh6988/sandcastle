@@ -25,6 +25,7 @@ import { createCompanyRuntimeClient } from "../dist-electron/runtime/client.js";
 import { EnvelopeCommandSchema } from "../dist-electron/runtime/interface.js";
 import {
   applyElectronTestFixtureExitCode,
+  createT26ElectronTestResult,
   createElectronTestFixture,
   loadElectronTestFixtureConfig,
   normalizeTestEvidenceLocator,
@@ -347,6 +348,54 @@ const selectElementValue = async (selector, value) => {
   );
 };
 
+const selectElementOption = async (selector, value) => {
+  await waitForElement(selector);
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  let targetLabel;
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `(()=>{const select=document.querySelector(${JSON.stringify(selector)});return select?{options:[...select.options].map((option)=>({label:option.textContent,value:option.value})),value:select.value}:null})()`,
+      returnByValue: true,
+    });
+    assert.ok(result.result.value, `Select ${selector} was not found.`);
+    targetLabel = result.result.value.options.find(
+      (option) => option.value === value,
+    )?.label;
+    assert.ok(targetLabel, `Select option ${value} was not found.`);
+    await debuggerSession.sendCommand("DOM.enable");
+    const document = await debuggerSession.sendCommand("DOM.getDocument");
+    const target = await debuggerSession.sendCommand("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector,
+    });
+    assert.notEqual(target.nodeId, 0, `Select ${selector} was not found.`);
+    await debuggerSession.sendCommand("DOM.scrollIntoViewIfNeeded", {
+      nodeId: target.nodeId,
+    });
+    await debuggerSession.sendCommand("DOM.focus", { nodeId: target.nodeId });
+    for (const character of targetLabel) {
+      await debuggerSession.sendCommand("Input.dispatchKeyEvent", {
+        type: "char",
+        key: character,
+        text: character,
+        unmodifiedText: character,
+      });
+    }
+  } finally {
+    debuggerSession.detach();
+  }
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const state = await readElementState(selector);
+    if (state?.value === value) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Electron keyboard selection did not settle for ${selector}: ${JSON.stringify(await readElementState(selector))}`,
+  );
+};
+
 const waitForFile = async (path, timeoutMs = 20_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -370,6 +419,37 @@ const readElementState = async (selector) => {
   } finally {
     debuggerSession.detach();
   }
+};
+
+const readElementAttribute = async (selector, attribute) => {
+  const debuggerSession = window.webContents.debugger;
+  debuggerSession.attach("1.3");
+  try {
+    const result = await debuggerSession.sendCommand("Runtime.evaluate", {
+      expression: `document.querySelector(${JSON.stringify(selector)})?.getAttribute(${JSON.stringify(attribute)}) ?? null`,
+      returnByValue: true,
+    });
+    return result.result.value;
+  } finally {
+    debuggerSession.detach();
+  }
+};
+
+const waitForElementAttribute = async (
+  selector,
+  attribute,
+  predicate,
+  timeoutMs = 10_000,
+) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await readElementAttribute(selector, attribute);
+    if (value !== null && predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for Electron fixture attribute ${attribute} on ${selector}.`,
+  );
 };
 
 const waitForElementState = async (selector, predicate, timeoutMs = 10_000) => {
@@ -2177,7 +2257,7 @@ const run = async () => {
     fixture.config.companyDirectory,
   );
   const candidateRestartClaimAfter = basename(fixture.authorizationClaimPath);
-  assert.equal(candidateRestartHealth.schemaVersion, 51);
+  assert.equal(candidateRestartHealth.schemaVersion, 52);
   assert.notEqual(candidateRestartHealth.pid, candidateRestartPidBefore);
   assert.notEqual(candidateRestartClaimAfter, candidateRestartClaimBefore);
   const candidateRestartAuthorityCountsAfter = await measureAuthorityCounts(
@@ -3024,6 +3104,707 @@ const run = async () => {
       ),
   );
 
+  const t26MetricId = "product-baseline-confirmation-count";
+  const t26ConsumerId = "electron-test-fixture-human-release";
+  const executeT26 = async (commandId, command) => {
+    const result = await humanRuntimeClient.executeEnvelope({
+      schemaVersion: 1,
+      commandId,
+      actor: humanActor,
+      consumerId: t26ConsumerId,
+      command,
+    });
+    assert.equal(
+      result.status,
+      "succeeded",
+      result.status === "rejected"
+        ? `${result.error.code}: ${result.error.message}`
+        : undefined,
+    );
+    if (result.status !== "succeeded") {
+      throw new Error(`T26 Command ${commandId} was rejected.`);
+    }
+    return result;
+  };
+  const waitForT26Proposal = async (proposalId, predicate) => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const proposals = await humanRuntimeClient.query({
+        type: "improvement-proposals.list",
+        projectId: seeded.projectId,
+      });
+      const proposal = proposals.find((entry) => entry.id === proposalId);
+      if (proposal && predicate(proposal)) return proposal;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Timed out waiting for T26 proposal ${proposalId}.`);
+  };
+  const waitForT26Application = async (operationId, predicate) => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const applications = await humanRuntimeClient.query({
+        type: "improvement-applications.list",
+        projectId: seeded.projectId,
+      });
+      const application = applications.find(
+        (entry) => entry.id === operationId,
+      );
+      if (application && predicate(application)) return application;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Timed out waiting for T26 application ${operationId}.`);
+  };
+  const repositoryState = (configuration) => ({
+    repositoryDirectory: configuration.repositoryDirectory,
+    repositoryHead: git(configuration.repositoryDirectory, "rev-parse", "HEAD"),
+    repositoryIndex: git(configuration.repositoryDirectory, "ls-files", "-s"),
+    repositoryStatus: git(
+      configuration.repositoryDirectory,
+      "status",
+      "--short",
+      "--untracked-files=all",
+    ),
+    worktreeDirectory: configuration.worktreeDirectory,
+    worktreeHead: git(configuration.worktreeDirectory, "rev-parse", "HEAD"),
+    worktreeIndex: git(configuration.worktreeDirectory, "ls-files", "-s"),
+    worktreeStatus: git(
+      configuration.worktreeDirectory,
+      "status",
+      "--short",
+      "--untracked-files=all",
+    ),
+  });
+  const t26Repositories = [
+    {
+      repositoryDirectory: fixture.config.repositoryDirectory,
+      worktreeDirectory: fixture.config.worktreeDirectory,
+    },
+    ...(fixture.config.additionalRepositories ?? []),
+  ];
+  const captureT26Invariants = async () => ({
+    run: await humanRuntimeClient.query({
+      type: "run.inspect",
+      runId: seeded.runId,
+    }),
+    pipeline: await humanRuntimeClient.query({
+      type: "department.pipeline.inspect",
+      departmentId: preparation.departmentId,
+    }),
+    skills: await humanRuntimeClient.query({
+      type: "department.skill-configuration.inspect",
+      departmentId: preparation.departmentId,
+    }),
+    repositories: t26Repositories.map(repositoryState),
+  });
+  const t26InvariantsBefore = await captureT26Invariants();
+  assert.equal(
+    t26InvariantsBefore.run.run.snapshotRevisionId,
+    seeded.snapshotRevisionId,
+  );
+  assert.equal(
+    t26InvariantsBefore.repositories.every(
+      (repository) =>
+        repository.repositoryStatus === "" && repository.worktreeStatus === "",
+    ),
+    true,
+  );
+
+  const t26Project = await humanRuntimeClient.query({
+    type: "project.inspect",
+    projectId: seeded.projectId,
+  });
+  const t26ProjectStart = Date.parse(t26Project.createdAt);
+  const sourceQuery = {
+    projectId: seeded.projectId,
+    window: {
+      kind: "explicit-utc-half-open",
+      startInclusive: t26Project.createdAt,
+      endExclusive: new Date(
+        Math.max(Date.now(), t26ProjectStart + 24 * 60 * 60 * 1_000),
+      ).toISOString(),
+    },
+    cohort: { id: "cohort:t26-electron-source" },
+    comparisonSet: {
+      id: "comparison:t26-electron-source",
+      metricIds: [t26MetricId],
+    },
+  };
+  const sourceEvidenceResult = await executeT26("fixture:t26:source-evidence", {
+    type: "statistics.evidence.freeze",
+    evidenceSnapshotId: "statistics-evidence:t26:source",
+    query: sourceQuery,
+  });
+  const sourceEvidence = sourceEvidenceResult.value;
+  const sourceMetric = sourceEvidence.observations.find(
+    (observation) => observation.metricId === t26MetricId,
+  );
+  assert.equal(sourceMetric?.status, "available");
+  assert.equal(sourceMetric?.measurement?.kind, "count");
+  assert.equal(sourceMetric?.measurement?.value, 0);
+  const sourceOwnerId = "harness:t26-electron";
+  const sourceProposalId = "improvement-proposal:t26:source";
+  const sourceProposalRevisionId = "improvement-proposal-revision:t26:source:1";
+  const sourceContent = {
+    evidence: sourceEvidence,
+    target: {
+      targetKind: "harness",
+      ownerId: sourceOwnerId,
+      governedHead: { revisionId: null, revisionHash: null },
+      content: {
+        principles: ["Use exact frozen evidence."],
+        constitution: "Keep the disposable Electron Harness bounded.",
+        rules: ["Apply only reviewed Runtime-owned revisions."],
+        examples: { positive: [], negative: [] },
+        impactScope: [seeded.projectId],
+      },
+    },
+    rootCauseHypothesis: "The Harness needs one governed source revision.",
+    impactScope: {
+      projectIds: [seeded.projectId],
+      departmentIds: [],
+      positionIds: [],
+    },
+    expectedMetrics: [{ metricId: t26MetricId, direction: "decrease" }],
+    validationPolicy: {
+      metricIds: [t26MetricId],
+      minimumComparableObservations: 1,
+    },
+    rolloutNotes:
+      "Create the disposable rollback source through formal Runtime Commands.",
+    rollbackSource: {
+      revisionId: "governed-harness-revision:t26:bootstrap",
+      revisionHash: "0".repeat(64),
+    },
+  };
+  const sourceCreated = await executeT26("fixture:t26:source-create", {
+    type: "improvement.proposal.create",
+    proposal: {
+      proposalId: sourceProposalId,
+      revisionId: sourceProposalRevisionId,
+      projectId: seeded.projectId,
+      departmentId: null,
+      content: sourceContent,
+    },
+  });
+  const sourceRevision = sourceCreated.value.revisions.find(
+    (revision) => revision.id === sourceProposalRevisionId,
+  );
+  assert.ok(sourceRevision);
+  await executeT26("fixture:t26:source-propose", {
+    type: "improvement.proposal.propose",
+    proposalId: sourceProposalId,
+    proposalRevisionId: sourceRevision.id,
+    expectedProposalRevisionHash: sourceRevision.hash,
+  });
+  const sourceDecisionConfirmation =
+    "I confirm the exact disposable T26 source revision and frozen evidence.";
+  await executeT26("fixture:t26:source-request-decision", {
+    type: "improvement.proposal.request-decision",
+    proposalId: sourceProposalId,
+    proposalRevisionId: sourceRevision.id,
+    expectedProposalRevisionHash: sourceRevision.hash,
+    confirmation: sourceDecisionConfirmation,
+  });
+  const sourceApproved = await executeT26("fixture:t26:source-approve", {
+    type: "improvement.proposal.decide",
+    proposalId: sourceProposalId,
+    proposalRevisionId: sourceRevision.id,
+    expectedProposalRevisionHash: sourceRevision.hash,
+    decision: "approved",
+    confirmation: sourceDecisionConfirmation,
+    reason: "The source Harness revision is exact, bounded, and disposable.",
+    evidenceRefs: [sourceEvidence.id],
+  });
+  const sourceDecision = sourceApproved.value.revisions.find(
+    (revision) => revision.id === sourceRevision.id,
+  )?.decision;
+  assert.ok(sourceDecision);
+  const sourceOperationId = "improvement-application:t26:source";
+  await executeT26("fixture:t26:source-apply", {
+    type: "improvement.application.apply",
+    application: {
+      operationId: sourceOperationId,
+      proposalId: sourceProposalId,
+      proposalRevisionId: sourceRevision.id,
+      expectedProposalRevisionHash: sourceRevision.hash,
+      approvedDecisionId: sourceDecision.id,
+      expectedApprovedDecisionHash: sourceDecision.hash,
+      target: sourceContent.target,
+      confirmation:
+        "I confirm applying the exact disposable source Harness revision.",
+      reason:
+        "Establish the exact source revision required for restoring rollback.",
+      evidenceRefs: [sourceEvidence.id, sourceDecision.id],
+    },
+  });
+  const sourceApplication = await waitForT26Application(
+    sourceOperationId,
+    (application) => application.state === "applied",
+  );
+  const sourceTargetRevision = sourceApplication.receipts.find(
+    (receipt) => receipt.phase === "apply" && receipt.targetRevision !== null,
+  )?.targetRevision;
+  assert.ok(sourceTargetRevision);
+
+  await clickElement('[data-project-tab="improvements"]');
+  await waitForElement("[data-project-improvements]");
+  await waitForElementState(
+    `[data-statistics-metric="${t26MetricId}"][data-statistics-observation-status="available"]`,
+    (state) => state.text.endsWith("0"),
+  );
+  await clickElement("[data-statistics-inspect]");
+  await waitForElementState(
+    `[data-statistics-metric="${t26MetricId}"][data-statistics-observation-status="available"]`,
+    (state) => state.text.endsWith("0"),
+  );
+  await clickElement("[data-statistics-freeze]");
+  const beforeEvidenceId = await waitForElementAttribute(
+    "[data-statistics-evidence]",
+    "data-statistics-evidence",
+    (value) => value !== sourceEvidence.id,
+  );
+  const beforeEvidence = await humanRuntimeClient.query({
+    type: "statistics-evidence.inspect",
+    evidenceSnapshotId: beforeEvidenceId,
+  });
+  const beforeMetric = beforeEvidence.observations.find(
+    (observation) => observation.metricId === t26MetricId,
+  );
+  assert.equal(beforeMetric?.status, "available");
+  assert.equal(beforeMetric?.measurement?.kind, "count");
+  assert.equal(beforeMetric?.measurement?.value, 0);
+
+  const proposalsBeforeRendererCreate = await humanRuntimeClient.query({
+    type: "improvement-proposals.list",
+    projectId: seeded.projectId,
+  });
+  await selectElementOption(
+    '[data-improvement-proposal-field="metricId"]',
+    t26MetricId,
+  );
+  const t26ProposalFields = {
+    targetOwnerId: sourceOwnerId,
+    governedHeadRevisionId: sourceTargetRevision.revisionId,
+    governedHeadRevisionHash: sourceTargetRevision.revisionHash,
+    principle: "Keep exact improvement evidence restart-safe.",
+    constitution: "Apply only one approved disposable Harness revision.",
+    rule: "Re-query authoritative Views after every invalidation.",
+    rootCauseHypothesis:
+      "Without governed receipts, renderer recovery can overstate an Improvement effect.",
+    rolloutNotes:
+      "Validate with an exact comparable frozen window, then restore the source revision.",
+    rollbackRevisionId: sourceTargetRevision.revisionId,
+    rollbackRevisionHash: sourceTargetRevision.revisionHash,
+  };
+  for (const [field, value] of Object.entries(t26ProposalFields)) {
+    await typeElement(`[data-improvement-proposal-field="${field}"]`, value);
+  }
+  await waitForElementState(
+    "[data-improvement-proposal-create]",
+    (state) => state.disabled === false,
+  );
+  await clickElement("[data-improvement-proposal-create]");
+  let changedProposal;
+  const changedProposalDeadline = Date.now() + 20_000;
+  while (Date.now() < changedProposalDeadline) {
+    const proposals = await humanRuntimeClient.query({
+      type: "improvement-proposals.list",
+      projectId: seeded.projectId,
+    });
+    changedProposal = proposals.find(
+      (proposal) =>
+        !proposalsBeforeRendererCreate.some(
+          (prior) => prior.id === proposal.id,
+        ),
+    );
+    if (changedProposal) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(changedProposal);
+  await waitForElementAttribute(
+    `[data-improvement-proposal="${changedProposal.id}"]`,
+    "data-improvement-proposal-state",
+    (value) => value === "draft",
+  );
+  const changedRevision = changedProposal.revisions.find(
+    (revision) => revision.id === changedProposal.currentRevisionId,
+  );
+  assert.ok(changedRevision);
+  assert.equal(changedRevision.content.evidence.id, beforeEvidence.id);
+  assert.equal(changedRevision.content.evidence.hash, beforeEvidence.hash);
+  assert.deepEqual(
+    changedRevision.content.target.governedHead,
+    sourceTargetRevision,
+  );
+
+  const decisionConfirmation =
+    "I confirm this exact T26 proposal revision, evidence, governed head, and rollback source.";
+  await typeElement(
+    "[data-improvement-decision-confirmation]",
+    decisionConfirmation,
+  );
+  await clickElement(
+    `[data-improvement-propose-proposal="${changedProposal.id}"]`,
+  );
+  changedProposal = await waitForT26Proposal(
+    changedProposal.id,
+    (proposal) => proposal.currentState === "proposed",
+  );
+  await clickElement(
+    `[data-improvement-request-decision="${changedProposal.id}"]`,
+  );
+  changedProposal = await waitForT26Proposal(
+    changedProposal.id,
+    (proposal) => proposal.currentState === "awaiting-human",
+  );
+  const applicationsBeforeApproval = await humanRuntimeClient.query({
+    type: "improvement-applications.list",
+    projectId: seeded.projectId,
+  });
+  const sourceReceiptBeforeApproval = sourceApplication.receipts[0];
+  await typeElement(
+    "[data-improvement-decision-reason]",
+    "The exact T26 Harness change is bounded, evidence-backed, and reversible.",
+  );
+  await clickElement(
+    `[data-improvement-approve-proposal="${changedProposal.id}"]`,
+  );
+  changedProposal = await waitForT26Proposal(
+    changedProposal.id,
+    (proposal) => proposal.currentState === "approved",
+  );
+  const approvedRevision = changedProposal.revisions.find(
+    (revision) => revision.id === changedProposal.currentRevisionId,
+  );
+  const approvedDecision = approvedRevision?.decision;
+  assert.ok(approvedRevision);
+  assert.ok(approvedDecision);
+  const applicationsAfterApproval = await humanRuntimeClient.query({
+    type: "improvement-applications.list",
+    projectId: seeded.projectId,
+  });
+  assert.deepEqual(
+    applicationsAfterApproval.map((application) => application.id).sort(),
+    applicationsBeforeApproval.map((application) => application.id).sort(),
+  );
+  const sourceAfterApproval = applicationsAfterApproval.find(
+    (application) => application.id === sourceOperationId,
+  );
+  assert.equal(
+    canonicalJson(sourceAfterApproval?.receipts[0]),
+    canonicalJson(sourceReceiptBeforeApproval),
+  );
+
+  const changedOperationId = "improvement-application:t26:changed";
+  await typeElement(
+    "#improvement-application-operation-id",
+    changedOperationId,
+  );
+  await typeElement(
+    "#improvement-application-confirmation",
+    "I confirm applying the exact approved T26 Harness revision.",
+  );
+  await typeElement(
+    "#improvement-application-reason",
+    "Exercise the governed T26 apply, restart, validation, and rollback flow.",
+  );
+  await clickElement(
+    `[data-improvement-apply-proposal="${changedProposal.id}"]`,
+  );
+  let changedApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "applied",
+  );
+  await waitForElementAttribute(
+    `[data-improvement-application="${changedOperationId}"]`,
+    "data-improvement-application-state",
+    (value) => value === "applied",
+  );
+  const appliedReceipt = changedApplication.receipts.find(
+    (receipt) => receipt.phase === "apply" && receipt.targetRevision !== null,
+  );
+  assert.ok(appliedReceipt?.targetRevision);
+  const applicationsBeforeDuplicateGesture = await humanRuntimeClient.query({
+    type: "improvement-applications.list",
+    projectId: seeded.projectId,
+  });
+  await clickElement(
+    `[data-improvement-apply-proposal="${changedProposal.id}"]`,
+  );
+  const duplicateApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "applied",
+  );
+  const applicationsAfterDuplicateGesture = await humanRuntimeClient.query({
+    type: "improvement-applications.list",
+    projectId: seeded.projectId,
+  });
+  assert.deepEqual(
+    applicationsAfterDuplicateGesture
+      .map((application) => application.id)
+      .sort(),
+    applicationsBeforeDuplicateGesture
+      .map((application) => application.id)
+      .sort(),
+  );
+  assert.equal(
+    canonicalJson(duplicateApplication.receipts),
+    canonicalJson(changedApplication.receipts),
+  );
+
+  const t26CursorBeforeRestart = reviewsCursorStates(
+    await supervisor.audit({ limit: 1_000 }),
+  ).at(-1);
+  assert.ok(t26CursorBeforeRestart);
+  const t26PidBeforeRestart = (await supervisor.health()).pid;
+  await supervisor.stop();
+  const t26RestartHealth = await supervisor.start(
+    fixture.config.companyDirectory,
+  );
+  assert.notEqual(t26RestartHealth.pid, t26PidBeforeRestart);
+  assert.equal(t26RestartHealth.schemaVersion, 52);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await window.reload();
+    await waitForElement('[data-nav="projects"]');
+    await clickElement('[data-nav="projects"]');
+    try {
+      await waitForElement(`[data-project-id="${seeded.projectId}"]`, 5_000);
+      break;
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
+  await clickElement(`[data-project-id="${seeded.projectId}"]`);
+  await waitForElement(`[data-runtime-project-id="${seeded.projectId}"]`);
+  await clickElement('[data-project-tab="improvements"]');
+  await waitForElementAttribute(
+    `[data-improvement-application="${changedOperationId}"]`,
+    "data-improvement-application-state",
+    (value) => value === "applied",
+  );
+  const restartedApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "applied",
+  );
+  assert.equal(restartedApplication.id, changedApplication.id);
+  assert.equal(
+    canonicalJson(restartedApplication.receipts),
+    canonicalJson(changedApplication.receipts),
+  );
+  let t26CursorAfterRestart;
+  const t26CursorDeadline = Date.now() + 10_000;
+  while (Date.now() < t26CursorDeadline) {
+    t26CursorAfterRestart = reviewsCursorStates(
+      await supervisor.audit({ limit: 1_000 }),
+    ).at(-1);
+    if (
+      t26CursorAfterRestart &&
+      t26CursorAfterRestart.subscriptionGeneration >
+        t26CursorBeforeRestart.subscriptionGeneration
+    ) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(t26CursorAfterRestart);
+  assert.ok(
+    t26CursorAfterRestart.subscriptionGeneration >
+      t26CursorBeforeRestart.subscriptionGeneration,
+  );
+  assert.ok(t26CursorAfterRestart.sequence >= t26CursorBeforeRestart.sequence);
+
+  const afterWindow = {
+    startInclusive: new Date(
+      Date.parse(beforeEvidence.query.window.startInclusive) - 1,
+    ).toISOString(),
+    endExclusive: new Date(
+      Date.parse(beforeEvidence.query.window.endExclusive) - 1,
+    ).toISOString(),
+  };
+  await typeElement(
+    "[data-statistics-window-start]",
+    afterWindow.startInclusive,
+  );
+  await typeElement("[data-statistics-window-end]", afterWindow.endExclusive);
+  await clickElement("[data-statistics-inspect]");
+  await waitForElementAttribute(
+    "[data-statistics-view-window-start]",
+    "data-statistics-view-window-start",
+    (value) => value === afterWindow.startInclusive,
+  );
+  await waitForElementAttribute(
+    "[data-statistics-view-window-end]",
+    "data-statistics-view-window-end",
+    (value) => value === afterWindow.endExclusive,
+  );
+  await clickElement("[data-statistics-freeze]");
+  const afterEvidenceId = await waitForElementAttribute(
+    "[data-statistics-evidence]",
+    "data-statistics-evidence",
+    (value) => value !== beforeEvidence.id,
+  );
+  const afterEvidence = await humanRuntimeClient.query({
+    type: "statistics-evidence.inspect",
+    evidenceSnapshotId: afterEvidenceId,
+  });
+  const afterMetric = afterEvidence.observations.find(
+    (observation) => observation.metricId === t26MetricId,
+  );
+  assert.equal(afterMetric?.status, "available");
+  assert.equal(afterMetric?.measurement?.kind, "count");
+  assert.equal(afterMetric?.measurement?.value, 0);
+  await typeElement(
+    `[data-improvement-validation-reason="${changedOperationId}"]`,
+    "The shifted exact window retains the same authoritative baseline count.",
+  );
+  await clickElement(
+    `[data-improvement-validate-application="${changedOperationId}"]`,
+  );
+  changedApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "validated",
+  );
+  assert.equal(changedApplication.validations.at(-1)?.outcome, "unchanged");
+  await waitForElementAttribute(
+    `[data-improvement-application="${changedOperationId}"]`,
+    "data-improvement-application-state",
+    (value) => value === "validated",
+  );
+
+  await typeElement(
+    `[data-improvement-rollback-confirmation="${changedOperationId}"]`,
+    "I confirm restoring the exact governed T26 source Harness revision.",
+  );
+  await typeElement(
+    `[data-improvement-rollback-reason="${changedOperationId}"]`,
+    "Complete the disposable T26 proof without changing active configuration.",
+  );
+  await clickElement(
+    `[data-improvement-rollback-application="${changedOperationId}"]`,
+  );
+  changedApplication = await waitForT26Application(
+    changedOperationId,
+    (application) => application.state === "rolled-back",
+  );
+  const rollback = changedApplication.rollbacks.at(-1);
+  const rollbackReceipt = changedApplication.receipts.find(
+    (receipt) =>
+      receipt.phase === "rollback" && receipt.targetRevision !== null,
+  );
+  assert.ok(rollback?.restoringRevision);
+  assert.ok(rollbackReceipt?.targetRevision);
+  assert.equal(
+    rollback.sourceRevision.revisionId,
+    sourceTargetRevision.revisionId,
+  );
+  assert.equal(
+    rollback.restoringRevision.revisionHash,
+    sourceTargetRevision.revisionHash,
+  );
+  assert.equal(
+    changedApplication.receipts.some(
+      (receipt) =>
+        receipt.phase === "apply" &&
+        receipt.targetRevision?.revisionId ===
+          appliedReceipt.targetRevision.revisionId,
+    ),
+    true,
+  );
+  await waitForElementAttribute(
+    `[data-improvement-application="${changedOperationId}"]`,
+    "data-improvement-application-state",
+    (value) => value === "rolled-back",
+  );
+
+  const t26InvariantsAfter = await captureT26Invariants();
+  const t26InvariantProof = {
+    runUnchanged:
+      canonicalJson(t26InvariantsAfter.run.run) ===
+      canonicalJson(t26InvariantsBefore.run.run),
+    snapshotUnchanged:
+      canonicalJson(t26InvariantsAfter.run.snapshot) ===
+        canonicalJson(t26InvariantsBefore.run.snapshot) &&
+      t26InvariantsAfter.run.run.snapshotRevisionId ===
+        seeded.snapshotRevisionId,
+    publishedConfigurationUnchanged:
+      canonicalJson(t26InvariantsAfter.pipeline.published) ===
+      canonicalJson(t26InvariantsBefore.pipeline.published),
+    activeConfigurationUnchanged:
+      canonicalJson(t26InvariantsAfter.skills) ===
+      canonicalJson(t26InvariantsBefore.skills),
+    repositoryFilesUnchanged:
+      canonicalJson(t26InvariantsAfter.repositories) ===
+      canonicalJson(t26InvariantsBefore.repositories),
+  };
+  assert.equal(Object.values(t26InvariantProof).every(Boolean), true);
+  const t26Result = createT26ElectronTestResult({
+    schemaVersion: 52,
+    eventRegistryVersion: 20,
+    statistics: {
+      catalogVersion: beforeEvidence.query.catalogVersion,
+      metricId: t26MetricId,
+      beforeEvidenceId: beforeEvidence.id,
+      beforeEvidenceHash: beforeEvidence.hash,
+      beforeAsOfSequence: beforeEvidence.asOfSequence,
+      beforeValue: beforeMetric.measurement.value,
+      beforeCompleteness: beforeEvidence.completeness.status,
+      afterEvidenceId: afterEvidence.id,
+      afterEvidenceHash: afterEvidence.hash,
+      afterAsOfSequence: afterEvidence.asOfSequence,
+      afterValue: afterMetric.measurement.value,
+      afterCompleteness: afterEvidence.completeness.status,
+    },
+    proposal: {
+      proposalId: changedProposal.id,
+      proposalRevisionId: approvedRevision.id,
+      proposalRevisionHash: approvedRevision.hash,
+      decisionId: approvedDecision.id,
+      decisionHash: approvedDecision.hash,
+      approvalCreatedTargetRevision: false,
+    },
+    application: {
+      operationId: changedApplication.id,
+      canonicalRequestHash: changedApplication.canonicalRequestHash,
+      deterministicEffectId: changedApplication.deterministicEffectId,
+      appliedReceiptId: appliedReceipt.id,
+      appliedReceiptHash: appliedReceipt.hash,
+      appliedRevisionId: appliedReceipt.targetRevision.revisionId,
+      appliedRevisionHash: appliedReceipt.targetRevision.revisionHash,
+      rollbackReceiptId: rollbackReceipt.id,
+      rollbackReceiptHash: rollbackReceipt.hash,
+      restoringRevisionId: rollback.restoringRevision.revisionId,
+      restoringRevisionHash: rollback.restoringRevision.revisionHash,
+      sourceRevisionId: sourceTargetRevision.revisionId,
+      sourceRevisionHash: sourceTargetRevision.revisionHash,
+      validationOutcome: changedApplication.validations.at(-1).outcome,
+    },
+    invariants: t26InvariantProof,
+    resilience: {
+      rendererReloaded: true,
+      runtimeRestarted: t26RestartHealth.pid !== t26PidBeforeRestart,
+      eventAckRecovered:
+        t26CursorAfterRestart.subscriptionGeneration >
+          t26CursorBeforeRestart.subscriptionGeneration &&
+        t26CursorAfterRestart.sequence >= t26CursorBeforeRestart.sequence,
+      duplicateReplayRevisionCountStable:
+        canonicalJson(duplicateApplication.receipts) ===
+          canonicalJson(restartedApplication.receipts) &&
+        applicationsBeforeDuplicateGesture.length ===
+          applicationsAfterDuplicateGesture.length,
+      applicationIdentityStable:
+        restartedApplication.id === changedApplication.id,
+      receiptStable:
+        canonicalJson(restartedApplication.receipts) ===
+        canonicalJson(duplicateApplication.receipts),
+    },
+    cleanup: {
+      rootFingerprint: fixture.config.rootFingerprint,
+      disposableResourcesOnly: fixture.config.cleanupTargets.every((target) =>
+        target.path.startsWith(`${fixture.root}/`),
+      ),
+    },
+  });
+
   const finalAudit = await supervisor.audit({
     runId: seeded.runId,
     limit: 1_000,
@@ -3039,6 +3820,31 @@ const run = async () => {
   });
   const eventRegistrySources = eventRegistryReplay.events.map(
     (event) => event.payload.source,
+  );
+  const t26FormalEventTypes = [
+    "statistics.evidence.invalidated",
+    "improvement.proposal.invalidated",
+    "improvement.application.invalidated",
+  ];
+  const t26FormalEventTypeSet = new Set(t26FormalEventTypes);
+  const t26FormalRegistryEvidence = eventRegistrySources
+    .map((source) => ({
+      eventId: source.eventId,
+      type: finalEvents.find((event) => event.eventId === source.eventId)?.type,
+      registryVersion: source.registryVersion,
+    }))
+    .filter((event) => t26FormalEventTypeSet.has(event.type));
+  assert.deepEqual(
+    [...new Set(t26FormalRegistryEvidence.map((event) => event.type))].sort(),
+    [...t26FormalEventTypes].sort(),
+  );
+  assert.deepEqual(
+    [
+      ...new Set(
+        t26FormalRegistryEvidence.map((event) => event.registryVersion),
+      ),
+    ],
+    [20],
   );
   assert.equal(
     finalEvents.filter(
@@ -3083,7 +3889,7 @@ const run = async () => {
     1,
   );
   assert.ok(restartHealth);
-  assert.equal(restartHealth.schemaVersion, 51);
+  assert.equal(restartHealth.schemaVersion, 52);
 
   const recoveredInteraction = {
     view: await humanRuntimeClient.query({
@@ -3155,7 +3961,7 @@ const run = async () => {
     ),
     true,
   );
-  assert.equal(health.schemaVersion, 51);
+  assert.equal(health.schemaVersion, 52);
   assert.ok(eventRegistrySources.length > 0);
   const eventTypeById = new Map(
     finalEvents.map((event) => [event.eventId, event.type]),
@@ -3199,28 +4005,27 @@ const run = async () => {
         t22FormalRegistryEvidence.map((event) => event.registryVersion),
       ),
     ],
-    [19],
+    [20],
   );
-  const outOfScopeLegacySetupEvents = eventRegistrySources
+  const scopedFormalEventTypes = new Set([
+    ...t22FormalEventTypes,
+    ...t26FormalEventTypes,
+  ]);
+  const otherSetupEvents = eventRegistrySources
     .map((source) => ({
       eventId: source.eventId,
       type: eventTypeById.get(source.eventId),
       registryVersion: source.registryVersion,
     }))
-    .filter((event) => event.registryVersion !== 19);
+    .filter((event) => !scopedFormalEventTypes.has(event.type));
   process.stdout.write(
     `${JSON.stringify({
-      status: "ok",
-      scope: "T22 only",
-      excludedEffects: {
-        T22: false,
-        T26: true,
-        T27: true,
-        releaseDecisionAcceptance: false,
-        destinationRefUpdate: false,
-        export: false,
-        deployment: true,
-        network: true,
+      ...t26Result,
+      prerequisiteFixture: {
+        scope: "disposable T21 Product-to-Candidate and T22 Release setup",
+        releaseDecisionAcceptance: true,
+        destinationRefUpdate: true,
+        export: true,
       },
       product: {
         projectId: seeded.projectId,
@@ -3240,21 +4045,19 @@ const run = async () => {
         passAuthorityHash: seeded.integrationAuthority.passAuthorityHash,
       },
       runtimePid: (await supervisor.health()).pid,
-      schemaVersion: health.schemaVersion,
-      eventRegistryVersion: 19,
+      schemaVersion: (await supervisor.health()).schemaVersion,
+      eventRegistryVersion: 20,
       eventRegistryEvidence: {
-        scope:
-          "exact T21 Product-to-Candidate and T22 Release operation events",
+        scope: "exact T26 Statistics and Improvement invalidation events",
         typedControlFramesExcluded: true,
-        formalEvents: t22FormalRegistryEvidence,
-        outOfScopeLegacySetupEventCount: outOfScopeLegacySetupEvents.length,
-        outOfScopeLegacySetupRegistryVersions: [
-          ...new Set(
-            outOfScopeLegacySetupEvents.map((event) => event.registryVersion),
-          ),
+        formalEvents: t26FormalRegistryEvidence,
+        prerequisiteFormalEvents: t22FormalRegistryEvidence,
+        otherSetupEventCount: otherSetupEvents.length,
+        otherSetupRegistryVersions: [
+          ...new Set(otherSetupEvents.map((event) => event.registryVersion)),
         ],
-        outOfScopeLegacySetupEventTypes: [
-          ...new Set(outOfScopeLegacySetupEvents.map((event) => event.type)),
+        otherSetupEventTypes: [
+          ...new Set(otherSetupEvents.map((event) => event.type)),
         ].sort(),
       },
       auditRecords: finalAudit.length,

@@ -31,6 +31,137 @@ export class ElectronTestFixtureError extends Error {
   }
 }
 
+export interface T26ElectronTestEvidence {
+  readonly schemaVersion: 52;
+  readonly eventRegistryVersion: 20;
+  readonly statistics: {
+    readonly catalogVersion: "statistics@1";
+    readonly metricId: string;
+    readonly beforeEvidenceId: string;
+    readonly beforeEvidenceHash: string;
+    readonly beforeAsOfSequence: number;
+    readonly beforeValue: number;
+    readonly beforeCompleteness: string;
+    readonly afterEvidenceId: string;
+    readonly afterEvidenceHash: string;
+    readonly afterAsOfSequence: number;
+    readonly afterValue: number;
+    readonly afterCompleteness: string;
+  };
+  readonly proposal: {
+    readonly proposalId: string;
+    readonly proposalRevisionId: string;
+    readonly proposalRevisionHash: string;
+    readonly decisionId: string;
+    readonly decisionHash: string;
+    readonly approvalCreatedTargetRevision: false;
+  };
+  readonly application: {
+    readonly operationId: string;
+    readonly canonicalRequestHash: string;
+    readonly deterministicEffectId: string;
+    readonly appliedReceiptId: string;
+    readonly appliedReceiptHash: string;
+    readonly appliedRevisionId: string;
+    readonly appliedRevisionHash: string;
+    readonly rollbackReceiptId: string;
+    readonly rollbackReceiptHash: string;
+    readonly restoringRevisionId: string;
+    readonly restoringRevisionHash: string;
+    readonly sourceRevisionId: string;
+    readonly sourceRevisionHash: string;
+    readonly validationOutcome: "improved" | "unchanged" | "regressed";
+  };
+  readonly invariants: {
+    readonly runUnchanged: boolean;
+    readonly snapshotUnchanged: boolean;
+    readonly publishedConfigurationUnchanged: boolean;
+    readonly activeConfigurationUnchanged: boolean;
+    readonly repositoryFilesUnchanged: boolean;
+  };
+  readonly resilience: {
+    readonly rendererReloaded: boolean;
+    readonly runtimeRestarted: boolean;
+    readonly eventAckRecovered: boolean;
+    readonly duplicateReplayRevisionCountStable: boolean;
+    readonly applicationIdentityStable: boolean;
+    readonly receiptStable: boolean;
+  };
+  readonly cleanup: {
+    readonly rootFingerprint: string;
+    readonly disposableResourcesOnly: boolean;
+  };
+}
+
+export const createT26ElectronTestResult = (
+  evidence: T26ElectronTestEvidence,
+) => {
+  const hashes = [
+    evidence.statistics.beforeEvidenceHash,
+    evidence.statistics.afterEvidenceHash,
+    evidence.proposal.proposalRevisionHash,
+    evidence.proposal.decisionHash,
+    evidence.application.appliedRevisionHash,
+    evidence.application.canonicalRequestHash,
+    evidence.application.appliedReceiptHash,
+    evidence.application.rollbackReceiptHash,
+    evidence.application.restoringRevisionHash,
+    evidence.application.sourceRevisionHash,
+    evidence.cleanup.rootFingerprint,
+  ];
+  const identities = [
+    evidence.statistics.metricId,
+    evidence.statistics.beforeEvidenceId,
+    evidence.statistics.afterEvidenceId,
+    evidence.proposal.proposalId,
+    evidence.proposal.proposalRevisionId,
+    evidence.proposal.decisionId,
+    evidence.application.operationId,
+    evidence.application.deterministicEffectId,
+    evidence.application.appliedReceiptId,
+    evidence.application.appliedRevisionId,
+    evidence.application.rollbackReceiptId,
+    evidence.application.restoringRevisionId,
+    evidence.application.sourceRevisionId,
+  ];
+  if (
+    evidence.schemaVersion !== 52 ||
+    evidence.eventRegistryVersion !== 20 ||
+    evidence.statistics.catalogVersion !== "statistics@1" ||
+    !Number.isInteger(evidence.statistics.beforeAsOfSequence) ||
+    evidence.statistics.beforeAsOfSequence < 0 ||
+    !Number.isInteger(evidence.statistics.afterAsOfSequence) ||
+    evidence.statistics.afterAsOfSequence < 0 ||
+    !Number.isFinite(evidence.statistics.beforeValue) ||
+    !Number.isFinite(evidence.statistics.afterValue) ||
+    evidence.statistics.beforeCompleteness.trim() === "" ||
+    evidence.statistics.afterCompleteness.trim() === "" ||
+    hashes.some((hash) => !/^[a-f0-9]{64}$/.test(hash)) ||
+    identities.some((identity) => identity.trim() === "") ||
+    evidence.proposal.approvalCreatedTargetRevision !== false ||
+    evidence.application.restoringRevisionHash !==
+      evidence.application.sourceRevisionHash ||
+    Object.values(evidence.invariants).some((proven) => proven !== true) ||
+    Object.values(evidence.resilience).some((proven) => proven !== true) ||
+    evidence.cleanup.disposableResourcesOnly !== true
+  ) {
+    throw new ElectronTestFixtureError(
+      "FIXTURE_T26_EVIDENCE_INVALID",
+      "T26 Electron evidence must prove the complete isolated workflow before it can be reported.",
+    );
+  }
+  return {
+    status: "ok" as const,
+    scope: "T26 only" as const,
+    effects: {
+      T27: false as const,
+      deployment: false as const,
+      network: false as const,
+    },
+    evidence,
+  };
+};
+
 export const applyElectronTestFixtureExitCode = (
   processControl: { readonly exit: (code: number) => unknown },
   exitCode: number,
