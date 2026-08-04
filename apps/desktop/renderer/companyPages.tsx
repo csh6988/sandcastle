@@ -133,6 +133,39 @@ export const improvementApplicationValidateInput = (
   evidenceRefs: [...new Set([...application.evidenceRefs, afterEvidence.id])],
 });
 
+export const improvementApplicationRollbackInput = (
+  application: ImprovementApplicationOperationView,
+  proposal: ImprovementProposalView,
+  confirmation: string,
+  reason: string,
+) => {
+  const appliedRevision = [...application.receipts]
+    .reverse()
+    .find(
+      (receipt) => receipt.phase === "apply" && receipt.targetRevision !== null,
+    )?.targetRevision;
+  const proposalRevision = proposal.revisions.find(
+    (revision) => revision.id === application.proposalRevisionId,
+  );
+  if (!appliedRevision || !proposalRevision) return null;
+  return {
+    operationId: application.id,
+    expectedOperationHash: application.canonicalRequestHash,
+    appliedRevision,
+    expectedGovernedHead: appliedRevision,
+    rollbackSource: proposalRevision.content.rollbackSource,
+    confirmation,
+    reason,
+    evidenceRefs: [
+      ...new Set([
+        ...application.evidenceRefs,
+        appliedRevision.revisionId,
+        proposalRevision.content.rollbackSource.revisionId,
+      ]),
+    ],
+  };
+};
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error
     ? error.message
@@ -4750,6 +4783,19 @@ export function ProjectDetailView({
   const reconcileImprovementApplication = async (
     application: ImprovementApplicationOperationView,
   ): Promise<void> => {
+    const rollback = application.rollbacks.at(-1);
+    if (rollback) {
+      const proposal = improvementProposals.find(
+        (candidate) => candidate.id === application.proposalId,
+      );
+      if (!proposal) return;
+      await rollbackImprovementApplication(
+        application,
+        rollback.confirmation,
+        rollback.reason,
+      );
+      return;
+    }
     await executeImprovementApplication({
       operationId: application.id,
       proposalId: application.proposalId,
@@ -4788,6 +4834,48 @@ export function ProjectDetailView({
         command: {
           type: "improvement.application.validate",
           validation,
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
+  const rollbackImprovementApplication = async (
+    application: ImprovementApplicationOperationView,
+    confirmation: string,
+    reason: string,
+  ): Promise<void> => {
+    const proposal = improvementProposals.find(
+      (candidate) => candidate.id === application.proposalId,
+    );
+    if (!proposal) return;
+    const rollback = improvementApplicationRollbackInput(
+      application,
+      proposal,
+      confirmation,
+      reason,
+    );
+    if (!rollback) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `rollback:${application.id}:${application.canonicalRequestHash}:${JSON.stringify(rollback)}`;
+      const commandId =
+        improvementApplicationGestures.current.get(key) ??
+        `improvement-application-rollback:${globalThis.crypto.randomUUID()}`;
+      improvementApplicationGestures.current.set(key, commandId);
+      const result = await window.sandcastle.execute({
+        commandId,
+        command: {
+          type: "improvement.application.rollback",
+          rollback,
         },
       });
       if (result.status === "rejected") {
@@ -5218,6 +5306,13 @@ export function ProjectDetailView({
             void validateImprovementApplication(
               application,
               afterEvidence,
+              reason,
+            )
+          }
+          onRollbackApplication={(application, confirmation, reason) =>
+            void rollbackImprovementApplication(
+              application,
+              confirmation,
               reason,
             )
           }

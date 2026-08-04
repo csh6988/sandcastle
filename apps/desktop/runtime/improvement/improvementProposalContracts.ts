@@ -514,6 +514,9 @@ export const ImprovementApplicationRollbackRequestSchema =
   ImprovementApplicationRollbackBaseSchema.extend({
     actor: VerifiedLocalSessionHumanSchema,
   }).strict();
+export type ImprovementApplicationRollbackRequest = z.infer<
+  typeof ImprovementApplicationRollbackRequestSchema
+>;
 
 export const ImprovementApplicationReceiptSchema = z
   .object({
@@ -574,6 +577,8 @@ export const ImprovementApplicationRollbackViewSchema = z
     expectedGovernedHead: GovernedRevisionRefSchema,
     restoringRevision: GovernedRevisionRefSchema.nullable(),
     state: z.enum(["requested", "rolled-back", "failed", "unknown"]),
+    confirmation: ReasonSchema,
+    reason: ReasonSchema,
     evidenceRefs: z.array(IdSchema).max(64),
     hash: Sha256Schema,
     requestedBy: VerifiedLocalSessionHumanSchema,

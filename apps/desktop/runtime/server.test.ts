@@ -919,6 +919,33 @@ describe("Company Runtime server startup", () => {
       }
       assert.equal(validated.value.state, "validated");
       assert.equal(validated.value.validations[0]?.outcome, "unchanged");
+      const appliedRevision = validated.value.receipts[0]?.targetRevision;
+      if (!appliedRevision) assert.fail("applied revision must exist");
+      const rollback = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:rollback-improvement-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.application.rollback",
+          rollback: {
+            operationId: validated.value.id,
+            expectedOperationHash: validated.value.canonicalRequestHash,
+            appliedRevision,
+            expectedGovernedHead: appliedRevision,
+            rollbackSource: revision.content.rollbackSource,
+            confirmation:
+              "I confirm restoring the exact selected source revision.",
+            reason: "Prove the typed rollback route fails closed.",
+            evidenceRefs: [appliedRevision.revisionId],
+          },
+        },
+      });
+      assert.equal(rollback.status, "rejected");
+      if (rollback.status !== "rejected") {
+        assert.fail("missing rollback source must be rejected");
+      }
+      assert.equal(rollback.error.code, "IMPROVEMENT_TARGET_CONFLICT");
     } finally {
       await server.close();
     }

@@ -6781,6 +6781,8 @@ const migrations: readonly CompanyMigration[] = [
               restoring_revision_hash IS NULL OR length(restoring_revision_hash) = 64
             ),
             state TEXT NOT NULL CHECK (state IN ('requested', 'rolled-back', 'failed', 'unknown')),
+            confirmation TEXT NOT NULL CHECK (length(confirmation) BETWEEN 1 AND 4000),
+            reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
             evidence_refs_json TEXT NOT NULL,
             rollback_hash TEXT NOT NULL CHECK (length(rollback_hash) = 64),
             actor_type TEXT NOT NULL CHECK (actor_type = 'human'),

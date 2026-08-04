@@ -13,6 +13,7 @@ import {
   ImprovementApplicationOperationViewSchema,
   ImprovementApplicationReceiptSchema,
   ImprovementApplicationReconciliationSchema,
+  ImprovementApplicationRollbackRequestSchema,
   ImprovementApplicationRollbackViewSchema,
   ImprovementApplicationValidationSchema,
   ImprovementProposalRevisionContentSchema,
@@ -20,6 +21,7 @@ import {
   type ImprovementApplicationApplyRequest,
   type ImprovementApplicationEffectAdapter,
   type ImprovementApplicationOperationView,
+  type ImprovementApplicationRollbackRequest,
   type ImprovementApplicationState,
   type ImprovementApplicationValidateRequest,
   type ImprovementValidationActor,
@@ -73,6 +75,10 @@ export interface ImprovementApplicationRuntime {
   readonly validateInTransaction: (input: {
     readonly commandId: string;
     readonly request: ImprovementApplicationValidateRequest;
+  }) => ImprovementApplicationOperationView;
+  readonly rollbackInTransaction: (input: {
+    readonly commandId: string;
+    readonly request: ImprovementApplicationRollbackRequest;
   }) => ImprovementApplicationOperationView;
   readonly inspect: (
     operationId: string,
@@ -270,7 +276,7 @@ export const openImprovementApplicationRuntime = (
                   evidence_refs_json AS evidenceRefsJson,
                   receipt_hash AS hash, created_at AS createdAt
              FROM improvement_application_receipts
-            WHERE operation_id = ? ORDER BY created_at, id`,
+            WHERE operation_id = ? ORDER BY created_at, rowid`,
         )
         .all(operationId) as Array<{
         readonly id: string;
@@ -308,7 +314,7 @@ export const openImprovementApplicationRuntime = (
           `SELECT id, phase, outcome, evidence_refs_json AS evidenceRefsJson,
                   observation_hash AS hash, observed_at AS observedAt
              FROM improvement_application_observations
-            WHERE operation_id = ? ORDER BY observed_at, id`,
+            WHERE operation_id = ? ORDER BY observed_at, rowid`,
         )
         .all(operationId) as Array<{
         readonly id: string;
@@ -341,7 +347,7 @@ export const openImprovementApplicationRuntime = (
           `SELECT id, phase, result, evidence_refs_json AS evidenceRefsJson,
                   reconciliation_hash AS hash, created_at AS createdAt
              FROM improvement_application_reconciliations
-            WHERE operation_id = ? ORDER BY created_at, id`,
+            WHERE operation_id = ? ORDER BY created_at, rowid`,
         )
         .all(operationId) as Array<{
         readonly id: string;
@@ -373,7 +379,7 @@ export const openImprovementApplicationRuntime = (
                   authenticated_by AS authenticatedBy,
                   validation_hash AS hash, created_at AS createdAt
              FROM improvement_application_validations
-            WHERE operation_id = ? ORDER BY created_at, id`,
+            WHERE operation_id = ? ORDER BY created_at, rowid`,
         )
         .all(operationId) as Array<{
         readonly id: string;
@@ -416,11 +422,12 @@ export const openImprovementApplicationRuntime = (
                   expected_governed_head_revision_hash AS expectedHeadRevisionHash,
                   restoring_revision_id AS restoringRevisionId,
                   restoring_revision_hash AS restoringRevisionHash, state,
+                  confirmation, reason,
                   evidence_refs_json AS evidenceRefsJson,
                   rollback_hash AS hash, actor_id AS actorId,
                   created_at AS createdAt
              FROM improvement_application_rollbacks
-            WHERE operation_id = ? ORDER BY created_at, id`,
+            WHERE operation_id = ? ORDER BY created_at, rowid`,
         )
         .all(operationId) as Array<{
         readonly id: string;
@@ -433,6 +440,8 @@ export const openImprovementApplicationRuntime = (
         readonly restoringRevisionId: string | null;
         readonly restoringRevisionHash: string | null;
         readonly state: "requested" | "rolled-back" | "failed" | "unknown";
+        readonly confirmation: string;
+        readonly reason: string;
         readonly evidenceRefsJson: string;
         readonly hash: string;
         readonly actorId: string;
@@ -461,6 +470,8 @@ export const openImprovementApplicationRuntime = (
               }
             : null,
         state: rollback.state,
+        confirmation: rollback.confirmation,
+        reason: rollback.reason,
         evidenceRefs: parseJson(
           rollback.evidenceRefsJson,
           `Improvement application rollback ${rollback.id} evidence`,
@@ -952,6 +963,7 @@ export const openImprovementApplicationRuntime = (
 
   const appendObservation = (input: {
     readonly operationId: string;
+    readonly phase?: "apply" | "rollback";
     readonly outcome:
       | "exact-match"
       | "proven-absent"
@@ -962,7 +974,7 @@ export const openImprovementApplicationRuntime = (
   }): void => {
     const record = {
       id: `improvement-observation:${randomUUID()}`,
-      phase: "apply" as const,
+      phase: input.phase ?? "apply",
       outcome: input.outcome,
       evidenceRefs: [...input.evidenceRefs],
       observedAt: input.observedAt,
@@ -972,11 +984,12 @@ export const openImprovementApplicationRuntime = (
         `INSERT INTO improvement_application_observations(
            id, operation_id, phase, outcome, evidence_refs_json,
            observation_hash, observed_at
-         ) VALUES (?, ?, 'apply', ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
         input.operationId,
+        record.phase,
         record.outcome,
         canonicalJson(record.evidenceRefs),
         sha256(record),
@@ -986,13 +999,14 @@ export const openImprovementApplicationRuntime = (
 
   const appendReconciliation = (input: {
     readonly operationId: string;
+    readonly phase?: "apply" | "rollback";
     readonly result: "finalized" | "retry-permitted" | "unknown";
     readonly evidenceRefs: readonly string[];
     readonly createdAt: string;
   }): void => {
     const record = {
       id: `improvement-reconciliation:${randomUUID()}`,
-      phase: "apply" as const,
+      phase: input.phase ?? "apply",
       result: input.result,
       evidenceRefs: [...input.evidenceRefs],
       createdAt: input.createdAt,
@@ -1002,11 +1016,12 @@ export const openImprovementApplicationRuntime = (
         `INSERT INTO improvement_application_reconciliations(
            id, operation_id, phase, result, evidence_refs_json,
            reconciliation_hash, created_at
-         ) VALUES (?, ?, 'apply', ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
         input.operationId,
+        record.phase,
         record.result,
         canonicalJson(record.evidenceRefs),
         sha256(record),
@@ -1016,6 +1031,7 @@ export const openImprovementApplicationRuntime = (
 
   const appendReceipt = (input: {
     readonly operationId: string;
+    readonly phase?: "apply" | "rollback";
     readonly disposition: "applied" | "no-op" | "failed";
     readonly targetRevision: {
       readonly revisionId: string;
@@ -1026,7 +1042,7 @@ export const openImprovementApplicationRuntime = (
   }): void => {
     const record = {
       id: `improvement-receipt:${randomUUID()}`,
-      phase: "apply" as const,
+      phase: input.phase ?? "apply",
       disposition: input.disposition,
       targetRevision: input.targetRevision,
       evidenceRefs: [...input.evidenceRefs],
@@ -1037,11 +1053,12 @@ export const openImprovementApplicationRuntime = (
         `INSERT INTO improvement_application_receipts(
            id, operation_id, phase, disposition, target_revision_id,
            target_revision_hash, evidence_refs_json, receipt_hash, created_at
-         ) VALUES (?, ?, 'apply', ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
         input.operationId,
+        record.phase,
         record.disposition,
         record.targetRevision?.revisionId ?? null,
         record.targetRevision?.revisionHash ?? null,
@@ -1073,7 +1090,277 @@ export const openImprovementApplicationRuntime = (
       );
   };
 
-  const worker = async (
+  const appendRollbackRecord = (input: {
+    readonly operationId: string;
+    readonly appliedRevision: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+    readonly sourceRevision: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+    readonly expectedGovernedHead: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+    readonly restoringRevision: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    } | null;
+    readonly state: "requested" | "rolled-back" | "failed" | "unknown";
+    readonly confirmation: string;
+    readonly reason: string;
+    readonly evidenceRefs: readonly string[];
+    readonly actor: ImprovementApplicationRollbackRequest["actor"];
+    readonly commandId: string;
+    readonly createdAt: string;
+  }): void => {
+    const record = {
+      id: `improvement-rollback:${randomUUID()}`,
+      appliedRevision: input.appliedRevision,
+      sourceRevision: input.sourceRevision,
+      expectedGovernedHead: input.expectedGovernedHead,
+      restoringRevision: input.restoringRevision,
+      state: input.state,
+      confirmation: input.confirmation,
+      reason: input.reason,
+      evidenceRefs: [...input.evidenceRefs],
+      requestedBy: input.actor,
+      createdAt: input.createdAt,
+    };
+    database
+      .prepare(
+        `INSERT INTO improvement_application_rollbacks(
+           id, operation_id, applied_revision_id, applied_revision_hash,
+           source_revision_id, source_revision_hash,
+           expected_governed_head_revision_id,
+           expected_governed_head_revision_hash, restoring_revision_id,
+           restoring_revision_hash, state, confirmation, reason,
+           evidence_refs_json, rollback_hash, actor_type, actor_id,
+           authenticated_by, command_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'human', ?,
+                   'local-session', ?, ?)`,
+      )
+      .run(
+        record.id,
+        input.operationId,
+        record.appliedRevision.revisionId,
+        record.appliedRevision.revisionHash,
+        record.sourceRevision.revisionId,
+        record.sourceRevision.revisionHash,
+        record.expectedGovernedHead.revisionId,
+        record.expectedGovernedHead.revisionHash,
+        record.restoringRevision?.revisionId ?? null,
+        record.restoringRevision?.revisionHash ?? null,
+        record.state,
+        record.confirmation,
+        record.reason,
+        canonicalJson(record.evidenceRefs),
+        sha256(record),
+        record.requestedBy.id,
+        input.commandId,
+        record.createdAt,
+      );
+  };
+
+  const rollbackTarget = (
+    operation: ImprovementApplicationOperationView,
+    sourceRevision: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    },
+  ): ImprovementTarget => {
+    if (operation.target.targetKind !== "harness") {
+      throw new ImprovementApplicationRuntimeError(
+        "IMPROVEMENT_TARGET_UNSUPPORTED",
+        `Target kind ${operation.target.targetKind} does not yet support rollback.`,
+      );
+    }
+    const source = database
+      .prepare(
+        `SELECT content_json AS contentJson
+           FROM governed_harness_revisions
+          WHERE owner_id = ? AND id = ? AND content_hash = ?`,
+      )
+      .get(
+        operation.target.ownerId,
+        sourceRevision.revisionId,
+        sourceRevision.revisionHash,
+      ) as { readonly contentJson: string } | undefined;
+    if (!source) {
+      throw new ImprovementApplicationRuntimeError(
+        "IMPROVEMENT_TARGET_CONFLICT",
+        `Rollback source ${sourceRevision.revisionId} is not an exact governed Harness revision.`,
+      );
+    }
+    return ImprovementTargetSchema.parse({
+      ...operation.target,
+      content: parseJson(
+        source.contentJson,
+        `Governed Harness rollback source ${sourceRevision.revisionId}`,
+      ),
+    });
+  };
+
+  const rollbackInTransaction: ImprovementApplicationRuntime["rollbackInTransaction"] =
+    (input) => {
+      const request = ImprovementApplicationRollbackRequestSchema.parse(
+        input.request,
+      );
+      const operation = inspect(request.operationId);
+      if (operation.canonicalRequestHash !== request.expectedOperationHash) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+          `Improvement application ${operation.id} does not match the expected immutable operation hash.`,
+        );
+      }
+      const existing = operation.rollbacks.find(
+        (rollback) => rollback.state === "requested",
+      );
+      if (existing) {
+        const sameRequest =
+          canonicalJson({
+            appliedRevision: existing.appliedRevision,
+            expectedGovernedHead: existing.expectedGovernedHead,
+            rollbackSource: existing.sourceRevision,
+            confirmation: existing.confirmation,
+            reason: existing.reason,
+            evidenceRefs: existing.evidenceRefs,
+          }) ===
+          canonicalJson({
+            appliedRevision: request.appliedRevision,
+            expectedGovernedHead: request.expectedGovernedHead,
+            rollbackSource: request.rollbackSource,
+            confirmation: request.confirmation,
+            reason: request.reason,
+            evidenceRefs: request.evidenceRefs,
+          });
+        if (!sameRequest) {
+          throw new ImprovementApplicationRuntimeError(
+            "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+            `Improvement application ${operation.id} already binds different rollback input.`,
+          );
+        }
+        if (operation.state === "unknown") {
+          const updatedAt = clock().toISOString();
+          setProjection({
+            operationId: operation.id,
+            state: "reconciling",
+            error: null,
+            updatedAt,
+          });
+          invalidate({
+            operationId: operation.id,
+            projectId: operation.projectId,
+            proposalId: operation.proposalId,
+            state: "reconciling",
+            timestamp: updatedAt,
+            commandId: input.commandId,
+          });
+        }
+        return inspect(operation.id);
+      }
+      if (operation.state !== "applied" && operation.state !== "validated") {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_INVALID_STATE",
+          `Improvement application ${operation.id} cannot roll back from ${operation.state}.`,
+        );
+      }
+      const appliedRevision = [...operation.receipts]
+        .reverse()
+        .find(
+          (receipt) =>
+            receipt.phase === "apply" && receipt.targetRevision !== null,
+        )?.targetRevision;
+      if (
+        !appliedRevision ||
+        canonicalJson(appliedRevision) !==
+          canonicalJson(request.appliedRevision) ||
+        canonicalJson(appliedRevision) !==
+          canonicalJson(request.expectedGovernedHead)
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          "Rollback must bind the exact applied revision as the expected governed head.",
+        );
+      }
+      const proposalRow = database
+        .prepare(
+          `SELECT content_json AS contentJson
+             FROM improvement_proposal_revisions
+            WHERE proposal_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.proposalId,
+          operation.proposalRevisionId,
+          operation.proposalRevisionHash,
+        ) as { readonly contentJson: string } | undefined;
+      const proposalContent = proposalRow
+        ? ImprovementProposalRevisionContentSchema.parse(
+            parseJson(
+              proposalRow.contentJson,
+              `Improvement proposal revision ${operation.proposalRevisionId}`,
+            ),
+          )
+        : null;
+      if (
+        !proposalContent ||
+        canonicalJson(proposalContent.rollbackSource) !==
+          canonicalJson(request.rollbackSource)
+      ) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          "Rollback source does not match the exact approved proposal revision.",
+        );
+      }
+      rollbackTarget(operation, request.rollbackSource);
+      const createdAt = clock().toISOString();
+      appendRollbackRecord({
+        operationId: operation.id,
+        appliedRevision: request.appliedRevision,
+        sourceRevision: request.rollbackSource,
+        expectedGovernedHead: request.expectedGovernedHead,
+        restoringRevision: null,
+        state: "requested",
+        confirmation: request.confirmation,
+        reason: request.reason,
+        evidenceRefs: request.evidenceRefs,
+        actor: request.actor,
+        commandId: input.commandId,
+        createdAt,
+      });
+      setProjection({
+        operationId: operation.id,
+        state: "rollback-requested",
+        error: null,
+        updatedAt: createdAt,
+      });
+      appendAudit({
+        action: "improvement.application.rollback",
+        operationId: operation.id,
+        actor: request.actor,
+        before: { state: operation.state },
+        after: {
+          state: "rollback-requested",
+          appliedRevision: request.appliedRevision,
+          rollbackSource: request.rollbackSource,
+        },
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      invalidate({
+        operationId: operation.id,
+        projectId: operation.projectId,
+        proposalId: operation.proposalId,
+        state: "rollback-requested",
+        timestamp: createdAt,
+        commandId: input.commandId,
+      });
+      return inspect(operation.id);
+    };
+
+  const applyWorker = async (
     operationId: string,
   ): Promise<ImprovementApplicationOperationView> => {
     const view = inspect(operationId);
@@ -1250,6 +1537,283 @@ export const openImprovementApplicationRuntime = (
     });
   };
 
+  const rollbackWorker = async (
+    operationId: string,
+  ): Promise<ImprovementApplicationOperationView> => {
+    const view = inspect(operationId);
+    const rollback = [...view.rollbacks]
+      .reverse()
+      .find(
+        (entry) => entry.state === "requested" || entry.state === "unknown",
+      );
+    if (!rollback || stopping) return view;
+    let target: ImprovementTarget;
+    try {
+      target = rollbackTarget(view, rollback.sourceRevision);
+    } catch (error) {
+      const failedAt = clock().toISOString();
+      return transaction(() => {
+        appendRollbackRecord({
+          operationId,
+          appliedRevision: rollback.appliedRevision,
+          sourceRevision: rollback.sourceRevision,
+          expectedGovernedHead: rollback.expectedGovernedHead,
+          restoringRevision: null,
+          state: "failed",
+          confirmation: rollback.confirmation,
+          reason: rollback.reason,
+          evidenceRefs: rollback.evidenceRefs,
+          actor: rollback.requestedBy,
+          commandId: `${operationId}:failed-rollback-source`,
+          createdAt: failedAt,
+        });
+        setProjection({
+          operationId,
+          state: "rollback-failed",
+          error: {
+            code:
+              error instanceof ImprovementApplicationRuntimeError
+                ? error.code
+                : "IMPROVEMENT_TARGET_CONFLICT",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Rollback source is unavailable.",
+          },
+          updatedAt: failedAt,
+        });
+        return inspect(operationId);
+      });
+    }
+    const observation = await options.adapter.inspectEffect({
+      operationId,
+      target,
+      phase: "rollback",
+    });
+    const observedAt = clock().toISOString();
+    if (observation.outcome === "exact-match") {
+      return transaction(() => {
+        appendObservation({
+          operationId,
+          phase: "rollback",
+          outcome: observation.outcome,
+          evidenceRefs: observation.evidenceRefs,
+          observedAt,
+        });
+        appendReconciliation({
+          operationId,
+          phase: "rollback",
+          result: "finalized",
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        appendReceipt({
+          operationId,
+          phase: "rollback",
+          disposition: "no-op",
+          targetRevision: observation.revision,
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        appendRollbackRecord({
+          operationId,
+          appliedRevision: rollback.appliedRevision,
+          sourceRevision: rollback.sourceRevision,
+          expectedGovernedHead: rollback.expectedGovernedHead,
+          restoringRevision: observation.revision,
+          state: "rolled-back",
+          confirmation: rollback.confirmation,
+          reason: rollback.reason,
+          evidenceRefs: observation.evidenceRefs,
+          actor: rollback.requestedBy,
+          commandId: `${operationId}:reconciled-rollback`,
+          createdAt: observedAt,
+        });
+        setProjection({
+          operationId,
+          state: "rolled-back",
+          error: null,
+          updatedAt: observedAt,
+        });
+        invalidate({
+          operationId,
+          projectId: view.projectId,
+          proposalId: view.proposalId,
+          state: "rolled-back",
+          timestamp: observedAt,
+          commandId: `${operationId}:reconciled-rollback`,
+        });
+        return inspect(operationId);
+      });
+    }
+    if (
+      observation.outcome === "conflict" ||
+      observation.outcome === "insufficient-evidence"
+    ) {
+      return transaction(() => {
+        appendObservation({
+          operationId,
+          phase: "rollback",
+          outcome: observation.outcome,
+          evidenceRefs: observation.evidenceRefs,
+          observedAt,
+        });
+        appendReconciliation({
+          operationId,
+          phase: "rollback",
+          result: "unknown",
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: observedAt,
+        });
+        appendRollbackRecord({
+          operationId,
+          appliedRevision: rollback.appliedRevision,
+          sourceRevision: rollback.sourceRevision,
+          expectedGovernedHead: rollback.expectedGovernedHead,
+          restoringRevision: null,
+          state: "unknown",
+          confirmation: rollback.confirmation,
+          reason: rollback.reason,
+          evidenceRefs: observation.evidenceRefs,
+          actor: rollback.requestedBy,
+          commandId: `${operationId}:unknown-rollback:${randomUUID()}`,
+          createdAt: observedAt,
+        });
+        setProjection({
+          operationId,
+          state: "unknown",
+          error: {
+            code: "IMPROVEMENT_APPLICATION_UNKNOWN",
+            message:
+              "The restoring revision cannot be proven exactly and was not resent.",
+          },
+          updatedAt: observedAt,
+        });
+        return inspect(operationId);
+      });
+    }
+    transaction(() => {
+      appendObservation({
+        operationId,
+        phase: "rollback",
+        outcome: "proven-absent",
+        evidenceRefs: observation.evidenceRefs,
+        observedAt,
+      });
+      appendReconciliation({
+        operationId,
+        phase: "rollback",
+        result: "retry-permitted",
+        evidenceRefs: observation.evidenceRefs,
+        createdAt: observedAt,
+      });
+    });
+    let result;
+    try {
+      result = await options.adapter.appendRevision({
+        operationId,
+        target,
+        phase: "rollback",
+        expectedGovernedHead: rollback.expectedGovernedHead,
+      });
+    } catch (error) {
+      const failedAt = clock().toISOString();
+      const code =
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : "IMPROVEMENT_TARGET_CONFLICT";
+      const message =
+        error instanceof Error ? error.message : "Restoring revision failed.";
+      return transaction(() => {
+        appendReceipt({
+          operationId,
+          phase: "rollback",
+          disposition: "failed",
+          targetRevision: null,
+          evidenceRefs: observation.evidenceRefs,
+          createdAt: failedAt,
+        });
+        appendRollbackRecord({
+          operationId,
+          appliedRevision: rollback.appliedRevision,
+          sourceRevision: rollback.sourceRevision,
+          expectedGovernedHead: rollback.expectedGovernedHead,
+          restoringRevision: null,
+          state: "failed",
+          confirmation: rollback.confirmation,
+          reason: rollback.reason,
+          evidenceRefs: observation.evidenceRefs,
+          actor: rollback.requestedBy,
+          commandId: `${operationId}:failed-rollback`,
+          createdAt: failedAt,
+        });
+        setProjection({
+          operationId,
+          state: "rollback-failed",
+          error: { code, message },
+          updatedAt: failedAt,
+        });
+        return inspect(operationId);
+      });
+    }
+    options.failureInjection?.("after-effect-before-finalize");
+    return transaction(() => {
+      const completedAt = clock().toISOString();
+      appendReceipt({
+        operationId,
+        phase: "rollback",
+        disposition: result.disposition,
+        targetRevision: result.revision,
+        evidenceRefs: result.evidenceRefs,
+        createdAt: completedAt,
+      });
+      appendRollbackRecord({
+        operationId,
+        appliedRevision: rollback.appliedRevision,
+        sourceRevision: rollback.sourceRevision,
+        expectedGovernedHead: rollback.expectedGovernedHead,
+        restoringRevision: result.revision,
+        state: "rolled-back",
+        confirmation: rollback.confirmation,
+        reason: rollback.reason,
+        evidenceRefs: result.evidenceRefs,
+        actor: rollback.requestedBy,
+        commandId: `${operationId}:completed-rollback`,
+        createdAt: completedAt,
+      });
+      setProjection({
+        operationId,
+        state: "rolled-back",
+        error: null,
+        updatedAt: completedAt,
+      });
+      invalidate({
+        operationId,
+        projectId: view.projectId,
+        proposalId: view.proposalId,
+        state: "rolled-back",
+        timestamp: completedAt,
+        commandId: `${operationId}:completed-rollback`,
+      });
+      return inspect(operationId);
+    });
+  };
+
+  const worker = (
+    operationId: string,
+  ): Promise<ImprovementApplicationOperationView> => {
+    const view = inspect(operationId);
+    const rollback = view.rollbacks.at(-1);
+    return view.state === "rollback-requested" ||
+      ((view.state === "reconciling" || view.state === "unknown") &&
+        rollback !== undefined)
+      ? rollbackWorker(operationId)
+      : applyWorker(operationId);
+  };
+
   const dispatch = (
     operationId: string,
   ): Promise<ImprovementApplicationOperationView> => {
@@ -1266,7 +1830,8 @@ export const openImprovementApplicationRuntime = (
     const ids = database
       .prepare(
         `SELECT operation_id AS id FROM improvement_application_projections
-          WHERE state IN ('applying', 'reconciling') ORDER BY updated_at, operation_id`,
+          WHERE state IN ('applying', 'rollback-requested', 'reconciling')
+          ORDER BY updated_at, operation_id`,
       )
       .all() as Array<{ readonly id: string }>;
     const views: ImprovementApplicationOperationView[] = [];
@@ -1279,7 +1844,7 @@ export const openImprovementApplicationRuntime = (
     for (const operationId of active.keys()) {
       transaction(() => {
         const view = inspect(operationId);
-        if (view.state === "applying") {
+        if (view.state === "applying" || view.state === "rollback-requested") {
           const updatedAt = clock().toISOString();
           setProjection({
             operationId,
@@ -1304,6 +1869,7 @@ export const openImprovementApplicationRuntime = (
   return {
     createInTransaction,
     validateInTransaction,
+    rollbackInTransaction,
     inspect,
     list,
     dispatch,

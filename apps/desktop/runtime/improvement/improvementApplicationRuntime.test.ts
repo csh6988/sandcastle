@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
+import { deterministicGovernedRevisionId } from "./governedRevisionAdapter.js";
 import type {
   ImprovementProposalRevisionContent,
   StatisticsEvidenceSnapshotView,
@@ -37,6 +38,17 @@ const createApprovedHarnessProposal = (
   database: ReturnType<typeof openCompanyDatabase>,
   suffix = "1",
   direction: "increase" | "decrease" | "hold" = "decrease",
+  targetOptions: {
+    readonly governedHead?: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+    readonly rollbackSource?: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+    readonly principle?: string;
+  } = {},
 ): {
   readonly proposalId: string;
   readonly revisionId: string;
@@ -84,9 +96,12 @@ const createApprovedHarnessProposal = (
     target: {
       targetKind: "harness",
       ownerId: "harness:software-rnd-review",
-      governedHead: { revisionId: null, revisionHash: null },
+      governedHead: targetOptions.governedHead ?? {
+        revisionId: null,
+        revisionHash: null,
+      },
       content: {
-        principles: ["Use exact frozen evidence."],
+        principles: [targetOptions.principle ?? "Use exact frozen evidence."],
         constitution: "Review immutable production contracts.",
         rules: ["Bind every recommendation to exact evidence."],
         examples: {
@@ -108,7 +123,7 @@ const createApprovedHarnessProposal = (
       minimumComparableObservations: 1,
     },
     rolloutNotes: "Validate against the next comparable cohort.",
-    rollbackSource: {
+    rollbackSource: targetOptions.rollbackSource ?? {
       revisionId: "harness:software-rnd-review:source",
       revisionHash: hash,
     },
@@ -325,6 +340,53 @@ const harnessApplyEnvelope = (
     },
   },
 });
+
+const prepareAppliedRollbackScenario = async (
+  database: ReturnType<typeof openCompanyDatabase>,
+  suffix: string,
+) => {
+  const sourceProposal = createApprovedHarnessProposal(
+    database,
+    `${suffix}-source`,
+  );
+  const sourceIntent = database.commandRegistry.execute(
+    harnessApplyEnvelope(sourceProposal, {
+      operationId: `improvement-application:${suffix}:source`,
+      commandId: `command:${suffix}:source`,
+    }),
+  );
+  assert.equal(sourceIntent.status, "succeeded");
+  if (sourceIntent.status !== "succeeded") assert.fail("source must succeed");
+  const source = await database.improvementApplications.dispatch(
+    sourceIntent.value.id,
+  );
+  const sourceRevision = source.receipts[0]?.targetRevision;
+  if (!sourceRevision) assert.fail("source revision must exist");
+  const changedProposal = createApprovedHarnessProposal(
+    database,
+    `${suffix}-change`,
+    "decrease",
+    {
+      governedHead: sourceRevision,
+      rollbackSource: sourceRevision,
+      principle: `Use the ${suffix} changed policy.`,
+    },
+  );
+  const changedIntent = database.commandRegistry.execute(
+    harnessApplyEnvelope(changedProposal, {
+      operationId: `improvement-application:${suffix}:change`,
+      commandId: `command:${suffix}:change`,
+    }),
+  );
+  assert.equal(changedIntent.status, "succeeded");
+  if (changedIntent.status !== "succeeded") assert.fail("change must succeed");
+  const application = await database.improvementApplications.dispatch(
+    changedIntent.value.id,
+  );
+  const appliedRevision = application.receipts[0]?.targetRevision;
+  if (!appliedRevision) assert.fail("applied revision must exist");
+  return { sourceRevision, changedProposal, application, appliedRevision };
+};
 
 describe("Improvement Application Runtime", () => {
   it("commits Harness apply intent before one deterministic append-only effect and replays without duplication", async () => {
@@ -971,6 +1033,469 @@ describe("Improvement Application Runtime", () => {
       database.improvementApplications.inspect(applied.id).state,
       "applied",
     );
+    database.close();
+  });
+
+  it("rolls back an applied Harness operation by appending an exact restoring revision and retaining history", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date(timestamp),
+    });
+    const sourceProposal = createApprovedHarnessProposal(
+      database,
+      "rollback-source",
+      "decrease",
+      { principle: "Preserve the stable review policy." },
+    );
+    const sourceIntent = database.commandRegistry.execute(
+      harnessApplyEnvelope(sourceProposal, {
+        operationId: "improvement-application:harness:rollback-source",
+        commandId: "command:apply-harness-rollback-source",
+      }),
+    );
+    assert.equal(sourceIntent.status, "succeeded");
+    if (sourceIntent.status !== "succeeded") {
+      assert.fail("source apply intent must succeed");
+    }
+    const sourceApplied = await database.improvementApplications.dispatch(
+      sourceIntent.value.id,
+    );
+    const sourceRevision = sourceApplied.receipts[0]?.targetRevision;
+    if (!sourceRevision) assert.fail("source revision must exist");
+
+    const changedProposal = createApprovedHarnessProposal(
+      database,
+      "rollback-change",
+      "decrease",
+      {
+        governedHead: sourceRevision,
+        rollbackSource: sourceRevision,
+        principle: "Apply the experimental review policy.",
+      },
+    );
+    const changedIntent = database.commandRegistry.execute(
+      harnessApplyEnvelope(changedProposal, {
+        operationId: "improvement-application:harness:rollback-change",
+        commandId: "command:apply-harness-rollback-change",
+      }),
+    );
+    assert.equal(changedIntent.status, "succeeded");
+    if (changedIntent.status !== "succeeded") {
+      assert.fail("changed apply intent must succeed");
+    }
+    const changedApplied = await database.improvementApplications.dispatch(
+      changedIntent.value.id,
+    );
+    const appliedRevision = changedApplied.receipts[0]?.targetRevision;
+    if (!appliedRevision) assert.fail("applied revision must exist");
+
+    const rollbackEnvelope = {
+      schemaVersion: 1 as const,
+      commandId: "command:rollback-harness-change",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.application.rollback" as const,
+        rollback: {
+          operationId: changedApplied.id,
+          expectedOperationHash: changedApplied.canonicalRequestHash,
+          appliedRevision,
+          expectedGovernedHead: appliedRevision,
+          rollbackSource: sourceRevision,
+          confirmation:
+            "I confirm restoring the exact selected Harness source revision.",
+          reason: "Restore the stable reviewed Harness policy.",
+          evidenceRefs: [sourceRevision.revisionId, appliedRevision.revisionId],
+        },
+      },
+    };
+    const unauthorized = database.commandRegistry.execute({
+      ...rollbackEnvelope,
+      commandId: "command:rollback-harness-unauthorized",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+    });
+    assert.equal(unauthorized.status, "rejected");
+    if (unauthorized.status !== "rejected") {
+      assert.fail("unauthorized rollback must be rejected");
+    }
+    assert.equal(unauthorized.error.code, "FORBIDDEN");
+    const rollbackIntent = database.commandRegistry.execute(rollbackEnvelope);
+    assert.equal(rollbackIntent.status, "succeeded");
+    if (rollbackIntent.status !== "succeeded") {
+      assert.fail("rollback intent must succeed");
+    }
+    assert.equal(rollbackIntent.value.state, "rollback-requested");
+    const operationReplay = database.commandRegistry.execute({
+      ...rollbackEnvelope,
+      commandId: "command:rollback-harness-change-replay",
+    });
+    assert.equal(operationReplay.status, "succeeded");
+    if (operationReplay.status !== "succeeded") {
+      assert.fail("exact rollback replay must succeed");
+    }
+    assert.deepEqual(operationReplay.value, rollbackIntent.value);
+    const changedReplay = database.commandRegistry.execute({
+      ...rollbackEnvelope,
+      commandId: "command:rollback-harness-change-conflict",
+      command: {
+        ...rollbackEnvelope.command,
+        rollback: {
+          ...rollbackEnvelope.command.rollback,
+          reason: "Changed rollback input under the same operation.",
+        },
+      },
+    });
+    assert.equal(changedReplay.status, "rejected");
+    if (changedReplay.status !== "rejected") {
+      assert.fail("changed rollback replay must be rejected");
+    }
+    assert.equal(
+      changedReplay.error.code,
+      "IMPROVEMENT_APPLICATION_OPERATION_ID_REUSE",
+    );
+    const rolledBack = await database.improvementApplications.dispatch(
+      rollbackIntent.value.id,
+    );
+    assert.equal(rolledBack.state, "rolled-back");
+    assert.equal(rolledBack.rollbacks.at(-1)?.state, "rolled-back");
+    const restoringRevision = rolledBack.rollbacks.at(-1)?.restoringRevision;
+    if (!restoringRevision) assert.fail("restoring revision must exist");
+
+    const sqlite = new DatabaseSync(database.path);
+    const revisions = sqlite
+      .prepare(
+        `SELECT id, content_json AS contentJson
+           FROM governed_harness_revisions
+          WHERE owner_id = ? ORDER BY revision`,
+      )
+      .all(changedProposal.content.target.ownerId) as Array<{
+      readonly id: string;
+      readonly contentJson: string;
+    }>;
+    assert.equal(revisions.length, 3);
+    assert.equal(revisions[0]?.id, sourceRevision.revisionId);
+    assert.equal(revisions[1]?.id, appliedRevision.revisionId);
+    assert.equal(revisions[2]?.id, restoringRevision.revisionId);
+    assert.equal(revisions[2]?.contentJson, revisions[0]?.contentJson);
+    assert.notEqual(revisions[1]?.contentJson, revisions[0]?.contentJson);
+    sqlite.close();
+    database.close();
+  });
+
+  it("reconciles an exact restoring Harness revision after restart without duplicate rollback effect", async () => {
+    const companyDir = tempCompanyDir();
+    let failAfterRollbackEffect = false;
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+      improvementApplicationRuntime: {
+        failureInjection: (point) => {
+          if (
+            failAfterRollbackEffect &&
+            point === "after-effect-before-finalize"
+          ) {
+            throw new Error("simulated rollback finalize crash");
+          }
+        },
+      },
+    });
+    const sourceProposal = createApprovedHarnessProposal(
+      database,
+      "rollback-restart-source",
+    );
+    const sourceIntent = database.commandRegistry.execute(
+      harnessApplyEnvelope(sourceProposal, {
+        operationId: "improvement-application:rollback-restart-source",
+        commandId: "command:rollback-restart-source",
+      }),
+    );
+    assert.equal(sourceIntent.status, "succeeded");
+    if (sourceIntent.status !== "succeeded") assert.fail("source must succeed");
+    const source = await database.improvementApplications.dispatch(
+      sourceIntent.value.id,
+    );
+    const sourceRevision = source.receipts[0]?.targetRevision;
+    if (!sourceRevision) assert.fail("source revision must exist");
+    const changedProposal = createApprovedHarnessProposal(
+      database,
+      "rollback-restart-change",
+      "decrease",
+      {
+        governedHead: sourceRevision,
+        rollbackSource: sourceRevision,
+        principle: "Use the restart-sensitive policy.",
+      },
+    );
+    const changedIntent = database.commandRegistry.execute(
+      harnessApplyEnvelope(changedProposal, {
+        operationId: "improvement-application:rollback-restart-change",
+        commandId: "command:rollback-restart-change",
+      }),
+    );
+    assert.equal(changedIntent.status, "succeeded");
+    if (changedIntent.status !== "succeeded")
+      assert.fail("change must succeed");
+    const changed = await database.improvementApplications.dispatch(
+      changedIntent.value.id,
+    );
+    const appliedRevision = changed.receipts[0]?.targetRevision;
+    if (!appliedRevision) assert.fail("changed revision must exist");
+    const afterEvidence = persistEvidenceVariant(
+      database.path,
+      changedProposal.content.evidence,
+      { id: "statistics-evidence:rollback-restart-after", count: 0 },
+    );
+    const validation = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:rollback-restart-validation",
+      actor: {
+        type: "runtime-worker" as const,
+        id: "runtime-worker:improvement-validation",
+        authenticatedBy: "runtime" as const,
+      },
+      command: {
+        type: "improvement.application.validate" as const,
+        validation: {
+          operationId: changed.id,
+          expectedOperationHash: changed.canonicalRequestHash,
+          afterEvidence,
+          reason: "Validate before exercising restoring restart recovery.",
+          evidenceRefs: [changedProposal.content.evidence.id, afterEvidence.id],
+        },
+      },
+    });
+    assert.equal(validation.status, "succeeded");
+    if (validation.status !== "succeeded") {
+      assert.fail("validation before rollback must succeed");
+    }
+    assert.equal(validation.value.state, "validated");
+    const rollback = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:rollback-restart-request",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.application.rollback" as const,
+        rollback: {
+          operationId: validation.value.id,
+          expectedOperationHash: validation.value.canonicalRequestHash,
+          appliedRevision,
+          expectedGovernedHead: appliedRevision,
+          rollbackSource: sourceRevision,
+          confirmation: "I confirm the exact restart-safe restoring revision.",
+          reason: "Exercise rollback restart reconciliation.",
+          evidenceRefs: [sourceRevision.revisionId, appliedRevision.revisionId],
+        },
+      },
+    });
+    assert.equal(rollback.status, "succeeded");
+    failAfterRollbackEffect = true;
+    await assert.rejects(
+      database.improvementApplications.dispatch(changed.id),
+      /simulated rollback finalize crash/,
+    );
+    database.close();
+
+    const restarted = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    await restarted.improvementApplications.reconcilePending();
+    const recovered = restarted.improvementApplications.inspect(
+      validation.value.id,
+    );
+    assert.equal(recovered.state, "rolled-back");
+    assert.equal(
+      recovered.receipts.filter((receipt) => receipt.phase === "rollback")
+        .length,
+      1,
+    );
+    const sqlite = new DatabaseSync(restarted.path);
+    assert.equal(
+      (
+        sqlite
+          .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
+          .get() as { readonly count: number }
+      ).count,
+      3,
+    );
+    sqlite.close();
+    restarted.close();
+  });
+
+  it("fails rollback on governed-head drift without appending a restoring revision", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date(timestamp),
+    });
+    const scenario = await prepareAppliedRollbackScenario(
+      database,
+      "rollback-head-drift",
+    );
+    const driftProposal = createApprovedHarnessProposal(
+      database,
+      "rollback-head-drift-intervening",
+      "decrease",
+      {
+        governedHead: scenario.appliedRevision,
+        rollbackSource: scenario.appliedRevision,
+        principle: "Append an intervening governed policy.",
+      },
+    );
+    const driftIntent = database.commandRegistry.execute(
+      harnessApplyEnvelope(driftProposal, {
+        operationId: "improvement-application:rollback-head-drift:intervening",
+        commandId: "command:rollback-head-drift:intervening",
+      }),
+    );
+    assert.equal(driftIntent.status, "succeeded");
+    if (driftIntent.status !== "succeeded") assert.fail("drift must succeed");
+    await database.improvementApplications.dispatch(driftIntent.value.id);
+
+    const rollback = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:rollback-head-drift:rollback",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.application.rollback" as const,
+        rollback: {
+          operationId: scenario.application.id,
+          expectedOperationHash: scenario.application.canonicalRequestHash,
+          appliedRevision: scenario.appliedRevision,
+          expectedGovernedHead: scenario.appliedRevision,
+          rollbackSource: scenario.sourceRevision,
+          confirmation: "I confirm the exact stale-head rollback request.",
+          reason: "Prove governed-head drift fails closed.",
+          evidenceRefs: [
+            scenario.sourceRevision.revisionId,
+            scenario.appliedRevision.revisionId,
+          ],
+        },
+      },
+    });
+    assert.equal(rollback.status, "succeeded");
+    const failed = await database.improvementApplications.dispatch(
+      scenario.application.id,
+    );
+    assert.equal(failed.state, "rollback-failed");
+    assert.equal(failed.latestError?.code, "IMPROVEMENT_TARGET_CONFLICT");
+    assert.equal(failed.rollbacks.at(-1)?.state, "failed");
+    const sqlite = new DatabaseSync(database.path);
+    assert.equal(
+      (
+        sqlite
+          .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
+          .get() as { readonly count: number }
+      ).count,
+      3,
+    );
+    sqlite.close();
+    database.close();
+  });
+
+  it("keeps a conflicting restoring effect unknown and reconciles without blind resend", async () => {
+    const database = openCompanyDatabase(tempCompanyDir(), {
+      clock: () => new Date(timestamp),
+    });
+    const scenario = await prepareAppliedRollbackScenario(
+      database,
+      "rollback-unknown",
+    );
+    const rollbackInput = {
+      operationId: scenario.application.id,
+      expectedOperationHash: scenario.application.canonicalRequestHash,
+      appliedRevision: scenario.appliedRevision,
+      expectedGovernedHead: scenario.appliedRevision,
+      rollbackSource: scenario.sourceRevision,
+      confirmation: "I confirm inspecting this exact restoring revision.",
+      reason: "Fail closed on a conflicting deterministic effect.",
+      evidenceRefs: [
+        scenario.sourceRevision.revisionId,
+        scenario.appliedRevision.revisionId,
+      ],
+    };
+    const requested = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:rollback-unknown:request",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.application.rollback" as const,
+        rollback: rollbackInput,
+      },
+    });
+    assert.equal(requested.status, "succeeded");
+    const conflictId = deterministicGovernedRevisionId({
+      operationId: scenario.application.id,
+      targetKind: "harness",
+      phase: "rollback",
+    });
+    const sqlite = new DatabaseSync(database.path);
+    sqlite
+      .prepare(
+        `INSERT INTO governed_harness_revisions(
+           id, owner_id, revision, supersedes_revision_id, content_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 3, ?, '{}', ?, ?, 'rollback', ?)`,
+      )
+      .run(
+        conflictId,
+        scenario.changedProposal.content.target.ownerId,
+        scenario.appliedRevision.revisionId,
+        "b".repeat(64),
+        scenario.application.id,
+        timestamp,
+      );
+    sqlite.close();
+
+    const unknown = await database.improvementApplications.dispatch(
+      scenario.application.id,
+    );
+    assert.equal(unknown.state, "unknown");
+    assert.equal(unknown.rollbacks.at(-1)?.state, "unknown");
+    const replay = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:rollback-unknown:reconcile",
+      actor: {
+        type: "human" as const,
+        id: "human:improvement-owner",
+        authenticatedBy: "local-session" as const,
+      },
+      command: {
+        type: "improvement.application.rollback" as const,
+        rollback: rollbackInput,
+      },
+    });
+    assert.equal(replay.status, "succeeded");
+    if (replay.status !== "succeeded") assert.fail("reconcile must succeed");
+    assert.equal(replay.value.state, "reconciling");
+    const stillUnknown = await database.improvementApplications.dispatch(
+      scenario.application.id,
+    );
+    assert.equal(stillUnknown.state, "unknown");
+    const after = new DatabaseSync(database.path);
+    assert.equal(
+      (
+        after
+          .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
+          .get() as { readonly count: number }
+      ).count,
+      3,
+    );
+    after.close();
     database.close();
   });
 });

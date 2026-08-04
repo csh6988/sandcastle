@@ -476,10 +476,17 @@ export const startCompanyRuntimeServer = async (
                     .catch(() => undefined);
                 } else if (
                   request.envelope.command.type ===
-                  "improvement.application.apply"
+                    "improvement.application.apply" ||
+                  request.envelope.command.type ===
+                    "improvement.application.rollback"
                 ) {
                   void database.improvementApplications
-                    .dispatch(request.envelope.command.application.operationId)
+                    .dispatch(
+                      request.envelope.command.type ===
+                        "improvement.application.apply"
+                        ? request.envelope.command.application.operationId
+                        : request.envelope.command.rollback.operationId,
+                    )
                     .catch(() => undefined);
                 } else if (
                   request.envelope.command.type ===

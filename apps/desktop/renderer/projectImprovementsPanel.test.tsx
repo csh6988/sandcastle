@@ -433,6 +433,41 @@ describe("Project Improvements panel", () => {
       nextActions: ["rollback"],
       updatedAt: "2026-08-05T00:01:00.000Z",
     };
+    const rolledBackApplication: ImprovementApplicationOperationView = {
+      ...validatedApplication,
+      id: "improvement-application:rolled-back",
+      state: "rolled-back",
+      rollbacks: [
+        {
+          id: "improvement-rollback:1",
+          appliedRevision: {
+            revisionId: "governed-harness-revision:applied",
+            revisionHash: hash,
+          },
+          sourceRevision: {
+            revisionId: "governed-harness-revision:source",
+            revisionHash: hash,
+          },
+          expectedGovernedHead: {
+            revisionId: "governed-harness-revision:applied",
+            revisionHash: hash,
+          },
+          restoringRevision: {
+            revisionId: "governed-harness-revision:restoring",
+            revisionHash: hash,
+          },
+          state: "rolled-back",
+          confirmation: "I confirm restoring the exact source revision.",
+          reason: "Restore the stable Harness policy.",
+          evidenceRefs: ["governed-harness-revision:source"],
+          hash,
+          requestedBy: decision.actor,
+          createdAt: "2026-08-05T00:02:00.000Z",
+        },
+      ],
+      nextActions: [],
+      updatedAt: "2026-08-05T00:02:00.000Z",
+    };
     const render = (t: Messages) =>
       renderToStaticMarkup(
         <ProjectImprovementsPanel
@@ -445,7 +480,12 @@ describe("Project Improvements panel", () => {
           onInspect={() => undefined}
           onInspectEvidence={() => undefined}
           onWindowChange={() => undefined}
-          applications={[application, appliedApplication, validatedApplication]}
+          applications={[
+            application,
+            appliedApplication,
+            validatedApplication,
+            rolledBackApplication,
+          ]}
           proposals={[
             proposal,
             proposedProposal,
@@ -484,6 +524,10 @@ describe("Project Improvements panel", () => {
     assert.match(english, /Validation outcome/);
     assert.match(english, /Unchanged/);
     assert.match(english, /runtime-worker:improvement-validation/);
+    assert.match(english, /Rollback confirmation/);
+    assert.match(english, /Rollback exact applied revision/);
+    assert.match(english, /governed-harness-revision:restoring/);
+    assert.match(english, /Restore the stable Harness policy/);
     assert.match(english, /IMPROVEMENT_APPLICATION_UNKNOWN/);
     assert.match(english, /improvement-proposal-revision:1/);
     assert.match(english, /improvement-proposal-revision:2/);
@@ -511,6 +555,8 @@ describe("Project Improvements panel", () => {
     assert.match(chinese, /验证精确可比证据/);
     assert.match(chinese, /验证结果/);
     assert.match(chinese, /未变化/);
+    assert.match(chinese, /回滚确认文本/);
+    assert.match(chinese, /回滚精确的已应用修订版/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {

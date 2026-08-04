@@ -167,6 +167,7 @@ export function ProjectImprovementsPanel({
   onApplyProposal,
   onReconcileApplication,
   onValidateApplication,
+  onRollbackApplication,
 }: {
   readonly t: Messages;
   readonly query: StatisticsInspectInput;
@@ -212,6 +213,11 @@ export function ProjectImprovementsPanel({
     afterEvidence: StatisticsEvidenceSnapshotView,
     reason: string,
   ) => void;
+  readonly onRollbackApplication?: (
+    application: ImprovementApplicationOperationView,
+    confirmation: string,
+    reason: string,
+  ) => void;
 }) {
   const [proposalDraft, setProposalDraft] = useState<ImprovementProposalDraft>({
     metricId: "",
@@ -236,6 +242,8 @@ export function ProjectImprovementsPanel({
   const [applicationConfirmation, setApplicationConfirmation] = useState("");
   const [applicationReason, setApplicationReason] = useState("");
   const [validationReason, setValidationReason] = useState("");
+  const [rollbackConfirmation, setRollbackConfirmation] = useState("");
+  const [rollbackReason, setRollbackReason] = useState("");
   const isHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
   const hasGovernedHead =
     proposalDraft.governedHeadRevisionId.trim().length > 0 ||
@@ -862,6 +870,20 @@ export function ProjectImprovementsPanel({
                     </dd>
                   </div>
                 ))}
+                {application.rollbacks.map((rollback) => (
+                  <div key={rollback.id}>
+                    <dt>{t.improvementRollbackHistory}</dt>
+                    <dd>
+                      {rollback.state} · {t.improvementRollbackAppliedRevision}{" "}
+                      {rollback.appliedRevision.revisionId} ·{" "}
+                      {t.improvementRollbackSourceRevision}{" "}
+                      {rollback.sourceRevision.revisionId} ·{" "}
+                      {t.improvementRollbackRestoringRevision}{" "}
+                      {rollback.restoringRevision?.revisionId ?? "—"} ·{" "}
+                      {rollback.confirmation} · {rollback.reason}
+                    </dd>
+                  </div>
+                ))}
               </dl>
               {application.nextActions.includes("validate") ? (
                 <div className="field-grid two-column">
@@ -896,6 +918,46 @@ export function ProjectImprovementsPanel({
                     type="button"
                   >
                     {t.improvementValidationAction}
+                  </button>
+                </div>
+              ) : null}
+              {application.nextActions.includes("rollback") ? (
+                <div className="field-grid two-column">
+                  <label>
+                    <span>{t.improvementRollbackConfirmation}</span>
+                    <textarea
+                      value={rollbackConfirmation}
+                      onChange={(event) =>
+                        setRollbackConfirmation(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t.improvementRollbackReason}</span>
+                    <textarea
+                      value={rollbackReason}
+                      onChange={(event) =>
+                        setRollbackReason(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <button
+                    disabled={
+                      busy ||
+                      rollbackConfirmation.trim().length === 0 ||
+                      rollbackReason.trim().length === 0 ||
+                      !onRollbackApplication
+                    }
+                    onClick={() =>
+                      onRollbackApplication?.(
+                        application,
+                        rollbackConfirmation.trim(),
+                        rollbackReason.trim(),
+                      )
+                    }
+                    type="button"
+                  >
+                    {t.improvementRollbackAction}
                   </button>
                 </div>
               ) : null}

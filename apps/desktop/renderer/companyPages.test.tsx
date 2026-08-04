@@ -48,6 +48,7 @@ import {
   recoveryOverrideInputProvided,
   improvementApplicationApplyInput,
   improvementApplicationValidateInput,
+  improvementApplicationRollbackInput,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -2463,6 +2464,52 @@ describe("Project detail", () => {
       evidenceRefs: [evidence.id, decision.id],
     });
     assert.equal("actor" in validation, false);
+    const rollback = improvementApplicationRollbackInput(
+      {
+        ...existingApplication,
+        state: "applied",
+        receipts: [
+          {
+            id: "improvement-receipt:applied",
+            phase: "apply",
+            disposition: "applied",
+            targetRevision: {
+              revisionId: "governed-harness-revision:applied",
+              revisionHash: hash,
+            },
+            evidenceRefs: [evidence.id],
+            hash,
+            createdAt: "2026-08-04T00:03:00.000Z",
+          },
+        ],
+        nextActions: ["rollback"],
+      },
+      proposal,
+      "I confirm restoring the exact source revision.",
+      "Restore the stable Harness policy.",
+    );
+    assert.deepEqual(rollback, {
+      operationId: existingApplication.id,
+      expectedOperationHash: hash,
+      appliedRevision: {
+        revisionId: "governed-harness-revision:applied",
+        revisionHash: hash,
+      },
+      expectedGovernedHead: {
+        revisionId: "governed-harness-revision:applied",
+        revisionHash: hash,
+      },
+      rollbackSource: proposal.revisions[0]?.content.rollbackSource,
+      confirmation: "I confirm restoring the exact source revision.",
+      reason: "Restore the stable Harness policy.",
+      evidenceRefs: [
+        evidence.id,
+        decision.id,
+        "governed-harness-revision:applied",
+        "harness:source",
+      ],
+    });
+    assert.equal(rollback && "actor" in rollback, false);
   });
 
   it("queries and mounts the selected Run Work Package graph without retaining failed data", async () => {

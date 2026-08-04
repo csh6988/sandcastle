@@ -196,6 +196,10 @@ export const companyCommandDefinitions = {
     primaryAggregate: "improvement-application",
     expectedRevisionRequired: false,
   },
+  "improvement.application.rollback": {
+    primaryAggregate: "improvement-application",
+    expectedRevisionRequired: false,
+  },
   "project.update": {
     primaryAggregate: "project",
     expectedRevisionRequired: true,
@@ -902,7 +906,8 @@ const executeImprovementApplicationCommand = (
 ): CommandResult<unknown> => {
   if (
     envelope.command.type !== "improvement.application.apply" &&
-    envelope.command.type !== "improvement.application.validate"
+    envelope.command.type !== "improvement.application.validate" &&
+    envelope.command.type !== "improvement.application.rollback"
   ) {
     throw new CompanyCommandError(
       "COMMAND_UNSUPPORTED",
@@ -977,7 +982,8 @@ const executeImprovementApplicationCommand = (
         envelope.schemaVersion,
       );
     const validActor =
-      envelope.command.type === "improvement.application.apply"
+      envelope.command.type === "improvement.application.apply" ||
+      envelope.command.type === "improvement.application.rollback"
         ? envelope.actor.type === "human" &&
           envelope.actor.authenticatedBy === "local-session"
         : (envelope.actor.type === "human" &&
@@ -994,9 +1000,9 @@ const executeImprovementApplicationCommand = (
         error: {
           code: "FORBIDDEN",
           message:
-            envelope.command.type === "improvement.application.apply"
-              ? "Improvement application apply requires a verified local-session human."
-              : "Improvement application validation requires a verified local-session human or trusted Runtime worker.",
+            envelope.command.type === "improvement.application.validate"
+              ? "Improvement application validation requires a verified local-session human or trusted Runtime worker."
+              : `Improvement application ${envelope.command.type === "improvement.application.apply" ? "apply" : "rollback"} requires a verified local-session human.`,
         },
         effectIds: [],
       };
@@ -1015,24 +1021,36 @@ const executeImprovementApplicationCommand = (
                   },
                 },
               })
-            : improvementApplications.validateInTransaction({
-                commandId: envelope.commandId,
-                request: {
-                  ...envelope.command.validation,
-                  actor:
-                    envelope.actor.type === "human"
-                      ? {
-                          type: "human",
-                          id: envelope.actor.id,
-                          authenticatedBy: "local-session",
-                        }
-                      : {
-                          type: "runtime-worker",
-                          id: envelope.actor.id,
-                          authenticatedBy: "runtime",
-                        },
-                },
-              });
+            : envelope.command.type === "improvement.application.validate"
+              ? improvementApplications.validateInTransaction({
+                  commandId: envelope.commandId,
+                  request: {
+                    ...envelope.command.validation,
+                    actor:
+                      envelope.actor.type === "human"
+                        ? {
+                            type: "human",
+                            id: envelope.actor.id,
+                            authenticatedBy: "local-session",
+                          }
+                        : {
+                            type: "runtime-worker",
+                            id: envelope.actor.id,
+                            authenticatedBy: "runtime",
+                          },
+                  },
+                })
+              : improvementApplications.rollbackInTransaction({
+                  commandId: envelope.commandId,
+                  request: {
+                    ...envelope.command.rollback,
+                    actor: {
+                      type: "human",
+                      id: envelope.actor.id,
+                      authenticatedBy: "local-session",
+                    },
+                  },
+                });
         database.exec("RELEASE improvement_application_command");
         const effectIds = (
           database
@@ -4455,7 +4473,8 @@ export const openCompanyCommandRegistry = (
     }
     if (
       envelope.command.type === "improvement.application.apply" ||
-      envelope.command.type === "improvement.application.validate"
+      envelope.command.type === "improvement.application.validate" ||
+      envelope.command.type === "improvement.application.rollback"
     ) {
       if (!improvementApplications) {
         throw new CompanyCommandError(
