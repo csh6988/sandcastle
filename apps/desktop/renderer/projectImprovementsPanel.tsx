@@ -19,18 +19,19 @@ const metricLabel = (t: Messages, metricId: StatisticsMetricId): string => {
       t.statisticsMetricReviewDiscussionRoundCount,
     "review-recheck-pass-rate": t.statisticsMetricReviewRecheckPassRate,
     "readiness-blocker-count": t.statisticsMetricReadinessBlockerCount,
-    "governed-execution-concurrency": "governed-execution-concurrency",
-    "ordinary-retry-count": "ordinary-retry-count",
-    "recovery-attempt-count": "recovery-attempt-count",
+    "governed-execution-concurrency":
+      t.statisticsMetricGovernedExecutionConcurrency,
+    "ordinary-retry-count": t.statisticsMetricOrdinaryRetryCount,
+    "recovery-attempt-count": t.statisticsMetricRecoveryAttemptCount,
     "code-review-defect-incidence": "code-review-defect-incidence",
     "integration-conflict-rate": "integration-conflict-rate",
     "test-pass-rate": "test-pass-rate",
     "electron-ui-runtime-mismatch-rate": "electron-ui-runtime-mismatch-rate",
-    "department-run-failure-rate": "department-run-failure-rate",
-    "node-attempt-failure-rate": "node-attempt-failure-rate",
-    "lease-interruption-rate": "lease-interruption-rate",
-    "human-approval-wait": "human-approval-wait",
-    "governed-intervention-rate": "governed-intervention-rate",
+    "department-run-failure-rate": t.statisticsMetricDepartmentRunFailureRate,
+    "node-attempt-failure-rate": t.statisticsMetricNodeAttemptFailureRate,
+    "lease-interruption-rate": t.statisticsMetricLeaseInterruptionRate,
+    "human-approval-wait": t.statisticsMetricHumanApprovalWait,
+    "governed-intervention-rate": t.statisticsMetricGovernedInterventionRate,
     "delivery-candidate-acceptance-rate": "delivery-candidate-acceptance-rate",
     "release-item-success-rate": "release-item-success-rate",
     "memory-promotion-rate": "memory-promotion-rate",
@@ -67,6 +68,36 @@ const observationText = (
   if (observation.status === "available") return measurementText(observation);
   return `${observation.status === "incomplete" ? t.statisticsIncomplete : t.statisticsUnavailable}: ${observation.reason}`;
 };
+
+function StatisticsObservations({
+  t,
+  observations,
+  evidence = false,
+}: {
+  readonly t: Messages;
+  readonly observations: readonly StatisticsMetricObservation[];
+  readonly evidence?: boolean;
+}) {
+  return (
+    <div className="overview-inventory statistics-observations">
+      {observations.map((observation) => (
+        <div
+          data-statistics-evidence-observation-status={
+            evidence ? observation.status : undefined
+          }
+          data-statistics-metric={observation.metricId}
+          data-statistics-observation-status={
+            evidence ? undefined : observation.status
+          }
+          key={observation.metricId}
+        >
+          <dt>{metricLabel(t, observation.metricId)}</dt>
+          <dd>{observationText(t, observation)}</dd>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function ProjectImprovementsPanel({
   t,
@@ -162,18 +193,7 @@ export function ProjectImprovementsPanel({
             {t.statisticsCatalog}: {view.query.catalogVersion} ·{" "}
             {t.statisticsAsOf} {view.asOfSequence}
           </p>
-          <div className="overview-inventory statistics-observations">
-            {view.observations.map((observation) => (
-              <div
-                data-statistics-metric={observation.metricId}
-                data-statistics-observation-status={observation.status}
-                key={observation.metricId}
-              >
-                <dt>{metricLabel(t, observation.metricId)}</dt>
-                <dd>{observationText(t, observation)}</dd>
-              </div>
-            ))}
-          </div>
+          <StatisticsObservations observations={view.observations} t={t} />
         </section>
       ) : (
         <div className="empty-state" data-statistics-empty>
@@ -199,24 +219,31 @@ export function ProjectImprovementsPanel({
           {t.statisticsInspectEvidence}
         </button>
         {evidence ? (
-          <dl data-statistics-evidence={evidence.id}>
-            <div>
-              <dt>{t.statisticsEvidenceId}</dt>
-              <dd>{evidence.id}</dd>
-            </div>
-            <div>
-              <dt>{t.statisticsEvidenceHash}</dt>
-              <dd>{evidence.hash}</dd>
-            </div>
-            <div>
-              <dt>{t.statisticsAsOf}</dt>
-              <dd>{evidence.asOfSequence}</dd>
-            </div>
-            <div>
-              <dt>{t.statisticsFrozenBy}</dt>
-              <dd>{evidence.frozenBy.id}</dd>
-            </div>
-          </dl>
+          <>
+            <dl data-statistics-evidence={evidence.id}>
+              <div>
+                <dt>{t.statisticsEvidenceId}</dt>
+                <dd>{evidence.id}</dd>
+              </div>
+              <div>
+                <dt>{t.statisticsEvidenceHash}</dt>
+                <dd>{evidence.hash}</dd>
+              </div>
+              <div>
+                <dt>{t.statisticsAsOf}</dt>
+                <dd>{evidence.asOfSequence}</dd>
+              </div>
+              <div>
+                <dt>{t.statisticsFrozenBy}</dt>
+                <dd>{evidence.frozenBy.id}</dd>
+              </div>
+            </dl>
+            <StatisticsObservations
+              evidence
+              observations={evidence.observations}
+              t={t}
+            />
+          </>
         ) : (
           <p>{t.statisticsNoEvidence}</p>
         )}

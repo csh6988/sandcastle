@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { openCompanyDatabase } from "../storage/sqlite.js";
+import type { StatisticsInspectInput } from "./statisticsContracts.js";
 
 const hash = "a".repeat(64);
 const timestamp = "2026-08-04T00:00:00.000Z";
@@ -168,6 +169,102 @@ const seedBaselineFacts = (path: string): void => {
        '${hash}', 'contracts', 'ready', 'Contracts are ready', '[]',
        'product-planner-member', 'product-planner', 'session:statistics',
        '2026-08-01T00:56:00.000Z');
+  `);
+  database.close();
+};
+
+const seedExecutionReliabilityFacts = (path: string): void => {
+  const database = new DatabaseSync(path);
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    INSERT INTO department_runs(
+      id, project_id, department_id, status, created_at, revision,
+      snapshot_revision_id, pipeline_version_id, updated_at
+    ) VALUES
+      ('run:reliability:completed', 'project:statistics', 'software-rnd',
+       'completed', '2026-08-01T00:00:00.000Z', 1,
+       'snapshot:reliability:completed', 'software-rnd-pipeline-v1',
+       '2026-08-01T05:00:00.000Z'),
+      ('run:reliability:failed', 'project:statistics', 'software-rnd',
+       'failed', '2026-08-01T00:00:00.000Z', 1,
+       'snapshot:reliability:failed', 'software-rnd-pipeline-v1',
+       '2026-08-01T06:00:00.000Z');
+    INSERT INTO node_runs(
+      id, run_id, pipeline_node_id, node_type, status, attempt_count,
+      required_dependency_ids_json, created_at, updated_at
+    ) VALUES
+      ('node-run:reliability:completed', 'run:reliability:completed',
+       'implement', 'ai-task', 'succeeded', 2, '[]',
+       '2026-08-01T00:30:00.000Z', '2026-08-01T01:45:00.000Z'),
+      ('node-run:reliability:failed', 'run:reliability:failed',
+       'recover', 'ai-task', 'failed', 1, '[]',
+       '2026-08-01T01:50:00.000Z', '2026-08-01T02:20:00.000Z'),
+      ('node-run:approval', 'run:reliability:completed', 'approve',
+       'human-approval', 'succeeded', 0, '[]',
+       '2026-08-01T04:00:00.000Z', '2026-08-01T04:10:00.000Z');
+    INSERT INTO node_attempts(
+      id, node_run_id, attempt_number, snapshot_revision_id, reason, status,
+      created_at, started_at, completed_at, recoverable,
+      execution_operation_key
+    ) VALUES
+      ('attempt:initial', 'node-run:reliability:completed', 1,
+       'snapshot:reliability:completed', 'initial', 'succeeded',
+       '2026-08-01T01:00:00.000Z', '2026-08-01T01:00:00.000Z',
+       '2026-08-01T01:30:00.000Z', 0, 'operation:initial'),
+      ('attempt:retry', 'node-run:reliability:completed', 2,
+       'snapshot:reliability:completed', 'retry', 'failed',
+       '2026-08-01T01:15:00.000Z', '2026-08-01T01:15:00.000Z',
+       '2026-08-01T01:45:00.000Z', 0, 'operation:retry'),
+      ('attempt:recovery', 'node-run:reliability:failed', 1,
+       'snapshot:reliability:failed', 'recovery', 'interrupted',
+       '2026-08-01T02:00:00.000Z', '2026-08-01T02:00:00.000Z',
+       '2026-08-01T02:20:00.000Z', 1, 'operation:recovery'),
+      ('attempt:boundary', 'node-run:reliability:failed', 2,
+       'snapshot:reliability:failed', 'retry', 'failed',
+       '2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z',
+       '2026-08-02T00:01:00.000Z', 0, 'operation:boundary');
+    INSERT INTO execution_leases(
+      id, target_kind, target_id, lease_kind, operation_key,
+      execution_epoch, fence_token, worker_id, issued_at, expires_at,
+      released_at, cancel_requested
+    ) VALUES
+      ('lease:initial', 'node-attempt', 'attempt:initial', 'execution',
+       'operation:initial', 1, 'fence:initial', 'worker:1',
+       '2026-08-01T01:00:00.000Z', '2026-08-01T01:40:00.000Z',
+       '2026-08-01T01:30:00.000Z', 0),
+      ('lease:retry', 'node-attempt', 'attempt:retry', 'execution',
+       'operation:retry', 1, 'fence:retry', 'worker:2',
+       '2026-08-01T01:15:00.000Z', '2026-08-01T01:55:00.000Z',
+       '2026-08-01T01:45:00.000Z', 0),
+      ('lease:recovery', 'node-attempt', 'attempt:recovery', 'execution',
+       'operation:recovery', 1, 'fence:recovery', 'worker:3',
+       '2026-08-01T02:00:00.000Z', '2026-08-01T02:20:00.000Z', NULL, 0);
+    INSERT INTO approvals(
+      id, run_id, node_run_id, cycle, snapshot_revision_id, status, decision,
+      requested_action, input_manifest_hash, eligible_human_policy_json,
+      created_at, decided_at, decision_actor_type, decision_actor_id,
+      decision_actor_authenticated_by, decision_command_id, decision_hash
+    ) VALUES (
+      'approval:reliability', 'run:reliability:completed', 'node-run:approval',
+      1, 'snapshot:reliability:completed', 'decided', 'approve',
+      'Approve reliability evidence', '${hash}', '{}',
+      '2026-08-01T04:00:00.000Z', '2026-08-01T04:10:00.000Z',
+      'human', 'human:statistics', 'local-session', 'command:approval', '${hash}'
+    );
+    INSERT INTO governed_interventions(
+      id, run_id, node_run_id, attempt_id, snapshot_revision_id, actor_id,
+      reason, feedback, outcome, created_at
+    ) VALUES
+      ('intervention:retry', 'run:reliability:completed',
+       'node-run:reliability:completed', 'attempt:retry',
+       'snapshot:reliability:completed', 'human:statistics', 'Needs guidance',
+       'Use the exact recovery seam.', 'feedback',
+       '2026-08-01T01:20:00.000Z'),
+      ('intervention:boundary', 'run:reliability:failed',
+       'node-run:reliability:failed', 'attempt:boundary',
+       'snapshot:reliability:failed', 'human:statistics', 'Boundary',
+       'Must not enter the prior window.', 'feedback',
+       '2026-08-02T00:00:00.000Z');
   `);
   database.close();
 };
@@ -364,6 +461,255 @@ describe("Statistics Runtime", () => {
       /Statistics evidence snapshot is immutable/,
     );
     sqlite.close();
+    database.close();
+  });
+
+  it("reports literal governed execution reliability facts under one UTC half-open window", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedExecutionReliabilityFacts(database.path);
+    const beforeSequence = database.eventSequence();
+
+    const view = database.statistics.inspect({
+      ...baselineQuery,
+      comparisonSet: {
+        id: "comparison:execution-reliability",
+        metricIds: [
+          "recovery-attempt-count",
+          "ordinary-retry-count",
+          "node-attempt-failure-rate",
+          "lease-interruption-rate",
+          "human-approval-wait",
+          "governed-intervention-rate",
+          "governed-execution-concurrency",
+          "department-run-failure-rate",
+        ],
+      },
+    });
+
+    assert.deepEqual(
+      view.observations.map((observation) => ({
+        metricId: observation.metricId,
+        status: observation.status,
+        measurement:
+          observation.status === "available" ? observation.measurement : null,
+      })),
+      [
+        {
+          metricId: "department-run-failure-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "governed-execution-concurrency",
+          status: "available",
+          measurement: { kind: "concurrency", maximum: 2, intervalCount: 3 },
+        },
+        {
+          metricId: "governed-intervention-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 3,
+            value: 1 / 3,
+          },
+        },
+        {
+          metricId: "human-approval-wait",
+          status: "available",
+          measurement: { kind: "duration", milliseconds: 600_000 },
+        },
+        {
+          metricId: "lease-interruption-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 3,
+            value: 1 / 3,
+          },
+        },
+        {
+          metricId: "node-attempt-failure-rate",
+          status: "available",
+          measurement: {
+            kind: "rate",
+            numerator: 1,
+            denominator: 2,
+            value: 0.5,
+          },
+        },
+        {
+          metricId: "ordinary-retry-count",
+          status: "available",
+          measurement: { kind: "count", value: 1 },
+        },
+        {
+          metricId: "recovery-attempt-count",
+          status: "available",
+          measurement: { kind: "count", value: 1 },
+        },
+      ],
+    );
+    assert.equal(view.completeness.status, "complete");
+    assert.equal(database.eventSequence(), beforeSequence);
+    database.close();
+  });
+
+  it("marks governed execution evidence incomplete when exact attempt attribution is missing", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedExecutionReliabilityFacts(database.path);
+    const sqlite = new DatabaseSync(database.path);
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      INSERT INTO governed_interventions(
+        id, run_id, node_run_id, attempt_id, snapshot_revision_id, actor_id,
+        reason, feedback, outcome, created_at
+      ) VALUES (
+        'intervention:missing-attempt', 'run:reliability:completed',
+        'node-run:reliability:completed', NULL,
+        'snapshot:reliability:completed', 'human:statistics',
+        'Missing attempt authority', 'Do not guess the affected attempt.',
+        'feedback', '2026-08-01T01:25:00.000Z'
+      );
+    `);
+    sqlite.close();
+
+    const view = database.statistics.inspect({
+      ...baselineQuery,
+      comparisonSet: {
+        id: "comparison:missing-execution-attribution",
+        metricIds: ["governed-intervention-rate"],
+      },
+    });
+    assert.deepEqual(view.observations[0], {
+      metricId: "governed-intervention-rate",
+      status: "incomplete",
+      reason:
+        "A governed intervention does not identify its affected Node Attempt.",
+      missingFactKinds: ["governed-intervention-attempt-attribution"],
+      sourceFactFamily: "governed-intervention",
+      sourceFactRefs: ["intervention:missing-attempt"],
+    });
+    assert.equal(view.completeness.status, "incomplete");
+
+    const unavailableDimensionFilters: Array<
+      readonly [string, NonNullable<StatisticsInspectInput["filters"]>]
+    > = [
+      ["ai-member", { aiMemberIds: ["ai-member:missing-attribution"] }],
+      ["model", { modelIds: ["model:missing-attribution"] }],
+      ["repository", { repositoryIds: ["repository:missing-attribution"] }],
+      [
+        "work-package",
+        { workPackageIds: ["work-package:missing-attribution"] },
+      ],
+    ];
+    for (const [id, filters] of unavailableDimensionFilters) {
+      const filtered = database.statistics.inspect({
+        ...baselineQuery,
+        filters,
+        comparisonSet: {
+          id: `comparison:${id}-attribution`,
+          metricIds: ["governed-execution-concurrency", "ordinary-retry-count"],
+        },
+      });
+      assert.equal(
+        filtered.observations.every(
+          (observation) =>
+            observation.status === "unavailable" &&
+            observation.unavailableReasonCode ===
+              "missing-dimension-attribution",
+        ),
+        true,
+      );
+    }
+    const exactLineageFilters: Array<
+      readonly [string, NonNullable<StatisticsInspectInput["filters"]>]
+    > = [
+      ["department", { departmentIds: ["department:outside-cohort"] }],
+      ["pipeline", { pipelineVersionIds: ["pipeline:outside-cohort"] }],
+    ];
+    for (const [id, filters] of exactLineageFilters) {
+      const filtered = database.statistics.inspect({
+        ...baselineQuery,
+        filters,
+        comparisonSet: {
+          id: `comparison:${id}-filter`,
+          metricIds: ["ordinary-retry-count"],
+        },
+      });
+      assert.deepEqual(filtered.observations[0], {
+        metricId: "ordinary-retry-count",
+        status: "available",
+        measurement: { kind: "count", value: 0 },
+        sourceFactFamily: "node-attempt",
+        sourceFactRefs: [],
+      });
+    }
+    database.close();
+  });
+
+  it("keeps frozen execution reliability evidence restart-stable", () => {
+    const companyDir = tempCompanyDir();
+    let database = openCompanyDatabase(companyDir, {
+      clock: () => new Date(timestamp),
+    });
+    seedBaselineFacts(database.path);
+    seedExecutionReliabilityFacts(database.path);
+    const query = {
+      ...baselineQuery,
+      comparisonSet: {
+        id: "comparison:execution-reliability-restart",
+        metricIds: [
+          "department-run-failure-rate" as const,
+          "governed-execution-concurrency" as const,
+          "governed-intervention-rate" as const,
+          "human-approval-wait" as const,
+          "lease-interruption-rate" as const,
+          "node-attempt-failure-rate" as const,
+          "ordinary-retry-count" as const,
+          "recovery-attempt-count" as const,
+        ],
+      },
+    };
+    const result = database.commandRegistry.execute({
+      schemaVersion: 1,
+      commandId: "command:freeze-execution-reliability",
+      actor: {
+        type: "human",
+        id: "human:statistics",
+        authenticatedBy: "local-session",
+      },
+      command: {
+        type: "statistics.evidence.freeze",
+        evidenceSnapshotId: "statistics-evidence:execution-reliability",
+        query,
+      },
+    });
+    assert.equal(result.status, "succeeded");
+    if (result.status !== "succeeded") assert.fail("freeze must succeed");
+    database.close();
+
+    database = openCompanyDatabase(companyDir, {
+      clock: () => new Date("2026-08-05T00:00:00.000Z"),
+    });
+    assert.deepEqual(
+      database.statistics.inspectEvidence(result.value.id),
+      result.value,
+    );
     database.close();
   });
 });

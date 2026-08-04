@@ -2416,7 +2416,7 @@ type ProjectDetailTab =
   | "memory"
   | "settings";
 
-const baselineStatisticsQuery = (
+const projectStatisticsQuery = (
   project: Pick<ProjectEditorView, "id" | "createdAt">,
 ): StatisticsInspectInput => {
   const start = Date.parse(project.createdAt);
@@ -2437,7 +2437,15 @@ const baselineStatisticsQuery = (
       metricIds: [
         "product-baseline-confirmation-count",
         "product-baseline-confirmation-latency",
+        "department-run-failure-rate",
+        "governed-execution-concurrency",
+        "governed-intervention-rate",
+        "human-approval-wait",
+        "lease-interruption-rate",
+        "node-attempt-failure-rate",
+        "ordinary-retry-count",
         "readiness-blocker-count",
+        "recovery-attempt-count",
         "review-discussion-round-count",
         "review-finding-count",
         "review-recheck-pass-rate",
@@ -3151,9 +3159,9 @@ export function ProjectDetailView({
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ProjectDetailTab>(initialTab);
   const [statisticsQueryDraft, setStatisticsQueryDraft] =
-    useState<StatisticsInspectInput>(() => baselineStatisticsQuery(project));
+    useState<StatisticsInspectInput>(() => projectStatisticsQuery(project));
   const [statisticsQuery, setStatisticsQuery] =
-    useState<StatisticsInspectInput>(() => baselineStatisticsQuery(project));
+    useState<StatisticsInspectInput>(() => projectStatisticsQuery(project));
   const [statisticsView, setStatisticsView] = useState<StatisticsView | null>(
     null,
   );
@@ -3208,7 +3216,7 @@ export function ProjectDetailView({
     setSharedContext(project.sharedContext);
     setRepositoryReferences([...project.repositoryReferences]);
     setRepositoryReference("");
-    const nextStatisticsQuery = baselineStatisticsQuery(project);
+    const nextStatisticsQuery = projectStatisticsQuery(project);
     setStatisticsQueryDraft(nextStatisticsQuery);
     setStatisticsQuery(nextStatisticsQuery);
     setStatisticsView(null);

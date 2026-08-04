@@ -6,7 +6,7 @@ import type {
   StatisticsInspectInput,
   StatisticsView,
 } from "../runtime/interface.js";
-import { messages } from "./i18n.js";
+import { messages, type Messages } from "./i18n.js";
 import { ProjectImprovementsPanel } from "./projectImprovementsPanel.js";
 
 const hash = "a".repeat(64);
@@ -161,5 +161,95 @@ describe("Project Improvements panel", () => {
     assert.match(markup, /检查统计/);
     assert.match(markup, /冻结精确证据/);
     assert.match(markup, /尚未检查统计数据/);
+  });
+
+  it("renders governed execution reliability evidence consistently in English and Chinese", () => {
+    const reliabilityQuery = {
+      ...canonicalQuery,
+      comparisonSet: {
+        id: "comparison:execution-reliability",
+        metricIds: [
+          "governed-execution-concurrency" as const,
+          "human-approval-wait" as const,
+        ],
+      },
+    };
+    const observations = [
+      {
+        metricId: "governed-execution-concurrency" as const,
+        status: "available" as const,
+        measurement: {
+          kind: "concurrency" as const,
+          maximum: 2,
+          intervalCount: 3,
+        },
+        sourceFactFamily: "execution-lease",
+        sourceFactRefs: ["lease-1", "lease-2", "lease-3"],
+      },
+      {
+        metricId: "human-approval-wait" as const,
+        status: "available" as const,
+        measurement: { kind: "duration" as const, milliseconds: 600_000 },
+        sourceFactFamily: "approval",
+        sourceFactRefs: ["approval-1"],
+      },
+    ];
+    const view: StatisticsView = {
+      query: reliabilityQuery,
+      asOfSequence: 43,
+      observations,
+      completeness: {
+        status: "complete",
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      generatedAt: "2026-08-04T00:00:00.000Z",
+    };
+    const evidence: StatisticsEvidenceSnapshotView = {
+      id: "statistics-evidence-reliability",
+      query: reliabilityQuery,
+      queryHash: hash,
+      asOfSequence: 43,
+      observations,
+      completeness: view.completeness,
+      frozenBy: {
+        type: "human",
+        id: "verified-local-human",
+        authenticatedBy: "local-session",
+      },
+      hash,
+      createdAt: "2026-08-04T00:01:00.000Z",
+    };
+    const render = (t: Messages) =>
+      renderToStaticMarkup(
+        <ProjectImprovementsPanel
+          busy={false}
+          diagnostic={null}
+          evidence={evidence}
+          evidenceSnapshotId={evidence.id}
+          onEvidenceSnapshotIdChange={() => undefined}
+          onFreeze={() => undefined}
+          onInspect={() => undefined}
+          onInspectEvidence={() => undefined}
+          onWindowChange={() => undefined}
+          query={query}
+          t={t}
+          view={view}
+        />,
+      );
+
+    const english = render(messages.en);
+    const chinese = render(messages.zh);
+    assert.match(english, /Governed execution concurrency/);
+    assert.match(english, /Human approval wait/);
+    assert.match(chinese, /受治理执行并发度/);
+    assert.match(chinese, /人工审批等待时间/);
+    assert.equal(
+      (english.match(/data-statistics-evidence-observation-status/g) ?? [])
+        .length,
+      2,
+    );
+    assert.match(english, />2 \/ 3</);
+    assert.match(english, />600000 ms</);
   });
 });

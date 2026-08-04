@@ -174,6 +174,39 @@ export const openStatisticsRuntime = (
       sourceFactRefs: refs,
     });
 
+  const missingDenominator = (
+    metricId: StatisticsMetricId,
+    sourceFactFamily: string,
+    reason: string,
+  ): StatisticsMetricObservation => ({
+    metricId,
+    status: "unavailable",
+    reason,
+    unavailableReasonCode: "missing-denominator-authority",
+    sourceFactFamily,
+    sourceFactRefs: [],
+  });
+
+  const rateObservation = (
+    metricId: StatisticsMetricId,
+    sourceFactFamily: string,
+    numerator: number,
+    denominator: number,
+    refs: readonly string[],
+  ): StatisticsMetricObservation =>
+    StatisticsMetricObservationSchema.parse({
+      metricId,
+      status: "available",
+      measurement: {
+        kind: "rate",
+        numerator,
+        denominator,
+        value: numerator / denominator,
+      },
+      sourceFactFamily,
+      sourceFactRefs: refs,
+    });
+
   const observe = (
     metricId: StatisticsMetricId,
     query: StatisticsCanonicalQuery,
@@ -366,6 +399,336 @@ export const openStatisticsRuntime = (
           metricId,
           "product-readiness",
           rows.map((row) => row.id),
+        );
+      }
+      case "governed-execution-concurrency": {
+        const rows = database
+          .prepare(
+            `SELECT leases.id, leases.issued_at AS issuedAt,
+                    leases.expires_at AS expiresAt,
+                    leases.released_at AS releasedAt
+               FROM execution_leases AS leases
+               JOIN node_attempts AS attempts ON attempts.id = leases.target_id
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND leases.target_kind = 'node-attempt'
+                AND leases.lease_kind = 'execution'
+                AND leases.issued_at < ?
+                AND COALESCE(leases.released_at, leases.expires_at) > ?
+              ORDER BY leases.issued_at, leases.id`,
+          )
+          .all(...run.values, endExclusive, startInclusive) as Array<{
+          readonly id: string;
+          readonly issuedAt: string;
+          readonly expiresAt: string;
+          readonly releasedAt: string | null;
+        }>;
+        const windowStart = Date.parse(startInclusive);
+        const windowEnd = Date.parse(endExclusive);
+        const boundaries = rows.flatMap((row) => {
+          const start = Math.max(Date.parse(row.issuedAt), windowStart);
+          const end = Math.min(
+            Date.parse(row.releasedAt ?? row.expiresAt),
+            windowEnd,
+          );
+          return [
+            { at: start, delta: 1 },
+            { at: end, delta: -1 },
+          ];
+        });
+        boundaries.sort((left, right) =>
+          left.at === right.at ? left.delta - right.delta : left.at - right.at,
+        );
+        let active = 0;
+        let maximum = 0;
+        for (const boundary of boundaries) {
+          active += boundary.delta;
+          maximum = Math.max(maximum, active);
+        }
+        return {
+          metricId,
+          status: "available",
+          measurement: {
+            kind: "concurrency",
+            maximum,
+            intervalCount: rows.length,
+          },
+          sourceFactFamily: "execution-lease",
+          sourceFactRefs: rows.map((row) => row.id),
+        };
+      }
+      case "ordinary-retry-count":
+      case "recovery-attempt-count": {
+        const reason =
+          metricId === "ordinary-retry-count" ? "retry" : "recovery";
+        const rows = database
+          .prepare(
+            `SELECT attempts.id
+               FROM node_attempts AS attempts
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND attempts.reason = ?
+                AND attempts.created_at >= ?
+                AND attempts.created_at < ?
+              ORDER BY attempts.created_at, attempts.id`,
+          )
+          .all(...run.values, reason, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+        }>;
+        return countObservation(
+          metricId,
+          "node-attempt",
+          rows.map((row) => row.id),
+        );
+      }
+      case "department-run-failure-rate": {
+        const rows = database
+          .prepare(
+            `SELECT runs.id, runs.status
+               FROM department_runs AS runs
+              WHERE ${run.sql}
+                AND runs.status IN ('completed', 'failed')
+                AND runs.updated_at >= ?
+                AND runs.updated_at < ?
+              ORDER BY runs.updated_at, runs.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly status: string;
+        }>;
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "department-run",
+            "No completed or failed Department Run denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "department-run",
+          rows.filter((row) => row.status === "failed").length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "node-attempt-failure-rate": {
+        const rows = database
+          .prepare(
+            `SELECT attempts.id, attempts.status
+               FROM node_attempts AS attempts
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND attempts.status IN ('succeeded', 'failed')
+                AND attempts.completed_at >= ?
+                AND attempts.completed_at < ?
+              ORDER BY attempts.completed_at, attempts.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly status: string;
+        }>;
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "node-attempt",
+            "No succeeded or failed Node Attempt denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "node-attempt",
+          rows.filter((row) => row.status === "failed").length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "lease-interruption-rate": {
+        const rows = database
+          .prepare(
+            `SELECT leases.id, leases.expires_at AS expiresAt,
+                    leases.released_at AS releasedAt
+               FROM execution_leases AS leases
+               JOIN node_attempts AS attempts ON attempts.id = leases.target_id
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND leases.target_kind = 'node-attempt'
+                AND leases.lease_kind = 'execution'
+                AND COALESCE(leases.released_at, leases.expires_at) >= ?
+                AND COALESCE(leases.released_at, leases.expires_at) < ?
+              ORDER BY COALESCE(leases.released_at, leases.expires_at), leases.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly expiresAt: string;
+          readonly releasedAt: string | null;
+        }>;
+        if (rows.length === 0) {
+          return missingDenominator(
+            metricId,
+            "execution-lease",
+            "No ended execution Lease denominator exists.",
+          );
+        }
+        return rateObservation(
+          metricId,
+          "execution-lease",
+          rows.filter(
+            (row) =>
+              row.releasedAt === null ||
+              Date.parse(row.releasedAt) >= Date.parse(row.expiresAt),
+          ).length,
+          rows.length,
+          rows.map((row) => row.id),
+        );
+      }
+      case "human-approval-wait": {
+        const rows = database
+          .prepare(
+            `SELECT approvals.id, approvals.created_at AS createdAt,
+                    CASE
+                      WHEN approvals.status = 'decided' THEN approvals.decided_at
+                      WHEN approvals.status = 'expired' THEN approvals.expired_at
+                      ELSE NULL
+                    END AS terminalAt
+               FROM approvals
+               JOIN department_runs AS runs ON runs.id = approvals.run_id
+              WHERE ${run.sql}
+                AND approvals.created_at >= ?
+                AND approvals.created_at < ?
+              ORDER BY approvals.created_at, approvals.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+          readonly createdAt: string;
+          readonly terminalAt: string | null;
+        }>;
+        if (rows.length === 0) {
+          return {
+            metricId,
+            status: "unavailable",
+            reason: "No paired human Approval timestamps exist.",
+            unavailableReasonCode: "missing-paired-timestamps",
+            sourceFactFamily: "approval",
+            sourceFactRefs: [],
+          };
+        }
+        const durations = rows.map((row) =>
+          row.terminalAt === null
+            ? Number.NaN
+            : Date.parse(row.terminalAt) - Date.parse(row.createdAt),
+        );
+        if (
+          durations.some(
+            (duration) => !Number.isFinite(duration) || duration < 0,
+          )
+        ) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason: "A human Approval lacks a valid terminal timestamp.",
+            missingFactKinds: ["valid-human-approval-timestamp-pair"],
+            sourceFactFamily: "approval",
+            sourceFactRefs: rows.map((row) => row.id),
+          };
+        }
+        return {
+          metricId,
+          status: "available",
+          measurement: {
+            kind: "duration",
+            milliseconds:
+              durations.reduce((total, duration) => total + duration, 0) /
+              durations.length,
+          },
+          sourceFactFamily: "approval",
+          sourceFactRefs: rows.map((row) => row.id),
+        };
+      }
+      case "governed-intervention-rate": {
+        const unattributed = database
+          .prepare(
+            `SELECT interventions.id
+               FROM governed_interventions AS interventions
+               JOIN department_runs AS runs ON runs.id = interventions.run_id
+              WHERE ${run.sql}
+                AND interventions.attempt_id IS NULL
+                AND interventions.created_at >= ?
+                AND interventions.created_at < ?
+              ORDER BY interventions.created_at, interventions.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+        }>;
+        if (unattributed.length > 0) {
+          return {
+            metricId,
+            status: "incomplete",
+            reason:
+              "A governed intervention does not identify its affected Node Attempt.",
+            missingFactKinds: ["governed-intervention-attempt-attribution"],
+            sourceFactFamily: "governed-intervention",
+            sourceFactRefs: unattributed.map((row) => row.id),
+          };
+        }
+        const attempts = database
+          .prepare(
+            `SELECT attempts.id
+               FROM node_attempts AS attempts
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND attempts.created_at >= ?
+                AND attempts.created_at < ?
+              ORDER BY attempts.created_at, attempts.id`,
+          )
+          .all(...run.values, startInclusive, endExclusive) as Array<{
+          readonly id: string;
+        }>;
+        if (attempts.length === 0) {
+          return missingDenominator(
+            metricId,
+            "governed-intervention",
+            "No Node Attempt denominator exists for governed interventions.",
+          );
+        }
+        const interventions = database
+          .prepare(
+            `SELECT interventions.id, interventions.attempt_id AS attemptId
+               FROM governed_interventions AS interventions
+               JOIN node_attempts AS attempts
+                 ON attempts.id = interventions.attempt_id
+               JOIN node_runs AS nodes ON nodes.id = attempts.node_run_id
+               JOIN department_runs AS runs ON runs.id = nodes.run_id
+              WHERE ${run.sql}
+                AND attempts.created_at >= ?
+                AND attempts.created_at < ?
+                AND interventions.created_at >= ?
+                AND interventions.created_at < ?
+              ORDER BY interventions.created_at, interventions.id`,
+          )
+          .all(
+            ...run.values,
+            startInclusive,
+            endExclusive,
+            startInclusive,
+            endExclusive,
+          ) as Array<{ readonly id: string; readonly attemptId: string }>;
+        const intervenedAttemptIds = new Set(
+          interventions.map((row) => row.attemptId),
+        );
+        return rateObservation(
+          metricId,
+          "governed-intervention",
+          intervenedAttemptIds.size,
+          attempts.length,
+          [
+            ...attempts.map((row) => row.id),
+            ...interventions.map((row) => row.id),
+          ],
         );
       }
       default:
