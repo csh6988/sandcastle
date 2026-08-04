@@ -594,6 +594,141 @@ describe("Company Runtime server startup", () => {
     }
   });
 
+  it("routes immutable evidence-backed Improvement proposal authoring and queries through the typed tunnel", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-server-improvement-proposals-"),
+    );
+    roots.push(companyDir);
+    const address = companyRuntimeAddress(companyDir);
+    const token = "server-improvement-proposal-test-token";
+    const actor = {
+      type: "human" as const,
+      id: "improvement-author",
+      authenticatedBy: "local-session" as const,
+    };
+    const server = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token,
+      principal: actor,
+      consumerId: "improvement-proposal-server-test",
+    });
+    const client = createCompanyRuntimeClientFromTransport(
+      createLocalRuntimeTransport({ address, token }),
+      token,
+      { actor, consumerId: "improvement-proposal-server-test" },
+    );
+    try {
+      const project = await client.execute({
+        type: "project.create",
+        name: "Improvement proposals",
+        goal: "Govern exact revisions",
+      });
+      const frozen = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:freeze-improvement-proposal-server-evidence",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "statistics.evidence.freeze",
+          evidenceSnapshotId: "statistics-evidence:improvement-proposal-server",
+          query: {
+            projectId: project.id,
+            window: {
+              kind: "explicit-utc-half-open",
+              startInclusive: "2026-08-01T00:00:00.000Z",
+              endExclusive: "2026-08-02T00:00:00.000Z",
+            },
+            cohort: { id: "cohort:improvement-proposal-server" },
+            comparisonSet: {
+              id: "comparison:improvement-proposal-server",
+              metricIds: ["review-finding-count"],
+            },
+          },
+        },
+      });
+      assert.equal(frozen.status, "succeeded");
+      if (frozen.status !== "succeeded") assert.fail("freeze must succeed");
+
+      const created = await client.executeEnvelope({
+        schemaVersion: 1,
+        commandId: "command:create-improvement-proposal-server",
+        actor,
+        consumerId: "improvement-proposal-server-test",
+        command: {
+          type: "improvement.proposal.create",
+          proposal: {
+            proposalId: "improvement-proposal:server",
+            revisionId: "improvement-proposal-revision:server:1",
+            projectId: project.id,
+            departmentId: null,
+            content: {
+              evidence: frozen.value,
+              target: {
+                targetKind: "harness",
+                ownerId: "harness:server-review",
+                governedHead: { revisionId: null, revisionHash: null },
+                content: {
+                  principles: ["Use exact frozen evidence."],
+                  constitution: "Review immutable production contracts.",
+                  rules: ["Bind proposals to one frozen snapshot."],
+                  examples: {
+                    positive: ["Inspect the exact evidence hash."],
+                    negative: ["Use a moving dashboard query."],
+                  },
+                  impactScope: [project.id],
+                },
+              },
+              rootCauseHypothesis:
+                "Review guidance does not require frozen Statistics evidence.",
+              impactScope: {
+                projectIds: [project.id],
+                departmentIds: [],
+                positionIds: [],
+              },
+              expectedMetrics: [
+                { metricId: "review-finding-count", direction: "decrease" },
+              ],
+              validationPolicy: {
+                metricIds: ["review-finding-count"],
+                minimumComparableObservations: 1,
+              },
+              rolloutNotes: "Validate with the next comparable cohort.",
+              rollbackSource: {
+                revisionId: "harness:server-review:source",
+                revisionHash: "a".repeat(64),
+              },
+            },
+          },
+        },
+      });
+      assert.equal(created.status, "succeeded");
+      if (created.status !== "succeeded") assert.fail("create must succeed");
+
+      const listed = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "query-improvement-proposals",
+        principal: actor,
+        consumerId: "improvement-proposal-server-test",
+        query: { type: "improvement-proposals.list", projectId: project.id },
+      });
+      const inspected = await client.queryEnvelope({
+        schemaVersion: 1,
+        requestId: "query-improvement-proposal",
+        principal: actor,
+        consumerId: "improvement-proposal-server-test",
+        query: {
+          type: "improvement-proposal.inspect",
+          proposalId: created.value.id,
+        },
+      });
+      assert.deepEqual(listed.view, [created.value]);
+      assert.deepEqual(inspected.view, created.value);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("injects the fake clock and repeatable IDs into the actual Test Runtime", async () => {
     const first = await captureDeterministicTestRevision(
       "2026-07-29T00:00:00.000Z",

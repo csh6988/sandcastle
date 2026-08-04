@@ -172,6 +172,10 @@ import {
   openStatisticsRuntime,
   type StatisticsRuntime,
 } from "../statistics/statisticsRuntime.js";
+import {
+  openImprovementProposalRuntime,
+  type ImprovementProposalRuntime,
+} from "../improvement/improvementProposalRuntime.js";
 
 export interface CompanyDatabase {
   readonly path: string;
@@ -204,6 +208,7 @@ export interface CompanyDatabase {
   readonly delivery: DeliveryRuntime;
   readonly releaseOperations: ReleaseOperationRuntime;
   readonly statistics: StatisticsRuntime;
+  readonly improvementProposals: ImprovementProposalRuntime;
   readonly qualityGateNodeHandler: QualityGateNodeHandler;
   readonly testNodeHandler: TestNodeHandler;
   readonly integrationNodeHandler: IntegrationNodeHandler;
@@ -570,6 +575,11 @@ export const openCompanyDatabase = (
     events,
     ...(options.clock ? { clock: options.clock } : {}),
   });
+  const improvementProposals = openImprovementProposalRuntime(database, {
+    statistics,
+    events,
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const gitReleaseAdapter = openLocalGitReleaseAdapter();
   const artifactExportAdapter = createArtifactExportAdapter({
     artifacts: artifactRegistry,
@@ -712,6 +722,7 @@ export const openCompanyDatabase = (
     delivery,
     releaseOperations,
     statistics,
+    improvementProposals,
   );
   const testExecutionAdapters = [
     ...(options.testRuntime?.executionAdapters ?? []),
@@ -832,6 +843,7 @@ export const openCompanyDatabase = (
     delivery,
     releaseOperations,
     statistics,
+    improvementProposals,
     qualityGateNodeHandler,
     testNodeHandler,
     integrationNodeHandler,

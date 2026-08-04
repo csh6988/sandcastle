@@ -346,6 +346,9 @@ export const ImprovementProposalCreateRequestSchema =
   ImprovementProposalCreateBaseSchema.extend({
     actor: ImprovementAuthorActorSchema,
   }).strict();
+export type ImprovementProposalCreateRequest = z.infer<
+  typeof ImprovementProposalCreateRequestSchema
+>;
 
 const ImprovementProposalReviseBaseSchema = z
   .object({
@@ -364,6 +367,9 @@ export const ImprovementProposalReviseRequestSchema =
   ImprovementProposalReviseBaseSchema.extend({
     actor: ImprovementAuthorActorSchema,
   }).strict();
+export type ImprovementProposalReviseRequest = z.infer<
+  typeof ImprovementProposalReviseRequestSchema
+>;
 
 export const ImprovementProposalTransitionCommandInputSchema = z
   .object({
@@ -377,6 +383,9 @@ export const ImprovementProposalTransitionRequestSchema =
   ImprovementProposalTransitionCommandInputSchema.extend({
     actor: ImprovementAuthorActorSchema,
   }).strict();
+export type ImprovementProposalTransitionRequest = z.infer<
+  typeof ImprovementProposalTransitionRequestSchema
+>;
 
 export const ImprovementProposalRequestDecisionCommandInputSchema =
   ImprovementProposalTransitionCommandInputSchema.extend({

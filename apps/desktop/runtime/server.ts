@@ -618,6 +618,14 @@ export const startCompanyRuntimeServer = async (
                     return database.statistics.inspectEvidence(
                       query.evidenceSnapshotId,
                     );
+                  case "improvement-proposal.inspect":
+                    assertStatisticsReader(principal);
+                    return database.improvementProposals.inspect(
+                      query.proposalId,
+                    );
+                  case "improvement-proposals.list":
+                    assertStatisticsReader(principal);
+                    return database.improvementProposals.list(query.projectId);
                   case "run.supervision.inspect":
                     return database.supervision.inspect(query.runId);
                   case "artifact.inspect":
@@ -743,6 +751,16 @@ export const startCompanyRuntimeServer = async (
                   assertStatisticsReader(principal);
                   return database.statistics.inspectEvidence(
                     request.query.evidenceSnapshotId,
+                  );
+                case "improvement-proposal.inspect":
+                  assertStatisticsReader(principal);
+                  return database.improvementProposals.inspect(
+                    request.query.proposalId,
+                  );
+                case "improvement-proposals.list":
+                  assertStatisticsReader(principal);
+                  return database.improvementProposals.list(
+                    request.query.projectId,
                   );
                 case "departments.list":
                   return database.catalog.departments();

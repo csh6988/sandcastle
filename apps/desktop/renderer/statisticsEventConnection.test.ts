@@ -26,6 +26,7 @@ describe("Statistics Runtime event connection", () => {
     const views: Array<{
       readonly count: number;
       readonly evidenceId: string | null;
+      readonly proposalCount: number;
     }> = [];
     const invalidationFrame = {
       subscriptionId: "statistics-subscription-1",
@@ -47,6 +48,29 @@ describe("Statistics Runtime event connection", () => {
             catalogVersion: "statistics@1",
           },
           timestamp: "2026-08-04T00:01:00.000Z",
+        },
+      },
+    } as RuntimeEventFrame;
+    const proposalInvalidationFrame = {
+      subscriptionId: "statistics-subscription-1",
+      subscriptionGeneration: 3,
+      barrierSequence: 10,
+      value: {
+        kind: "event",
+        event: {
+          registryVersion: 20,
+          schemaVersion: 1,
+          sequence: 12,
+          eventId: "improvement-proposal-event-12",
+          type: "improvement.proposal.invalidated",
+          companyId: "company",
+          projectId: "project-1",
+          improvementProposalId: "improvement-proposal-1",
+          payload: {
+            proposalId: "improvement-proposal-1",
+            proposalRevisionId: "improvement-proposal-revision-1",
+          },
+          timestamp: "2026-08-04T00:02:00.000Z",
         },
       },
     } as RuntimeEventFrame;
@@ -102,6 +126,14 @@ describe("Statistics Runtime event connection", () => {
               queryCount === 1 ? "statistics-token-10" : "statistics-token-11",
           };
         }
+        if (input.type === "improvement-proposals.list") {
+          return {
+            view: [],
+            asOfSequence: queryCount === 1 ? 10 : 11,
+            viewSyncToken:
+              queryCount === 1 ? "proposals-token-10" : "proposals-token-11",
+          };
+        }
         return {
           view: {
             id: "statistics-evidence-1",
@@ -132,6 +164,7 @@ describe("Statistics Runtime event connection", () => {
         sink: (frame: RuntimeEventFrame) => void | Promise<void>,
       ) => {
         await sink(invalidationFrame);
+        await sink(proposalInvalidationFrame);
         return {
           subscriptionId: "statistics-subscription-1",
           subscriptionGeneration: 3,
@@ -157,6 +190,7 @@ describe("Statistics Runtime event connection", () => {
               ? observation.measurement.value
               : -1,
           evidenceId: next.evidence?.id ?? null,
+          proposalCount: next.proposals.length,
         });
       },
       projectId: "project-1",
@@ -166,14 +200,20 @@ describe("Statistics Runtime event connection", () => {
     assert.deepEqual(queryTypes, [
       "statistics.inspect",
       "statistics-evidence.inspect",
+      "improvement-proposals.list",
       "statistics.inspect",
       "statistics-evidence.inspect",
+      "improvement-proposals.list",
+      "statistics.inspect",
+      "statistics-evidence.inspect",
+      "improvement-proposals.list",
     ]);
     assert.deepEqual(views, [
-      { count: 1, evidenceId: "statistics-evidence-1" },
-      { count: 2, evidenceId: "statistics-evidence-1" },
+      { count: 1, evidenceId: "statistics-evidence-1", proposalCount: 0 },
+      { count: 2, evidenceId: "statistics-evidence-1", proposalCount: 0 },
+      { count: 3, evidenceId: "statistics-evidence-1", proposalCount: 0 },
     ]);
-    assert.equal(acknowledgements.length, 2);
+    assert.equal(acknowledgements.length, 3);
     await connection.close();
   });
 });

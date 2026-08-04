@@ -36,6 +36,8 @@ import type {
   AcceptedDeliveryCandidateAuthorityView,
   ReleaseOperationEnvelopeCommand,
   ReleaseOperationView,
+  ImprovementProposalRevisionContent,
+  ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
   StatisticsView,
@@ -67,7 +69,10 @@ import {
 } from "./reviewsEventConnection.js";
 import { createRuntimeViewConnectionCoordinator } from "./runtimeViewConnectionCoordinator.js";
 import { ReleaseOperationPanel } from "./releaseOperationPanel.js";
-import { ProjectImprovementsPanel } from "./projectImprovementsPanel.js";
+import {
+  ProjectImprovementsPanel,
+  type ImprovementProposalDraft,
+} from "./projectImprovementsPanel.js";
 import {
   connectStatisticsEventStream,
   type StatisticsEventConnection,
@@ -3179,6 +3184,9 @@ export function ProjectDetailView({
   );
   const [statisticsEvidence, setStatisticsEvidence] =
     useState<StatisticsEvidenceSnapshotView | null>(null);
+  const [improvementProposals, setImprovementProposals] = useState<
+    readonly ImprovementProposalView[]
+  >([]);
   const [statisticsEvidenceIdInput, setStatisticsEvidenceIdInput] =
     useState("");
   const [statisticsEvidenceSnapshotId, setStatisticsEvidenceSnapshotId] =
@@ -3192,6 +3200,16 @@ export function ProjectDetailView({
     readonly commandId: string;
     readonly evidenceSnapshotId: string;
   } | null>(null);
+  const improvementProposalGestures = useRef(
+    new Map<
+      string,
+      {
+        readonly commandId: string;
+        readonly proposalId?: string;
+        readonly revisionId?: string;
+      }
+    >(),
+  );
   const [consultation, setConsultation] = useState<InteractionView | null>(
     null,
   );
@@ -3323,6 +3341,7 @@ export function ProjectDetailView({
               if (!canApply()) return;
               setStatisticsView(views.statistics);
               setStatisticsEvidence(views.evidence);
+              setImprovementProposals(views.proposals);
               setStatisticsDiagnostic(null);
             },
             onDiagnostic: (diagnostic) => {
@@ -4368,6 +4387,176 @@ export function ProjectDetailView({
     }
   };
 
+  const improvementProposalContent = (
+    draft: ImprovementProposalDraft,
+  ): ImprovementProposalRevisionContent | null => {
+    const evidence = statisticsEvidence;
+    const metricId = draft.metricId;
+    if (!evidence || !metricId) return null;
+    const governedHeadRevisionId = draft.governedHeadRevisionId.trim();
+    const governedHeadRevisionHash = draft.governedHeadRevisionHash.trim();
+    return {
+      evidence,
+      target: {
+        targetKind: "harness",
+        ownerId: draft.targetOwnerId.trim(),
+        governedHead:
+          governedHeadRevisionId && governedHeadRevisionHash
+            ? {
+                revisionId: governedHeadRevisionId,
+                revisionHash: governedHeadRevisionHash,
+              }
+            : { revisionId: null, revisionHash: null },
+        content: {
+          principles: [draft.principle.trim()],
+          constitution: draft.constitution.trim(),
+          rules: [draft.rule.trim()],
+          examples: { positive: [], negative: [] },
+          impactScope: [project.id],
+        },
+      },
+      rootCauseHypothesis: draft.rootCauseHypothesis.trim(),
+      impactScope: {
+        projectIds: [project.id],
+        departmentIds: [],
+        positionIds: [],
+      },
+      expectedMetrics: [{ metricId, direction: "decrease" }],
+      validationPolicy: {
+        metricIds: [metricId],
+        minimumComparableObservations: 1,
+      },
+      rolloutNotes: draft.rolloutNotes.trim(),
+      rollbackSource: {
+        revisionId: draft.rollbackRevisionId.trim(),
+        revisionHash: draft.rollbackRevisionHash.trim(),
+      },
+    };
+  };
+
+  const resyncImprovements = async (): Promise<void> => {
+    const connection = runtimeViewConnectionCoordinator.current();
+    if (connection?.kind === "improvements") {
+      await connection.connection.resync();
+    }
+  };
+
+  const createImprovementProposal = async (
+    draft: ImprovementProposalDraft,
+  ): Promise<void> => {
+    const content = improvementProposalContent(draft);
+    if (!content) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `create:${JSON.stringify(content)}`;
+      const gesture = improvementProposalGestures.current.get(key) ?? {
+        commandId: `improvement-proposal-create:${globalThis.crypto.randomUUID()}`,
+        proposalId: `improvement-proposal:${globalThis.crypto.randomUUID()}`,
+        revisionId: `improvement-proposal-revision:${globalThis.crypto.randomUUID()}`,
+      };
+      improvementProposalGestures.current.set(key, gesture);
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "improvement.proposal.create",
+          proposal: {
+            proposalId: gesture.proposalId!,
+            revisionId: gesture.revisionId!,
+            projectId: project.id,
+            departmentId: null,
+            content,
+          },
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
+  const reviseImprovementProposal = async (
+    proposal: ImprovementProposalView,
+    draft: ImprovementProposalDraft,
+  ): Promise<void> => {
+    const content = improvementProposalContent(draft);
+    const currentRevision = proposal.revisions.find(
+      (revision) => revision.id === proposal.currentRevisionId,
+    );
+    if (!content || !currentRevision) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `revise:${proposal.id}:${currentRevision.hash}:${JSON.stringify(content)}`;
+      const gesture = improvementProposalGestures.current.get(key) ?? {
+        commandId: `improvement-proposal-revise:${globalThis.crypto.randomUUID()}`,
+        revisionId: `improvement-proposal-revision:${globalThis.crypto.randomUUID()}`,
+      };
+      improvementProposalGestures.current.set(key, gesture);
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "improvement.proposal.revise",
+          proposal: {
+            proposalId: proposal.id,
+            revisionId: gesture.revisionId!,
+            supersedesRevisionId: currentRevision.id,
+            expectedSupersededRevisionHash: currentRevision.hash,
+            content,
+          },
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
+  const proposeImprovementProposal = async (
+    proposal: ImprovementProposalView,
+  ): Promise<void> => {
+    const currentRevision = proposal.revisions.find(
+      (revision) => revision.id === proposal.currentRevisionId,
+    );
+    if (!currentRevision) return;
+    setStatisticsBusy(true);
+    setStatisticsDiagnostic(null);
+    try {
+      const key = `propose:${proposal.id}:${currentRevision.id}:${currentRevision.hash}`;
+      const gesture = improvementProposalGestures.current.get(key) ?? {
+        commandId: `improvement-proposal-propose:${globalThis.crypto.randomUUID()}`,
+      };
+      improvementProposalGestures.current.set(key, gesture);
+      const result = await window.sandcastle.execute({
+        commandId: gesture.commandId,
+        command: {
+          type: "improvement.proposal.propose",
+          proposalId: proposal.id,
+          proposalRevisionId: currentRevision.id,
+          expectedProposalRevisionHash: currentRevision.hash,
+        },
+      });
+      if (result.status === "rejected") {
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      }
+      await resyncImprovements();
+    } catch (nextError) {
+      setStatisticsDiagnostic(errorMessage(nextError));
+    } finally {
+      setStatisticsBusy(false);
+    }
+  };
+
   return (
     <section
       className="page"
@@ -4751,12 +4940,20 @@ export function ProjectDetailView({
           evidenceSnapshotId={statisticsEvidenceIdInput}
           onEvidenceSnapshotIdChange={setStatisticsEvidenceIdInput}
           onFreeze={() => void freezeStatisticsEvidence()}
+          onCreateProposal={(draft) => void createImprovementProposal(draft)}
+          onReviseProposal={(proposal, draft) =>
+            void reviseImprovementProposal(proposal, draft)
+          }
+          onProposeProposal={(proposal) =>
+            void proposeImprovementProposal(proposal)
+          }
           onInspect={inspectStatistics}
           onInspectEvidence={inspectStatisticsEvidence}
           onWindowChange={(window: StatisticsWindow) =>
             setStatisticsQueryDraft((current) => ({ ...current, window }))
           }
           query={statisticsQueryDraft}
+          proposals={improvementProposals}
           t={t}
           view={statisticsView}
         />

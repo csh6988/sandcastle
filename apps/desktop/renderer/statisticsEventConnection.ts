@@ -1,6 +1,7 @@
 import type { RuntimeEventFrame, SandcastleBridge } from "../preload/bridge.js";
 import type {
   RuntimeSubscriptionHandle,
+  ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
   StatisticsView,
@@ -24,6 +25,7 @@ export const connectStatisticsEventStream = async (input: {
   readonly onViews: (views: {
     readonly statistics: StatisticsView;
     readonly evidence: StatisticsEvidenceSnapshotView | null;
+    readonly proposals: readonly ImprovementProposalView[];
   }) => void;
   readonly onDiagnostic: (diagnostic: string | null) => void;
 }): Promise<StatisticsEventConnection> => {
@@ -40,7 +42,7 @@ export const connectStatisticsEventStream = async (input: {
   };
 
   const queryViews = async () => {
-    const [statistics, evidence] = await Promise.all([
+    const [statistics, evidence, proposals] = await Promise.all([
       input.bridge.query({
         type: "statistics.inspect" as const,
         projectId: input.projectId,
@@ -52,8 +54,12 @@ export const connectStatisticsEventStream = async (input: {
             evidenceSnapshotId: input.evidenceSnapshotId,
           })
         : Promise.resolve(null),
+      input.bridge.query({
+        type: "improvement-proposals.list" as const,
+        projectId: input.projectId,
+      }),
     ]);
-    return { statistics, evidence };
+    return { statistics, evidence, proposals };
   };
 
   const acknowledge = async (inputSequence: {
@@ -86,6 +92,7 @@ export const connectStatisticsEventStream = async (input: {
     input.onViews({
       statistics: next.statistics.view,
       evidence: next.evidence?.view ?? null,
+      proposals: next.proposals.view,
     });
   };
 
@@ -105,6 +112,7 @@ export const connectStatisticsEventStream = async (input: {
     input.onViews({
       statistics: next.statistics.view,
       evidence: next.evidence?.view ?? null,
+      proposals: next.proposals.view,
     });
     await acknowledge({
       sequence: anchor.asOfSequence,
@@ -133,7 +141,8 @@ export const connectStatisticsEventStream = async (input: {
           );
         }
         if (
-          event.type === "statistics.evidence.invalidated" &&
+          (event.type === "statistics.evidence.invalidated" ||
+            event.type === "improvement.proposal.invalidated") &&
           event.projectId === input.projectId
         ) {
           await refresh();

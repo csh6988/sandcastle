@@ -1,4 +1,6 @@
+import { useState } from "react";
 import type {
+  ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
   StatisticsMetricId,
@@ -7,6 +9,20 @@ import type {
   StatisticsWindow,
 } from "../runtime/interface.js";
 import type { Messages } from "./i18n.js";
+
+export interface ImprovementProposalDraft {
+  readonly metricId: StatisticsMetricId | "";
+  readonly targetOwnerId: string;
+  readonly governedHeadRevisionId: string;
+  readonly governedHeadRevisionHash: string;
+  readonly principle: string;
+  readonly constitution: string;
+  readonly rule: string;
+  readonly rootCauseHypothesis: string;
+  readonly rolloutNotes: string;
+  readonly rollbackRevisionId: string;
+  readonly rollbackRevisionHash: string;
+}
 
 const metricLabel = (t: Messages, metricId: StatisticsMetricId): string => {
   const labels: Readonly<Record<StatisticsMetricId, string>> = {
@@ -114,6 +130,10 @@ export function ProjectImprovementsPanel({
   onInspect,
   onFreeze,
   onInspectEvidence,
+  proposals,
+  onCreateProposal,
+  onReviseProposal,
+  onProposeProposal,
 }: {
   readonly t: Messages;
   readonly query: StatisticsInspectInput;
@@ -127,7 +147,53 @@ export function ProjectImprovementsPanel({
   readonly onInspect: () => void;
   readonly onFreeze: () => void;
   readonly onInspectEvidence: () => void;
+  readonly proposals?: readonly ImprovementProposalView[];
+  readonly onCreateProposal?: (draft: ImprovementProposalDraft) => void;
+  readonly onReviseProposal?: (
+    proposal: ImprovementProposalView,
+    draft: ImprovementProposalDraft,
+  ) => void;
+  readonly onProposeProposal?: (proposal: ImprovementProposalView) => void;
 }) {
+  const [proposalDraft, setProposalDraft] = useState<ImprovementProposalDraft>({
+    metricId: "",
+    targetOwnerId: "",
+    governedHeadRevisionId: "",
+    governedHeadRevisionHash: "",
+    principle: "",
+    constitution: "",
+    rule: "",
+    rootCauseHypothesis: "",
+    rolloutNotes: "",
+    rollbackRevisionId: "",
+    rollbackRevisionHash: "",
+  });
+  const updateProposalDraft = <Key extends keyof ImprovementProposalDraft>(
+    key: Key,
+    value: ImprovementProposalDraft[Key],
+  ): void => setProposalDraft((current) => ({ ...current, [key]: value }));
+  const isHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
+  const hasGovernedHead =
+    proposalDraft.governedHeadRevisionId.trim().length > 0 ||
+    proposalDraft.governedHeadRevisionHash.trim().length > 0;
+  const proposalMetricAvailable = evidence?.observations.some(
+    (observation) =>
+      observation.metricId === proposalDraft.metricId &&
+      observation.status === "available",
+  );
+  const proposalDraftValid =
+    proposalMetricAvailable === true &&
+    proposalDraft.targetOwnerId.trim().length > 0 &&
+    proposalDraft.principle.trim().length > 0 &&
+    proposalDraft.constitution.trim().length > 0 &&
+    proposalDraft.rule.trim().length > 0 &&
+    proposalDraft.rootCauseHypothesis.trim().length > 0 &&
+    proposalDraft.rolloutNotes.trim().length > 0 &&
+    proposalDraft.rollbackRevisionId.trim().length > 0 &&
+    isHash(proposalDraft.rollbackRevisionHash.trim()) &&
+    (!hasGovernedHead ||
+      (proposalDraft.governedHeadRevisionId.trim().length > 0 &&
+        isHash(proposalDraft.governedHeadRevisionHash.trim())));
   return (
     <section className="project-improvements" data-project-improvements>
       <header className="section-heading">
@@ -249,6 +315,234 @@ export function ProjectImprovementsPanel({
         ) : (
           <p>{t.statisticsNoEvidence}</p>
         )}
+      </section>
+      <section className="create-panel" data-improvement-proposals>
+        <h3>{t.improvementProposalsTitle}</h3>
+        <p>{t.improvementProposalsBody}</p>
+        <div className="field-grid two-column">
+          <label>
+            <span>{t.improvementValidationMetric}</span>
+            <select
+              value={proposalDraft.metricId}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "metricId",
+                  event.currentTarget.value as StatisticsMetricId | "",
+                )
+              }
+            >
+              <option value="">{t.improvementSelectMetric}</option>
+              {(evidence?.observations ?? [])
+                .filter((observation) => observation.status === "available")
+                .map((observation) => (
+                  <option
+                    key={observation.metricId}
+                    value={observation.metricId}
+                  >
+                    {metricLabel(t, observation.metricId)}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>{t.improvementTargetOwner}</span>
+            <input
+              value={proposalDraft.targetOwnerId}
+              onChange={(event) =>
+                updateProposalDraft("targetOwnerId", event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementGovernedHeadRevisionId}</span>
+            <input
+              value={proposalDraft.governedHeadRevisionId}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "governedHeadRevisionId",
+                  event.currentTarget.value,
+                )
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementGovernedHeadRevisionHash}</span>
+            <input
+              value={proposalDraft.governedHeadRevisionHash}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "governedHeadRevisionHash",
+                  event.currentTarget.value,
+                )
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementHarnessPrinciple}</span>
+            <input
+              value={proposalDraft.principle}
+              onChange={(event) =>
+                updateProposalDraft("principle", event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementHarnessConstitution}</span>
+            <textarea
+              value={proposalDraft.constitution}
+              onChange={(event) =>
+                updateProposalDraft("constitution", event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementHarnessRule}</span>
+            <textarea
+              value={proposalDraft.rule}
+              onChange={(event) =>
+                updateProposalDraft("rule", event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementRootCause}</span>
+            <textarea
+              value={proposalDraft.rootCauseHypothesis}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "rootCauseHypothesis",
+                  event.currentTarget.value,
+                )
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementRolloutNotes}</span>
+            <textarea
+              value={proposalDraft.rolloutNotes}
+              onChange={(event) =>
+                updateProposalDraft("rolloutNotes", event.currentTarget.value)
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementRollbackRevisionId}</span>
+            <input
+              value={proposalDraft.rollbackRevisionId}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "rollbackRevisionId",
+                  event.currentTarget.value,
+                )
+              }
+            />
+          </label>
+          <label>
+            <span>{t.improvementRollbackRevisionHash}</span>
+            <input
+              value={proposalDraft.rollbackRevisionHash}
+              onChange={(event) =>
+                updateProposalDraft(
+                  "rollbackRevisionHash",
+                  event.currentTarget.value,
+                )
+              }
+            />
+          </label>
+        </div>
+        <div className="form-actions">
+          <button
+            disabled={busy || !proposalDraftValid || !onCreateProposal}
+            onClick={() => onCreateProposal?.(proposalDraft)}
+            type="button"
+          >
+            {t.improvementCreateDraft}
+          </button>
+        </div>
+        <div className="overview-inventory" data-improvement-proposal-history>
+          {(proposals ?? []).map((proposal) => {
+            const currentRevision = proposal.revisions.find(
+              (revision) => revision.id === proposal.currentRevisionId,
+            );
+            return (
+              <article
+                data-improvement-proposal={proposal.id}
+                key={proposal.id}
+              >
+                <div className="project-card-top">
+                  <strong>{proposal.id}</strong>
+                  <span className="pill">{proposal.currentState}</span>
+                </div>
+                {currentRevision ? (
+                  <dl>
+                    <div>
+                      <dt>{t.improvementRevision}</dt>
+                      <dd>
+                        {currentRevision.revision} · {currentRevision.hash}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t.improvementEvidence}</dt>
+                      <dd>
+                        {currentRevision.content.evidence.id} ·{" "}
+                        {currentRevision.content.evidence.hash}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t.improvementTarget}</dt>
+                      <dd>
+                        {currentRevision.content.target.targetKind} ·{" "}
+                        {currentRevision.content.target.ownerId}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t.improvementRootCause}</dt>
+                      <dd>{currentRevision.content.rootCauseHypothesis}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+                <ol data-improvement-revision-timeline>
+                  {proposal.revisions.map((revision) => (
+                    <li key={revision.id}>
+                      {t.improvementRevision} {revision.revision} ·{" "}
+                      {revision.id} ·{" "}
+                      {revision.lifecycle
+                        .map((entry) => entry.state)
+                        .join(" → ")}
+                    </li>
+                  ))}
+                </ol>
+                <div className="form-actions">
+                  {proposal.nextActions.includes("revise") ? (
+                    <button
+                      disabled={
+                        busy || !proposalDraftValid || !onReviseProposal
+                      }
+                      onClick={() =>
+                        onReviseProposal?.(proposal, proposalDraft)
+                      }
+                      type="button"
+                    >
+                      {t.improvementReviseDraft}
+                    </button>
+                  ) : null}
+                  {proposal.nextActions.includes("propose") ? (
+                    <button
+                      disabled={busy || !onProposeProposal}
+                      onClick={() => onProposeProposal?.(proposal)}
+                      type="button"
+                    >
+                      {t.improvementPropose}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+          {(proposals ?? []).length === 0 ? (
+            <p>{t.improvementNoProposals}</p>
+          ) : null}
+        </div>
       </section>
     </section>
   );

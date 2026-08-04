@@ -3650,8 +3650,7 @@ export const ImprovementProposalInspectQuerySchema = z
 export const ImprovementProposalListQuerySchema = z
   .object({
     type: z.literal("improvement-proposals.list"),
-    projectId: z.string().trim().min(1).optional(),
-    departmentId: z.string().trim().min(1).optional(),
+    projectId: z.string().trim().min(1),
   })
   .strict();
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
+  ImprovementProposalView,
   StatisticsEvidenceSnapshotView,
   StatisticsInspectInput,
   StatisticsView,
@@ -161,6 +162,152 @@ describe("Project Improvements panel", () => {
     assert.match(markup, /检查统计/);
     assert.match(markup, /冻结精确证据/);
     assert.match(markup, /尚未检查统计数据/);
+  });
+
+  it("renders strict Improvement proposal authoring and immutable revision history in English and Chinese", () => {
+    const evidence: StatisticsEvidenceSnapshotView = {
+      id: "statistics-evidence-proposal",
+      query: canonicalQuery,
+      queryHash: hash,
+      asOfSequence: 42,
+      observations: [
+        {
+          metricId: "review-finding-count",
+          status: "available",
+          measurement: { kind: "count", value: 2 },
+          sourceFactFamily: "review-finding",
+          sourceFactRefs: ["finding:1", "finding:2"],
+        },
+      ],
+      completeness: {
+        status: "complete",
+        incompleteMetricIds: [],
+        unavailableMetricIds: [],
+      },
+      frozenBy: {
+        type: "runtime-worker",
+        id: "runtime-worker:improvements",
+        authenticatedBy: "runtime",
+      },
+      hash,
+      createdAt: "2026-08-04T00:01:00.000Z",
+    };
+    const proposal: ImprovementProposalView = {
+      id: "improvement-proposal:1",
+      projectId: "project-1",
+      departmentId: null,
+      currentRevisionId: "improvement-proposal-revision:2",
+      currentState: "draft" as const,
+      revisions: [
+        {
+          id: "improvement-proposal-revision:1",
+          revision: 1,
+          supersedesRevisionId: null,
+          content: {
+            evidence,
+            target: {
+              targetKind: "harness" as const,
+              ownerId: "harness:review",
+              governedHead: { revisionId: null, revisionHash: null },
+              content: {
+                principles: ["Use exact evidence."],
+                constitution: "Review immutable contracts.",
+                rules: ["Bind recommendations to frozen evidence."],
+                examples: { positive: [], negative: [] },
+                impactScope: ["project-1"],
+              },
+            },
+            rootCauseHypothesis: "Review guidance permits moving evidence.",
+            impactScope: {
+              projectIds: ["project-1"],
+              departmentIds: [],
+              positionIds: [],
+            },
+            expectedMetrics: [
+              {
+                metricId: "review-finding-count" as const,
+                direction: "decrease" as const,
+              },
+            ],
+            validationPolicy: {
+              metricIds: ["review-finding-count" as const],
+              minimumComparableObservations: 1,
+            },
+            rolloutNotes: "Validate the next cohort.",
+            rollbackSource: {
+              revisionId: "harness:source",
+              revisionHash: hash,
+            },
+          },
+          hash,
+          authoredBy: {
+            type: "runtime-worker" as const,
+            id: "runtime-worker:improvements",
+            authenticatedBy: "runtime" as const,
+          },
+          lifecycle: [
+            { state: "draft" as const, createdAt: "2026-08-04T00:02:00.000Z" },
+          ],
+          decision: null,
+          createdAt: "2026-08-04T00:02:00.000Z",
+        },
+      ],
+      nextActions: ["revise" as const, "propose" as const],
+      createdAt: "2026-08-04T00:02:00.000Z",
+      updatedAt: "2026-08-04T00:02:00.000Z",
+    };
+    const firstRevision = proposal.revisions[0];
+    if (!firstRevision) assert.fail("first proposal revision must exist");
+    proposal.revisions.push({
+      ...firstRevision,
+      id: "improvement-proposal-revision:2",
+      revision: 2,
+      supersedesRevisionId: "improvement-proposal-revision:1",
+      content: {
+        ...firstRevision.content,
+        rootCauseHypothesis:
+          "Review guidance lacks a stable evidence identity.",
+      },
+    });
+    const render = (t: Messages) =>
+      renderToStaticMarkup(
+        <ProjectImprovementsPanel
+          busy={false}
+          diagnostic={null}
+          evidence={evidence}
+          evidenceSnapshotId={evidence.id}
+          onEvidenceSnapshotIdChange={() => undefined}
+          onFreeze={() => undefined}
+          onInspect={() => undefined}
+          onInspectEvidence={() => undefined}
+          onWindowChange={() => undefined}
+          proposals={[proposal]}
+          query={query}
+          t={t}
+          view={null}
+        />,
+      );
+
+    const english = render(messages.en);
+    const chinese = render(messages.zh);
+    assert.match(english, /Improvement proposals/);
+    assert.match(english, /Expected and validation metric/);
+    assert.match(english, /Select an available metric/);
+    assert.match(english, /Harness owner ID/);
+    assert.match(english, /Create proposal draft/);
+    assert.match(english, /Create revised draft/);
+    assert.match(english, /Propose exact revision/);
+    assert.match(english, /improvement-proposal-revision:1/);
+    assert.match(english, /improvement-proposal-revision:2/);
+    assert.match(english, /statistics-evidence-proposal/);
+    assert.match(english, /Review guidance lacks a stable evidence identity/);
+    assert.match(chinese, /改进提案/);
+    assert.match(chinese, /预期与验证指标/);
+    assert.match(chinese, /选择可用指标/);
+    assert.match(chinese, /Harness 所有者 ID/);
+    assert.match(chinese, /创建提案草稿/);
+    assert.match(chinese, /创建修订草稿/);
+    assert.match(chinese, /提交精确修订版/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {
