@@ -42,6 +42,87 @@ const target = {
   },
 };
 
+const seedGovernedGenesis = (
+  company: ReturnType<typeof openCompanyDatabase>,
+  target: ImprovementTarget,
+): ImprovementTarget => {
+  if (target.governedHead.revisionId !== null) return target;
+  const revisionId = `${target.ownerId}:source`;
+  const revisionHash = hash(
+    target.targetKind === "application-spec"
+      ? {
+          applicationId: target.content.lineage.applicationId,
+          promotedProjectSpecRevisionId:
+            target.content.lineage.promotedProjectSpecRevisionId,
+          promotedProjectSpecHash:
+            target.content.lineage.promotedProjectSpecHash,
+          content: target.content.content,
+        }
+      : target.content,
+  );
+  const sqlite = new DatabaseSync(company.path);
+  sqlite.exec("PRAGMA foreign_keys = ON;");
+  if (target.targetKind === "harness") {
+    sqlite
+      .prepare(
+        `INSERT INTO governed_harness_revisions(
+           id, owner_id, revision, supersedes_revision_id, content_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        canonicalJson(target.content),
+        revisionHash,
+        "2026-08-04T00:00:00.000Z",
+      );
+  } else if (target.targetKind === "template") {
+    sqlite
+      .prepare(
+        `INSERT INTO runtime_template_revisions(
+           id, owner_id, revision, supersedes_revision_id, manifest_json,
+           content_hash, operation_id, phase, created_at
+         ) VALUES (?, ?, 1, NULL, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        canonicalJson(target.content.manifest),
+        revisionHash,
+        "2026-08-04T00:00:00.000Z",
+      );
+  } else if (target.targetKind === "skill-flow") {
+    sqlite
+      .prepare(
+        `INSERT INTO governed_skill_flow_revisions(
+           id, owner_id, position_id, revision, supersedes_revision_id, name,
+           instructions, skill_ids_json, content_hash, operation_id, phase,
+           created_at
+         ) VALUES (?, ?, ?, 1, NULL, ?, ?, ?, ?, NULL, NULL, ?)`,
+      )
+      .run(
+        revisionId,
+        target.ownerId,
+        target.content.positionId,
+        target.content.name,
+        target.content.instructions,
+        canonicalJson(target.content.skillIds),
+        revisionHash,
+        "2026-08-04T00:00:00.000Z",
+      );
+  } else {
+    sqlite.close();
+    return target;
+  }
+  assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
+  sqlite.close();
+  return {
+    ...target,
+    governedHead: { revisionId, revisionHash },
+  } as ImprovementTarget;
+};
+
 const createApplyIntent = (
   company: ReturnType<typeof openCompanyDatabase>,
   operationId: string,
@@ -86,12 +167,27 @@ const createApplyIntent = (
   });
   assert.equal(frozen.status, "succeeded");
   if (frozen.status !== "succeeded") assert.fail("freeze must succeed");
-  const governedTarget =
+  const requestedTarget =
     options.target?.(project.id) ??
     ({
       ...target,
       content: { ...target.content, impactScope: [project.id] },
     } satisfies ImprovementTarget);
+  const governedTarget = seedGovernedGenesis(company, requestedTarget);
+  const rollbackSource =
+    options.rollbackSource ??
+    (() => {
+      if (
+        governedTarget.governedHead.revisionId === null ||
+        governedTarget.governedHead.revisionHash === null
+      ) {
+        assert.fail("a governed rollback source is required");
+      }
+      return {
+        revisionId: governedTarget.governedHead.revisionId,
+        revisionHash: governedTarget.governedHead.revisionHash,
+      };
+    })();
   const proposal = company.commandRegistry.execute({
     schemaVersion: 1,
     commandId: `command:adapter-proposal:${operationId}`,
@@ -120,10 +216,7 @@ const createApplyIntent = (
             minimumComparableObservations: 1,
           },
           rolloutNotes: "Validate the next cohort.",
-          rollbackSource: options.rollbackSource ?? {
-            revisionId: `${governedTarget.ownerId}:source`,
-            revisionHash: "a".repeat(64),
-          },
+          rollbackSource,
         },
       },
     },
@@ -252,7 +345,7 @@ describe("Governed revision Adapter", () => {
           .prepare("SELECT COUNT(*) AS count FROM governed_harness_revisions")
           .get() as { readonly count: number }
       ).count,
-      1,
+      2,
     );
 
     await assert.rejects(
@@ -653,13 +746,13 @@ describe("Governed revision Adapter", () => {
         readonly manifestJson: string;
         readonly contentHash: string;
       }>;
-      assert.equal(revisions.length, 3);
-      assert.equal(revisions[0]?.id, source.revision.revisionId);
-      assert.equal(revisions[1]?.id, applied.revision.revisionId);
-      assert.equal(revisions[2]?.id, restored.revision.revisionId);
-      assert.equal(revisions[2]?.manifestJson, revisions[0]?.manifestJson);
-      assert.equal(revisions[2]?.contentHash, revisions[0]?.contentHash);
-      assert.notEqual(revisions[1]?.manifestJson, revisions[0]?.manifestJson);
+      assert.equal(revisions.length, 4);
+      assert.equal(revisions[1]?.id, source.revision.revisionId);
+      assert.equal(revisions[2]?.id, applied.revision.revisionId);
+      assert.equal(revisions[3]?.id, restored.revision.revisionId);
+      assert.equal(revisions[3]?.manifestJson, revisions[1]?.manifestJson);
+      assert.equal(revisions[3]?.contentHash, revisions[1]?.contentHash);
+      assert.notEqual(revisions[2]?.manifestJson, revisions[1]?.manifestJson);
     } finally {
       sqlite.close();
       company.close();
@@ -774,12 +867,12 @@ describe("Governed revision Adapter", () => {
         readonly skillIdsJson: string;
         readonly contentHash: string;
       }>;
-      assert.equal(revisions.length, 3);
-      assert.equal(revisions[0]?.id, source.revision.revisionId);
-      assert.equal(revisions[1]?.id, applied.revision.revisionId);
-      assert.equal(revisions[2]?.id, restored.revision.revisionId);
-      assert.equal(revisions[2]?.contentHash, revisions[0]?.contentHash);
-      assert.equal(revisions[2]?.skillIdsJson, canonicalJson(skillIds));
+      assert.equal(revisions.length, 4);
+      assert.equal(revisions[1]?.id, source.revision.revisionId);
+      assert.equal(revisions[2]?.id, applied.revision.revisionId);
+      assert.equal(revisions[3]?.id, restored.revision.revisionId);
+      assert.equal(revisions[3]?.contentHash, revisions[1]?.contentHash);
+      assert.equal(revisions[3]?.skillIdsJson, canonicalJson(skillIds));
       assert.deepEqual(
         sqlite.prepare("SELECT * FROM skill_flows ORDER BY id").all(),
         legacyFlowsBefore,
@@ -796,10 +889,10 @@ describe("Governed revision Adapter", () => {
       const invalidOperationId =
         "improvement-application:skill-flow:unbound-skill";
       const invalidTarget = createApplyIntent(company, invalidOperationId, {
+        rollbackSource: source.revision,
         target: () => ({
           ...sourceTarget,
-          ownerId: "governed-skill-flow:invalid",
-          governedHead: { revisionId: null, revisionHash: null },
+          governedHead: restored.revision,
           content: {
             ...sourceTarget.content,
             skillIds: ["skill:not-bound-to-position"],
