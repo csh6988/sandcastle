@@ -60,17 +60,7 @@ export const openSqliteGovernedRevisionAdapter = (
   const clock = options.clock ?? (() => new Date());
 
   const requireSupportedTarget = (target: ImprovementTarget) => {
-    const parsed = ImprovementTargetSchema.parse(target);
-    if (
-      parsed.targetKind === "template" ||
-      parsed.targetKind === "skill-flow"
-    ) {
-      throw new GovernedRevisionAdapterError(
-        "IMPROVEMENT_TARGET_UNSUPPORTED",
-        `Target kind ${parsed.targetKind} is not supported by this governed revision Adapter slice.`,
-      );
-    }
-    return parsed;
+    return ImprovementTargetSchema.parse(target);
   };
 
   const revisionHash = (
@@ -98,10 +88,20 @@ export const openSqliteGovernedRevisionAdapter = (
           }
         : target.targetKind === "project-spec"
           ? { table: "project_spec_revisions", ownerColumn: "project_spec_id" }
-          : {
-              table: "application_spec_revisions",
-              ownerColumn: "application_spec_id",
-            };
+          : target.targetKind === "application-spec"
+            ? {
+                table: "application_spec_revisions",
+                ownerColumn: "application_spec_id",
+              }
+            : target.targetKind === "template"
+              ? {
+                  table: "runtime_template_revisions",
+                  ownerColumn: "owner_id",
+                }
+              : {
+                  table: "governed_skill_flow_revisions",
+                  ownerColumn: "owner_id",
+                };
     const row = database
       .prepare(
         `SELECT id AS revisionId, content_hash AS revisionHash
@@ -140,11 +140,23 @@ export const openSqliteGovernedRevisionAdapter = (
                 ownerColumn: "project_spec_id",
                 operationColumns: false,
               }
-            : {
-                table: "application_spec_revisions",
-                ownerColumn: "application_spec_id",
-                operationColumns: false,
-              };
+            : target.targetKind === "application-spec"
+              ? {
+                  table: "application_spec_revisions",
+                  ownerColumn: "application_spec_id",
+                  operationColumns: false,
+                }
+              : target.targetKind === "template"
+                ? {
+                    table: "runtime_template_revisions",
+                    ownerColumn: "owner_id",
+                    operationColumns: true,
+                  }
+                : {
+                    table: "governed_skill_flow_revisions",
+                    ownerColumn: "owner_id",
+                    operationColumns: true,
+                  };
       const row = database
         .prepare(
           `SELECT id AS revisionId, ${source.ownerColumn} AS ownerId,
@@ -319,7 +331,7 @@ export const openSqliteGovernedRevisionAdapter = (
             lineage.producerSessionId,
             createdAt,
           );
-      } else {
+      } else if (target.targetKind === "application-spec") {
         if (!head) {
           throw new GovernedRevisionAdapterError(
             "IMPROVEMENT_TARGET_CONFLICT",
@@ -412,6 +424,87 @@ export const openSqliteGovernedRevisionAdapter = (
             lineage.producerAiMemberId,
             lineage.producerPositionId,
             lineage.producerSessionId,
+            createdAt,
+          );
+      } else if (target.targetKind === "template") {
+        const revision = (
+          database
+            .prepare(
+              `SELECT COALESCE(MAX(revision), 0) + 1 AS revision
+                 FROM runtime_template_revisions WHERE owner_id = ?`,
+            )
+            .get(target.ownerId) as { readonly revision: number }
+        ).revision;
+        database
+          .prepare(
+            `INSERT INTO runtime_template_revisions(
+               id, owner_id, revision, supersedes_revision_id, manifest_json,
+               content_hash, operation_id, phase, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            revisionId,
+            target.ownerId,
+            revision,
+            head?.revisionId ?? null,
+            canonicalJson(target.content.manifest),
+            contentHash,
+            input.operationId,
+            input.phase,
+            createdAt,
+          );
+      } else {
+        const position = database
+          .prepare("SELECT 1 AS present FROM positions WHERE id = ?")
+          .get(target.content.positionId);
+        if (!position) {
+          throw new GovernedRevisionAdapterError(
+            "IMPROVEMENT_TARGET_CONFLICT",
+            `Governed Skill Flow ${target.ownerId} references unknown Position ${target.content.positionId}.`,
+          );
+        }
+        for (const skillId of target.content.skillIds) {
+          const binding = database
+            .prepare(
+              `SELECT 1 AS present FROM position_skill_bindings
+                WHERE position_id = ? AND skill_id = ?`,
+            )
+            .get(target.content.positionId, skillId);
+          if (!binding) {
+            throw new GovernedRevisionAdapterError(
+              "IMPROVEMENT_TARGET_CONFLICT",
+              `Skill ${skillId} is not owned by Position ${target.content.positionId}.`,
+            );
+          }
+        }
+        const revision = (
+          database
+            .prepare(
+              `SELECT COALESCE(MAX(revision), 0) + 1 AS revision
+                 FROM governed_skill_flow_revisions WHERE owner_id = ?`,
+            )
+            .get(target.ownerId) as { readonly revision: number }
+        ).revision;
+        database
+          .prepare(
+            `INSERT INTO governed_skill_flow_revisions(
+               id, owner_id, position_id, revision, supersedes_revision_id,
+               name, instructions, skill_ids_json, content_hash, operation_id,
+               phase, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            revisionId,
+            target.ownerId,
+            target.content.positionId,
+            revision,
+            head?.revisionId ?? null,
+            target.content.name,
+            target.content.instructions,
+            canonicalJson(target.content.skillIds),
+            contentHash,
+            input.operationId,
+            input.phase,
             createdAt,
           );
       }

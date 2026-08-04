@@ -652,15 +652,6 @@ export const openImprovementApplicationRuntime = (
           `Improvement proposal revision ${request.proposalRevisionId} lacks the exact approved decision.`,
         );
       }
-      if (
-        request.target.targetKind === "template" ||
-        request.target.targetKind === "skill-flow"
-      ) {
-        throw new ImprovementApplicationRuntimeError(
-          "IMPROVEMENT_TARGET_UNSUPPORTED",
-          `Target kind ${request.target.targetKind} is not supported by this application slice.`,
-        );
-      }
       const createdAt = clock().toISOString();
       const deterministicEffectId = `improvement-effect:${sha256({
         operationId: request.operationId,
@@ -1174,15 +1165,6 @@ export const openImprovementApplicationRuntime = (
       readonly revisionHash: string;
     },
   ): ImprovementTarget => {
-    if (
-      operation.target.targetKind === "template" ||
-      operation.target.targetKind === "skill-flow"
-    ) {
-      throw new ImprovementApplicationRuntimeError(
-        "IMPROVEMENT_TARGET_UNSUPPORTED",
-        `Target kind ${operation.target.targetKind} does not yet support rollback.`,
-      );
-    }
     if (operation.target.targetKind === "project-spec") {
       const source = database
         .prepare(
@@ -1250,6 +1232,73 @@ export const openImprovementApplicationRuntime = (
           content: parseJson(
             source.contentJson,
             `Application Spec rollback source ${sourceRevision.revisionId}`,
+          ),
+        },
+      });
+    }
+    if (operation.target.targetKind === "template") {
+      const source = database
+        .prepare(
+          `SELECT manifest_json AS manifestJson
+             FROM runtime_template_revisions
+            WHERE owner_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.target.ownerId,
+          sourceRevision.revisionId,
+          sourceRevision.revisionHash,
+        ) as { readonly manifestJson: string } | undefined;
+      if (!source) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Rollback source ${sourceRevision.revisionId} is not an exact Runtime template revision.`,
+        );
+      }
+      return ImprovementTargetSchema.parse({
+        ...operation.target,
+        content: {
+          manifest: parseJson(
+            source.manifestJson,
+            `Runtime template rollback source ${sourceRevision.revisionId}`,
+          ),
+        },
+      });
+    }
+    if (operation.target.targetKind === "skill-flow") {
+      const source = database
+        .prepare(
+          `SELECT position_id AS positionId, name, instructions,
+                  skill_ids_json AS skillIdsJson
+             FROM governed_skill_flow_revisions
+            WHERE owner_id = ? AND id = ? AND content_hash = ?`,
+        )
+        .get(
+          operation.target.ownerId,
+          sourceRevision.revisionId,
+          sourceRevision.revisionHash,
+        ) as
+        | {
+            readonly positionId: string;
+            readonly name: string;
+            readonly instructions: string;
+            readonly skillIdsJson: string;
+          }
+        | undefined;
+      if (!source) {
+        throw new ImprovementApplicationRuntimeError(
+          "IMPROVEMENT_TARGET_CONFLICT",
+          `Rollback source ${sourceRevision.revisionId} is not an exact governed Skill Flow revision.`,
+        );
+      }
+      return ImprovementTargetSchema.parse({
+        ...operation.target,
+        content: {
+          positionId: source.positionId,
+          name: source.name,
+          instructions: source.instructions,
+          skillIds: parseJson(
+            source.skillIdsJson,
+            `Governed Skill Flow rollback source ${sourceRevision.revisionId}`,
           ),
         },
       });

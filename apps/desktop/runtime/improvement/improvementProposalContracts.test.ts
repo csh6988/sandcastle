@@ -149,6 +149,45 @@ describe("Improvement proposal contracts", () => {
         },
       }),
     );
+    assert.throws(() =>
+      ImprovementTargetSchema.parse({
+        targetKind: "template",
+        ownerId: "template:unsorted",
+        governedHead: { revisionId: null, revisionHash: null },
+        content: {
+          manifest: [
+            { path: "z-last.md", contentHash: hash },
+            { path: "a-first.md", contentHash: hash },
+          ],
+        },
+      }),
+    );
+    assert.throws(() =>
+      ImprovementTargetSchema.parse({
+        targetKind: "template",
+        ownerId: "template:duplicate",
+        governedHead: { revisionId: null, revisionHash: null },
+        content: {
+          manifest: [
+            { path: "same.md", contentHash: hash },
+            { path: "same.md", contentHash: "b".repeat(64) },
+          ],
+        },
+      }),
+    );
+    assert.throws(() =>
+      ImprovementTargetSchema.parse({
+        targetKind: "skill-flow",
+        ownerId: "skill-flow:duplicate",
+        governedHead: { revisionId: null, revisionHash: null },
+        content: {
+          positionId: "position:reviewer",
+          name: "Review",
+          instructions: "Review exact evidence.",
+          skillIds: ["code-review", "code-review"],
+        },
+      }),
+    );
   });
 
   it("freezes all approved application states and exact error codes", () => {

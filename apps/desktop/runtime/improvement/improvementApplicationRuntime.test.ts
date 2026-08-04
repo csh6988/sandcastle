@@ -561,7 +561,7 @@ describe("Improvement Application Runtime", () => {
     database.close();
   });
 
-  it("applies Project and Application Spec targets through restart reconciliation without duplicate effects", async () => {
+  it("applies every governed target kind through restart reconciliation without duplicate effects", async () => {
     const targetCases = [
       {
         kind: "project-spec" as const,
@@ -598,6 +598,34 @@ describe("Improvement Application Runtime", () => {
               integrationObligations: ["Produce checkout-api@1."],
               contractRefs: [{ id: "checkout-api", version: "1" }],
             },
+          },
+        }),
+      },
+      {
+        kind: "template" as const,
+        target: (_projectId: string) => ({
+          targetKind: "template" as const,
+          ownerId: "template:software-rnd-review",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            manifest: [
+              { path: "review/prompt.md", contentHash: "b".repeat(64) },
+              { path: "review/rules.md", contentHash: "c".repeat(64) },
+            ],
+          },
+        }),
+      },
+      {
+        kind: "skill-flow" as const,
+        target: (_projectId: string) => ({
+          targetKind: "skill-flow" as const,
+          ownerId: "skill-flow:software-rnd-review",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            positionId: "reviewer",
+            name: "Governed review",
+            instructions: "Review the exact immutable evidence.",
+            skillIds: ["code-review"],
           },
         }),
       },
@@ -1323,6 +1351,250 @@ describe("Improvement Application Runtime", () => {
     assert.notEqual(revisions[1]?.contentJson, revisions[0]?.contentJson);
     sqlite.close();
     database.close();
+  });
+
+  it("rolls back Runtime template and governed Skill Flow targets by restoring exact source content", async () => {
+    for (const targetKind of ["template", "skill-flow"] as const) {
+      const database = openCompanyDatabase(tempCompanyDir(), {
+        clock: () => new Date(timestamp),
+      });
+      const sqlite = new DatabaseSync(database.path);
+      const position =
+        targetKind === "skill-flow"
+          ? (sqlite
+              .prepare(
+                `SELECT position_id AS positionId
+                   FROM position_skill_bindings
+               GROUP BY position_id
+               ORDER BY position_id
+                  LIMIT 1`,
+              )
+              .get() as { readonly positionId: string } | undefined)
+          : undefined;
+      if (targetKind === "skill-flow" && !position) {
+        assert.fail("a seeded Position Skill binding is required");
+      }
+      const skillIds = position
+        ? (
+            sqlite
+              .prepare(
+                `SELECT skill_id AS skillId
+                   FROM position_skill_bindings
+                  WHERE position_id = ?
+               ORDER BY skill_id
+                  LIMIT 2`,
+              )
+              .all(position.positionId) as Array<{ readonly skillId: string }>
+          ).map((row) => row.skillId)
+        : [];
+      const legacyFlowsBefore = sqlite
+        .prepare("SELECT * FROM skill_flows ORDER BY id")
+        .all();
+      const legacySelectionsBefore = sqlite
+        .prepare(
+          "SELECT * FROM skill_flow_skills ORDER BY skill_flow_id, sort_order",
+        )
+        .all();
+      sqlite.close();
+
+      const sourceTarget = (
+        _projectId: string,
+      ): ImprovementProposalRevisionContent["target"] => {
+        if (targetKind === "template") {
+          return {
+            targetKind,
+            ownerId: "template:runtime-rollback",
+            governedHead: { revisionId: null, revisionHash: null },
+            content: {
+              manifest: [
+                { path: "review/prompt.md", contentHash: "b".repeat(64) },
+                { path: "review/rules.md", contentHash: "c".repeat(64) },
+              ],
+            },
+          };
+        }
+        return {
+          targetKind,
+          ownerId: "governed-skill-flow:runtime-rollback",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            positionId: position!.positionId,
+            name: "Stable review",
+            instructions: "Review exact immutable evidence.",
+            skillIds,
+          },
+        };
+      };
+      const sourceProposal = createApprovedHarnessProposal(
+        database,
+        `${targetKind}:rollback-source`,
+        "decrease",
+        { target: sourceTarget },
+      );
+      const sourceIntent = database.commandRegistry.execute(
+        harnessApplyEnvelope(sourceProposal, {
+          operationId: `improvement-application:${targetKind}:rollback-source`,
+          commandId: `command:apply-${targetKind}-rollback-source`,
+        }),
+      );
+      assert.equal(sourceIntent.status, "succeeded");
+      if (sourceIntent.status !== "succeeded") {
+        assert.fail("source apply intent must succeed");
+      }
+      const sourceApplied = await database.improvementApplications.dispatch(
+        sourceIntent.value.id,
+      );
+      const sourceRevision = sourceApplied.receipts[0]?.targetRevision;
+      if (!sourceRevision) assert.fail("source revision must exist");
+
+      const changedProposal = createApprovedHarnessProposal(
+        database,
+        `${targetKind}:rollback-change`,
+        "decrease",
+        {
+          rollbackSource: sourceRevision,
+          target: (projectId) => {
+            const source = sourceTarget(projectId);
+            if (source.targetKind === "template") {
+              return {
+                ...source,
+                governedHead: sourceRevision,
+                content: {
+                  manifest: [
+                    {
+                      path: "review/prompt.md",
+                      contentHash: "d".repeat(64),
+                    },
+                    {
+                      path: "review/rules.md",
+                      contentHash: "c".repeat(64),
+                    },
+                  ],
+                },
+              };
+            }
+            if (source.targetKind !== "skill-flow") {
+              throw new Error("unexpected governed target kind");
+            }
+            return {
+              ...source,
+              governedHead: sourceRevision,
+              content: {
+                ...source.content,
+                name: "Experimental review",
+                instructions: "Review exact evidence and reconciliation state.",
+              },
+            };
+          },
+        },
+      );
+      const changedIntent = database.commandRegistry.execute(
+        harnessApplyEnvelope(changedProposal, {
+          operationId: `improvement-application:${targetKind}:rollback-change`,
+          commandId: `command:apply-${targetKind}-rollback-change`,
+        }),
+      );
+      assert.equal(changedIntent.status, "succeeded");
+      if (changedIntent.status !== "succeeded") {
+        assert.fail("changed apply intent must succeed");
+      }
+      const changedApplied = await database.improvementApplications.dispatch(
+        changedIntent.value.id,
+      );
+      const appliedRevision = changedApplied.receipts[0]?.targetRevision;
+      if (!appliedRevision) assert.fail("applied revision must exist");
+      const rollbackIntent = database.commandRegistry.execute({
+        schemaVersion: 1,
+        commandId: `command:rollback-${targetKind}-change`,
+        actor: {
+          type: "human" as const,
+          id: "human:improvement-owner",
+          authenticatedBy: "local-session" as const,
+        },
+        command: {
+          type: "improvement.application.rollback" as const,
+          rollback: {
+            operationId: changedApplied.id,
+            expectedOperationHash: changedApplied.canonicalRequestHash,
+            appliedRevision,
+            expectedGovernedHead: appliedRevision,
+            rollbackSource: sourceRevision,
+            confirmation: `I confirm restoring the exact selected ${targetKind} source revision.`,
+            reason: `Restore the stable governed ${targetKind} content.`,
+            evidenceRefs: [
+              sourceRevision.revisionId,
+              appliedRevision.revisionId,
+            ],
+          },
+        },
+      });
+      assert.equal(rollbackIntent.status, "succeeded");
+      if (rollbackIntent.status !== "succeeded") {
+        assert.fail("rollback intent must succeed");
+      }
+      const rolledBack = await database.improvementApplications.dispatch(
+        rollbackIntent.value.id,
+      );
+      assert.equal(rolledBack.state, "rolled-back");
+      const restoringRevision = rolledBack.rollbacks.at(-1)?.restoringRevision;
+      if (!restoringRevision) assert.fail("restoring revision must exist");
+
+      const after = new DatabaseSync(database.path);
+      if (targetKind === "template") {
+        const revisions = after
+          .prepare(
+            `SELECT id, manifest_json AS contentJson
+               FROM runtime_template_revisions
+              WHERE owner_id = ? ORDER BY revision`,
+          )
+          .all(changedProposal.content.target.ownerId) as Array<{
+          readonly id: string;
+          readonly contentJson: string;
+        }>;
+        assert.equal(revisions.length, 3);
+        assert.equal(revisions[2]?.id, restoringRevision.revisionId);
+        assert.equal(revisions[2]?.contentJson, revisions[0]?.contentJson);
+        assert.notEqual(revisions[1]?.contentJson, revisions[0]?.contentJson);
+      } else {
+        const revisions = after
+          .prepare(
+            `SELECT id, position_id AS positionId, name, instructions,
+                    skill_ids_json AS skillIdsJson
+               FROM governed_skill_flow_revisions
+              WHERE owner_id = ? ORDER BY revision`,
+          )
+          .all(changedProposal.content.target.ownerId) as Array<{
+          readonly id: string;
+          readonly positionId: string;
+          readonly name: string;
+          readonly instructions: string;
+          readonly skillIdsJson: string;
+        }>;
+        assert.equal(revisions.length, 3);
+        assert.equal(revisions[2]?.id, restoringRevision.revisionId);
+        assert.deepEqual(
+          { ...revisions[2] },
+          {
+            ...revisions[0],
+            id: restoringRevision.revisionId,
+          },
+        );
+      }
+      assert.deepEqual(
+        after.prepare("SELECT * FROM skill_flows ORDER BY id").all(),
+        legacyFlowsBefore,
+      );
+      assert.deepEqual(
+        after
+          .prepare(
+            "SELECT * FROM skill_flow_skills ORDER BY skill_flow_id, sort_order",
+          )
+          .all(),
+        legacySelectionsBefore,
+      );
+      after.close();
+      database.close();
+    }
   });
 
   it("reconciles an exact restoring Harness revision after restart without duplicate rollback effect", async () => {

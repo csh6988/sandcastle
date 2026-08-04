@@ -225,7 +225,18 @@ export const GovernedSkillFlowRevisionContentSchema = z
     positionId: IdSchema,
     name: ReasonSchema,
     instructions: ReasonSchema,
-    skillIds: z.array(IdSchema).min(1).max(256),
+    skillIds: z
+      .array(IdSchema)
+      .min(1)
+      .max(256)
+      .superRefine((skillIds, context) => {
+        if (new Set(skillIds).size !== skillIds.length) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Governed Skill Flow Skill IDs must be unique.",
+          });
+        }
+      }),
   })
   .strict();
 

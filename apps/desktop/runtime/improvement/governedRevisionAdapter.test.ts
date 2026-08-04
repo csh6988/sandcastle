@@ -11,6 +11,7 @@ import {
   GovernedRevisionAdapterError,
   openSqliteGovernedRevisionAdapter,
 } from "./governedRevisionAdapter.js";
+import type { ImprovementTarget } from "./improvementProposalContracts.js";
 
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -44,6 +45,13 @@ const target = {
 const createApplyIntent = (
   company: ReturnType<typeof openCompanyDatabase>,
   operationId: string,
+  options: {
+    readonly target?: (projectId: string) => ImprovementTarget;
+    readonly rollbackSource?: {
+      readonly revisionId: string;
+      readonly revisionHash: string;
+    };
+  } = {},
 ) => {
   const project = company.catalog.createProject({
     name: "Harness Adapter",
@@ -56,11 +64,11 @@ const createApplyIntent = (
   };
   const frozen = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-freeze",
+    commandId: `command:adapter-freeze:${operationId}`,
     actor,
     command: {
       type: "statistics.evidence.freeze",
-      evidenceSnapshotId: "statistics-evidence:adapter",
+      evidenceSnapshotId: `statistics-evidence:adapter:${operationId}`,
       query: {
         projectId: project.id,
         window: {
@@ -78,23 +86,26 @@ const createApplyIntent = (
   });
   assert.equal(frozen.status, "succeeded");
   if (frozen.status !== "succeeded") assert.fail("freeze must succeed");
+  const governedTarget =
+    options.target?.(project.id) ??
+    ({
+      ...target,
+      content: { ...target.content, impactScope: [project.id] },
+    } satisfies ImprovementTarget);
   const proposal = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-proposal",
+    commandId: `command:adapter-proposal:${operationId}`,
     actor,
     command: {
       type: "improvement.proposal.create",
       proposal: {
-        proposalId: "improvement-proposal:adapter",
-        revisionId: "improvement-proposal-revision:adapter:1",
+        proposalId: `improvement-proposal:adapter:${operationId}`,
+        revisionId: `improvement-proposal-revision:adapter:${operationId}:1`,
         projectId: project.id,
         departmentId: null,
         content: {
           evidence: frozen.value,
-          target: {
-            ...target,
-            content: { ...target.content, impactScope: [project.id] },
-          },
+          target: governedTarget,
           rootCauseHypothesis: "Review guidance can drift.",
           impactScope: {
             projectIds: [project.id],
@@ -109,8 +120,8 @@ const createApplyIntent = (
             minimumComparableObservations: 1,
           },
           rolloutNotes: "Validate the next cohort.",
-          rollbackSource: {
-            revisionId: "harness:adapter:source",
+          rollbackSource: options.rollbackSource ?? {
+            revisionId: `${governedTarget.ownerId}:source`,
             revisionHash: "a".repeat(64),
           },
         },
@@ -123,7 +134,7 @@ const createApplyIntent = (
   if (!revision) assert.fail("proposal revision must exist");
   const proposed = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-propose",
+    commandId: `command:adapter-propose:${operationId}`,
     actor,
     command: {
       type: "improvement.proposal.propose",
@@ -133,10 +144,10 @@ const createApplyIntent = (
     },
   });
   assert.equal(proposed.status, "succeeded");
-  const confirmation = "I confirm this exact governed Harness revision.";
+  const confirmation = `I confirm this exact governed ${governedTarget.targetKind} revision.`;
   const requested = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-request-decision",
+    commandId: `command:adapter-request-decision:${operationId}`,
     actor,
     command: {
       type: "improvement.proposal.request-decision",
@@ -149,7 +160,7 @@ const createApplyIntent = (
   assert.equal(requested.status, "succeeded");
   const approved = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-approve",
+    commandId: `command:adapter-approve:${operationId}`,
     actor,
     command: {
       type: "improvement.proposal.decide",
@@ -168,7 +179,7 @@ const createApplyIntent = (
   if (!decision) assert.fail("approved decision must exist");
   const intent = company.commandRegistry.execute({
     schemaVersion: 1,
-    commandId: "command:adapter-apply-intent",
+    commandId: `command:adapter-apply-intent:${operationId}`,
     actor,
     command: {
       type: "improvement.application.apply",
@@ -180,7 +191,7 @@ const createApplyIntent = (
         approvedDecisionId: decision.id,
         expectedApprovedDecisionHash: decision.hash,
         target: revision.content.target,
-        confirmation: "I confirm applying this exact Harness revision.",
+        confirmation: `I confirm applying this exact ${governedTarget.targetKind} revision.`,
         reason: "Exercise the Adapter after durable intent.",
         evidenceRefs: [frozen.value.id, decision.id],
       },
@@ -554,5 +565,261 @@ describe("Governed revision Adapter", () => {
         error.code === "IMPROVEMENT_TARGET_CONFLICT",
     );
     sqlite.close();
+  });
+
+  it("appends and restores deterministic Runtime-owned template manifests", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-governed-template-adapter-"),
+    );
+    const company = openCompanyDatabase(companyDir, {
+      clock: () => new Date("2026-08-04T00:00:00.000Z"),
+    });
+    const sqlite = new DatabaseSync(company.path);
+    try {
+      const adapter = openSqliteGovernedRevisionAdapter(sqlite, {
+        clock: () => new Date("2026-08-04T00:00:00.000Z"),
+      });
+      const sourceOperationId = "improvement-application:template:source";
+      const sourceTarget = createApplyIntent(company, sourceOperationId, {
+        target: () => ({
+          targetKind: "template",
+          ownerId: "template:software-rnd-review",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            manifest: [
+              { path: "review/prompt.md", contentHash: "b".repeat(64) },
+              { path: "review/rules.md", contentHash: "c".repeat(64) },
+            ],
+          },
+        }),
+      });
+      if (sourceTarget.targetKind !== "template") {
+        assert.fail("template source target must remain exact");
+      }
+      const source = await adapter.appendRevision({
+        operationId: sourceOperationId,
+        target: sourceTarget,
+        phase: "apply",
+        expectedGovernedHead: sourceTarget.governedHead,
+      });
+      assert.equal(
+        source.revision.revisionHash,
+        "0cc224c1b34ef960bdc3d87f10cbc158d54c645167bdcc9b159392e53fa16c96",
+      );
+      const applyOperationId = "improvement-application:template:change";
+      const changedTarget = createApplyIntent(company, applyOperationId, {
+        rollbackSource: source.revision,
+        target: () => ({
+          ...sourceTarget,
+          governedHead: source.revision,
+          content: {
+            manifest: [
+              { path: "review/prompt.md", contentHash: "d".repeat(64) },
+              { path: "review/rules.md", contentHash: "c".repeat(64) },
+            ],
+          },
+        }),
+      });
+      if (changedTarget.targetKind !== "template") {
+        assert.fail("template changed target must remain exact");
+      }
+      const applied = await adapter.appendRevision({
+        operationId: applyOperationId,
+        target: changedTarget,
+        phase: "apply",
+        expectedGovernedHead: source.revision,
+      });
+      const replay = await adapter.appendRevision({
+        operationId: applyOperationId,
+        target: changedTarget,
+        phase: "apply",
+        expectedGovernedHead: source.revision,
+      });
+      assert.equal(replay.disposition, "no-op");
+      const restored = await adapter.appendRevision({
+        operationId: applyOperationId,
+        target: { ...changedTarget, content: sourceTarget.content },
+        phase: "rollback",
+        expectedGovernedHead: applied.revision,
+      });
+      const revisions = sqlite
+        .prepare(
+          `SELECT id, manifest_json AS manifestJson, content_hash AS contentHash
+             FROM runtime_template_revisions
+            WHERE owner_id = ? ORDER BY revision`,
+        )
+        .all(sourceTarget.ownerId) as Array<{
+        readonly id: string;
+        readonly manifestJson: string;
+        readonly contentHash: string;
+      }>;
+      assert.equal(revisions.length, 3);
+      assert.equal(revisions[0]?.id, source.revision.revisionId);
+      assert.equal(revisions[1]?.id, applied.revision.revisionId);
+      assert.equal(revisions[2]?.id, restored.revision.revisionId);
+      assert.equal(revisions[2]?.manifestJson, revisions[0]?.manifestJson);
+      assert.equal(revisions[2]?.contentHash, revisions[0]?.contentHash);
+      assert.notEqual(revisions[1]?.manifestJson, revisions[0]?.manifestJson);
+    } finally {
+      sqlite.close();
+      company.close();
+    }
+  });
+
+  it("validates governed Skill Flow revisions against Position-owned Skills without mutating the active flow", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-governed-skill-flow-adapter-"),
+    );
+    const company = openCompanyDatabase(companyDir, {
+      clock: () => new Date("2026-08-04T00:00:00.000Z"),
+    });
+    const sqlite = new DatabaseSync(company.path);
+    try {
+      const position = sqlite
+        .prepare(
+          `SELECT position_id AS positionId
+             FROM position_skill_bindings
+         GROUP BY position_id
+         ORDER BY position_id
+            LIMIT 1`,
+        )
+        .get() as { readonly positionId: string } | undefined;
+      if (!position) assert.fail("a seeded Position Skill binding is required");
+      const skillIds = (
+        sqlite
+          .prepare(
+            `SELECT skill_id AS skillId
+               FROM position_skill_bindings
+              WHERE position_id = ?
+           ORDER BY skill_id
+              LIMIT 2`,
+          )
+          .all(position.positionId) as Array<{ readonly skillId: string }>
+      ).map((row) => row.skillId);
+      assert.ok(skillIds.length > 0);
+      const legacyFlowsBefore = sqlite
+        .prepare("SELECT * FROM skill_flows ORDER BY id")
+        .all();
+      const legacySelectionsBefore = sqlite
+        .prepare(
+          "SELECT * FROM skill_flow_skills ORDER BY skill_flow_id, sort_order",
+        )
+        .all();
+      const adapter = openSqliteGovernedRevisionAdapter(sqlite, {
+        clock: () => new Date("2026-08-04T00:00:00.000Z"),
+      });
+      const sourceOperationId = "improvement-application:skill-flow:source";
+      const sourceTarget = createApplyIntent(company, sourceOperationId, {
+        target: () => ({
+          targetKind: "skill-flow",
+          ownerId: "governed-skill-flow:review",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            positionId: position.positionId,
+            name: "Stable review",
+            instructions: "Review exact immutable evidence.",
+            skillIds,
+          },
+        }),
+      });
+      if (sourceTarget.targetKind !== "skill-flow") {
+        assert.fail("Skill Flow source target must remain exact");
+      }
+      const source = await adapter.appendRevision({
+        operationId: sourceOperationId,
+        target: sourceTarget,
+        phase: "apply",
+        expectedGovernedHead: sourceTarget.governedHead,
+      });
+      const applyOperationId = "improvement-application:skill-flow:change";
+      const changedTarget = createApplyIntent(company, applyOperationId, {
+        rollbackSource: source.revision,
+        target: () => ({
+          ...sourceTarget,
+          governedHead: source.revision,
+          content: {
+            ...sourceTarget.content,
+            name: "Experimental review",
+            instructions: "Review exact evidence and reconciliation state.",
+          },
+        }),
+      });
+      if (changedTarget.targetKind !== "skill-flow") {
+        assert.fail("Skill Flow changed target must remain exact");
+      }
+      const applied = await adapter.appendRevision({
+        operationId: applyOperationId,
+        target: changedTarget,
+        phase: "apply",
+        expectedGovernedHead: source.revision,
+      });
+      const restored = await adapter.appendRevision({
+        operationId: applyOperationId,
+        target: { ...changedTarget, content: sourceTarget.content },
+        phase: "rollback",
+        expectedGovernedHead: applied.revision,
+      });
+      const revisions = sqlite
+        .prepare(
+          `SELECT id, position_id AS positionId, name, instructions,
+                  skill_ids_json AS skillIdsJson, content_hash AS contentHash
+             FROM governed_skill_flow_revisions
+            WHERE owner_id = ? ORDER BY revision`,
+        )
+        .all(sourceTarget.ownerId) as Array<{
+        readonly id: string;
+        readonly positionId: string;
+        readonly name: string;
+        readonly instructions: string;
+        readonly skillIdsJson: string;
+        readonly contentHash: string;
+      }>;
+      assert.equal(revisions.length, 3);
+      assert.equal(revisions[0]?.id, source.revision.revisionId);
+      assert.equal(revisions[1]?.id, applied.revision.revisionId);
+      assert.equal(revisions[2]?.id, restored.revision.revisionId);
+      assert.equal(revisions[2]?.contentHash, revisions[0]?.contentHash);
+      assert.equal(revisions[2]?.skillIdsJson, canonicalJson(skillIds));
+      assert.deepEqual(
+        sqlite.prepare("SELECT * FROM skill_flows ORDER BY id").all(),
+        legacyFlowsBefore,
+      );
+      assert.deepEqual(
+        sqlite
+          .prepare(
+            "SELECT * FROM skill_flow_skills ORDER BY skill_flow_id, sort_order",
+          )
+          .all(),
+        legacySelectionsBefore,
+      );
+
+      const invalidOperationId =
+        "improvement-application:skill-flow:unbound-skill";
+      const invalidTarget = createApplyIntent(company, invalidOperationId, {
+        target: () => ({
+          ...sourceTarget,
+          ownerId: "governed-skill-flow:invalid",
+          governedHead: { revisionId: null, revisionHash: null },
+          content: {
+            ...sourceTarget.content,
+            skillIds: ["skill:not-bound-to-position"],
+          },
+        }),
+      });
+      await assert.rejects(
+        adapter.appendRevision({
+          operationId: invalidOperationId,
+          target: invalidTarget,
+          phase: "apply",
+          expectedGovernedHead: invalidTarget.governedHead,
+        }),
+        (error: unknown) =>
+          error instanceof GovernedRevisionAdapterError &&
+          error.code === "IMPROVEMENT_TARGET_CONFLICT",
+      );
+    } finally {
+      sqlite.close();
+      company.close();
+    }
   });
 });

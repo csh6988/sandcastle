@@ -672,6 +672,34 @@ describe("Project Improvements panel", () => {
           },
         },
       }),
+      proposalFor("improvement-proposal:template", {
+        targetKind: "template",
+        ownerId: "template:software-rnd-review",
+        governedHead: {
+          revisionId: "template-revision:accepted",
+          revisionHash: hash,
+        },
+        content: {
+          manifest: [
+            { path: "review/prompt.md", contentHash: "b".repeat(64) },
+            { path: "review/rules.md", contentHash: "c".repeat(64) },
+          ],
+        },
+      }),
+      proposalFor("improvement-proposal:skill-flow", {
+        targetKind: "skill-flow",
+        ownerId: "governed-skill-flow:review",
+        governedHead: {
+          revisionId: "governed-skill-flow-revision:accepted",
+          revisionHash: hash,
+        },
+        content: {
+          positionId: "reviewer",
+          name: "Governed review",
+          instructions: "Review exact immutable evidence.",
+          skillIds: ["code-review", "tdd"],
+        },
+      }),
     ];
     const markup = renderToStaticMarkup(
       <ProjectImprovementsPanel
@@ -696,6 +724,10 @@ describe("Project Improvements panel", () => {
     assert.match(markup, /application:checkout/);
     assert.match(markup, /project-spec-revision:accepted/);
     assert.match(markup, /Use the accepted checkout contract/);
+    assert.match(markup, /data-improvement-target-content="template"/);
+    assert.match(markup, /review\/prompt.md/);
+    assert.match(markup, /data-improvement-target-content="skill-flow"/);
+    assert.match(markup, /reviewer · Governed review · code-review → tdd/);
   });
 
   it("renders governed execution reliability evidence consistently in English and Chinese", () => {
