@@ -37,6 +37,7 @@ import type {
   TestFixtureAuthority,
 } from "./testing/testRuntime.js";
 import { CompanyCommandError } from "./commandRegistry.js";
+import type { RuntimeCompactionAuthority } from "./diagnostics.js";
 import { RuntimeEventCursorError } from "./events/cursor.js";
 import { WorkspaceRuntimeError } from "./workspaces/workspaceRuntime.js";
 import { WorkPackageRuntimeError } from "./workspaces/workPackages.js";
@@ -110,6 +111,41 @@ const assertStatisticsReader = (
       `Statistics queries require authenticated read authority for Project ${projectId}.`,
     );
   }
+};
+
+// Runtime-event compaction is a single-writer prune that records an authority
+// on its append-only checkpoint. The authorizing actor is derived from the
+// authenticated principal (never from the Command envelope): a verified
+// local-session human or a trusted Runtime worker. Any other principal (e.g. an
+// IPC-token Electron main or a test driver) is refused, mirroring the authority
+// pairs enforced for the other append-only fact families.
+const toCompactionActor = (
+  principal: RuntimePrincipal,
+): RuntimeCompactionAuthority["actor"] => {
+  if (
+    principal.type === "human" &&
+    principal.authenticatedBy === "local-session"
+  ) {
+    return {
+      type: "human",
+      id: principal.id,
+      authenticatedBy: "local-session",
+    };
+  }
+  if (
+    principal.type === "runtime-worker" &&
+    principal.authenticatedBy === "runtime"
+  ) {
+    return {
+      type: "runtime-worker",
+      id: principal.id,
+      authenticatedBy: "runtime",
+    };
+  }
+  throw new CompanyCommandError(
+    "FORBIDDEN",
+    "Compacting Runtime events requires a trusted Runtime worker or verified local-session human.",
+  );
 };
 
 export const reconcileCompanyRuntimeStartup = async (
@@ -1123,9 +1159,11 @@ export const startCompanyRuntimeServer = async (
               sendResponse(socket, {
                 id: request.id,
                 ok: true,
-                result: database.diagnostics.compactRuntimeEvents(
-                  request.command,
-                ),
+                result: database.diagnostics.compactRuntimeEvents({
+                  retainLast: request.command.retainLast,
+                  actor: toCompactionActor(principal),
+                  commandId: request.id,
+                }),
               });
               return;
             case "runtime.events.ack":

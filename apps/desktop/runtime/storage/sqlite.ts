@@ -451,7 +451,9 @@ export const openCompanyDatabase = (
       : {}),
     events,
   });
-  const diagnostics = openRuntimeDiagnostics(database, path);
+  const diagnostics = openRuntimeDiagnostics(database, path, {
+    ...(options.clock ? { clock: options.clock } : {}),
+  });
   const agentCatalog = openAgentCatalog(database, {
     ...(options.agentHost ? { host: options.agentHost } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
