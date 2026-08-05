@@ -72,19 +72,6 @@ export class RuntimeEventRegistryError extends Error {
 }
 
 /**
- * Shared registry-version compatibility choke point.
- *
- * Every reader (AG-UI, ACP, and any future protocol) must run an event's
- * effective registry version through this single guard so the fail-closed rule
- * is enforced identically everywhere: a version newer than this reader supports
- * is refused, and a version below the floor is refused. Both are PERMANENT
- * (non-retryable) conditions — the event will never become readable by retrying.
- *
- * Forward compatibility is preserved: an older registry version is always
- * accepted and read unchanged. There is no upcast/downcast; all events are
- * schemaVersion 1, so there is nothing to transform.
- */
-/**
  * The registry version an event is stamped with, defaulting pre-mirror events
  * (which predate the `registryVersion` envelope field) to 1. Shared so every
  * reader feeds the same effective version into the choke point below.
@@ -93,11 +80,35 @@ export const effectiveRuntimeEventRegistryVersion = (event: {
   readonly registryVersion?: number;
 }): number => event.registryVersion ?? 1;
 
+/**
+ * Shared registry-version compatibility choke point.
+ *
+ * Every reader (AG-UI, ACP, and any future protocol) must decide readability
+ * through this single predicate so the fail-closed rule is defined in exactly
+ * one place: a version newer than this reader supports is unreadable, and a
+ * version below the floor is unreadable. Both are PERMANENT (non-retryable)
+ * conditions — the event will never become readable by retrying.
+ *
+ * Forward compatibility is preserved: an older registry version is always
+ * accepted and read unchanged. There is no upcast/downcast; all events are
+ * schemaVersion 1, so there is nothing to transform.
+ *
+ * Callers that translate the failure into their own protocol diagnostic use
+ * this predicate directly; callers that just need to reject use the assertion
+ * wrapper below.
+ */
+export const isRuntimeEventRegistryVersionSupported = (
+  registryVersion: number,
+  currentVersion: number = RUNTIME_EVENT_REGISTRY_VERSION,
+): boolean => registryVersion >= 1 && registryVersion <= currentVersion;
+
 export const assertRuntimeEventRegistryVersionSupported = (
   registryVersion: number,
   currentVersion: number = RUNTIME_EVENT_REGISTRY_VERSION,
 ): void => {
-  if (registryVersion < 1 || registryVersion > currentVersion) {
+  if (
+    !isRuntimeEventRegistryVersionSupported(registryVersion, currentVersion)
+  ) {
     throw new RuntimeEventRegistryError(
       "RUNTIME_EVENT_REGISTRY_VERSION_UNSUPPORTED",
       `Runtime event registry version ${String(registryVersion)} is not supported (current ${String(currentVersion)}).`,
