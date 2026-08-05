@@ -6,7 +6,7 @@ import {
 } from "../pipeline/canonicalPipeline.js";
 import { defaultNodeHandlerRegistry } from "../pipeline/nodeHandlerRegistry.js";
 
-export const CURRENT_SCHEMA_VERSION = 52;
+export const CURRENT_SCHEMA_VERSION = 53;
 
 interface CompanyMigration {
   readonly version: number;
@@ -431,6 +431,13 @@ const T26_V52_SCHEMA_OBJECT_QUERY = `SELECT type, name, sql FROM sqlite_schema
          OR name LIKE 'governed_harness_revisions%'
          OR name LIKE 'governed_skill_flow_revisions%'
          OR name LIKE 'runtime_template_revisions%'
+      ORDER BY name`;
+
+// The v53 append-only compaction-checkpoint object set. Re-checked on every
+// at-target open alongside the T26 set so a tampered checkpoint table (a
+// dropped immutability trigger, an altered column) fails closed.
+const V53_SCHEMA_OBJECT_QUERY = `SELECT type, name, sql FROM sqlite_schema
+      WHERE name LIKE 'runtime_event_compaction_checkpoints%'
       ORDER BY name`;
 
 const migrations: readonly CompanyMigration[] = [
@@ -1792,7 +1799,8 @@ const migrations: readonly CompanyMigration[] = [
           `SELECT name FROM sqlite_schema
             WHERE type = 'trigger'
               AND name LIKE 'runtime_%'
-              AND name NOT LIKE 'runtime_template_revisions_%'`,
+              AND name NOT LIKE 'runtime_template_revisions_%'
+              AND name NOT LIKE 'runtime_event_compaction_checkpoints_%'`,
         )
         .all() as Array<{ readonly name: string }>;
       for (const trigger of triggers) {
@@ -6996,6 +7004,72 @@ const migrations: readonly CompanyMigration[] = [
       }
     },
   },
+  {
+    version: 53,
+    name: "runtime_event_compaction_checkpoints",
+    migrate: (database) => {
+      // Append-only authority + integrity proof for runtime-event compaction
+      // (T27 Phase B). Additive only: this migration creates the checkpoint
+      // table, its index, and its immutability triggers, and alters no
+      // existing table or trigger. Compaction behavior that writes these rows
+      // lands in a later ticket; here we only establish the durable record.
+      //
+      // Adoption pattern (matches v52): build the reference schema in memory,
+      // create it on the live database only when absent, otherwise drift-check
+      // the existing objects. This keeps the migration replay-safe over a
+      // database that already carries the checkpoint objects.
+      const createSchema = (target: DatabaseSync): void =>
+        target.exec(`
+          CREATE TABLE runtime_event_compaction_checkpoints (
+            id TEXT PRIMARY KEY,
+            compacted_from_sequence INTEGER NOT NULL CHECK (compacted_from_sequence >= 0),
+            compacted_through_sequence INTEGER NOT NULL CHECK (compacted_through_sequence >= 0),
+            retained_watermark_sequence INTEGER NOT NULL CHECK (retained_watermark_sequence >= 0),
+            pre_compaction_integrity_hash TEXT NOT NULL CHECK (length(pre_compaction_integrity_hash) = 64),
+            compacted_event_count INTEGER NOT NULL CHECK (compacted_event_count >= 0),
+            authorized_by_actor_type TEXT NOT NULL CHECK (
+              authorized_by_actor_type IN ('human', 'runtime-worker')
+            ),
+            authorized_by_actor_id TEXT NOT NULL,
+            authorized_by_authenticated_by TEXT NOT NULL,
+            command_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            CHECK (compacted_through_sequence >= compacted_from_sequence),
+            CHECK (retained_watermark_sequence >= compacted_through_sequence),
+            CHECK (
+              (authorized_by_actor_type = 'human' AND authorized_by_authenticated_by = 'local-session')
+              OR
+              (authorized_by_actor_type = 'runtime-worker' AND authorized_by_authenticated_by = 'runtime')
+            )
+          ) STRICT;
+          CREATE INDEX runtime_event_compaction_checkpoints_range_idx
+            ON runtime_event_compaction_checkpoints(compacted_through_sequence, id);
+          CREATE TRIGGER runtime_event_compaction_checkpoints_immutable_update
+            BEFORE UPDATE ON runtime_event_compaction_checkpoints
+            BEGIN SELECT RAISE(ABORT, 'Runtime event compaction checkpoint is immutable'); END;
+          CREATE TRIGGER runtime_event_compaction_checkpoints_immutable_delete
+            BEFORE DELETE ON runtime_event_compaction_checkpoints
+            BEGIN SELECT RAISE(ABORT, 'Runtime event compaction checkpoint is immutable'); END;
+        `);
+
+      const reference = new DatabaseSync(":memory:");
+      try {
+        createSchema(reference);
+        const actual = readSchemaObjects(database, V53_SCHEMA_OBJECT_QUERY);
+        if (actual.length === 0) {
+          createSchema(database);
+        } else {
+          assertSchemaObjectSetMatches(
+            readSchemaObjects(reference, V53_SCHEMA_OBJECT_QUERY),
+            actual,
+            "Existing T27 v53 schema is incompatible",
+          );
+        }
+      } finally {
+        reference.close();
+      }
+    },
+  },
 ];
 
 const schemaMetadataExists = (database: DatabaseSync): boolean =>
@@ -7035,7 +7109,7 @@ const readUserVersion = (database: DatabaseSync): number => {
   return Number(row?.user_version ?? 0);
 };
 
-// An at-target database runs no migration bodies, so the v52 migration's own
+// An at-target database runs no migration bodies, so the latest migration's own
 // drift check never fires on it. Re-run the same structural comparison against a
 // freshly migrated in-memory reference so a hand-tampered same-version database
 // is rejected rather than silently trusted. Read-only: throws before any write.
@@ -7048,6 +7122,11 @@ const assertAtTargetSchemaIntegrity = (database: DatabaseSync): void => {
       readSchemaObjects(reference, T26_V52_SCHEMA_OBJECT_QUERY),
       readSchemaObjects(database, T26_V52_SCHEMA_OBJECT_QUERY),
       "Existing T26 v52 schema is incompatible",
+    );
+    assertSchemaObjectSetMatches(
+      readSchemaObjects(reference, V53_SCHEMA_OBJECT_QUERY),
+      readSchemaObjects(database, V53_SCHEMA_OBJECT_QUERY),
+      "Existing v53 compaction-checkpoint schema is incompatible",
     );
   } finally {
     reference.close();

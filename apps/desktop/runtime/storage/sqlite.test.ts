@@ -193,7 +193,8 @@ const removeCatalogAuditTriggers = (database: DatabaseSync): void => {
       `SELECT name FROM sqlite_schema
         WHERE type = 'trigger'
           AND name LIKE 'runtime_%'
-          AND name NOT LIKE 'runtime_template_revisions_%'`,
+          AND name NOT LIKE 'runtime_template_revisions_%'
+          AND name NOT LIKE 'runtime_event_compaction_checkpoints_%'`,
     )
     .all() as Array<{ readonly name: string }>;
   for (const trigger of triggers) {
@@ -499,6 +500,10 @@ describe("Company database migrations", () => {
             {
               version: 52,
               name: "improvement_proposal_foundation",
+            },
+            {
+              version: 53,
+              name: "runtime_event_compaction_checkpoints",
             },
           ],
         );
@@ -2161,7 +2166,7 @@ describe("Company database migrations", () => {
     current.close();
 
     // The migrate path has written the PRAGMA user_version mirror since the
-    // first runtime schema, so a v52 schema_metadata paired with a zeroed mirror
+    // first runtime schema, so a v53 schema_metadata paired with a zeroed mirror
     // never arises from a legitimate open — it is tampering or corruption and
     // must fail closed rather than be silently healed to the target version.
     const zeroed = new DatabaseSync(databasePath);
@@ -2173,7 +2178,7 @@ describe("Company database migrations", () => {
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Company database version markers disagree: schema_metadata 52, user_version 0/,
+      /Company database version markers disagree: schema_metadata 53, user_version 0/,
     );
 
     // The refusal must not rewrite either marker.
@@ -2190,6 +2195,201 @@ describe("Company database migrations", () => {
     } finally {
       inspected.close();
     }
+  });
+
+  it("adds an append-only runtime-event compaction checkpoint table at v53", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(database.schemaVersion(), 53);
+      const inspected = new DatabaseSync(database.path);
+      try {
+        // The v53 checkpoint table exists and is STRICT like the other
+        // fact-family tables.
+        const table = inspected
+          .prepare(
+            `SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'runtime_event_compaction_checkpoints'`,
+          )
+          .get() as { readonly sql?: string } | undefined;
+        assert.ok(table?.sql, "checkpoint table should exist");
+        assert.match(table.sql, /STRICT/);
+        // It captures the compacted range, retained watermark, pre-compaction
+        // integrity proof, and the authorizing actor.
+        for (const column of [
+          "compacted_from_sequence",
+          "compacted_through_sequence",
+          "retained_watermark_sequence",
+          "pre_compaction_integrity_hash",
+          "authorized_by_actor_type",
+          "authorized_by_actor_id",
+        ]) {
+          assert.match(table.sql, new RegExp(column));
+        }
+        // Append-only: both immutability triggers are present.
+        const triggers = inspected
+          .prepare(
+            `SELECT name FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name LIKE 'runtime_event_compaction_checkpoints%'
+             ORDER BY name`,
+          )
+          .all()
+          .map((row) => (row as { readonly name: string }).name);
+        assert.deepEqual(triggers, [
+          "runtime_event_compaction_checkpoints_immutable_delete",
+          "runtime_event_compaction_checkpoints_immutable_update",
+        ]);
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects updates and deletes on the compaction checkpoint table", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+    const databasePath = database.path;
+    database.close();
+
+    const raw = new DatabaseSync(databasePath);
+    try {
+      raw.exec(`
+        INSERT INTO runtime_event_compaction_checkpoints(
+          id, compacted_from_sequence, compacted_through_sequence,
+          retained_watermark_sequence, pre_compaction_integrity_hash,
+          compacted_event_count, authorized_by_actor_type,
+          authorized_by_actor_id, authorized_by_authenticated_by,
+          command_id, created_at
+        ) VALUES (
+          'checkpoint-1', 1, 10, 11,
+          '0000000000000000000000000000000000000000000000000000000000000000',
+          10, 'human', 'operator-1', 'local-session', 'command-1',
+          '2026-07-27T00:00:00.000Z'
+        );
+      `);
+      assert.throws(
+        () =>
+          raw.exec(
+            "UPDATE runtime_event_compaction_checkpoints SET compacted_through_sequence = 20 WHERE id = 'checkpoint-1'",
+          ),
+        /immutable/,
+      );
+      assert.throws(
+        () =>
+          raw.exec(
+            "DELETE FROM runtime_event_compaction_checkpoints WHERE id = 'checkpoint-1'",
+          ),
+        /immutable/,
+      );
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("adds v53 as an additive, forward-only upgrade over v52", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    current.close();
+
+    const allObjects = (
+      target: DatabaseSync,
+    ): { type: string; name: string }[] =>
+      target
+        .prepare(
+          `SELECT type, name FROM sqlite_schema
+           WHERE name NOT LIKE 'sqlite_%'
+           ORDER BY type, name`,
+        )
+        .all()
+        .map((row) => {
+          const entry = row as { readonly type: string; readonly name: string };
+          return { type: entry.type, name: entry.name };
+        });
+
+    // Simulate a v52 database by removing the v53-only checkpoint objects and
+    // stepping both version markers back to 52, mirroring the other upgrade
+    // fixtures in this suite.
+    const downgraded = new DatabaseSync(databasePath);
+    let v52Objects: { type: string; name: string }[];
+    try {
+      downgraded.exec(`
+        DROP TRIGGER runtime_event_compaction_checkpoints_immutable_update;
+        DROP TRIGGER runtime_event_compaction_checkpoints_immutable_delete;
+        DROP TABLE runtime_event_compaction_checkpoints;
+        DELETE FROM schema_migrations WHERE version = 53;
+        UPDATE schema_metadata SET value = '52' WHERE key = 'schema_version';
+        PRAGMA user_version = 52;
+      `);
+      v52Objects = allObjects(downgraded);
+    } finally {
+      downgraded.close();
+    }
+
+    const upgraded = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(upgraded.schemaVersion(), 53);
+    } finally {
+      upgraded.close();
+    }
+
+    const inspected = new DatabaseSync(databasePath);
+    let v53Objects: { type: string; name: string }[];
+    try {
+      v53Objects = allObjects(inspected);
+    } finally {
+      inspected.close();
+    }
+
+    // The upgrade adds exactly the checkpoint table + its two triggers and
+    // removes nothing: every v52 object still exists, and the only additions
+    // are the v53 checkpoint objects.
+    const added = v53Objects.filter(
+      (after) =>
+        !v52Objects.some(
+          (before) => before.type === after.type && before.name === after.name,
+        ),
+    );
+    const removed = v52Objects.filter(
+      (before) =>
+        !v53Objects.some(
+          (after) => after.type === before.type && after.name === before.name,
+        ),
+    );
+    assert.deepEqual(removed, []);
+    assert.deepEqual(added.map((entry) => entry.name).sort(), [
+      "runtime_event_compaction_checkpoints",
+      "runtime_event_compaction_checkpoints_immutable_delete",
+      "runtime_event_compaction_checkpoints_immutable_update",
+      "runtime_event_compaction_checkpoints_range_idx",
+    ]);
+  });
+
+  it("re-verifies the open-path drift guard against a tampered v53 database", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    assert.equal(current.schemaVersion(), 53);
+    current.close();
+
+    // Ticket 02's at-target drift re-check must now fire at v53: dropping a
+    // checkpoint immutability trigger is structural drift and must fail closed.
+    const tampered = new DatabaseSync(databasePath);
+    try {
+      tampered.exec(
+        "DROP TRIGGER runtime_event_compaction_checkpoints_immutable_delete;",
+      );
+    } finally {
+      tampered.close();
+    }
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      (error: unknown) => error instanceof CompanyDatabaseError,
+    );
   });
 
   it("upgrades schema version 43 with durable Reviewer execution stages", () => {
@@ -2620,8 +2820,8 @@ describe("Test authority schema migration", () => {
   it("upgrades through the historical v47 contract to the complete immutable v48 Test schema", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 52);
-    assert.equal(opened.schemaVersion(), 52);
+    assert.equal(CURRENT_SCHEMA_VERSION, 53);
+    assert.equal(opened.schemaVersion(), 53);
     opened.close();
 
     const database = new DatabaseSync(
@@ -2716,7 +2916,7 @@ describe("Test authority schema migration", () => {
     const historical = new DatabaseSync(path);
     restoreHistoricalV47Contract(historical);
 
-    assert.equal(migrateCompanyDatabase(historical), 52);
+    assert.equal(migrateCompanyDatabase(historical), 53);
     assert.deepEqual(
       historical
         .prepare(
@@ -2764,7 +2964,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 48;
       PRAGMA user_version = 47;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 52);
+    assert.equal(migrateCompanyDatabase(compatible), 53);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2834,7 +3034,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 49;
       PRAGMA user_version = 48;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 52);
+    assert.equal(migrateCompanyDatabase(compatible), 53);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2882,7 +3082,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(forward), 52);
+    assert.equal(migrateCompanyDatabase(forward), 53);
     assert.deepEqual(
       forward
         .prepare(
@@ -2921,7 +3121,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 50;
       PRAGMA user_version = 49;
     `);
-    assert.equal(migrateCompanyDatabase(compatible), 52);
+    assert.equal(migrateCompanyDatabase(compatible), 53);
     compatible.close();
 
     const partialDir = tempCompanyDir();
@@ -2955,8 +3155,8 @@ describe("Test authority schema migration", () => {
   it("adds the immutable v51 release-operation claim and observation schema", () => {
     const companyDir = tempCompanyDir();
     const database = openCompanyDatabase(companyDir);
-    assert.equal(CURRENT_SCHEMA_VERSION, 52);
-    assert.equal(database.schemaVersion(), 52);
+    assert.equal(CURRENT_SCHEMA_VERSION, 53);
+    assert.equal(database.schemaVersion(), 53);
     database.close();
 
     const sqlite = new DatabaseSync(
@@ -3130,7 +3330,7 @@ describe("Test authority schema migration", () => {
       DELETE FROM schema_migrations WHERE version = 52;
       PRAGMA user_version = 51;
     `);
-    assert.equal(migrateCompanyDatabase(database), 52);
+    assert.equal(migrateCompanyDatabase(database), 53);
     assert.deepEqual(
       database
         .prepare(
@@ -3168,7 +3368,7 @@ describe("Test authority schema migration", () => {
       UPDATE schema_metadata SET value = '51' WHERE key = 'schema_version';
       PRAGMA user_version = 51;
     `);
-    assert.equal(migrateCompanyDatabase(upgrade), 52);
+    assert.equal(migrateCompanyDatabase(upgrade), 53);
     assert.deepEqual(
       upgrade
         .prepare(
@@ -3550,12 +3750,12 @@ describe("Test authority schema migration", () => {
     initialized.close();
     const future = new DatabaseSync(path);
     future.exec(`
-      UPDATE schema_metadata SET value = '53' WHERE key = 'schema_version';
-      PRAGMA user_version = 53;
+      UPDATE schema_metadata SET value = '54' WHERE key = 'schema_version';
+      PRAGMA user_version = 54;
     `);
     assert.throws(
       () => migrateCompanyDatabase(future),
-      /Unsupported company database schema version 53/,
+      /Unsupported company database schema version 54/,
     );
     assert.equal(
       (
@@ -3565,7 +3765,7 @@ describe("Test authority schema migration", () => {
           )
           .get() as { readonly value: string }
       ).value,
-      "53",
+      "54",
     );
     future.close();
   });

@@ -249,15 +249,19 @@ const FROZEN_RELEASE_ERROR_CODES: readonly string[] = [
   "RELEASE_TARGET_INVALID",
 ];
 
-// Number of append-only immutability triggers in a fresh v52 company database.
-// Each guarded fact family contributes an `_immutable_update` and
-// `_immutable_delete` trigger; freezing the count catches both silent removal of
-// a guard and accidental introduction of a new mutable-history table.
-const FROZEN_IMMUTABLE_TRIGGER_COUNT = 150;
+// Number of append-only immutability triggers in a fresh company database. Each
+// guarded fact family contributes an `_immutable_update` and `_immutable_delete`
+// trigger; freezing the count catches both silent removal of a guard and
+// accidental introduction of a new mutable-history table. T27 Phase B (schema
+// v53) adds the append-only runtime-event compaction-checkpoint table, whose two
+// immutability triggers raise the T26 baseline of 150 to 152.
+const FROZEN_IMMUTABLE_TRIGGER_COUNT = 152;
 
-describe("T27 contract freeze baseline (schema v52 / registry v20)", () => {
+describe("T27 contract freeze baseline (Company Command/Query/error surface)", () => {
   it("pins the schema and Runtime Event Registry versions", () => {
-    assert.equal(CURRENT_SCHEMA_VERSION, 52);
+    // Schema advances one forward-only step per T27 phase that needs it; Phase B
+    // took it to v53. The Runtime Event Registry stays v20 (no event change).
+    assert.equal(CURRENT_SCHEMA_VERSION, 53);
     assert.equal(RUNTIME_EVENT_REGISTRY_VERSION, 20);
   });
 
@@ -286,7 +290,7 @@ describe("T27 contract freeze baseline (schema v52 / registry v20)", () => {
   it("freezes the append-only immutability trigger count and audit-by-construction guarantee", () => {
     const companyDir = tempCompanyDir();
     const opened = openCompanyDatabase(companyDir);
-    assert.equal(opened.schemaVersion(), 52);
+    assert.equal(opened.schemaVersion(), CURRENT_SCHEMA_VERSION);
     opened.close();
 
     const database = new DatabaseSync(
