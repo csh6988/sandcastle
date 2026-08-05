@@ -350,6 +350,89 @@ const columnExists = (
     .all()
     .some((entry) => (entry as { readonly name?: unknown }).name === column);
 
+/**
+ * Typed failure surface for the company-database open/migrate path.
+ *
+ * Every refusal to open a database (unsupported future schema, disagreeing
+ * version markers, structural drift) carries a stable machine-distinguishable
+ * `code` so callers can react to the specific condition instead of matching on
+ * a message string.
+ */
+export class CompanyDatabaseError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CompanyDatabaseError";
+  }
+}
+
+interface SchemaObjectRow {
+  readonly type: string;
+  readonly name: string;
+  readonly sql: string;
+}
+
+const normalizeSchemaObjectSql = (sql: string): string =>
+  sql
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1")
+    .trim()
+    .toLowerCase();
+
+const readSchemaObjects = (
+  target: DatabaseSync,
+  query: string,
+): SchemaObjectRow[] =>
+  target.prepare(query).all() as unknown as SchemaObjectRow[];
+
+// Compare a database's schema objects against a freshly built reference set and
+// throw a typed incompatibility error naming every object that is missing,
+// structurally changed, or unexpected. Shared by the v52 migration body's own
+// drift guard and the at-target open-path re-check so both produce identical
+// diagnostics from a single implementation.
+const assertSchemaObjectSetMatches = (
+  expected: readonly SchemaObjectRow[],
+  actual: readonly SchemaObjectRow[],
+  incompatibleLabel: string,
+): void => {
+  const actualByName = new Map(actual.map((entry) => [entry.name, entry]));
+  const expectedNames = new Set(expected.map((entry) => entry.name));
+  const incompatible = expected
+    .filter((entry) => {
+      const found = actualByName.get(entry.name);
+      return (
+        !found ||
+        found.type !== entry.type ||
+        normalizeSchemaObjectSql(found.sql) !==
+          normalizeSchemaObjectSql(entry.sql)
+      );
+    })
+    .map((entry) => entry.name);
+  incompatible.push(
+    ...actual
+      .filter((entry) => !expectedNames.has(entry.name))
+      .map((entry) => entry.name),
+  );
+  if (incompatible.length > 0) {
+    throw new CompanyDatabaseError(
+      "COMPANY_DB_SCHEMA_INCOMPATIBLE",
+      `${incompatibleLabel}: ${[...new Set(incompatible)].sort().join(", ")}`,
+    );
+  }
+};
+
+// The T26 (v52) fact-family object set guarded by the v52 migration's own
+// structural comparison and re-checked on every at-target open.
+const T26_V52_SCHEMA_OBJECT_QUERY = `SELECT type, name, sql FROM sqlite_schema
+      WHERE name LIKE 'improvement%'
+         OR name LIKE 'statistics_evidence_snapshots%'
+         OR name LIKE 'governed_harness_revisions%'
+         OR name LIKE 'governed_skill_flow_revisions%'
+         OR name LIKE 'runtime_template_revisions%'
+      ORDER BY name`;
+
 const migrations: readonly CompanyMigration[] = [
   {
     version: 1,
@@ -6895,64 +6978,18 @@ const migrations: readonly CompanyMigration[] = [
             BEGIN SELECT RAISE(ABORT, 'Governed Skill Flow revision is immutable'); END;
         `);
 
-      const objects = (target: DatabaseSync) =>
-        target
-          .prepare(
-            `SELECT type, name, sql FROM sqlite_schema
-              WHERE name LIKE 'improvement%'
-                 OR name LIKE 'statistics_evidence_snapshots%'
-                 OR name LIKE 'governed_harness_revisions%'
-                 OR name LIKE 'governed_skill_flow_revisions%'
-                 OR name LIKE 'runtime_template_revisions%'
-              ORDER BY name`,
-          )
-          .all() as Array<{
-          readonly type: string;
-          readonly name: string;
-          readonly sql: string;
-        }>;
-      const normalizeSql = (sql: string): string =>
-        sql
-          .replace(/\s+/g, " ")
-          .replace(/\s*([(),])\s*/g, "$1")
-          .trim()
-          .toLowerCase();
       const reference = new DatabaseSync(":memory:");
       try {
         createSchema(reference);
-        const expected = objects(reference);
-        const actual = objects(database);
+        const actual = readSchemaObjects(database, T26_V52_SCHEMA_OBJECT_QUERY);
         if (actual.length === 0) {
           createSchema(database);
         } else {
-          const actualByName = new Map(
-            actual.map((entry) => [entry.name, entry]),
+          assertSchemaObjectSetMatches(
+            readSchemaObjects(reference, T26_V52_SCHEMA_OBJECT_QUERY),
+            actual,
+            "Existing T26 v52 schema is incompatible",
           );
-          const expectedNames = new Set(expected.map((entry) => entry.name));
-          const incompatible = expected
-            .filter((entry) => {
-              const found = actualByName.get(entry.name);
-              return (
-                !found ||
-                found.type !== entry.type ||
-                normalizeSql(found.sql) !== normalizeSql(entry.sql)
-              );
-            })
-            .map((entry) => entry.name);
-          incompatible.push(
-            ...actual
-              .filter((entry) => !expectedNames.has(entry.name))
-              .map((entry) => entry.name),
-          );
-          if (incompatible.length > 0) {
-            throw new Error(
-              `Existing T26 v52 schema is incompatible: ${[
-                ...new Set(incompatible),
-              ]
-                .sort()
-                .join(", ")}`,
-            );
-          }
         }
       } finally {
         reference.close();
@@ -6998,24 +7035,6 @@ const readUserVersion = (database: DatabaseSync): number => {
   return Number(row?.user_version ?? 0);
 };
 
-const normalizeSchemaObjectSql = (sql: string): string =>
-  sql
-    .replace(/\s+/g, " ")
-    .replace(/\s*([(),])\s*/g, "$1")
-    .trim()
-    .toLowerCase();
-
-// The T26 (v52) fact-family object set guarded by the v52 migration's own
-// structural comparison. Kept identical here so the at-target re-check produces
-// the same "Existing T26 v52 schema is incompatible" diagnostics.
-const T26_V52_SCHEMA_OBJECT_QUERY = `SELECT type, name, sql FROM sqlite_schema
-      WHERE name LIKE 'improvement%'
-         OR name LIKE 'statistics_evidence_snapshots%'
-         OR name LIKE 'governed_harness_revisions%'
-         OR name LIKE 'governed_skill_flow_revisions%'
-         OR name LIKE 'runtime_template_revisions%'
-      ORDER BY name`;
-
 // An at-target database runs no migration bodies, so the v52 migration's own
 // drift check never fires on it. Re-run the same structural comparison against a
 // freshly migrated in-memory reference so a hand-tampered same-version database
@@ -7025,45 +7044,11 @@ const assertAtTargetSchemaIntegrity = (database: DatabaseSync): void => {
   try {
     reference.exec("PRAGMA foreign_keys = ON");
     migrateCompanyDatabase(reference);
-    const readObjects = (
-      target: DatabaseSync,
-    ): Array<{
-      readonly type: string;
-      readonly name: string;
-      readonly sql: string;
-    }> =>
-      target.prepare(T26_V52_SCHEMA_OBJECT_QUERY).all() as Array<{
-        readonly type: string;
-        readonly name: string;
-        readonly sql: string;
-      }>;
-    const expected = readObjects(reference);
-    const actual = readObjects(database);
-    const actualByName = new Map(actual.map((entry) => [entry.name, entry]));
-    const expectedNames = new Set(expected.map((entry) => entry.name));
-    const incompatible = expected
-      .filter((entry) => {
-        const found = actualByName.get(entry.name);
-        return (
-          !found ||
-          found.type !== entry.type ||
-          normalizeSchemaObjectSql(found.sql) !==
-            normalizeSchemaObjectSql(entry.sql)
-        );
-      })
-      .map((entry) => entry.name);
-    incompatible.push(
-      ...actual
-        .filter((entry) => !expectedNames.has(entry.name))
-        .map((entry) => entry.name),
+    assertSchemaObjectSetMatches(
+      readSchemaObjects(reference, T26_V52_SCHEMA_OBJECT_QUERY),
+      readSchemaObjects(database, T26_V52_SCHEMA_OBJECT_QUERY),
+      "Existing T26 v52 schema is incompatible",
     );
-    if (incompatible.length > 0) {
-      throw new Error(
-        `Existing T26 v52 schema is incompatible: ${[...new Set(incompatible)]
-          .sort()
-          .join(", ")}`,
-      );
-    }
   } finally {
     reference.close();
   }
@@ -7072,7 +7057,8 @@ const assertAtTargetSchemaIntegrity = (database: DatabaseSync): void => {
 export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   const existingVersion = readSchemaVersion(database);
   if (existingVersion > CURRENT_SCHEMA_VERSION) {
-    throw new Error(
+    throw new CompanyDatabaseError(
+      "COMPANY_DB_SCHEMA_FUTURE",
       `Unsupported company database schema version ${existingVersion}.`,
     );
   }
@@ -7083,12 +7069,15 @@ export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   // and re-run the v52 structural drift check. For any older version the
   // migration below is itself the integrity action: it rewrites both markers to
   // the target and re-runs the per-version drift checks, so an intermediate
-  // mirror lag is transient and reconciled rather than a durable mismatch. A
-  // zero mirror is a pre-mirror legacy database, not a disagreement.
+  // mirror lag is transient and reconciled rather than a durable mismatch. At
+  // target the migration has always written the mirror (since the first runtime
+  // schema), so any disagreement — including a zeroed mirror — is tampering or
+  // corruption and must fail closed rather than be silently healed.
   if (existingVersion === CURRENT_SCHEMA_VERSION) {
     const mirroredVersion = readUserVersion(database);
-    if (mirroredVersion !== 0 && mirroredVersion !== existingVersion) {
-      throw new Error(
+    if (mirroredVersion !== existingVersion) {
+      throw new CompanyDatabaseError(
+        "COMPANY_DB_VERSION_MARKERS_DISAGREE",
         `Company database version markers disagree: schema_metadata ${existingVersion}, user_version ${mirroredVersion}.`,
       );
     }

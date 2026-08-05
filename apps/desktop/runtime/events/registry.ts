@@ -84,6 +84,15 @@ export class RuntimeEventRegistryError extends Error {
  * accepted and read unchanged. There is no upcast/downcast; all events are
  * schemaVersion 1, so there is nothing to transform.
  */
+/**
+ * The registry version an event is stamped with, defaulting pre-mirror events
+ * (which predate the `registryVersion` envelope field) to 1. Shared so every
+ * reader feeds the same effective version into the choke point below.
+ */
+export const effectiveRuntimeEventRegistryVersion = (event: {
+  readonly registryVersion?: number;
+}): number => event.registryVersion ?? 1;
+
 export const assertRuntimeEventRegistryVersionSupported = (
   registryVersion: number,
   currentVersion: number = RUNTIME_EVENT_REGISTRY_VERSION,

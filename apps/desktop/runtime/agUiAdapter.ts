@@ -3,6 +3,7 @@ import type { EventEnvelope } from "./interface.js";
 import {
   assertRuntimeEventRegistryVersionSupported,
   createRuntimeEventRegistry,
+  effectiveRuntimeEventRegistryVersion,
   RuntimeEventRegistryError,
 } from "./events/registry.js";
 
@@ -100,15 +101,12 @@ const canonicalString = (value: unknown): string =>
     ? redactString(value)
     : JSON.stringify(canonicalizeAndRedact(value));
 
-const eventRegistryVersion = (event: EventEnvelope): number =>
-  event.registryVersion ?? 1;
-
 const eventSource = (event: EventEnvelope): Record<string, unknown> =>
   Object.fromEntries(
     Object.entries({
       eventId: event.eventId,
       sequence: event.sequence,
-      registryVersion: eventRegistryVersion(event),
+      registryVersion: effectiveRuntimeEventRegistryVersion(event),
       schemaVersion: event.schemaVersion,
       companyId: event.companyId,
       projectId: event.projectId,
@@ -173,7 +171,7 @@ const eventSource = (event: EventEnvelope): Record<string, unknown> =>
 export const runtimeEventToAgUi = (
   event: EventEnvelope,
 ): readonly AgUiEvent[] => {
-  const registryVersion = eventRegistryVersion(event);
+  const registryVersion = effectiveRuntimeEventRegistryVersion(event);
   try {
     assertRuntimeEventRegistryVersionSupported(
       registryVersion,

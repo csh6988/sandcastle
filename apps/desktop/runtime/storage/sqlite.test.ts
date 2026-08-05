@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import {
+  CompanyDatabaseError,
   CURRENT_SCHEMA_VERSION,
   migrateCompanyDatabase,
 } from "./migrations.js";
@@ -1991,9 +1992,12 @@ describe("Company database migrations", () => {
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      new RegExp(
-        `Unsupported company database schema version ${futureVersion}`,
-      ),
+      (error: unknown) =>
+        error instanceof CompanyDatabaseError &&
+        error.code === "COMPANY_DB_SCHEMA_FUTURE" &&
+        new RegExp(
+          `Unsupported company database schema version ${futureVersion}`,
+        ).test(error.message),
     );
 
     const inspected = new DatabaseSync(databasePath);
@@ -2051,7 +2055,12 @@ describe("Company database migrations", () => {
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Existing T26 v52 schema is incompatible: statistics_evidence_snapshots_immutable_delete/,
+      (error: unknown) =>
+        error instanceof CompanyDatabaseError &&
+        error.code === "COMPANY_DB_SCHEMA_INCOMPATIBLE" &&
+        /Existing T26 v52 schema is incompatible: statistics_evidence_snapshots_immutable_delete/.test(
+          error.message,
+        ),
     );
 
     // The refusal must not rewrite or repair the tampered database.
@@ -2113,7 +2122,10 @@ describe("Company database migrations", () => {
 
     assert.throws(
       () => openCompanyDatabase(companyDir),
-      /Company database version markers disagree/,
+      (error: unknown) =>
+        error instanceof CompanyDatabaseError &&
+        error.code === "COMPANY_DB_VERSION_MARKERS_DISAGREE" &&
+        /Company database version markers disagree/.test(error.message),
     );
 
     // The refusal must not rewrite either marker.
@@ -2142,40 +2154,41 @@ describe("Company database migrations", () => {
     }
   });
 
-  it("tolerates a pre-mirror user_version of zero on an at-target database", () => {
+  it("fails closed when an at-target database carries a zeroed version mirror", () => {
     const companyDir = tempCompanyDir();
     const current = openCompanyDatabase(companyDir);
     const databasePath = current.path;
     current.close();
 
-    // Legacy databases created before the user_version mirror existed carry
-    // user_version 0. That is not a disagreement; the open path must tolerate it
-    // (and the migrate path re-asserts the mirror to the target version).
-    const legacy = new DatabaseSync(databasePath);
+    // The migrate path has written the PRAGMA user_version mirror since the
+    // first runtime schema, so a v52 schema_metadata paired with a zeroed mirror
+    // never arises from a legitimate open — it is tampering or corruption and
+    // must fail closed rather than be silently healed to the target version.
+    const zeroed = new DatabaseSync(databasePath);
     try {
-      legacy.exec("PRAGMA user_version = 0;");
+      zeroed.exec("PRAGMA user_version = 0;");
     } finally {
-      legacy.close();
+      zeroed.close();
     }
 
-    const reopened = openCompanyDatabase(companyDir);
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Company database version markers disagree: schema_metadata 52, user_version 0/,
+    );
+
+    // The refusal must not rewrite either marker.
+    const inspected = new DatabaseSync(databasePath);
     try {
-      assert.equal(reopened.schemaVersion(), CURRENT_SCHEMA_VERSION);
-      const inspected = new DatabaseSync(databasePath);
-      try {
-        assert.equal(
-          (
-            inspected.prepare("PRAGMA user_version").get() as {
-              readonly user_version: number;
-            }
-          ).user_version,
-          CURRENT_SCHEMA_VERSION,
-        );
-      } finally {
-        inspected.close();
-      }
+      assert.equal(
+        (
+          inspected.prepare("PRAGMA user_version").get() as {
+            readonly user_version: number;
+          }
+        ).user_version,
+        0,
+      );
     } finally {
-      reopened.close();
+      inspected.close();
     }
   });
 

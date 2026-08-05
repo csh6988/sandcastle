@@ -707,6 +707,7 @@ describe("local ACP facade", () => {
 
   it("fails closed on a newer-than-supported Runtime Event registry version", async () => {
     const sent: AcpMessage[] = [];
+    const acknowledgements: unknown[] = [];
     let delivered = false;
     const client = {
       query: async () => ({
@@ -734,12 +735,17 @@ describe("local ACP facade", () => {
         turns: [],
         permissions: [],
       }),
-      execute: async () => ({
-        acknowledged: true,
-        subscriptionGeneration: 4,
-        barrierSequence: 0,
-        auditId: "audit-1",
-      }),
+      execute: async (command: { readonly type: string }) => {
+        if (command.type === "ack-runtime-events") {
+          acknowledgements.push(command);
+        }
+        return {
+          acknowledged: true,
+          subscriptionGeneration: 4,
+          barrierSequence: 0,
+          auditId: "audit-1",
+        };
+      },
       openSubscription: async () => ({
         subscriptionId: "subscription-1",
         subscriptionGeneration: 4,
@@ -801,6 +807,11 @@ describe("local ACP facade", () => {
         (message as { method?: unknown }).method === "session/update",
     );
     assert.deepEqual(forwarded, []);
+    // Failing closed means the durable cursor never advances past the poison
+    // event: it is not acknowledged, so the same batch replays on reconnect
+    // instead of being silently dropped — matching the existing delivery-failure
+    // contract rather than introducing a new skip behavior.
+    assert.deepEqual(acknowledgements, []);
     await facade.close();
   });
 

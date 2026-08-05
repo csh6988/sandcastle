@@ -8,6 +8,7 @@ import type {
 import {
   assertRuntimeEventRegistryVersionSupported,
   createRuntimeEventRegistry,
+  effectiveRuntimeEventRegistryVersion,
 } from "./events/registry.js";
 
 export type AcpRequestId = string | number;
@@ -145,7 +146,7 @@ export const createAcpFacade = (input: {
   const source = (event: EventEnvelope) => ({
     eventId: event.eventId,
     sequence: event.sequence,
-    registryVersion: event.registryVersion ?? 1,
+    registryVersion: effectiveRuntimeEventRegistryVersion(event),
     schemaVersion: event.schemaVersion,
   });
 
@@ -271,7 +272,7 @@ export const createAcpFacade = (input: {
     // the AG-UI path so a newer-than-supported event is refused on ACP too. A
     // below-floor or too-new version is permanent and must not be forwarded.
     assertRuntimeEventRegistryVersionSupported(
-      event.registryVersion ?? 1,
+      effectiveRuntimeEventRegistryVersion(event),
       registry.version,
     );
     const definition = registry.validate({
