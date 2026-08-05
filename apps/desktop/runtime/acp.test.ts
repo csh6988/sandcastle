@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { createAcpFacade, serveAcpStdio, type AcpMessage } from "./acp.js";
 import type { CompanyRuntimeClient } from "./interface.js";
+import { RUNTIME_EVENT_REGISTRY_VERSION } from "./events/registry.js";
 import { companyRuntimeAddress } from "./address.js";
 import { createCompanyRuntimeClient } from "./client.js";
 import { startCompanyRuntimeServer } from "./server.js";
@@ -701,6 +702,105 @@ describe("local ACP facade", () => {
         },
       },
     ]);
+    await facade.close();
+  });
+
+  it("fails closed on a newer-than-supported Runtime Event registry version", async () => {
+    const sent: AcpMessage[] = [];
+    let delivered = false;
+    const client = {
+      query: async () => ({
+        session: {
+          id: "session-1",
+          mode: "consultation" as const,
+          projectId: "project-1",
+          runId: null,
+          nodeRunId: null,
+          status: "active" as const,
+          createdAt: "2026-07-27T00:00:00.000Z",
+          closedAt: null,
+        },
+        participants: [
+          {
+            id: "client-participant-1",
+            sessionId: "session-1",
+            participantType: "human" as const,
+            participantRef: "editor-1",
+            role: "requester",
+            createdAt: "2026-07-27T00:00:00.000Z",
+          },
+        ],
+        messages: [],
+        turns: [],
+        permissions: [],
+      }),
+      execute: async () => ({
+        acknowledged: true,
+        subscriptionGeneration: 4,
+        barrierSequence: 0,
+        auditId: "audit-1",
+      }),
+      openSubscription: async () => ({
+        subscriptionId: "subscription-1",
+        subscriptionGeneration: 4,
+        barrierSequence: 0,
+      }),
+      readSubscription: async () => {
+        if (delivered) {
+          return { events: [], nextSequence: 1, hasMore: false };
+        }
+        delivered = true;
+        // An event stamped at a registry version newer than this reader
+        // supports must be refused identically to the AG-UI path: it is never
+        // forwarded to the editor as a session/update.
+        return {
+          events: [
+            {
+              registryVersion: RUNTIME_EVENT_REGISTRY_VERSION + 1,
+              schemaVersion: 1 as const,
+              sequence: 1,
+              eventId: "event-future",
+              type: "message.delta",
+              companyId: "company",
+              projectId: "project-1",
+              sessionId: "session-1",
+              interactionTurnId: "turn-1",
+              timestamp: "2026-07-27T00:00:00.000Z",
+              payload: { messageId: "message-future", content: "future" },
+            },
+          ],
+          nextSequence: 1,
+          hasMore: false,
+        };
+      },
+      closeSubscription: async () => undefined,
+    } as unknown as CompanyRuntimeClient;
+    const facade = createAcpFacade({
+      client,
+      connection: { clientId: "editor-1", consumerId: "acp:editor-1" },
+      pollIntervalMs: 1,
+      send: async (message) => {
+        sent.push(message);
+      },
+    });
+
+    await facade.receive({
+      jsonrpc: "2.0",
+      id: "load-1",
+      method: "session/load",
+      params: { sessionId: "session-1" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The too-new event must not surface as an outbound session/update.
+    const forwarded = sent.filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "method" in message &&
+        (message as { method?: unknown }).method === "session/update",
+    );
+    assert.deepEqual(forwarded, []);
     await facade.close();
   });
 

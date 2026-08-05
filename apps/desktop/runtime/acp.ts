@@ -5,7 +5,10 @@ import type {
   EventEnvelope,
   RuntimeSubscriptionHandle,
 } from "./interface.js";
-import { createRuntimeEventRegistry } from "./events/registry.js";
+import {
+  assertRuntimeEventRegistryVersionSupported,
+  createRuntimeEventRegistry,
+} from "./events/registry.js";
 
 export type AcpRequestId = string | number;
 
@@ -264,6 +267,13 @@ export const createAcpFacade = (input: {
     });
 
   const applyEvent = async (event: EventEnvelope): Promise<void> => {
+    // Shared registry-version choke point: enforce the same fail-closed rule as
+    // the AG-UI path so a newer-than-supported event is refused on ACP too. A
+    // below-floor or too-new version is permanent and must not be forwarded.
+    assertRuntimeEventRegistryVersionSupported(
+      event.registryVersion ?? 1,
+      registry.version,
+    );
     const definition = registry.validate({
       type: event.type,
       scope: event,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  assertRuntimeEventRegistryVersionSupported,
   createRuntimeEventRegistry,
   RUNTIME_EVENT_REGISTRY_VERSION,
   RuntimeEventRegistryError,
@@ -989,6 +990,41 @@ describe("Runtime Event registry", () => {
       (error: unknown) =>
         error instanceof RuntimeEventRegistryError &&
         error.code === "RUNTIME_EVENT_SCOPE_INVALID",
+    );
+  });
+});
+
+describe("Runtime Event registry-version choke point", () => {
+  it("accepts an event stamped at the current registry version", () => {
+    assert.doesNotThrow(() =>
+      assertRuntimeEventRegistryVersionSupported(
+        RUNTIME_EVENT_REGISTRY_VERSION,
+      ),
+    );
+  });
+
+  it("accepts an event stamped at an older registry version (forward-only)", () => {
+    assert.doesNotThrow(() => assertRuntimeEventRegistryVersionSupported(1));
+  });
+
+  it("rejects a newer-than-supported registry version as a permanent failure", () => {
+    assert.throws(
+      () =>
+        assertRuntimeEventRegistryVersionSupported(
+          RUNTIME_EVENT_REGISTRY_VERSION + 1,
+        ),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_REGISTRY_VERSION_UNSUPPORTED",
+    );
+  });
+
+  it("rejects a registry version below the floor", () => {
+    assert.throws(
+      () => assertRuntimeEventRegistryVersionSupported(0),
+      (error: unknown) =>
+        error instanceof RuntimeEventRegistryError &&
+        error.code === "RUNTIME_EVENT_REGISTRY_VERSION_UNSUPPORTED",
     );
   });
 });

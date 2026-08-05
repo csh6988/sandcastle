@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { EventEnvelope } from "./interface.js";
 import {
+  assertRuntimeEventRegistryVersionSupported,
   createRuntimeEventRegistry,
   RuntimeEventRegistryError,
 } from "./events/registry.js";
@@ -173,11 +174,20 @@ export const runtimeEventToAgUi = (
   event: EventEnvelope,
 ): readonly AgUiEvent[] => {
   const registryVersion = eventRegistryVersion(event);
-  if (registryVersion < 1 || registryVersion > runtimeEventRegistry.version) {
+  try {
+    assertRuntimeEventRegistryVersionSupported(
+      registryVersion,
+      runtimeEventRegistry.version,
+    );
+  } catch (error) {
+    if (!(error instanceof RuntimeEventRegistryError)) throw error;
+    // A version-too-new (or below-floor) registry version is a permanent
+    // condition: retrying will never make the event readable. Surface it as the
+    // AG-UI protocol diagnostic with retryable=false.
     throw new AgUiProtocolDiagnosticError(
       "AG_UI_RUNTIME_EVENT_REGISTRY_UNSUPPORTED",
       `Runtime event registry ${String(registryVersion)} is not supported.`,
-      true,
+      false,
       event.eventId,
       event.sequence,
     );

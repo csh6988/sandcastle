@@ -162,7 +162,7 @@ describe("AG-UI Runtime Adapter", () => {
       (error: unknown) =>
         error instanceof AgUiProtocolDiagnosticError &&
         error.code === "AG_UI_RUNTIME_EVENT_REGISTRY_UNSUPPORTED" &&
-        error.retryable === true,
+        error.retryable === false,
     );
   });
 
