@@ -2029,6 +2029,156 @@ describe("Company database migrations", () => {
     }
   });
 
+  it("re-checks structural drift on an at-target v52 database and rejects tampering", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    assert.equal(current.schemaVersion(), CURRENT_SCHEMA_VERSION);
+    current.close();
+
+    // Tamper an already-at-target (v52) database without changing its version
+    // markers: drop a v52 immutability guard while leaving schema_metadata and
+    // user_version at 52. Before the open-path drift re-check this silently
+    // reopened; it must now fail closed with the existing incompatible family.
+    const tampered = new DatabaseSync(databasePath);
+    try {
+      tampered.exec(
+        "DROP TRIGGER statistics_evidence_snapshots_immutable_delete;",
+      );
+    } finally {
+      tampered.close();
+    }
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Existing T26 v52 schema is incompatible: statistics_evidence_snapshots_immutable_delete/,
+    );
+
+    // The refusal must not rewrite or repair the tampered database.
+    const inspected = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get() as { readonly value: string }
+        ).value,
+        String(CURRENT_SCHEMA_VERSION),
+      );
+      assert.equal(
+        inspected
+          .prepare(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = 'statistics_evidence_snapshots_immutable_delete'",
+          )
+          .get(),
+        undefined,
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("re-opens an untampered at-target v52 database unchanged", () => {
+    const companyDir = tempCompanyDir();
+    const first = openCompanyDatabase(companyDir);
+    assert.equal(first.schemaVersion(), CURRENT_SCHEMA_VERSION);
+    first.close();
+
+    // A clean at-target database must pass the drift re-check and re-open.
+    const second = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(second.schemaVersion(), CURRENT_SCHEMA_VERSION);
+    } finally {
+      second.close();
+    }
+  });
+
+  it("fails closed when user_version disagrees with schema_metadata", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    current.close();
+
+    // schema_metadata is the authoritative version marker; PRAGMA user_version
+    // is its write-only mirror. A disagreement between the two indicates the
+    // markers were tampered with and must fail closed rather than be trusted.
+    const tampered = new DatabaseSync(databasePath);
+    try {
+      tampered.exec("PRAGMA user_version = 40;");
+    } finally {
+      tampered.close();
+    }
+
+    assert.throws(
+      () => openCompanyDatabase(companyDir),
+      /Company database version markers disagree/,
+    );
+
+    // The refusal must not rewrite either marker.
+    const inspected = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        (
+          inspected
+            .prepare(
+              "SELECT value FROM schema_metadata WHERE key = 'schema_version'",
+            )
+            .get() as { readonly value: string }
+        ).value,
+        String(CURRENT_SCHEMA_VERSION),
+      );
+      assert.equal(
+        (
+          inspected.prepare("PRAGMA user_version").get() as {
+            readonly user_version: number;
+          }
+        ).user_version,
+        40,
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+
+  it("tolerates a pre-mirror user_version of zero on an at-target database", () => {
+    const companyDir = tempCompanyDir();
+    const current = openCompanyDatabase(companyDir);
+    const databasePath = current.path;
+    current.close();
+
+    // Legacy databases created before the user_version mirror existed carry
+    // user_version 0. That is not a disagreement; the open path must tolerate it
+    // (and the migrate path re-asserts the mirror to the target version).
+    const legacy = new DatabaseSync(databasePath);
+    try {
+      legacy.exec("PRAGMA user_version = 0;");
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = openCompanyDatabase(companyDir);
+    try {
+      assert.equal(reopened.schemaVersion(), CURRENT_SCHEMA_VERSION);
+      const inspected = new DatabaseSync(databasePath);
+      try {
+        assert.equal(
+          (
+            inspected.prepare("PRAGMA user_version").get() as {
+              readonly user_version: number;
+            }
+          ).user_version,
+          CURRENT_SCHEMA_VERSION,
+        );
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("upgrades schema version 43 with durable Reviewer execution stages", () => {
     const companyDir = tempCompanyDir();
     const current = openCompanyDatabase(companyDir);

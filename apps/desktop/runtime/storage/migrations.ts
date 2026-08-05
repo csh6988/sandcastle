@@ -6991,12 +6991,108 @@ const recordMigration = (
     .run(migration.version, migration.name, new Date().toISOString());
 };
 
+const readUserVersion = (database: DatabaseSync): number => {
+  const row = database.prepare("PRAGMA user_version").get() as
+    | { readonly user_version?: unknown }
+    | undefined;
+  return Number(row?.user_version ?? 0);
+};
+
+const normalizeSchemaObjectSql = (sql: string): string =>
+  sql
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1")
+    .trim()
+    .toLowerCase();
+
+// The T26 (v52) fact-family object set guarded by the v52 migration's own
+// structural comparison. Kept identical here so the at-target re-check produces
+// the same "Existing T26 v52 schema is incompatible" diagnostics.
+const T26_V52_SCHEMA_OBJECT_QUERY = `SELECT type, name, sql FROM sqlite_schema
+      WHERE name LIKE 'improvement%'
+         OR name LIKE 'statistics_evidence_snapshots%'
+         OR name LIKE 'governed_harness_revisions%'
+         OR name LIKE 'governed_skill_flow_revisions%'
+         OR name LIKE 'runtime_template_revisions%'
+      ORDER BY name`;
+
+// An at-target database runs no migration bodies, so the v52 migration's own
+// drift check never fires on it. Re-run the same structural comparison against a
+// freshly migrated in-memory reference so a hand-tampered same-version database
+// is rejected rather than silently trusted. Read-only: throws before any write.
+const assertAtTargetSchemaIntegrity = (database: DatabaseSync): void => {
+  const reference = new DatabaseSync(":memory:");
+  try {
+    reference.exec("PRAGMA foreign_keys = ON");
+    migrateCompanyDatabase(reference);
+    const readObjects = (
+      target: DatabaseSync,
+    ): Array<{
+      readonly type: string;
+      readonly name: string;
+      readonly sql: string;
+    }> =>
+      target.prepare(T26_V52_SCHEMA_OBJECT_QUERY).all() as Array<{
+        readonly type: string;
+        readonly name: string;
+        readonly sql: string;
+      }>;
+    const expected = readObjects(reference);
+    const actual = readObjects(database);
+    const actualByName = new Map(actual.map((entry) => [entry.name, entry]));
+    const expectedNames = new Set(expected.map((entry) => entry.name));
+    const incompatible = expected
+      .filter((entry) => {
+        const found = actualByName.get(entry.name);
+        return (
+          !found ||
+          found.type !== entry.type ||
+          normalizeSchemaObjectSql(found.sql) !==
+            normalizeSchemaObjectSql(entry.sql)
+        );
+      })
+      .map((entry) => entry.name);
+    incompatible.push(
+      ...actual
+        .filter((entry) => !expectedNames.has(entry.name))
+        .map((entry) => entry.name),
+    );
+    if (incompatible.length > 0) {
+      throw new Error(
+        `Existing T26 v52 schema is incompatible: ${[...new Set(incompatible)]
+          .sort()
+          .join(", ")}`,
+      );
+    }
+  } finally {
+    reference.close();
+  }
+};
+
 export const migrateCompanyDatabase = (database: DatabaseSync): number => {
   const existingVersion = readSchemaVersion(database);
   if (existingVersion > CURRENT_SCHEMA_VERSION) {
     throw new Error(
       `Unsupported company database schema version ${existingVersion}.`,
     );
+  }
+
+  // An at-target database runs no migration bodies, so its integrity is never
+  // otherwise re-checked on open. Cross-validate the authoritative version
+  // marker (schema_metadata) against its write-only mirror (PRAGMA user_version)
+  // and re-run the v52 structural drift check. For any older version the
+  // migration below is itself the integrity action: it rewrites both markers to
+  // the target and re-runs the per-version drift checks, so an intermediate
+  // mirror lag is transient and reconciled rather than a durable mismatch. A
+  // zero mirror is a pre-mirror legacy database, not a disagreement.
+  if (existingVersion === CURRENT_SCHEMA_VERSION) {
+    const mirroredVersion = readUserVersion(database);
+    if (mirroredVersion !== 0 && mirroredVersion !== existingVersion) {
+      throw new Error(
+        `Company database version markers disagree: schema_metadata ${existingVersion}, user_version ${mirroredVersion}.`,
+      );
+    }
+    assertAtTargetSchemaIntegrity(database);
   }
 
   const rebuildsNodeAttempts = existingVersion < 18;
