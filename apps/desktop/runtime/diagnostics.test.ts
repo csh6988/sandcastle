@@ -22,6 +22,12 @@ const localSessionAuthority = {
   commandId: "compact-command-1",
 };
 
+const liveSubscriber = {
+  type: "human" as const,
+  id: "live-desktop-subscriber",
+  authenticatedBy: "local-session" as const,
+};
+
 interface CheckpointRow {
   readonly compacted_from_sequence: number;
   readonly compacted_through_sequence: number;
@@ -245,6 +251,103 @@ describe("Runtime Diagnostics", () => {
       const checkpoints = readCheckpoints(companyDir);
       assert.equal(checkpoints.length, 1);
       assert.equal(checkpoints[0]!.retained_watermark_sequence, first.sequence);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("delivers a gap-free stream to a live subscriber across a compacted hole", () => {
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+    try {
+      // Interleave durable facts with compactable streaming events so a
+      // selective prune leaves a NON-CONTIGUOUS hole among retained durables.
+      const durableA = database.events.append({
+        type: "project.updated",
+        scope: { companyId: "company", projectId: "project-1" },
+        payload: { projectId: "project-1", revision: 1 },
+      });
+      const toolScope = {
+        companyId: "company",
+        projectId: "project-1",
+        sessionId: "session-1",
+        interactionTurnId: "turn-1",
+      };
+      const standardA = database.events.append({
+        type: "tool.call",
+        scope: toolScope,
+        payload: { toolCallId: "call-1", name: "search", args: {} },
+      });
+      const standardB = database.events.append({
+        type: "tool.result",
+        scope: toolScope,
+        payload: { toolCallId: "call-1", content: "ok" },
+      });
+      const durableB = database.events.append({
+        type: "project.updated",
+        scope: { companyId: "company", projectId: "project-1" },
+        payload: { projectId: "project-1", revision: 2 },
+      });
+
+      // A live subscriber drains and acknowledges the whole stream, so its
+      // cursor sits at the tail — above the range compaction may sweep.
+      const opened = database.events.openSubscription({
+        principal: liveSubscriber,
+        consumerId: "live-subscriber",
+      });
+      const drained = database.events.readSubscription({
+        ...opened,
+        principal: liveSubscriber,
+        limit: 100,
+      });
+      const deliveredBefore = drained.events.map((event) => event.sequence);
+      assert.ok(deliveredBefore.includes(standardA.sequence));
+      assert.ok(deliveredBefore.includes(standardB.sequence));
+      database.events.acknowledge({
+        consumerId: "live-subscriber",
+        principal: liveSubscriber,
+        subscriptionGeneration: opened.subscriptionGeneration,
+        sequence: drained.nextSequence,
+      });
+
+      const earliestBefore = database.events.earliestSequence();
+      const compacted = database.diagnostics.compactRuntimeEvents({
+        retainLast: 0,
+        ...localSessionAuthority,
+      });
+      // The two standard events are gone, leaving a hole between durableA and
+      // durableB; durable facts are retained at their original sequences.
+      assert.equal(compacted.deleted, 2);
+      const retained = database.events.readAfter(0, 100);
+      const retainedSequences = retained.map((event) => event.sequence);
+      assert.ok(retainedSequences.includes(durableA.sequence));
+      assert.ok(retainedSequences.includes(durableB.sequence));
+      assert.equal(retainedSequences.includes(standardA.sequence), false);
+      assert.equal(retainedSequences.includes(standardB.sequence), false);
+      // The retained floor is unchanged: selective compaction removed interior
+      // events, never a prefix, so no live cursor is expired.
+      assert.equal(database.events.earliestSequence(), earliestBefore);
+
+      // Re-opening the SAME consumer after the prune neither expires the cursor
+      // (its watermark is above the hole) nor re-reads any swept sequence: the
+      // live subscriber observes a gap-free forward stream.
+      const reopened = database.events.openSubscription({
+        principal: liveSubscriber,
+        consumerId: "live-subscriber",
+      });
+      const afterCompaction = database.events.readSubscription({
+        ...reopened,
+        principal: liveSubscriber,
+        limit: 100,
+      });
+      assert.equal(
+        afterCompaction.events.some(
+          (event) =>
+            event.sequence === standardA.sequence ||
+            event.sequence === standardB.sequence,
+        ),
+        false,
+      );
     } finally {
       database.close();
     }

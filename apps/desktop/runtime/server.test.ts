@@ -1028,4 +1028,107 @@ describe("Company Runtime server startup", () => {
     assert.equal(changedClock.manifestHash, first.manifestHash);
     assert.notEqual(changedClock.createdAt, first.createdAt);
   });
+
+  it("injects compaction authority from the principal and refuses untrusted actors", async () => {
+    const companyDir = mkdtempSync(
+      join(tmpdir(), "sandcastle-server-compact-"),
+    );
+    roots.push(companyDir);
+    const address = companyRuntimeAddress(companyDir);
+    const token = "server-compact-human-token";
+    const humanActor = {
+      type: "human" as const,
+      id: "local-desktop-user",
+      authenticatedBy: "local-session" as const,
+      projectReadAuthority: ["*"],
+    };
+    const server = await startCompanyRuntimeServer({
+      address,
+      companyDir,
+      token,
+      principal: humanActor,
+      consumerId: "compact-human",
+      trustedConnections: [
+        {
+          token: "server-compact-untrusted-token",
+          principal: {
+            type: "test-driver",
+            id: "fixture-only",
+            authenticatedBy: "ipc-token",
+          },
+          consumerId: "compact-untrusted",
+        },
+      ],
+    });
+    try {
+      const humanClient = createCompanyRuntimeClientFromTransport(
+        createLocalRuntimeTransport({ address, token }),
+        token,
+        { actor: humanActor, consumerId: "compact-human" },
+      );
+      // The compaction Command carries no actor; authority is Runtime-injected
+      // from the authenticated principal. A verified local-session human is
+      // accepted and the injected actor lands on the checkpoint.
+      const compacted = await humanClient.execute({
+        type: "runtime.events.compact",
+        retainLast: 0,
+      });
+      assert.equal(typeof compacted.deleted, "number");
+
+      const untrustedClient = createCompanyRuntimeClientFromTransport(
+        createLocalRuntimeTransport({
+          address,
+          token: "server-compact-untrusted-token",
+        }),
+        "server-compact-untrusted-token",
+        {
+          actor: {
+            type: "test-driver",
+            id: "fixture-only",
+            authenticatedBy: "ipc-token",
+          },
+          consumerId: "compact-untrusted",
+        },
+      );
+      // An ipc-token/test-driver principal is neither a trusted Runtime worker
+      // nor a verified local-session human, so compaction fails closed.
+      await assert.rejects(
+        untrustedClient.execute({
+          type: "runtime.events.compact",
+          retainLast: 0,
+        }),
+        (error: unknown) =>
+          error instanceof RuntimeClientError && error.code === "FORBIDDEN",
+      );
+    } finally {
+      await server.close();
+    }
+
+    // Any checkpoint written by the accepted human path records exactly that
+    // authority pair — never the untrusted actor.
+    const sqlite = new DatabaseSync(
+      join(companyDir, ".sandcastle", "company.sqlite"),
+    );
+    try {
+      const checkpoints = sqlite
+        .prepare(
+          `SELECT authorized_by_actor_type AS actorType,
+                  authorized_by_actor_id AS actorId,
+                  authorized_by_authenticated_by AS authenticatedBy
+             FROM runtime_event_compaction_checkpoints`,
+        )
+        .all() as unknown as ReadonlyArray<{
+        readonly actorType: string;
+        readonly actorId: string;
+        readonly authenticatedBy: string;
+      }>;
+      for (const checkpoint of checkpoints) {
+        assert.equal(checkpoint.actorType, "human");
+        assert.equal(checkpoint.actorId, "local-desktop-user");
+        assert.equal(checkpoint.authenticatedBy, "local-session");
+      }
+    } finally {
+      sqlite.close();
+    }
+  });
 });

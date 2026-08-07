@@ -25,11 +25,23 @@ export interface RuntimeDiagnosticsView {
  * authenticated principal) rather than carried on the Command envelope.
  */
 export interface RuntimeCompactionAuthority {
-  readonly actor: {
-    readonly type: "human" | "runtime-worker";
-    readonly id: string;
-    readonly authenticatedBy: "local-session" | "runtime";
-  };
+  /**
+   * The authority pairs are a discriminated union rather than two independent
+   * unions so an invalid pairing (e.g. a human authenticated by "runtime") is
+   * unrepresentable in the type system instead of being caught late by the
+   * checkpoint CHECK constraint after the prune has already been staged.
+   */
+  readonly actor:
+    | {
+        readonly type: "human";
+        readonly id: string;
+        readonly authenticatedBy: "local-session";
+      }
+    | {
+        readonly type: "runtime-worker";
+        readonly id: string;
+        readonly authenticatedBy: "runtime";
+      };
   readonly commandId: string;
 }
 
@@ -50,7 +62,9 @@ const canonicalize = (value: unknown): unknown => {
   return Object.fromEntries(
     Object.entries(value)
       .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      // Locale-independent byte order so the integrity hash is reproducible
+      // across hosts (localeCompare would make the ordering ICU-dependent).
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, entry]) => [key, canonicalize(entry)]),
   );
 };
@@ -114,6 +128,28 @@ export const openRuntimeDiagnostics = (
       .filter((definition) => definition.retentionClass !== "durable")
       .map((definition) => definition.type);
 
+  // Compaction contract (T27 Phase B). Explicit, single-writer prune inside one
+  // transaction; there is no background writer. Design decisions recorded here
+  // so the behavior is unambiguous:
+  //   - Selective by retention class: only non-durable events are deleted, so
+  //     the retained log is intentionally NON-CONTIGUOUS (durable events remain
+  //     at their original sequences with holes where non-durable events were).
+  //     Live consumers advance an ack-gated cursor and never re-read below it,
+  //     so they never observe a hole; the checkpoint records the prune for audit.
+  //   - compacted_from/through_sequence are the min/max sequences of the DELETED
+  //     rows — a span that may still enclose retained durable events — not a
+  //     solid deleted interval. compacted_event_count is the authoritative count
+  //     of what was removed.
+  //   - pre_compaction_integrity_hash proves WHICH events (sequence, eventId,
+  //     type) were present immediately before the prune. It deliberately omits
+  //     payload: the durable business facts (and their content) are retained in
+  //     the outbox and their own append-only fact tables, so the checkpoint only
+  //     needs to attest the identity of the compacted non-durable slice.
+  //   - Not idempotent: each invocation prunes whatever is currently eligible.
+  //     command_id is UNIQUE to prevent duplicate checkpoint identity, not to
+  //     dedupe user retries (a repeat simply compacts the next eligible slice,
+  //     or nothing). A no-op prune writes no checkpoint by design — there is
+  //     nothing removed to attribute.
   const compactRuntimeEvents: RuntimeDiagnostics["compactRuntimeEvents"] = (
     input,
   ) => {
@@ -154,6 +190,9 @@ export const openRuntimeDiagnostics = (
               AND type IN (${placeholders})
             ORDER BY sequence`,
         )
+        // `.all()` is typed as Record<string, SQLOutputValue>[]; the double cast
+        // is required because the strict desktop tsconfig rejects a direct
+        // structural assertion over that index signature.
         .all(cutoff, ...eligibleTypes) as unknown as ReadonlyArray<{
         readonly sequence: number;
         readonly eventId: string;
