@@ -442,6 +442,17 @@ export const openReleaseOperationRuntime = (
       // Persist immutable intent through the persistence facade. The transient
       // marks and claim fencing that the facade folds into createIntent stay
       // internal; the enclosing transaction still owns commit/rollback.
+      //
+      // Only the durable inputs — id, request, acceptedAuthority,
+      // canonicalRequestHash, and the creation timestamps — are authoritative
+      // here; createIntent materializes the item and destination-claim rows from
+      // `request.items`. The remaining projection fields (aggregateState, counts,
+      // nextActions, items) are ADVISORY placeholders that satisfy the frozen
+      // ReleaseOperationView contract type: the facade never reads them and
+      // recomputes the authoritative projection via inspect() before returning.
+      // `items` is therefore left unmaterialized (the facade inserts the rows),
+      // and any decorator over this seam must treat these fields as advisory and
+      // read the returned view rather than trusting the input's derived shape.
       return persistence.createIntent({
         id: request.operationId,
         request,
@@ -711,6 +722,15 @@ export const openReleaseOperationRuntime = (
       return inspect(input.operationId);
     },
     reconcile: (input) => {
+      // The verified-human authority is re-derived AUTHORITATIVELY from the
+      // immutable append-only reconciliation log (pendingReconciliationIntent),
+      // never taken from input.request.actor. This is a deliberate fail-closed
+      // safety property, not redundancy: the base facade cannot be induced to
+      // invent or launder verified-human authority through a fabricated request
+      // (T22 invariants: two-authority separation, local-human reconcile,
+      // reconcile-as-evidence-only). input.request.operationId/itemId locate the
+      // item; input.request.actor/expectedOperationHash/evidenceRefs are only
+      // meaningful to a substitute decorator and are intentionally inert here.
       const item = itemRowByKey(input.request.operationId, input.request.itemId);
       const reconciliation = pendingReconciliationIntent(item.databaseId) ?? undefined;
       return resolveReconciliation(input.request.operationId, item, input.observation, reconciliation);
