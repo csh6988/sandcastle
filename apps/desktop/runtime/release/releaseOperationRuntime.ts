@@ -10,7 +10,9 @@ import {
   type ReleaseOperationCreateRequest,
   type ReleaseOperationEffectAdapter,
   type ReleaseOperationEffectRequest,
+  type ReleaseOperationErrorCode,
   type ReleaseOperationItemFinalize,
+  type ReleaseOperationPersistence,
   type ReleaseOperationReconcileObservation,
   type ReleaseOperationReconcileRequest,
   type ReleaseOperationView,
@@ -45,6 +47,17 @@ export interface ReleaseOperationRuntimeOptions {
   readonly id?: () => string;
   /** This is called inside the state transaction, so an outbox/audit bridge is atomic. */
   readonly invalidate?: (event: ReleaseOperationAuditEvent) => void;
+  /**
+   * Optional decorator over the runtime-owned {@link ReleaseOperationPersistence}
+   * facade. The base implementation persists durable intent, terminal
+   * finalization, reconciliation observation, and read projections over the
+   * existing tables; a decorator may wrap it (e.g. to record or substitute)
+   * without changing behavior. Transient in-flight marks and destination-claim
+   * fencing remain internal to the runtime and never cross this seam.
+   */
+  readonly persistence?: (
+    base: ReleaseOperationPersistence,
+  ) => ReleaseOperationPersistence;
   /** Test-only crash point; production wiring leaves it unset. */
   readonly failureInjection?: (point: "after-intent" | "after-effect-before-finalize") => void;
 }
@@ -70,17 +83,12 @@ export interface ReleaseOperationRuntime {
 }
 
 export class ReleaseOperationRuntimeError extends Error {
+  // The code is typed from the frozen ReleaseOperationErrorCode contract enum so
+  // the runtime throw surface and the adapter-level Item-failure codes
+  // (RELEASE_TARGET_INVALID / _CHECKED_OUT / _FAST_FORWARD_REQUIRED) are one
+  // aligned, single-source-of-truth set that cannot silently drift.
   constructor(
-    readonly code:
-      | "RELEASE_OPERATION_NOT_FOUND"
-      | "RELEASE_OPERATION_ID_REUSE"
-      | "RELEASE_AUTHORITY_CONFLICT"
-      | "RELEASE_ARTIFACT_NOT_AUTHORIZED"
-      | "RELEASE_ARTIFACT_UNREADABLE"
-      | "RELEASE_DESTINATION_INVALID"
-      | "RELEASE_DESTINATION_CONFLICT"
-      | "RELEASE_OPERATION_BLOCKED"
-      | "RELEASE_RECONCILIATION_INVALID",
+    readonly code: ReleaseOperationErrorCode,
     message: string,
   ) {
     super(message);
@@ -431,25 +439,21 @@ export const openReleaseOperationRuntime = (
       }
       const at = now();
       inserted = true;
-      database.prepare(
-        `INSERT INTO release_operations(id, idempotency_key, candidate_id, accepted_authority_id, kind, authorization_json, authorization_hash, request_json, canonical_request_hash, aggregate_state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-      ).run(request.operationId, request.operationId, request.candidateId, authority.id, request.kind, canonicalJson(request.authorization), digest(request.authorization), canonicalJson({ request, acceptedAuthority: authority }), requestHash, at, at);
-      for (const [ordinal, item] of request.items.entries()) {
-        const itemDatabaseId = `release-item:${request.operationId}:${item.id}`;
-        database.prepare(
-          `INSERT INTO release_operation_items(id, operation_id, item_key, ordinal, kind, request_json, request_hash, state, receipt_json, receipt_hash, failure_code, failure_message, evidence_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, '[]', ?, ?)`,
-        ).run(itemDatabaseId, request.operationId, item.id, ordinal, request.kind, canonicalJson(item), digest(item), at, at);
-        const claimId = `release-claim:${request.operationId}:${item.id}`;
-        database.prepare(
-          `INSERT INTO release_operation_destination_claims(id, operation_id, item_id, destination_key, fence_token, is_active, created_at, released_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?, NULL)`,
-        ).run(claimId, request.operationId, itemDatabaseId, destinationKeyFor(request, item), nextId(), at);
-        database.prepare("INSERT INTO release_operation_destination_claim_events(id, claim_id, action, evidence_json, created_at) VALUES (?, ?, 'acquired', ?, ?)").run(nextId(), claimId, canonicalJson({ reason: "intent" }), at);
-      }
-      invalidate(request.operationId);
-      return inspect(request.operationId);
+      // Persist immutable intent through the persistence facade. The transient
+      // marks and claim fencing that the facade folds into createIntent stay
+      // internal; the enclosing transaction still owns commit/rollback.
+      return persistence.createIntent({
+        id: request.operationId,
+        request,
+        acceptedAuthority: authority,
+        canonicalRequestHash: requestHash,
+        aggregateState: "pending",
+        counts: { pending: request.items.length, running: 0, reconciling: 0, succeeded: 0, failed: 0, destinationConflict: 0, unknown: 0 },
+        nextActions: [],
+        items: [],
+        createdAt: at,
+        updatedAt: at,
+      });
       });
     } catch (error) {
       if (String(error).includes("release_operation_destination_claims_active_destination_idx") || String(error).includes("release_operation_destination_claims.destination_key")) {
@@ -508,7 +512,7 @@ export const openReleaseOperationRuntime = (
                   observedAt: now(),
                 },
               };
-        view = finalize(operationId, row, result);
+        view = persistence.finalize({ operationId, itemFinalizations: [{ itemId: row.itemKey, result }] });
         if (result.state === "unknown") break;
         continue;
       }
@@ -519,7 +523,26 @@ export const openReleaseOperationRuntime = (
         }
         let observation: ReleaseOperationReconcileObservation;
         try { observation = await options.adapter.reconcile(effect, reconciliation?.evidenceRefs ?? []); } catch (error) { observation = { state: "unknown", unknown: { code: "RECONCILE_ERROR", message: String(error), observedAt: now() } }; }
-        view = resolveReconciliation(operationId, row, observation, reconciliation ?? undefined);
+        if (reconciliation) {
+          // A verified-human reconciliation intent exists, so the observation is
+          // applied through the persistence facade with the genuine human
+          // request reconstructed from that immutable intent — no fabricated
+          // authority. The facade re-links the observation to the intent.
+          view = persistence.reconcile({
+            request: {
+              operationId,
+              itemId: row.itemKey,
+              expectedOperationHash: current.canonicalRequestHash,
+              actor: { type: "human", id: reconciliation.actorId, authenticatedBy: "local-session" },
+              evidenceRefs: [...reconciliation.evidenceRefs],
+            },
+            observation,
+          });
+        } else {
+          // Crash-resume of an in-flight item has no human intent; keep it on the
+          // internal resolver so no verified-human authority is invented.
+          view = resolveReconciliation(operationId, row, observation, undefined);
+        }
         if (observation.state === "unknown") break;
         if (observation.state !== "pending") continue;
       }
@@ -529,14 +552,16 @@ export const openReleaseOperationRuntime = (
       ).get(operationId, originalRow.itemKey) as ItemRow;
       if (refreshed.state !== "pending") continue;
       if (!transaction(() => acquireClaim(operationId, refreshed.databaseId, now()))) {
-        view = finalize(operationId, refreshed, { state: "destination-conflict", conflict: { code: "RELEASE_DESTINATION_CONFLICT", message: "Another Release operation holds the destination claim.", observedDestinationState: null, observedAt: now() } });
+        view = persistence.finalize({ operationId, itemFinalizations: [{ itemId: refreshed.itemKey, result: { state: "destination-conflict", conflict: { code: "RELEASE_DESTINATION_CONFLICT", message: "Another Release operation holds the destination claim.", observedDestinationState: null, observedAt: now() } } }] });
         continue;
       }
       setItem({ operationId, item: refreshed, state: "running", kind: "execution", observation: { state: "running" }, release: false });
       let result: ReleaseOperationItemFinalize;
       try { result = await options.adapter.execute(effect); } catch (error) { result = { state: "unknown", unknown: { code: "RELEASE_EFFECT_ERROR", message: String(error), observedAt: now() } }; }
       options.failureInjection?.("after-effect-before-finalize");
-      view = finalize(operationId, refreshed, result);
+      // Terminal outcome of a freshly executed item carries no pending
+      // reconciliation intent, so it persists through the contract facade.
+      view = persistence.finalize({ operationId, itemFinalizations: [{ itemId: refreshed.itemKey, result }] });
       if (result.state === "unknown") break;
     }
     return inspect(operationId);
@@ -623,5 +648,78 @@ export const openReleaseOperationRuntime = (
     await Promise.all([...active.values()]);
   };
 
-  return { create, inspect, list: (candidateId) => (database.prepare("SELECT id FROM release_operations WHERE candidate_id = ? ORDER BY created_at, id").all(candidateId) as Array<{ readonly id: string }>).map((row) => inspect(row.id)), dispatch, reconcile, requestReconciliation, reconcilePending, prepareForShutdown };
+  const itemRowByKey = (operationId: string, itemKey: string): ItemRow => {
+    const row = database
+      .prepare(
+        `SELECT id AS databaseId, item_key AS itemKey, request_json AS requestJson, state, receipt_json AS receiptJson, evidence_json AS evidenceJson, updated_at AS updatedAt
+           FROM release_operation_items WHERE operation_id = ? AND item_key = ?`,
+      )
+      .get(operationId, itemKey) as ItemRow | undefined;
+    if (!row) throw new ReleaseOperationRuntimeError("RELEASE_OPERATION_NOT_FOUND", `Release item ${itemKey} was not found.`);
+    return row;
+  };
+
+  // The runtime-owned base persistence facade. It centralizes the durable
+  // reads and writes over the existing tables so callers persist through the
+  // ReleaseOperationPersistence contract rather than issuing scattered raw SQL.
+  // Transient in-flight marks (running/reconciling) and destination-claim
+  // fencing are deliberately NOT part of this contract; they remain internal to
+  // the runtime. Every method here runs inside whatever transaction its caller
+  // has already opened — the facade never commits on its own.
+  const basePersistence: ReleaseOperationPersistence = {
+    createIntent: (view) => {
+      const at = view.createdAt;
+      database
+        .prepare(
+          `INSERT INTO release_operations(id, idempotency_key, candidate_id, accepted_authority_id, kind, authorization_json, authorization_hash, request_json, canonical_request_hash, aggregate_state, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        )
+        .run(view.id, view.id, view.request.candidateId, view.acceptedAuthority.id, view.request.kind, canonicalJson(view.request.authorization), digest(view.request.authorization), canonicalJson({ request: view.request, acceptedAuthority: view.acceptedAuthority }), view.canonicalRequestHash, view.createdAt, view.updatedAt);
+      for (const [ordinal, item] of view.request.items.entries()) {
+        const itemDatabaseId = `release-item:${view.id}:${item.id}`;
+        database
+          .prepare(
+            `INSERT INTO release_operation_items(id, operation_id, item_key, ordinal, kind, request_json, request_hash, state, receipt_json, receipt_hash, failure_code, failure_message, evidence_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, '[]', ?, ?)`,
+          )
+          .run(itemDatabaseId, view.id, item.id, ordinal, view.request.kind, canonicalJson(item), digest(item), at, at);
+        const claimId = `release-claim:${view.id}:${item.id}`;
+        database
+          .prepare(
+            `INSERT INTO release_operation_destination_claims(id, operation_id, item_id, destination_key, fence_token, is_active, created_at, released_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, NULL)`,
+          )
+          .run(claimId, view.id, itemDatabaseId, destinationKeyFor(view.request, item), nextId(), at);
+        database
+          .prepare("INSERT INTO release_operation_destination_claim_events(id, claim_id, action, evidence_json, created_at) VALUES (?, ?, 'acquired', ?, ?)")
+          .run(nextId(), claimId, canonicalJson({ reason: "intent" }), at);
+      }
+      invalidate(view.id);
+      return inspect(view.id);
+    },
+    inspect: (operationId) => inspect(operationId),
+    list: (candidateId) =>
+      (
+        database
+          .prepare("SELECT id FROM release_operations WHERE candidate_id = ? ORDER BY created_at, id")
+          .all(candidateId) as Array<{ readonly id: string }>
+      ).map((row) => inspect(row.id)),
+    finalize: (input) => {
+      for (const entry of input.itemFinalizations) {
+        finalize(input.operationId, itemRowByKey(input.operationId, entry.itemId), entry.result);
+      }
+      return inspect(input.operationId);
+    },
+    reconcile: (input) => {
+      const item = itemRowByKey(input.request.operationId, input.request.itemId);
+      const reconciliation = pendingReconciliationIntent(item.databaseId) ?? undefined;
+      return resolveReconciliation(input.request.operationId, item, input.observation, reconciliation);
+    },
+  };
+
+  const persistence = options.persistence
+    ? options.persistence(basePersistence)
+    : basePersistence;
+
+  return { create, inspect: (operationId) => persistence.inspect(operationId), list: (candidateId) => persistence.list(candidateId), dispatch, reconcile, requestReconciliation, reconcilePending, prepareForShutdown };
 };

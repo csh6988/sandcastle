@@ -7,11 +7,14 @@ import { describe, it } from "node:test";
 import { migrateCompanyDatabase } from "../storage/migrations.js";
 import {
   openReleaseOperationRuntime,
+  ReleaseOperationRuntimeError,
   type ReleaseOperationArtifactReader,
 } from "./releaseOperationRuntime.js";
+import { ReleaseOperationErrorCodeSchema } from "./releaseOperationContracts.js";
 import type {
   AcceptedDeliveryCandidateAuthoritySnapshot,
   ReleaseOperationEffectAdapter,
+  ReleaseOperationPersistence,
 } from "./releaseOperationContracts.js";
 
 const hash = (digit = "a"): string => digit.repeat(64);
@@ -42,6 +45,7 @@ const setup = (
   artifacts: ReleaseOperationArtifactReader = {
     metadata: () => ({ contentKind: "managed-file", integrityStatus: "verified", digest: hash("b") }),
   },
+  persistence?: (base: ReleaseOperationPersistence) => ReleaseOperationPersistence,
 ) => {
   const database = new DatabaseSync(":memory:");
   migrateCompanyDatabase(database);
@@ -54,9 +58,21 @@ const setup = (
       adapter,
       id: (() => { let value = 0; return () => `id-${++value}`; })(),
       clock: () => new Date("2026-08-03T00:00:00.000Z"),
+      ...(persistence ? { persistence } : {}),
     }),
   };
 };
+
+// A recording decorator over the runtime-owned base persistence: it delegates
+// every call unchanged (so behavior must be identical to raw SQL) while logging
+// which durable operation crossed the ReleaseOperationPersistence seam.
+const recordingPersistence = (log: string[]) => (base: ReleaseOperationPersistence): ReleaseOperationPersistence => ({
+  createIntent: (input) => { log.push(`createIntent:${input.id}`); return base.createIntent(input); },
+  inspect: (operationId) => { log.push(`inspect:${operationId}`); return base.inspect(operationId); },
+  list: (candidateId) => { log.push(`list:${candidateId}`); return base.list(candidateId); },
+  finalize: (input) => { log.push(`finalize:${input.operationId}:${input.itemFinalizations.map((entry) => `${entry.itemId}=${entry.result.state}`).join(",")}`); return base.finalize(input); },
+  reconcile: (input) => { log.push(`reconcile:${input.request.operationId}:${input.request.itemId}=${input.observation.state}`); return base.reconcile(input); },
+});
 
 const mergeRequest = (operationId = "release-operation-1") => ({
   operationId,
@@ -336,5 +352,104 @@ describe("ReleaseOperationRuntime", () => {
     assert.deepEqual(executed, ["repository:api", "repository:web"]);
     assert.equal(view.aggregateState, "partially-succeeded");
     assert.deepEqual(view.nextActions, ["create-new-operation"]);
+  });
+});
+
+describe("ReleaseOperationRuntime persistence seam (T27 D1)", () => {
+  it("routes every durable state transition through the injected ReleaseOperationPersistence", async () => {
+    const log: string[] = [];
+    const { runtime } = setup(
+      {
+        execute: async () => ({ state: "succeeded", receipt: { kind: "merge", disposition: "applied", resultingTargetTip: commit("c"), observedAt: "2026-08-03T00:00:01.000Z" } }),
+        reconcile: async () => ({ state: "pending" }),
+      },
+      authority,
+      undefined,
+      recordingPersistence(log),
+    );
+    const request = mergeRequest();
+
+    const created = runtime.create(request, request.authorization.actor);
+    assert.equal(created.aggregateState, "pending");
+    const completed = await runtime.dispatch(created.id);
+    assert.equal(completed.aggregateState, "succeeded");
+    runtime.list(request.candidateId);
+
+    // The durable lifecycle — intent creation, terminal finalize, and read
+    // projections — must be observable at the persistence seam, proving the
+    // runtime delegates rather than issuing its own raw SQL for these.
+    assert.ok(log.some((entry) => entry === `createIntent:${request.operationId}`), `expected createIntent, saw ${JSON.stringify(log)}`);
+    assert.ok(log.some((entry) => entry.startsWith(`finalize:${request.operationId}:repository:api=succeeded`)), `expected terminal finalize, saw ${JSON.stringify(log)}`);
+    assert.ok(log.some((entry) => entry === `list:${request.candidateId}`), `expected list, saw ${JSON.stringify(log)}`);
+  });
+
+  it("preserves behavior identically when persistence is decorated (idempotent create, ID reuse, terminal aggregate)", async () => {
+    const log: string[] = [];
+    const { runtime } = setup(
+      {
+        execute: async () => ({ state: "succeeded", receipt: { kind: "merge", disposition: "applied", resultingTargetTip: commit("c"), observedAt: "2026-08-03T00:00:01.000Z" } }),
+        reconcile: async () => ({ state: "pending" }),
+      },
+      authority,
+      undefined,
+      recordingPersistence(log),
+    );
+    const request = mergeRequest();
+
+    // Idempotent create returns the same operation identity, unchanged.
+    const first = runtime.create(request, request.authorization.actor);
+    assert.equal(runtime.create(request, request.authorization.actor).id, first.id);
+    // Divergent canonical request under the same identity still fails closed.
+    assert.throws(
+      () => runtime.create({ ...request, authorization: { ...request.authorization, reason: "Changed authorization." } }, request.authorization.actor),
+      (error: unknown) => error instanceof ReleaseOperationRuntimeError && error.code === "RELEASE_OPERATION_ID_REUSE",
+    );
+    const completed = await runtime.dispatch(first.id);
+    assert.equal(completed.aggregateState, "succeeded");
+    assert.equal(completed.items[0]?.state, "succeeded");
+  });
+
+  it("rolls the seam back with the enclosing Command transaction (no partial durable intent)", () => {
+    const log: string[] = [];
+    const { database, runtime } = setup(
+      {
+        execute: async () => ({ state: "unknown", unknown: { code: "never", message: "never", observedAt: "2026-08-03T00:00:01.000Z" } }),
+        reconcile: async () => ({ state: "pending" }),
+      },
+      authority,
+      undefined,
+      recordingPersistence(log),
+    );
+    const request = mergeRequest();
+
+    database.exec("BEGIN IMMEDIATE");
+    runtime.create(request, request.authorization.actor);
+    database.exec("ROLLBACK");
+
+    // createIntent must have crossed the seam, yet its writes are discarded with
+    // the outer transaction — the persistence facade never commits on its own.
+    assert.ok(log.includes(`createIntent:${request.operationId}`));
+    assert.throws(
+      () => runtime.inspect(request.operationId),
+      (error: unknown) => error instanceof ReleaseOperationRuntimeError && error.code === "RELEASE_OPERATION_NOT_FOUND",
+    );
+  });
+});
+
+describe("ReleaseOperationRuntime error-code surface (T27 D1)", () => {
+  it("types the runtime error code from the frozen ReleaseOperationErrorCode enum", () => {
+    // Every code the runtime can throw must be a member of the single-source-of-
+    // truth contract enum; this pins the alignment so the two cannot drift.
+    const thrown = new ReleaseOperationRuntimeError("RELEASE_OPERATION_NOT_FOUND", "probe");
+    assert.equal(ReleaseOperationErrorCodeSchema.parse(thrown.code), "RELEASE_OPERATION_NOT_FOUND");
+  });
+
+  it("keeps adapter-level target/fast-forward codes representable on the aligned surface", () => {
+    // RELEASE_TARGET_INVALID / _CHECKED_OUT / _FAST_FORWARD_REQUIRED are adapter
+    // Item failures; after alignment they remain valid members of the same enum
+    // that types the runtime error surface, so failure and thrown codes are one set.
+    for (const code of ["RELEASE_TARGET_INVALID", "RELEASE_TARGET_CHECKED_OUT", "RELEASE_FAST_FORWARD_REQUIRED"] as const) {
+      assert.equal(ReleaseOperationErrorCodeSchema.parse(code), code);
+    }
   });
 });
