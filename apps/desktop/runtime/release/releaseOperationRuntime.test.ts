@@ -453,3 +453,165 @@ describe("ReleaseOperationRuntime error-code surface (T27 D1)", () => {
     }
   });
 });
+
+describe("ReleaseOperationRuntime reconcile/claim edges (T27 D2)", () => {
+  it("stops the serial worker at the first unknown item and leaves later items pending", async () => {
+    const acceptedAuthority: AcceptedDeliveryCandidateAuthoritySnapshot = {
+      ...authority,
+      repositoryCommits: [
+        { repositoryReference: "repository:api", commit: commit("b") },
+        { repositoryReference: "repository:web", commit: commit("d") },
+      ],
+    };
+    const executed: string[] = [];
+    const { runtime } = setup(
+      {
+        execute: async (effect) => {
+          executed.push(effect.item.id);
+          return effect.item.id === "repository:api"
+            ? { state: "unknown", unknown: { code: "TIMEOUT", message: "write outcome is not known", observedAt: "2026-08-03T00:00:01.000Z" } }
+            : { state: "succeeded", receipt: { kind: "merge", disposition: "applied", resultingTargetTip: commit("e"), observedAt: "2026-08-03T00:00:02.000Z" } };
+        },
+        reconcile: async () => ({ state: "pending" }),
+      },
+      acceptedAuthority,
+    );
+    const request = {
+      ...mergeRequest(),
+      items: [
+        { id: "repository:api", repositoryReference: "repository:api", sourceCommit: commit("b"), destination: { targetBranch: "main", expectedTargetTip: commit("a") } },
+        { id: "repository:web", repositoryReference: "repository:web", sourceCommit: commit("d"), destination: { targetBranch: "main", expectedTargetTip: commit("c") } },
+      ],
+    };
+
+    const view = await runtime.dispatch(runtime.create(request, request.authorization.actor).id);
+
+    // The first item's unknown outcome halts the serial worker: the second item
+    // is never executed and stays pending, and the aggregate is blocked so the
+    // only forward move is a verified-human reconciliation.
+    assert.deepEqual(executed, ["repository:api"]);
+    assert.equal(view.aggregateState, "blocked");
+    assert.equal(view.items[0]?.state, "unknown");
+    assert.equal(view.items[1]?.state, "pending");
+    assert.equal(view.counts.unknown, 1);
+    assert.equal(view.counts.pending, 1);
+    assert.deepEqual(view.nextActions, ["reconcile"]);
+  });
+
+  it("treats an adapter-reported destination conflict as terminal, remediated only by a new operation with no resend or rollback", async () => {
+    let executions = 0;
+    let reconciliations = 0;
+    const { database, runtime } = setup({
+      execute: async () => {
+        executions += 1;
+        return {
+          state: "destination-conflict",
+          conflict: {
+            code: "RELEASE_DESTINATION_CONFLICT",
+            message: "the Release target changed during its expected-tip compare-and-swap",
+            observedDestinationState: { observedTargetTip: commit("f") },
+            observedAt: "2026-08-03T00:00:01.000Z",
+          },
+        };
+      },
+      reconcile: async () => {
+        reconciliations += 1;
+        return { state: "pending" };
+      },
+    });
+    const request = mergeRequest();
+
+    const view = await runtime.dispatch(runtime.create(request, request.authorization.actor).id);
+
+    // Destination drift is terminal: the item is a destination conflict, the only
+    // remediation offered is a brand-new operation (never reconcile), and the
+    // effect is neither rolled back nor resent — execute ran exactly once and the
+    // observe-only reconcile path was never entered.
+    assert.equal(view.items[0]?.state, "destination-conflict");
+    assert.equal(view.counts.destinationConflict, 1);
+    assert.equal(view.aggregateState, "failed");
+    assert.deepEqual(view.nextActions, ["create-new-operation"]);
+    assert.equal(view.items[0]?.receipt, null);
+    assert.equal(executions, 1);
+    assert.equal(reconciliations, 0);
+    // The fenced destination claim is released so no phantom hold survives, yet
+    // remediation is still a new operation rather than a retry of this one.
+    assert.equal(
+      (
+        database
+          .prepare("SELECT is_active AS isActive FROM release_operation_destination_claims WHERE operation_id = ?")
+          .get(request.operationId) as { readonly isActive: number }
+      ).isActive,
+      0,
+    );
+  });
+
+  it("resumes a crashed in-flight item by reconciling, never by re-executing the effect", async () => {
+    let executions = 0;
+    let reconciliations = 0;
+    const adapter: ReleaseOperationEffectAdapter = {
+      execute: async () => {
+        executions += 1;
+        return { state: "succeeded", receipt: { kind: "merge", disposition: "applied", resultingTargetTip: commit("c"), observedAt: "2026-08-03T00:00:01.000Z" } };
+      },
+      reconcile: async () => {
+        reconciliations += 1;
+        return { state: "succeeded", receipt: { kind: "merge", disposition: "applied", resultingTargetTip: commit("c"), observedAt: "2026-08-03T00:00:02.000Z" } };
+      },
+    };
+    const { database } = setup(adapter);
+    const crashing = openReleaseOperationRuntime(database, {
+      acceptedAuthority: () => authority,
+      artifacts: { metadata: () => ({ contentKind: "managed-file", integrityStatus: "verified", digest: hash("b") }) },
+      adapter,
+      failureInjection: (point) => { if (point === "after-effect-before-finalize") throw new Error("crash"); },
+    });
+    const request = mergeRequest();
+    crashing.create(request, request.authorization.actor);
+    await assert.rejects(crashing.dispatch(request.operationId), /crash/);
+    assert.equal(executions, 1);
+
+    // A fresh runtime with no crash injection resumes the in-flight item. It must
+    // OBSERVE via reconcile rather than re-run execute, so the external effect is
+    // applied at most once even though finalize never committed pre-crash.
+    const restarted = openReleaseOperationRuntime(database, {
+      acceptedAuthority: () => authority,
+      artifacts: { metadata: () => ({ contentKind: "managed-file", integrityStatus: "verified", digest: hash("b") }) },
+      adapter,
+    });
+    await restarted.reconcilePending();
+    assert.equal(restarted.inspect(request.operationId).aggregateState, "succeeded");
+    assert.equal(executions, 1);
+    assert.equal(reconciliations, 1);
+  });
+
+  it("never auto-resends or auto-reconciles a blocked unknown item during the resume sweep", async () => {
+    let executions = 0;
+    let reconciliations = 0;
+    const adapter: ReleaseOperationEffectAdapter = {
+      execute: async () => {
+        executions += 1;
+        return { state: "unknown", unknown: { code: "TIMEOUT", message: "write outcome is not known", observedAt: "2026-08-03T00:00:01.000Z" } };
+      },
+      reconcile: async () => {
+        reconciliations += 1;
+        return { state: "succeeded", receipt: { kind: "merge", disposition: "no-op", resultingTargetTip: commit("b"), observedAt: "2026-08-03T00:00:02.000Z" } };
+      },
+    };
+    const { runtime } = setup(adapter);
+    const request = mergeRequest();
+    await runtime.dispatch(runtime.create(request, request.authorization.actor).id);
+    assert.equal(runtime.inspect(request.operationId).aggregateState, "blocked");
+    assert.equal(executions, 1);
+
+    // The resume sweep only reconciles pending/running/reconciling aggregates. A
+    // blocked unknown item is human-gated, so the sweep must skip it entirely:
+    // neither the effect nor the observe path fires until a verified human
+    // explicitly reconciles.
+    const swept = await runtime.reconcilePending();
+    assert.ok(!swept.some((view) => view.id === request.operationId));
+    assert.equal(executions, 1);
+    assert.equal(reconciliations, 0);
+    assert.equal(runtime.inspect(request.operationId).aggregateState, "blocked");
+  });
+});
