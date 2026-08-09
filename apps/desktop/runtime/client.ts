@@ -108,6 +108,12 @@ const sendRequest = async (
   request: RuntimeRequestInput,
 ): Promise<RuntimeResponse> =>
   new Promise((resolve, reject) => {
+    // UNVERIFIED(real-windows-host): on win32 `connection.address` is a named
+    // pipe and `createConnection` connects to it without a platform guard. It
+    // fails closed on error (`error`/timeout listeners reject and destroy the
+    // socket), but the real named-pipe connect path requires a real Windows
+    // host to validate — only POSIX unix-socket connects run here. See
+    // docs/adr/0053 for the emulation-covered vs requires-real-host matrix.
     const socket = createConnection(connection.address);
     let response = "";
     let settled = false;

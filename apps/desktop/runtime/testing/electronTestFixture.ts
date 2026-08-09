@@ -412,6 +412,10 @@ const secureReadRegularFile = (input: {
   if (!isAbsolute(input.path)) {
     throw new ElectronTestFixtureError(input.errorCode, input.errorMessage);
   }
+  // UNVERIFIED(real-windows-host): descriptor-relative no-follow file
+  // verification is POSIX-only, so the fixture fails closed on win32 (throws
+  // rather than pretending to verify). The real Windows fixture path is
+  // UNVERIFIED; see docs/adr/0053 for the real-host matrix.
   if (process.platform === "win32") {
     throw new ElectronTestFixtureError(
       "FIXTURE_DESCRIPTOR_RELATIVE_UNAVAILABLE",

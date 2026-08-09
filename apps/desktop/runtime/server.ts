@@ -1530,6 +1530,13 @@ export const startCompanyRuntimeServer = async (
       socket.on("end", handleRequest);
     });
 
+    // UNVERIFIED(real-windows-host): on win32 `options.address` is a named pipe
+    // (\\.\pipe\...) and this bind proceeds without a platform guard. It fails
+    // closed on error (the `error` listener rejects and `close()` runs), but the
+    // success path — a live pipe accepting Runtime IPC — has only ever been
+    // exercised against a POSIX unix socket on darwin/CI here. Real named-pipe
+    // bind semantics require a real Windows host. See docs/adr/0053. Do NOT add a
+    // throwing win32 guard: that would break the path CI runs on windows-latest.
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(options.address, () => {
@@ -1537,6 +1544,8 @@ export const startCompanyRuntimeServer = async (
         resolve();
       });
     });
+    // The 0o600 tightening is POSIX-only; Windows named-pipe ACLs are a separate
+    // real-host concern (part of the UNVERIFIED(real-windows-host) IPC boundary).
     if (process.platform !== "win32") chmodSync(options.address, 0o600);
 
     return { address: options.address, closed, close };

@@ -227,6 +227,14 @@ export const patchGitMountsForWindows = (
   Effect.gen(function* () {
     if (platform !== "win32") return gitMounts;
 
+    // UNVERIFIED(real-windows-host): the path/parse logic below is emulation-
+    // covered (mountUtils.test.ts drives it with platform="win32" + injected
+    // readFile/statFile), but the DEFAULT non-injected branch performs real
+    // filesystem effects — reading the host `.git` pointer and writing a
+    // corrected gitdir file via mkdtemp/writeFile. Those effects, and the
+    // resulting mount resolving inside the Linux container, can only be
+    // validated on a real Windows host. It fails closed on error (WorktreeError
+    // propagates). See docs/adr/0053 and ADR-0006.
     const _readFile =
       readFile ??
       (async (p: string) => {

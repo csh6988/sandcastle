@@ -334,6 +334,10 @@ const runSecureHelper = (
   },
   bytes: Buffer,
 ): SecureWriteResult => {
+  // UNVERIFIED(real-windows-host): descriptor-relative no-follow export depends
+  // on POSIX openat/O_NOFOLLOW/dir_fd, absent on win32. This already fails
+  // closed — `unavailable` maps to an `unknown()` finalize, never a claimed
+  // success. A real win32 export path is UNVERIFIED; see docs/adr/0053.
   if (process.platform === "win32") {
     return {
       status: "unavailable",
