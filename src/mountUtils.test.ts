@@ -325,6 +325,36 @@ describe("normalizeMounts", () => {
       // sandboxPath is already a valid POSIX path, unchanged
       expect(result[0]!.sandboxPath).toBe("/mnt/cache");
     });
+
+    it("is idempotent — normalizing an already-normalized result is a no-op", () => {
+      // A normalizer must reach a fixed point: feeding its own POSIX output back
+      // in must not corrupt already-remapped paths. After the first pass hostPath
+      // and the under-worktree sandboxPath are POSIX; the guard at the `\\`/drive
+      // check must then leave them untouched so a second pass equals the first.
+      const mounts = [
+        { hostPath: "C:\\Users\\project", sandboxPath: "C:\\Users\\project" },
+        {
+          hostPath: "C:\\Users\\project\\.git",
+          sandboxPath: "C:\\Users\\project\\.git",
+        },
+        { hostPath: "C:\\Users\\data", sandboxPath: "/mnt/data" },
+      ];
+      const once = normalizeMounts(
+        mounts,
+        "C:\\Users\\project",
+        SANDBOX_REPO_DIR,
+        "win32",
+      );
+      const twice = normalizeMounts(
+        once,
+        "C:\\Users\\project",
+        SANDBOX_REPO_DIR,
+        "win32",
+      );
+      expect(twice).toEqual(once);
+      expect(once[0]!.sandboxPath).toBe(SANDBOX_REPO_DIR);
+      expect(once[1]!.sandboxPath).toBe(`${SANDBOX_REPO_DIR}/.git`);
+    });
   });
 });
 
@@ -355,6 +385,23 @@ describe("parseGitdirPath", () => {
     const result = parseGitdirPath("/home/user/repo/.git/worktrees/my-wt/");
     expect(result.parentGitDir).toBe("/home/user/repo/.git");
     expect(result.worktreeName).toBe("my-wt");
+  });
+
+  it("collapses multiple trailing slashes rather than emitting an empty worktree name", () => {
+    // The `\/+$/` strip must consume a RUN of trailing separators; if it only
+    // removed one, the final segment would be "" and the worktree name would be
+    // lost, breaking the corrected `gitdir:` path the sandbox mounts.
+    const result = parseGitdirPath("/home/user/repo/.git/worktrees/my-wt///");
+    expect(result.parentGitDir).toBe("/home/user/repo/.git");
+    expect(result.worktreeName).toBe("my-wt");
+  });
+
+  it("parses a gitdir path that mixes both separators", () => {
+    // git on Windows can emit a mixed path (backslash root, forward-slash tail);
+    // both must fold to POSIX so parentGitDir/worktreeName are separator-clean.
+    const result = parseGitdirPath("C:\\Users\\project/.git/worktrees\\feat");
+    expect(result.parentGitDir).toBe("C:/Users/project/.git");
+    expect(result.worktreeName).toBe("feat");
   });
 });
 

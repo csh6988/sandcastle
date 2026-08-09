@@ -375,6 +375,56 @@ const removePhaseOneCompanyConfiguration = (database: DatabaseSync): void => {
   `);
 };
 
+describe("Company database open-time locking configuration", () => {
+  it("persists WAL journal mode so concurrent readers never block the single writer", () => {
+    // WAL is the durability/concurrency contract for the single-writer Runtime:
+    // it is set at open (sqlite.ts PRAGMA journal_mode = WAL) and, unlike the
+    // per-connection busy_timeout/foreign_keys pragmas, is recorded in the
+    // database file header, so a fresh independent connection observes it. This
+    // pins the mode a Company database is left in — a regression to the default
+    // rollback journal would silently reintroduce writer-blocks-reader locking.
+    const companyDir = tempCompanyDir();
+    const database = openCompanyDatabase(companyDir);
+    try {
+      const inspected = new DatabaseSync(database.path);
+      try {
+        const journalMode = inspected.prepare("PRAGMA journal_mode").get() as {
+          readonly journal_mode: string;
+        };
+        assert.equal(journalMode.journal_mode.toLowerCase(), "wal");
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps a reopened Company database in WAL mode across close and reopen", () => {
+    // WAL is recorded in the file header, so it must survive a full close/reopen
+    // cycle: the second openCompanyDatabase must observe (and preserve) WAL
+    // rather than silently reverting to a rollback journal. This guards the
+    // durability half of the locking contract — a Company database is left in
+    // WAL no matter how many times the Runtime is restarted against it.
+    const companyDir = tempCompanyDir();
+    openCompanyDatabase(companyDir).close();
+    const reopened = openCompanyDatabase(companyDir);
+    try {
+      const inspected = new DatabaseSync(reopened.path);
+      try {
+        const journalMode = inspected.prepare("PRAGMA journal_mode").get() as {
+          readonly journal_mode: string;
+        };
+        assert.equal(journalMode.journal_mode.toLowerCase(), "wal");
+      } finally {
+        inspected.close();
+      }
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
 describe("Company database migrations", () => {
   it("migrates a schema version zero database to the current version", () => {
     const companyDir = tempCompanyDir();
