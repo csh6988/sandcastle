@@ -48,14 +48,18 @@ describe("Windows real-host verification boundary", () => {
     assert.match(matrixAdr, /patchGitMountsForWindows/);
     assert.match(matrixAdr, /electronTestFixture|Electron Test fixture/i);
     assert.match(matrixAdr, /\bWAL\b/);
-    assert.match(matrixAdr, /export/i);
+    assert.match(matrixAdr, /export on win32/i);
   });
 
   it("records the current macOS status as real-host-pending, never passed", () => {
     assert.match(matrixAdr, /UNVERIFIED/);
     // Honest about the environment: darwin, real-host verification still pending.
     assert.match(matrixAdr, /darwin|macOS/);
-    assert.match(matrixAdr, /pending|not (yet )?verified|unverified/i);
+    // "pending" (or an explicit "not verified") must actually appear — do NOT
+    // allow the bare "unverified" alternation to satisfy this, since the
+    // /UNVERIFIED/ assertion above already guarantees that word. This keeps the
+    // named property (macOS status recorded as PENDING) genuinely enforced.
+    assert.match(matrixAdr, /pending|not (yet )?verified/i);
     // Must not claim, within a single clause, that real Windows is
     // verified/passed/confirmed. Stops at a comma so honest negations
     // ("real-Windows gap ... not passed") are allowed while a bare false
@@ -67,7 +71,12 @@ describe("Windows real-host verification boundary", () => {
   });
 
   it("declares the matrix is carried into the final integration ticket, not silently closed", () => {
-    assert.match(matrixAdr, /integration/i);
+    // Bind to the actual clause (matrix carried into the integration ticket,
+    // gap recorded as pending), not any stray occurrence of "integration".
+    assert.match(
+      matrixAdr,
+      /references this matrix and records[\s\S]*?verification gap[\s\S]*?\bpending\b/i,
+    );
   });
 
   for (const relPath of REAL_HOST_MARKED_FILES) {

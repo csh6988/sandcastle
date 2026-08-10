@@ -44,8 +44,10 @@ describe("Company Runtime address", () => {
     // The in-directory socket suffix "/.sandcastle/runtime/company-runtime.sock"
     // is 41 bytes, so a 59-char Company Directory yields a 100-byte address
     // (inline) and a 60-char one yields 101 bytes (fallback). This pins the
-    // `<= 100` comparator at its exact boundary — the difference between a valid
-    // sun_path and an ENAMETOOLONG bind on darwin.
+    // `<= 100` comparator at its exact boundary — 100 is the project's
+    // conservative threshold, comfortably under the platform `sun_path` limit
+    // (104 bytes on darwin), so an over-limit path takes the /tmp fallback
+    // rather than risking a truncated or ENAMETOOLONG bind.
     const dirAtLimit = `/${"a".repeat(58)}`;
     const dirOverLimit = `/${"a".repeat(59)}`;
     const atLimit = companyRuntimeAddressForPlatform(dirAtLimit, "darwin");

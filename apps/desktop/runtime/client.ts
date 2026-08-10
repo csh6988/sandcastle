@@ -111,9 +111,12 @@ const sendRequest = async (
     // UNVERIFIED(real-windows-host): on win32 `connection.address` is a named
     // pipe and `createConnection` connects to it without a platform guard. It
     // fails closed on error (`error`/timeout listeners reject and destroy the
-    // socket), but the real named-pipe connect path requires a real Windows
-    // host to validate — only POSIX unix-socket connects run here. See
-    // docs/adr/0053 for the emulation-covered vs requires-real-host matrix.
+    // socket). The named-pipe connect itself IS exercised on `windows-latest`
+    // (client.test.ts drives this path unguarded — the win32 branch there only
+    // skips the POSIX parent-dir mkdir, not the connect), so the transport happy
+    // path is covered; what remains UNVERIFIED on a real Windows host is the
+    // pipe's disconnect/EOF/half-close failure semantics. See docs/adr/0053 for
+    // the emulation-covered vs requires-real-host matrix.
     const socket = createConnection(connection.address);
     let response = "";
     let settled = false;

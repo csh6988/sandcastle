@@ -375,6 +375,21 @@ const removePhaseOneCompanyConfiguration = (database: DatabaseSync): void => {
   `);
 };
 
+// AC3 (open-time locking configuration) is deliberately scoped to the two
+// pragmas whose effect is observable without a new test seam:
+//   - journal_mode = WAL — recorded in the database file header, so a fresh
+//     independent connection observes it (pinned below).
+//   - foreign_keys = ON — enforced behaviorally; a FK-violating INSERT throws
+//     `FOREIGN KEY constraint failed` (see the immutability/lineage test later
+//     in this file), which is impossible unless the pragma fired at open.
+// busy_timeout = 5000 is intentionally NOT asserted here: it is a per-connection
+// setting readable only off the raw handle, and CompanyDatabase deliberately
+// exposes no raw handle. Asserting it would require adding a production seam
+// purely for the test — forbidden — and the single-connection Runtime never
+// contends on the timeout, so there is no behavior to observe. This is a scoped
+// AC, not a coverage gap: we pin what is durably/behaviorally observable and do
+// not fabricate a test for what only a real Windows host under contention could
+// exercise (see docs/adr/0053 and the sqlite.ts open-path marker).
 describe("Company database open-time locking configuration", () => {
   it("persists WAL journal mode so concurrent readers never block the single writer", () => {
     // WAL is the durability/concurrency contract for the single-writer Runtime:

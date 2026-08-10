@@ -402,9 +402,9 @@ export const openCompanyDatabase = (
   try {
     database.exec("PRAGMA foreign_keys = ON");
     // UNVERIFIED(real-windows-host): WAL journal mode is durably observable in
-    // the file header (emulation-covered — see address/sqlite tests), but real
-    // WAL locking and `busy_timeout` contention behavior under Windows
-    // mandatory file locking can only be validated on a real Windows host. The
+    // the file header (emulation-covered — see sqlite.test.ts), but real WAL
+    // locking and `busy_timeout` contention behavior under Windows mandatory
+    // file locking can only be validated on a real Windows host. The
     // single-connection Runtime never contends here. See docs/adr/0053.
     database.exec("PRAGMA journal_mode = WAL");
     database.exec("PRAGMA busy_timeout = 5000");

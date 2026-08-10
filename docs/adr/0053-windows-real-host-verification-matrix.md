@@ -38,34 +38,37 @@ and is catalogued in the matrix below. The rules:
    fail closed (return a non-success sentinel / throw) or fail closed on error.
    It must never return a fabricated success to appear Windows-capable.
 3. **Do not cripple working paths.** Named-pipe IPC bind/connect, WAL setup, and
-   `patchGitMountsForWindows` run real logic on real Windows (CI covers them on
-   `windows-latest`). Adding a throwing `win32` guard purely to look cautious
-   would break the very support this effort is hardening. Markers document the
-   verification gap; they do not disable the path.
+   `patchGitMountsForWindows` run real logic on real Windows, and the desktop
+   suite runs unguarded on `windows-latest`, so the named-pipe transport happy
+   path is genuinely exercised there. Adding a throwing `win32` guard purely to
+   look cautious would break the very support this effort is hardening. Markers
+   scope the residual gap (real-host ACL/security and failure semantics, real FS
+   effects); they do not disable the path.
 4. **This gap is pending, not passed.** The current darwin verification status
    is recorded below as UNVERIFIED. The final integration ticket records the
    real-Windows gap as **pending**, not as a passed check.
 
 ### Matrix — emulation-covered vs requires-real-host
 
-| Behavior                                                                | Source                                                     | Classification                                                           | darwin/CI status                                               |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| Path/mount separator + git-dir normalization                            | `src/mountUtils.ts` (`normalizeMounts`, `parseGitdirPath`) | Emulation-covered (takes `platform`)                                     | Verified — `mountUtils.test.ts`                                |
-| Company Runtime address (named-pipe vs `.sock` selection)               | `apps/desktop/runtime/address.ts`                          | Emulation-covered (takes `platform`)                                     | Verified — `address.test.ts`                                   |
-| SQLite WAL journal mode set at open                                     | `apps/desktop/runtime/storage/sqlite.ts`                   | Emulation-covered (durable in file header)                               | Verified — `sqlite.test.ts`                                    |
-| Named-pipe IPC **bind**                                                 | `apps/desktop/runtime/server.ts` (`listen`)                | Requires-real-host                                                       | **UNVERIFIED** — only POSIX unix-socket bind exercised         |
-| Named-pipe IPC **connect**                                              | `apps/desktop/runtime/client.ts` (`createConnection`)      | Requires-real-host                                                       | **UNVERIFIED** — only POSIX unix-socket connect exercised      |
-| Real WAL locking / `busy_timeout` contention under Windows file locking | `apps/desktop/runtime/storage/sqlite.ts`                   | Requires-real-host                                                       | **UNVERIFIED** — single-connection Runtime never contends here |
-| `patchGitMountsForWindows` real filesystem effects                      | `src/mountUtils.ts`                                        | Requires-real-host (default non-injected FS branch)                      | **UNVERIFIED** — logic emulation-covered, real FS effects not  |
-| Electron Test fixture win32 path (descriptor-relative no-follow)        | `apps/desktop/runtime/testing/electronTestFixture.ts`      | Requires-real-host — fails closed (throws)                               | **UNVERIFIED** — POSIX-only helper; win32 throws               |
-| Artifact export on win32 (descriptor-relative no-follow)                | `apps/desktop/runtime/release/artifactExportAdapter.ts`    | Requires-real-host — fails closed (`unavailable` → `unknown()` finalize) | **UNVERIFIED** — POSIX openat/O_NOFOLLOW only                  |
+| Behavior                                                                | Source                                                     | Classification                                                                               | darwin/CI status                                                                            |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Path/mount separator + git-dir normalization                            | `src/mountUtils.ts` (`normalizeMounts`, `parseGitdirPath`) | Emulation-covered (`normalizeMounts` takes `platform`; `parseGitdirPath` separator-agnostic) | Verified — `mountUtils.test.ts`                                                             |
+| Company Runtime address (named-pipe vs `.sock` selection)               | `apps/desktop/runtime/address.ts`                          | Emulation-covered (takes `platform`)                                                         | Verified — `address.test.ts`                                                                |
+| SQLite WAL journal mode set at open                                     | `apps/desktop/runtime/storage/sqlite.ts`                   | Emulation-covered (durable in file header)                                                   | Verified — `sqlite.test.ts`                                                                 |
+| Named-pipe IPC **bind**                                                 | `apps/desktop/runtime/server.ts` (`listen`)                | Requires-real-host (transport exercised, semantics unverified)                               | Pipe bind runs on `windows-latest`; **UNVERIFIED** — ACL/security + failure semantics       |
+| Named-pipe IPC **connect**                                              | `apps/desktop/runtime/client.ts` (`createConnection`)      | Requires-real-host (transport exercised, semantics unverified)                               | Pipe connect runs on `windows-latest`; **UNVERIFIED** — disconnect/EOF/half-close semantics |
+| Real WAL locking / `busy_timeout` contention under Windows file locking | `apps/desktop/runtime/storage/sqlite.ts`                   | Requires-real-host                                                                           | **UNVERIFIED** — single-connection Runtime never contends here                              |
+| `patchGitMountsForWindows` real filesystem effects                      | `src/mountUtils.ts`                                        | Requires-real-host (default non-injected FS branch)                                          | **UNVERIFIED** — logic emulation-covered, real FS effects not                               |
+| Electron Test fixture win32 path (descriptor-relative no-follow)        | `apps/desktop/runtime/testing/electronTestFixture.ts`      | Requires-real-host — fails closed (throws)                                                   | **UNVERIFIED** — POSIX-only helper; win32 throws                                            |
+| Artifact export on win32 (descriptor-relative no-follow)                | `apps/desktop/runtime/release/artifactExportAdapter.ts`    | Requires-real-host — fails closed (`unavailable` → `unknown()` finalize)                     | **UNVERIFIED** — POSIX openat/O_NOFOLLOW only                                               |
 
 ## Consequences
 
-- The five requires-real-host behaviors from D11/R6 (named-pipe IPC bind and
-  connect, real WAL locking, export on win32, Electron fixture win32 path,
-  `patchGitMountsForWindows` FS effects) each carry an
-  `UNVERIFIED(real-windows-host)` marker pointing here. A completeness test
+- The five requires-real-host behaviors from D11/R6 — named-pipe IPC (bind and
+  connect, spanning two files), real WAL locking, export on win32, Electron
+  fixture win32 path, and `patchGitMountsForWindows` FS effects — span six marked
+  source files and each carries an `UNVERIFIED(real-windows-host)` marker
+  pointing here. A completeness test
   (`apps/desktop/tests/windowsRealHostMatrix.test.ts`) asserts both the markers
   and this document stay honest, so the two cannot silently diverge.
 - The **final integration ticket** references this matrix and records the

@@ -1532,11 +1532,14 @@ export const startCompanyRuntimeServer = async (
 
     // UNVERIFIED(real-windows-host): on win32 `options.address` is a named pipe
     // (\\.\pipe\...) and this bind proceeds without a platform guard. It fails
-    // closed on error (the `error` listener rejects and `close()` runs), but the
-    // success path — a live pipe accepting Runtime IPC — has only ever been
-    // exercised against a POSIX unix socket on darwin/CI here. Real named-pipe
-    // bind semantics require a real Windows host. See docs/adr/0053. Do NOT add a
-    // throwing win32 guard: that would break the path CI runs on windows-latest.
+    // closed on error (the `error` listener rejects and `close()` runs). The
+    // named-pipe bind itself IS exercised on `windows-latest` (server.test.ts
+    // runs unguarded under `npm run test`), so the transport happy path is
+    // covered; what remains UNVERIFIED on a real Windows host is the pipe's
+    // ACL/security posture (the analogue of the POSIX 0o600 tightening below)
+    // and its disconnect/half-close failure semantics. See docs/adr/0053. Do NOT
+    // add a throwing win32 guard: that would break the path CI runs on
+    // windows-latest.
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(options.address, () => {
