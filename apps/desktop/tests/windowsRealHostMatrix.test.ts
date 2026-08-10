@@ -79,6 +79,42 @@ describe("Windows real-host verification boundary", () => {
     );
   });
 
+  it("carries a committed final-integration record that back-references the matrix ADR and keeps the real-Windows gap pending", () => {
+    // AC#2 + AC#3: ADR-0053 forward-references "the final integration ticket";
+    // this is that ticket's durable committed artifact. It must cite 0053 so
+    // the matrix link is navigable both ways (planning scratch under issues/ is
+    // never committed), and it must record the real-Windows verification status
+    // as pending — never as a passed check.
+    const record = readFileSync(
+      join(
+        repoRoot,
+        "docs",
+        "research",
+        "t27-windows-real-host-verification.md",
+      ),
+      "utf8",
+    );
+    // Back-reference completes the bidirectional link to the matrix ADR.
+    assert.match(
+      record,
+      /0053/,
+      "the final-integration record must cite ADR-0053 so the matrix link is bidirectional",
+    );
+    // The real-Windows verification status is recorded as pending.
+    assert.match(
+      record,
+      /real[- ]windows[\s\S]*?verification[\s\S]*?\bpending\b/i,
+      "the record must state the real-Windows verification status as pending",
+    );
+    // Comma/period/newline-bounded honesty guard (mirrors the ADR test): no
+    // single clause may claim real Windows is verified/passed/confirmed. Honest
+    // negations after a comma ("... pending, not passed") remain allowed.
+    assert.doesNotMatch(
+      record,
+      /real[- ]windows[^,.\n]*\b(verified|passed|confirmed)\b/i,
+    );
+  });
+
   for (const relPath of REAL_HOST_MARKED_FILES) {
     it(`marks the real-host code path in ${relPath} UNVERIFIED and points to the matrix`, () => {
       const source = readFileSync(join(repoRoot, relPath), "utf8");
