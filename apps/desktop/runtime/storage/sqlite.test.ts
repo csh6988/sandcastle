@@ -2441,7 +2441,7 @@ describe("Company database migrations", () => {
     assert.equal(current.schemaVersion(), 53);
     current.close();
 
-    // Ticket 02's at-target drift re-check must now fire at v53: dropping a
+    // Task 02's at-target drift re-check must now fire at v53: dropping a
     // checkpoint immutability trigger is structural drift and must fail closed.
     const tampered = new DatabaseSync(databasePath);
     try {
