@@ -27,6 +27,7 @@ import { createCompanyRuntimeSupervisor } from "./companyRuntimeSupervisor.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { registerRuntimeIpc } from "./runtimeIpc.js";
 import { runRuntimeBrowserWindowSmoke } from "./runtimeBrowserWindowSmoke.js";
+import { createRepositoryDirectoryPicker } from "./repositoryDirectoryPicker.js";
 import { resolveStartupSelection } from "./startup.js";
 import {
   startShellServer,
@@ -72,6 +73,16 @@ const runtimeIpc = registerRuntimeIpc(ipcMain, () => runtimeSupervisor, {
     id: "local-user",
     authenticatedBy: "local-session",
   },
+  pickRepositoryDirectory: () =>
+    createRepositoryDirectoryPicker({
+      dialog: {
+        showOpenDialog: (options) =>
+          dialog.showOpenDialog({
+            title: options.title,
+            properties: [...options.properties],
+          }),
+      },
+    }),
 });
 
 const pickCompanyDir = async (): Promise<string | null> => {

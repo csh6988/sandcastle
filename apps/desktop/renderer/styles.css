@@ -444,6 +444,12 @@ p {
   overflow-wrap: anywhere;
 }
 
+.project-repository-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .project-card::before {
   content: "";
   position: absolute;

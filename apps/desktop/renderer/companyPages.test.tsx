@@ -49,6 +49,7 @@ import {
   improvementApplicationApplyInput,
   improvementApplicationValidateInput,
   improvementApplicationRollbackInput,
+  appendProjectRepositoryReference,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -2053,6 +2054,7 @@ describe("Project detail", () => {
     assert.match(markup, /data-project-repository="\/work\/checkout-web"/);
     assert.match(markup, /data-project-repository="\/work\/checkout-api"/);
     assert.match(markup, /Add repository reference/);
+    assert.match(markup, /Select folder/);
     assert.match(markup, /Save project/);
     assert.match(markup, /Archive project/);
     assert.match(markup, /data-project-runs/);
@@ -2064,6 +2066,193 @@ describe("Project detail", () => {
     assert.match(markup, /Start Department Run/);
     assert.match(markup, /class="run-start-field"/);
     assert.match(markup, /data-run-start-submit/);
+
+    const chineseMarkup = renderToStaticMarkup(
+      <ProjectDetailView
+        project={project}
+        t={messages.zh}
+        initialTab="settings"
+        onBack={() => undefined}
+        onSave={async () => project}
+        onArchive={async () => project}
+      />,
+    );
+    assert.match(chineseMarkup, /选择文件夹/);
+    assert.match(messages.zh.repositoryPickerNotAccessible, /无法访问/);
+    assert.match(messages.zh.repositoryPickerNotGit, /不是 Git 仓库/);
+  });
+
+  it("fills a picked Git root while cancel and error preserve the current input", async () => {
+    const project = {
+      id: "project-1",
+      name: "Checkout",
+      goal: "Ship the checkout redesign",
+      status: "active" as const,
+      revision: 1,
+      sharedContext: "",
+      repositoryReferences: ["existing-reference"],
+      departmentRuns: [],
+      createdAt: "2026-07-14T00:00:00.000Z",
+    };
+    const pickerResults = [
+      { status: "selected" as const, path: "/repo" },
+      { status: "canceled" as const },
+      {
+        status: "error" as const,
+        code: "NOT_GIT_REPOSITORY" as const,
+        message: "The selected directory is not a Git repository.",
+      },
+    ];
+    const saves: unknown[] = [];
+    const bridge = {
+      desktop: {
+        pickRepositoryDirectory: async () => pickerResults.shift()!,
+      },
+      query: async (query: { readonly type: string }) => {
+        if (query.type === "product.discovery.inspect") {
+          return {
+            view: {
+              project: {
+                id: project.id,
+                name: project.name,
+                goal: project.goal,
+                revision: project.revision,
+              },
+              proposal: null,
+              baselines: [],
+              formalRuns: [],
+            },
+          };
+        }
+        throw new Error(`Unexpected query ${query.type}`);
+      },
+      runtime: {
+        departments: async () => [],
+        runs: async () => [],
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [],
+      },
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      HTMLInputElement: dom.window.HTMLInputElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    const repositoryInput = (): HTMLInputElement =>
+      container.querySelector(
+        "#project-repository-reference",
+      ) as HTMLInputElement;
+    try {
+      await act(async () => {
+        root.render(
+          <ProjectDetailView
+            project={project}
+            t={messages.en}
+            initialTab="settings"
+            onBack={() => undefined}
+            onSave={async (input) => {
+              saves.push(input);
+              return project;
+            }}
+            onArchive={async () => project}
+          />,
+        );
+      });
+      const picker = container.querySelector(
+        "[data-project-repository-picker]",
+      ) as HTMLButtonElement;
+      await act(async () => picker.click());
+      assert.equal(repositoryInput().value, "/repo");
+      assert.equal(
+        container.querySelector('[data-project-repository="/repo"]'),
+        null,
+      );
+      assert.equal(saves.length, 0);
+
+      await act(async () => picker.click());
+      assert.equal(repositoryInput().value, "/repo");
+      assert.equal(saves.length, 0);
+
+      await act(async () => picker.click());
+      assert.equal(repositoryInput().value, "/repo");
+      assert.match(
+        container.querySelector("[data-project-repository-picker-error]")
+          ?.textContent ?? "",
+        /not a Git repository/i,
+      );
+      assert.equal(saves.length, 0);
+
+      await act(async () => {
+        (
+          container.querySelector("[data-project-settings]") as HTMLFormElement
+        ).requestSubmit();
+      });
+      assert.equal(saves.length, 1);
+      assert.deepEqual(
+        (saves[0] as { readonly repositoryReferences: readonly string[] })
+          .repositoryReferences,
+        ["existing-reference"],
+      );
+    } finally {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) {
+          Object.defineProperty(globalThis, key, descriptor);
+        } else {
+          Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    }
+  });
+
+  it("keeps arbitrary manual Repository references and existing duplicate handling", () => {
+    assert.deepEqual(
+      appendProjectRepositoryReference(
+        ["existing-reference"],
+        "  git@example.com:org/repo.git  ",
+      ),
+      {
+        repositoryReferences: [
+          "existing-reference",
+          "git@example.com:org/repo.git",
+        ],
+        repositoryReference: "",
+      },
+    );
+    assert.deepEqual(
+      appendProjectRepositoryReference(
+        ["existing-reference"],
+        "existing-reference",
+      ),
+      {
+        repositoryReferences: ["existing-reference"],
+        repositoryReference: "existing-reference",
+      },
+    );
   });
 
   it("opens Project Detail on the PRD Overview tab instead of configuration", () => {

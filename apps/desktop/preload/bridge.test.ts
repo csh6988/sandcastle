@@ -57,6 +57,7 @@ import {
   SKILL_DISCOVERY_ARCHIVE_CHANNEL,
   RUNTIME_TUNNEL_CHANNEL,
   RUNTIME_EVENT_PORT_CHANNEL,
+  REPOSITORY_DIRECTORY_PICK_CHANNEL,
   type RuntimeEventFrame,
 } from "./bridge.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
@@ -304,6 +305,38 @@ const testRunView = {
 };
 
 describe("Sandcastle preload bridge", () => {
+  it("exposes the repository folder picker on a dedicated Desktop IPC channel", async () => {
+    const calls: Array<{ channel: string; payload: unknown }> = [];
+    const bridge = createSandcastleBridge(async (channel, payload) => {
+      calls.push({ channel, payload });
+      return { status: "selected", path: "/work/checkout" };
+    });
+
+    assert.deepEqual(await bridge.desktop.pickRepositoryDirectory(), {
+      status: "selected",
+      path: "/work/checkout",
+    });
+    assert.deepEqual(calls, [
+      { channel: REPOSITORY_DIRECTORY_PICK_CHANNEL, payload: undefined },
+    ]);
+
+    const canceled = createSandcastleBridge(async () => ({
+      status: "canceled",
+    }));
+    assert.deepEqual(await canceled.desktop.pickRepositoryDirectory(), {
+      status: "canceled",
+    });
+
+    const malformed = createSandcastleBridge(async () => ({
+      status: "selected",
+      path: "",
+    }));
+    await assert.rejects(
+      malformed.desktop.pickRepositoryDirectory(),
+      /too_small|at least 1 character/i,
+    );
+  });
+
   it("parses Statistics live and frozen evidence through the actor-free typed tunnel", async () => {
     const canonicalQuery = {
       catalogVersion: "statistics@1" as const,
@@ -1073,6 +1106,7 @@ describe("Sandcastle preload bridge", () => {
       startedAt: "2026-07-13T00:00:00.000Z",
     });
     assert.deepEqual(Object.keys(bridge), [
+      "desktop",
       "execute",
       "query",
       "openEventStream",

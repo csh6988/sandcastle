@@ -46,6 +46,7 @@ import {
   SKILL_DISCOVERY_ARCHIVE_CHANNEL,
   RUNTIME_TUNNEL_CHANNEL,
   RUNTIME_EVENT_PORT_CHANNEL,
+  REPOSITORY_DIRECTORY_PICK_CHANNEL,
 } from "../preload/bridge.js";
 import { registerRuntimeIpc } from "./runtimeIpc.js";
 import { scriptedSoftwareRndDepartment } from "../runtime/testing/departmentInspectContract.js";
@@ -53,6 +54,49 @@ import { scriptedSkillConfiguration } from "../runtime/testing/skillConfiguratio
 import { scriptedDepartmentRun } from "../runtime/testing/runContract.js";
 
 describe("Runtime Electron IPC", () => {
+  it("guards the Desktop repository picker with the current window and origin boundary", async () => {
+    const handlers = new Map<
+      string,
+      ((...args: readonly unknown[]) => Promise<unknown> | unknown) | undefined
+    >();
+    const mainFrame = { url: "http://127.0.0.1:4399/" };
+    const webContents = { id: 7, mainFrame, postMessage: () => undefined };
+    const window = { webContents };
+    let pickerCalls = 0;
+    registerRuntimeIpc(
+      {
+        handle(channel, handler) {
+          handlers.set(channel, handler);
+        },
+      },
+      () => ({}) as never,
+      {
+        getWindow: () => window,
+        allowedOrigins: ["http://127.0.0.1:4399"],
+        pickRepositoryDirectory: async () => {
+          pickerCalls += 1;
+          return { status: "selected", path: "/work/checkout" };
+        },
+      },
+    );
+
+    const handler = handlers.get(REPOSITORY_DIRECTORY_PICK_CHANNEL)!;
+    assert.deepEqual(
+      await handler({ sender: webContents, senderFrame: mainFrame }),
+      { status: "selected", path: "/work/checkout" },
+    );
+    assert.equal(pickerCalls, 1);
+
+    await assert.rejects(async () => {
+      await handler({ sender: {}, senderFrame: mainFrame });
+    }, /registered BrowserWindow/i);
+    mainFrame.url = "https://untrusted.example/";
+    await assert.rejects(async () => {
+      await handler({ sender: webContents, senderFrame: mainFrame });
+    }, /origin is not allowlisted/i);
+    assert.equal(pickerCalls, 1);
+  });
+
   it("validates the typed tunnel sender and injects trusted context", async () => {
     const handlers = new Map<
       string,

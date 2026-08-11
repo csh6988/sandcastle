@@ -209,6 +209,37 @@ export const RUNTIME_DIAGNOSTICS_CHANNEL = "sandcastle:runtime.diagnostics";
 export const RUNTIME_BACKUP_CHANNEL = "sandcastle:runtime.backup";
 export const RUNTIME_EVENTS_COMPACT_CHANNEL =
   "sandcastle:runtime.events.compact";
+export const REPOSITORY_DIRECTORY_PICK_CHANNEL =
+  "sandcastle:desktop.repository-directory.pick";
+
+export const RepositoryDirectoryPickerResultSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({ status: z.literal("canceled") }).strict(),
+    z
+      .object({
+        status: z.literal("selected"),
+        path: z.string().trim().min(1),
+      })
+      .strict(),
+    z
+      .object({
+        status: z.literal("error"),
+        code: z.enum([
+          "DIRECTORY_NOT_ACCESSIBLE",
+          "NOT_GIT_REPOSITORY",
+          "GIT_UNAVAILABLE",
+          "PICKER_FAILED",
+        ]),
+        message: z.string().trim().min(1),
+      })
+      .strict(),
+  ],
+);
+
+export type RepositoryDirectoryPickerResult = z.infer<
+  typeof RepositoryDirectoryPickerResultSchema
+>;
 
 const RuntimeTunnelQuerySchema = z
   .object({
@@ -369,6 +400,9 @@ const invokeRuntimeCommand = async (
 };
 
 export interface SandcastleBridge {
+  readonly desktop: {
+    readonly pickRepositoryDirectory: () => Promise<RepositoryDirectoryPickerResult>;
+  };
   readonly execute: <Command extends EnvelopeCommand>(input: {
     readonly commandId: string;
     readonly expectedRevision?: number;
@@ -1237,6 +1271,12 @@ export const createSandcastleBridge = (
   };
 
   return {
+    desktop: {
+      pickRepositoryDirectory: async () =>
+        RepositoryDirectoryPickerResultSchema.parse(
+          await invoke(REPOSITORY_DIRECTORY_PICK_CHANNEL),
+        ),
+    },
     execute,
     query,
     openEventStream,

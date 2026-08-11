@@ -727,6 +727,23 @@ export const projectCreationInputInvalid = (
   goal: string,
 ): boolean => name.trim() === "" || goal.trim() === "";
 
+export const appendProjectRepositoryReference = (
+  repositoryReferences: readonly string[],
+  repositoryReference: string,
+): {
+  readonly repositoryReferences: readonly string[];
+  readonly repositoryReference: string;
+} => {
+  const reference = repositoryReference.trim();
+  if (!reference || repositoryReferences.includes(reference)) {
+    return { repositoryReferences, repositoryReference };
+  }
+  return {
+    repositoryReferences: [...repositoryReferences, reference],
+    repositoryReference: "",
+  };
+};
+
 type ProjectDepartmentRunRuntime = Pick<
   (typeof window.sandcastle)["runtime"],
   "startRun" | "executeReady"
@@ -3198,6 +3215,10 @@ export function ProjectDetailView({
     ...project.repositoryReferences,
   ]);
   const [repositoryReference, setRepositoryReference] = useState("");
+  const [repositoryPickerBusy, setRepositoryPickerBusy] = useState(false);
+  const [repositoryPickerError, setRepositoryPickerError] = useState<
+    string | null
+  >(null);
   const [runDepartments, setRunDepartments] = useState<
     readonly CompanyDepartment[]
   >([]);
@@ -3325,6 +3346,8 @@ export function ProjectDetailView({
     setSharedContext(project.sharedContext);
     setRepositoryReferences([...project.repositoryReferences]);
     setRepositoryReference("");
+    setRepositoryPickerBusy(false);
+    setRepositoryPickerError(null);
     const nextStatisticsQuery = projectStatisticsQuery(project);
     setStatisticsQueryDraft(nextStatisticsQuery);
     setStatisticsQuery(nextStatisticsQuery);
@@ -4400,6 +4423,33 @@ export function ProjectDetailView({
     setActiveTab("overview");
   };
 
+  const pickRepositoryDirectory = async (): Promise<void> => {
+    setRepositoryPickerBusy(true);
+    try {
+      const result = await window.sandcastle.desktop.pickRepositoryDirectory();
+      if (result.status === "selected") {
+        setRepositoryReference(result.path);
+        setRepositoryPickerError(null);
+        return;
+      }
+      if (result.status === "error") {
+        const message =
+          result.code === "DIRECTORY_NOT_ACCESSIBLE"
+            ? t.repositoryPickerNotAccessible
+            : result.code === "NOT_GIT_REPOSITORY"
+              ? t.repositoryPickerNotGit
+              : result.code === "GIT_UNAVAILABLE"
+                ? t.repositoryPickerGitUnavailable
+                : t.repositoryPickerFailed;
+        setRepositoryPickerError(message);
+      }
+    } catch {
+      setRepositoryPickerError(t.repositoryPickerFailed);
+    } finally {
+      setRepositoryPickerBusy(false);
+    }
+  };
+
   const inspectStatistics = (): void => {
     const nextQuery = {
       ...statisticsQueryDraft,
@@ -5425,11 +5475,30 @@ export function ProjectDetailView({
             <label htmlFor="project-repository-reference">
               {t.repositoryReference}
             </label>
-            <input
-              id="project-repository-reference"
-              onChange={(event) => setRepositoryReference(event.target.value)}
-              value={repositoryReference}
-            />
+            <div className="project-repository-input-row">
+              <input
+                id="project-repository-reference"
+                onChange={(event) => setRepositoryReference(event.target.value)}
+                value={repositoryReference}
+              />
+              <button
+                data-project-repository-picker
+                disabled={busy || repositoryPickerBusy}
+                onClick={() => void pickRepositoryDirectory()}
+                type="button"
+              >
+                {t.selectRepositoryFolder}
+              </button>
+            </div>
+            {repositoryPickerError ? (
+              <div
+                className="warn"
+                data-project-repository-picker-error
+                role="alert"
+              >
+                {repositoryPickerError}
+              </div>
+            ) : null}
             <button
               disabled={
                 busy ||
@@ -5437,12 +5506,12 @@ export function ProjectDetailView({
                 repositoryReferences.includes(repositoryReference.trim())
               }
               onClick={() => {
-                const reference = repositoryReference.trim();
-                if (!reference || repositoryReferences.includes(reference)) {
-                  return;
-                }
-                setRepositoryReferences((current) => [...current, reference]);
-                setRepositoryReference("");
+                const next = appendProjectRepositoryReference(
+                  repositoryReferences,
+                  repositoryReference,
+                );
+                setRepositoryReferences([...next.repositoryReferences]);
+                setRepositoryReference(next.repositoryReference);
               }}
               type="button"
             >

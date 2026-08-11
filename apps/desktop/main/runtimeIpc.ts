@@ -53,9 +53,11 @@ import {
   RUNTIME_EVENTS_ACK_CHANNEL,
   RUNTIME_TUNNEL_CHANNEL,
   RUNTIME_EVENT_PORT_CHANNEL,
+  REPOSITORY_DIRECTORY_PICK_CHANNEL,
   RuntimeEventFrameSchema,
   RuntimeTunnelRequestSchema,
   type RuntimeEventPort,
+  type RepositoryDirectoryPickerResult,
   RUNS_LIST_CHANNEL,
   RUN_APPROVAL_DECIDE_CHANNEL,
   RUN_APPROVAL_RETRY_CHANNEL,
@@ -217,6 +219,7 @@ export interface RuntimeIpcWindow {
 export interface RuntimeIpcOptions {
   readonly getWindow?: () => RuntimeIpcWindow | null;
   readonly allowedOrigins?: readonly string[] | (() => readonly string[]);
+  readonly pickRepositoryDirectory?: () => Promise<RepositoryDirectoryPickerResult>;
   readonly createMessageChannel?: () => {
     readonly port1: RuntimeIpcPort;
     readonly port2: unknown;
@@ -552,6 +555,13 @@ export const registerRuntimeIpc = (
     );
     return handle;
   });
+
+  if (options.pickRepositoryDirectory) {
+    ipcMain.handle(REPOSITORY_DIRECTORY_PICK_CHANNEL, async (event) => {
+      assertTrustedSender(event, {});
+      return options.pickRepositoryDirectory!();
+    });
+  }
 
   ipcMain.handle(RUNTIME_HEALTH_CHANNEL, () => runtime().health());
   ipcMain.handle(AGENT_CATALOG_INSPECT_CHANNEL, () =>
