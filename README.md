@@ -8,18 +8,38 @@
 
 ## What Is Sandcastle?
 
-A local workflow board for planning, approving, running, and verifying AI coding agent work in isolated sandboxes:
+Sandcastle is a local-first, supervised AI software company. Its primary product
+is an Electron Desktop application backed by a persistent Company Runtime. A
+user defines a Project and confirms the product boundary; Sandcastle then
+coordinates specialized AI members through planning, implementation, review,
+integration, testing, and delivery-candidate assembly while keeping the process
+observable, recoverable, and auditable.
 
-1. You start with a task or PRD in `sandcastle board`.
-2. Sandcastle turns it into alignment notes, a technical plan, and repository issues for review.
-3. After approval, Sandcastle runs sandboxed agents, tracks their progress, records artifacts, and verifies the delivery.
+The built-in Software R&D Department provides the end-to-end production line:
 
-Sandcastle is also a TypeScript orchestration library for custom automation. It is provider-agnostic — it ships with built-in providers for Docker, Podman, and Vercel, and you can create your own. Use the Board for the default human-in-the-loop workflow, and drop to `run()`, `runWorkspaceTask()`, or `runWorkspace()` when you need a custom script or integration.
+1. Product discovery produces a human-confirmed Product Baseline.
+2. Independent product and technical reviews promote exact, versioned inputs.
+3. Versioned Work Packages execute in attempt-owned branches, Worktrees,
+   Sandboxes, and Sessions.
+4. Independent Code Review, integration, Test, Security, and Operability gates
+   bind their results to exact commits, hashes, and evidence.
+5. Passing gates assemble an immutable Delivery candidate for a separate Human
+   release decision. Acceptance alone never silently merges, publishes, or
+   deploys.
+
+The Company Runtime is the authority for Projects, Departments, Runs, immutable
+Snapshots, Artifacts, audit records, Runtime Events, review evidence, and
+release operations. The repository also ships a provider-agnostic TypeScript
+library and CLI for lower-level automation. The historical `sandcastle board`
+remains a supported planning and execution primitive, but it is not the Desktop
+product's company data store or primary UI.
 
 ## Prerequisites
 
-- [Git](https://git-scm.com/)
-- A sandbox provider — Sandcastle needs an isolated environment to run agents in. Built-in options:
+- [Git](https://git-scm.com/) and Node.js/npm
+- A locally installed coding Agent such as Claude Code, Codex, or Pi when using
+  the Production Execution Adapter
+- A Sandbox provider for isolated Agent execution. Built-in options:
   - [Docker Desktop](https://www.docker.com/) — most common for local development
   - [Podman](https://podman.io/) — rootless alternative to Docker
   - [Vercel](https://vercel.com/) — cloud-based Firecracker microVMs via `@vercel/sandbox`
@@ -27,13 +47,50 @@ Sandcastle is also a TypeScript orchestration library for custom automation. It 
 
 ## Quick start
 
-By the end of this path, you should know three things:
+### Desktop — the primary product
 
-- how to scaffold Sandcastle config for a repository
-- how to start a Board task from a PRD or from the browser
-- when to stay in `sandcastle board` and when to use lower-level programmatic APIs
+The Desktop application currently lives in this repository and is not included
+in the npm package. To run it from source:
 
-1. Install the package:
+```bash
+cd apps/desktop
+npm install
+npm run dev
+```
+
+On first launch, choose a Company Directory. Sandcastle creates the local
+company structure, starts the authenticated Company Runtime, installs the
+built-in Software R&D Department, and opens Company Overview. The default
+Scripted Execution Adapter is deterministic and does not invoke a real Agent;
+set `SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER=production` only when you
+intend to run configured Agents and Sandbox providers.
+
+Useful Desktop commands:
+
+```bash
+npm test                       # Desktop test suite
+npm run start                  # Build and launch packaged-mode Electron
+npm run dist                   # Build an unpacked distributable
+npm run dist:windows           # Windows x64 NSIS target; run on Windows
+npm run test:runtime-capacity  # 10,000 Run / 100,000 Runtime event gate
+```
+
+Windows x64 packaging and CI smoke coverage are implemented, but the six
+requires-real-host paths in
+[`ADR-0053`](docs/adr/0053-windows-real-host-verification-matrix.md) remain
+**UNVERIFIED** pending a real Windows-host run. The installer is unsigned;
+ARM64, Microsoft code signing, and auto-update are separate release gates.
+
+See [`apps/desktop/README.md`](apps/desktop/README.md) for the current Runtime,
+UI, packaging, and local ACP details.
+
+### CLI and library — lower-level automation
+
+Use the npm package when you need the Board compatibility flow or want to build
+custom orchestration with `run()`, `runWorkspaceTask()`, `runWorkspace()`,
+`createSandbox()`, or `createWorktree()`.
+
+1. Install the package in the target repository:
 
 ```bash
 npm install --save-dev @chenshaohui6988/sandcastle
@@ -51,7 +108,7 @@ npx @chenshaohui6988/sandcastle init
 cp .sandcastle/.env.example .sandcastle/.env
 ```
 
-4. Start the workflow board:
+4. Start the CLI Board:
 
 ```bash
 npx @chenshaohui6988/sandcastle board
@@ -65,7 +122,7 @@ npx @chenshaohui6988/sandcastle board --prd-file ./prd.md
 
 Use `--planning-only` when you want the Board to produce `workspace-plan.json`, `alignment.md`, `technical-plan.md`, and `issues/*.md` without starting AFK execution after approval.
 
-## Quick Smoke Test
+## CLI Board Smoke Test
 
 Before you hand Sandcastle a real task, start the Board and run a planning-only task. This confirms the server starts, the agent authenticates, the planner can produce a workspace plan, and approval exports artifacts without touching code.
 
@@ -113,13 +170,18 @@ This is the recommended entry sequence:
 
 See [`sandcastle init`](#sandcastle-init) for the full business flow diagram and best practices.
 
-## Learn The Workflow
+## Learn The CLI Workflow
 
-Sandcastle is easiest to learn as a sequence, not as an API catalog.
+For Board and library automation, Sandcastle is easiest to learn as a sequence,
+not as an API catalog.
 
-### 1. Start With The Workflow Board
+### 1. Start With The CLI Board
 
-Use `sandcastle init` first, then start `sandcastle board`. Init creates the local config under `.sandcastle/`; the Board gives you the default human-in-the-loop path for planning, approval, execution, artifact review, and verification. Do not start by writing a custom orchestration script unless you already know which lifecycle you need.
+Use `sandcastle init` first, then start `sandcastle board`. Init creates the
+repository-local config under `.sandcastle/`; the Board provides the legacy
+human-in-the-loop CLI path for planning, approval, execution, artifact review,
+and verification. Use the Desktop Company Runtime for the current full product
+flow.
 
 After init, inspect these files:
 
@@ -170,7 +232,8 @@ You should see the Board move through the planning phases, produce a workspace p
 
 - Do not copy every available skill into the active agent. Load the skill flow selected by `.sandcastle/SKILL_ROUTER.md`.
 - Do not put project facts in the router. Put build commands, repo boundaries, terminology, and verification rules in `AGENTS.md` or `CLAUDE.md`.
-- Do not bypass the Board for PRD-first work unless you are building a custom automation. The Board is the default place for plan review, execution approval, artifacts, and verification.
+- Within the CLI PRD flow, do not bypass the Board unless you are building a
+  custom automation. Desktop product flows use the Company Runtime instead.
 - Do not start with `runWorkspaceTask()` for product work that needs human approval. Use the Board unless you specifically need the programmatic API.
 - Do not let chat history be the only source of instructions. If future agents need the rule, write it into project guidance.
 - Do not skip the planning-only practice run when teaching a new team or a new repository. It confirms the agent can find the router and explain the workflow before it writes code.
@@ -227,7 +290,12 @@ You can also [create your own provider](#custom-sandbox-providers) using `create
 
 ## API
 
-The workflow board is the default entry point for human-reviewed Sandcastle work. Sandcastle also exports programmatic APIs for scripts, CI pipelines, and custom tooling that need to own the control plane themselves. Use `run()` for one repository, `runWorkspaceTask()` when one product request may affect multiple repositories, and `runWorkspace()` when you need the lower-level multi-repository sandbox primitive directly. The examples below use `docker()`, but any compatible `SandboxProvider` works in its place.
+Sandcastle exports programmatic APIs for scripts, CI pipelines, and custom
+tooling that need to own the orchestration lifecycle themselves. Use `run()`
+for one repository, `runWorkspaceTask()` when one product request may affect
+multiple repositories, and `runWorkspace()` when you need the lower-level
+multi-repository Sandbox primitive directly. The examples below use `docker()`,
+but any compatible `SandboxProvider` works in its place.
 
 ```typescript
 import { run, claudeCode } from "@chenshaohui6988/sandcastle";
@@ -1254,7 +1322,12 @@ sandcastle workspace run --prd-file ./prd.md
 
 Starts a local workflow board so you can watch and manage runs in a browser instead of the terminal. The board persists runs, their event streams, task workflow state, tasks, progress documents, and verification reports to a file-backed store under `.sandcastle/board/`. It offers a **by-task** view that groups per-repository runs under their parent task, renders the workspace plan (alignment summary, technical plan, per-repository tasks), and shows a **by-status** kanban.
 
-The board frontend is the v1 **company control plane** shell (ADR 0026): a company-level left navigation with **Departments**, **Projects**, **Artifacts**, **Reviews**, and **Settings**, defaulting to the one operational department — **Software R&D** (the board itself). Projects come from `.sandcastle/workspace.json`, Artifacts aggregate every task's artifact manifest, Reviews list tasks with a verification status, and Settings shows the department's **role profiles**. The backing endpoints are `GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and `GET /api/role-profiles`.
+The Board preserves the earlier browser-based planning and execution surface.
+Its company-shaped navigation is a compatibility shell over Board files and
+`.sandcastle/workspace.json`; it is not the authoritative Company Runtime or
+the Desktop product's primary UI. The backing endpoints are
+`GET /api/company`, `GET /api/artifacts`, `GET /api/reviews`, and
+`GET /api/role-profiles`.
 
 ### Desktop Company Runtime
 

@@ -59,7 +59,7 @@ Responsibilities (and nothing more):
   contract, and non-sensitive reference changes. Department Run, Node Run, Node Attempt, Node
   feedback, and
   Approval history, Runtime audit/outbox records, and Artifact Version lineage
-  are stored in SQLite schema v23 and reload entirely from the
+  are stored in SQLite schema v53 and reload entirely from the
   Company Runtime. The Phase 2 scripted pipeline supports Start, AI Task,
   Human Approval Approve/Request Changes/Reject decisions, declarative
   Condition selection, logical Parallel branches, Join, and Complete without
@@ -191,11 +191,9 @@ provider directly.
 - No CopilotKit in Desktop v1, `src/`, or the shipped package.
 - No Company/Project/Department state stored in the historical JSON project
   store.
-- The Phase 2 scripted Run tracer remains deterministic and does not invoke a
+- The Scripted Execution Adapter remains deterministic and does not invoke a
   real Agent, Sandbox, or Worktree. Production execution is opt-in through the
-  Runtime environment. The remaining v1 slices include Artifact Registry,
-  RuntimeEvent Outbox, AG-UI, ACP, Memory, or Discussion Topics. Execution
-  Profiles and Secret References never store credential values; Run Snapshots
-  contain Secret Reference IDs only.
+  Runtime environment. Execution Profiles and Secret References never store
+  credential values; Run Snapshots contain Secret Reference IDs only.
 - The embedded HTML board (`sandcastle board`) remains an execution primitive,
   not the Desktop v1 default UI or company data contract.
