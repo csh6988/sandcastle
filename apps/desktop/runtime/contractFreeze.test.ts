@@ -12,7 +12,7 @@ import { CURRENT_SCHEMA_VERSION } from "./storage/migrations.js";
 import { openCompanyDatabase } from "./storage/sqlite.js";
 
 /**
- * T27 contract-freeze baseline (prefactor — ticket 01).
+ * T27 contract-freeze baseline (prefactor — Task 01).
  *
  * This suite freezes the T26/T22 public surface at schema v52 / Runtime Event
  * Registry v20 so every later T27 phase can prove strict zero regression. It is

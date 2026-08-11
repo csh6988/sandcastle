@@ -70,18 +70,23 @@ describe("Windows real-host verification boundary", () => {
     );
   });
 
-  it("declares the matrix is carried into the final integration ticket, not silently closed", () => {
-    // Bind to the actual clause (matrix carried into the integration ticket,
+  it("declares the matrix is carried into the final integration Task, not silently closed", () => {
+    // Bind to the actual clause (matrix carried into the integration Task,
     // gap recorded as pending), not any stray occurrence of "integration".
     assert.match(
       matrixAdr,
       /references this matrix and records[\s\S]*?verification gap[\s\S]*?\bpending\b/i,
     );
+    assert.match(
+      matrixAdr,
+      /\[[^\]]+\]\(\.\.\/research\/t27-windows-real-host-verification\.md\)/,
+      "ADR-0053 must link to the committed final-integration record",
+    );
   });
 
   it("carries a committed final-integration record that back-references the matrix ADR and keeps the real-Windows gap pending", () => {
-    // AC#2 + AC#3: ADR-0053 forward-references "the final integration ticket";
-    // this is that ticket's durable committed artifact. It must cite 0053 so
+    // AC#2 + AC#3: ADR-0053 forward-references "the final integration Task";
+    // this is that Task's durable committed artifact. It must cite 0053 so
     // the matrix link is navigable both ways (planning scratch under issues/ is
     // never committed), and it must record the real-Windows verification status
     // as pending — never as a passed check.
@@ -97,8 +102,8 @@ describe("Windows real-host verification boundary", () => {
     // Back-reference completes the bidirectional link to the matrix ADR.
     assert.match(
       record,
-      /0053/,
-      "the final-integration record must cite ADR-0053 so the matrix link is bidirectional",
+      /\[[^\]]*ADR-0053[^\]]*\]\(\.\.\/adr\/0053-windows-real-host-verification-matrix\.md\)/,
+      "the final-integration record must link to ADR-0053 so the matrix link is bidirectional",
     );
     // The real-Windows verification status is recorded as pending.
     assert.match(

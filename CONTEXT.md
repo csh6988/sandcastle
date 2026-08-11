@@ -288,6 +288,14 @@ _Avoid_: "message queue" (implies a remote broker), "event source" (v1 is not fu
 The durable highest contiguous global Runtime-event sequence acknowledged by one authenticated consumer. A consumer has only one active subscription generation: opening or View-syncing supersedes older handles, so an old stream cannot advance the new stream's delivered boundary. The consumer either acknowledges events delivered by its active generation or applies an authoritative Query View and consumes its short-lived view-sync token to rebase to that View's `asOfSequence`; it then replays every later sequence and filters locally. Acknowledgments update the cursor and audit record but never emit another event into the same outbox.
 _Avoid_: "last delivered event" (application and acknowledgment are distinct), a per-view offset, `delivered_at` as one global delivery truth
 
+**Runtime event retention class**:
+The registry-owned `transient`, `standard`, or `durable` classification that determines whether a **runtime event** must remain in the **Runtime event outbox** or may be compacted after every **Runtime event cursor** has acknowledged it.
+_Avoid_: "event TTL" (retention is classification- and acknowledgement-based), consumer-selected retention
+
+**Runtime event compaction checkpoint**:
+An immutable, append-only record proving one authorized selective removal of non-durable events from the **Runtime event outbox**, bounded by the slowest acknowledged **Runtime event cursor** and the events' **Runtime event retention class**. It preserves the removed sequence span, count, integrity identity, authority, and acknowledgement watermark without claiming that every sequence in the span was deleted.
+_Avoid_: "outbox snapshot", "cursor checkpoint", a replayable copy of removed event payloads
+
 **AG-UI adapter**:
 A protocol adapter that maps **runtime events** to AG-UI-style event names (`RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_START`, etc.) for the Desktop **agent interaction workspace** and other web UI/event-stream consumers. It carries live messages, steps, tool activity, usage, and Sandcastle-specific artifact or approval updates without making AG-UI part of core orchestration.
 _Avoid_: "AG-UI runtime" (Sandcastle runtime events remain internal), "frontend event model"

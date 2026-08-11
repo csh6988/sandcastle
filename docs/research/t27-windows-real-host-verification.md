@@ -3,15 +3,15 @@
 This is the durable final-integration record for the T27 umbrella
 (upgrade/retention/cross-platform/Release hardening). It closes the loop with
 [ADR-0053](../adr/0053-windows-real-host-verification-matrix.md): that ADR
-forward-references "the final integration ticket", and this document is that
-ticket's committed artifact, citing `0053` so the matrix link is navigable in
+forward-references "the final integration Task", and this document is that
+Task's committed artifact, citing `0053` so the matrix link is navigable in
 both directions rather than one-way.
 
 ## Integration
 
 T27 integrates onto the wave-1 integration line as a pure fast-forward: the
 implementation branch is a linear descendant of the integration reference with
-no divergence, so the ordered ticket commits (contract freeze → open-path
+no divergence, so the ordered T27 commits (contract freeze → open-path
 integrity → registry-version choke point → v53 compaction-checkpoint schema →
 retention-class compaction → Release persistence/error-code alignment →
 reconcile/claim edge coverage → cross-platform pure-logic coverage →

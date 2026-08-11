@@ -7012,7 +7012,8 @@ const migrations: readonly CompanyMigration[] = [
       // (T27 Phase B). Additive only: this migration creates the checkpoint
       // table, its index, and its immutability triggers, and alters no
       // existing table or trigger. Compaction behavior that writes these rows
-      // lands in a later ticket; here we only establish the durable record.
+      // is defined separately; this migration only establishes the durable
+      // record.
       //
       // Adoption pattern (matches v52): build the reference schema in memory,
       // create it on the live database only when absent, otherwise drift-check

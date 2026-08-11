@@ -22,7 +22,7 @@ them would let the project **falsely claim real Windows support**:
 
 Decision D11 / research note R6 in the T27 planning record enumerate the
 real-host-only behaviors. This ADR is the durable home for that boundary so the
-marker comments in source and the final integration ticket cannot drift from a
+marker comments in source and the final integration Task cannot drift from a
 single catalogue.
 
 ## Decision
@@ -45,7 +45,7 @@ and is catalogued in the matrix below. The rules:
    scope the residual gap (real-host ACL/security and failure semantics, real FS
    effects); they do not disable the path.
 4. **This gap is pending, not passed.** The current darwin verification status
-   is recorded below as UNVERIFIED. The final integration ticket records the
+   is recorded below as UNVERIFIED. The final integration Task records the
    real-Windows gap as **pending**, not as a passed check.
 
 ### Matrix — emulation-covered vs requires-real-host
@@ -71,10 +71,12 @@ and is catalogued in the matrix below. The rules:
   pointing here. A completeness test
   (`apps/desktop/tests/windowsRealHostMatrix.test.ts`) asserts both the markers
   and this document stay honest, so the two cannot silently diverge.
-- The **final integration ticket** references this matrix and records the
-  real-Windows verification gap as **pending**, not passed. Closing the gap
-  requires re-running the affected suites on a real Windows host and updating
-  the darwin/CI status column accordingly.
+- The
+  [**final integration Task**](../research/t27-windows-real-host-verification.md)
+  references this matrix and records the real-Windows verification gap as
+  **pending**, not passed. Closing the gap requires re-running the affected
+  suites on a real Windows host and updating the darwin/CI status column
+  accordingly.
 - No `win32` path was newly gated to throw. Fail-closed here means the existing
   sentinels/throws (export, fixture) and error-path rejection (IPC, git mounts)
   — not disabling behavior that real Windows relies on.

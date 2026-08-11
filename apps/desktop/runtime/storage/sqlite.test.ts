@@ -2103,17 +2103,18 @@ describe("Company database migrations", () => {
     }
   });
 
-  it("re-checks structural drift on an at-target v52 database and rejects tampering", () => {
+  it("re-checks structural drift on a current-schema database and rejects tampering", () => {
     const companyDir = tempCompanyDir();
     const current = openCompanyDatabase(companyDir);
     const databasePath = current.path;
     assert.equal(current.schemaVersion(), CURRENT_SCHEMA_VERSION);
     current.close();
 
-    // Tamper an already-at-target (v52) database without changing its version
-    // markers: drop a v52 immutability guard while leaving schema_metadata and
-    // user_version at 52. Before the open-path drift re-check this silently
-    // reopened; it must now fail closed with the existing incompatible family.
+    // Tamper an already-current database without changing its version markers:
+    // drop a required immutability guard while leaving schema_metadata and
+    // user_version at the current version. Before the open-path drift re-check
+    // this silently reopened; it must now fail closed with the existing
+    // incompatible family.
     const tampered = new DatabaseSync(databasePath);
     try {
       tampered.exec(
@@ -2159,7 +2160,7 @@ describe("Company database migrations", () => {
     }
   });
 
-  it("re-opens an untampered at-target v52 database unchanged", () => {
+  it("re-opens an untampered current-schema database unchanged", () => {
     const companyDir = tempCompanyDir();
     const first = openCompanyDatabase(companyDir);
     assert.equal(first.schemaVersion(), CURRENT_SCHEMA_VERSION);
