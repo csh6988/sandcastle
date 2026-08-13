@@ -1,5 +1,0 @@
----
-"@chenshaohui6988/sandcastle": minor
----
-
-Make Company Runtime event compaction retention-class aware and record an append-only checkpoint for every prune. The `runtime.events.compact` Command now consults the Runtime Event Registry retention class and deletes only non-durable events (transient and standard, such as `message.delta`, `tool.call`, and `tool.result`); durable business facts are always retained regardless of consumer acknowledgement. Compaction remains ack-gated — it never prunes past the slowest acknowledged consumer cursor — and now runs as a single writer inside one transaction that also writes a `runtime_event_compaction_checkpoints` row capturing the compacted range, the retained watermark, a pre-compaction integrity hash, the event count, and the authorizing actor. The authorizing actor is Runtime-injected from the authenticated principal (a verified local-session human or a trusted Runtime worker); any other principal is refused. No Command, Query, IPC channel, schema version, or Runtime Event Registry version changes.

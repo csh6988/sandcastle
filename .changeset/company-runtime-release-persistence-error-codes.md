@@ -1,5 +1,0 @@
----
-"@chenshaohui6988/sandcastle": patch
----
-
-Harden the Company Runtime Release operation surface. The Release runtime now persists durable intent, terminal item finalization, reconciliation observations, and read projections through the `ReleaseOperationPersistence` contract instead of scattered inline SQL, so persistence is centralized behind one injection seam and remains transactional and behavior-preserving (transient in-flight marks and destination-claim fencing stay internal to the runtime). The thrown `ReleaseOperationRuntimeError` code is now typed from the single-source-of-truth `ReleaseOperationErrorCode` enum, so the runtime throw surface and the adapter-level item-failure codes (`RELEASE_TARGET_INVALID`, `RELEASE_TARGET_CHECKED_OUT`, `RELEASE_FAST_FORWARD_REQUIRED`) form one aligned set that cannot silently drift. All Release operations remain local merge/export; no schema version, Runtime Event Registry version, Command, Query, or IPC channel changes, and every post-Run Release invariant is preserved.
