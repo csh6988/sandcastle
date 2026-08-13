@@ -50,6 +50,9 @@ import {
   improvementApplicationValidateInput,
   improvementApplicationRollbackInput,
   appendProjectRepositoryReference,
+  productProposalCanFormBaseline,
+  productProposalCompleteness,
+  productDiscoveryUnstartedFormalRun,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -3212,6 +3215,582 @@ describe("Project detail", () => {
 });
 
 describe("Agent Interaction workspace", () => {
+  const consultationProject = {
+    id: "project-consultation",
+    name: "Checkout",
+    goal: "Ship",
+    status: "active" as const,
+    revision: 1,
+    sharedContext: "",
+    repositoryReferences: [],
+    departmentRuns: [],
+    createdAt: "2026-07-15T00:00:00.000Z",
+  };
+
+  const consultationView = {
+    session: {
+      id: "consultation-1",
+      mode: "consultation" as const,
+      projectId: consultationProject.id,
+      runId: null,
+      nodeRunId: null,
+      status: "active" as const,
+      createdAt: "2026-07-15T00:00:00.000Z",
+      closedAt: null,
+    },
+    participants: [],
+    messages: [],
+    turns: [],
+    permissions: [],
+  };
+
+  const awaitingProductDiscovery = {
+    project: {
+      id: consultationProject.id,
+      name: consultationProject.name,
+      goal: consultationProject.goal,
+      revision: consultationProject.revision,
+    },
+    proposal: {
+      id: "proposal-1",
+      projectId: consultationProject.id,
+      status: "awaiting-confirmation" as const,
+      revision: 2,
+      currentRevision: {
+        id: "proposal-r1",
+        revision: 1,
+        hash: "a".repeat(64),
+        content: {
+          goal: "Ship",
+          users: [],
+          scope: [],
+          nonGoals: [],
+          acceptanceCriteria: [],
+          constraints: [],
+          risks: [],
+          openQuestions: ["None."],
+        },
+        producer: {
+          aiMemberId: "member-1",
+          positionId: "position-1",
+          sessionId: consultationView.session.id,
+        },
+        editedBy: {
+          type: "human" as const,
+          id: "local-user",
+          authenticatedBy: "local-session" as const,
+        },
+        createdAt: "2026-07-15T00:00:00.000Z",
+      },
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:01:00.000Z",
+    },
+    baselines: [],
+    formalRuns: [],
+  };
+
+  it("renders localized incomplete Product Baseline feedback and disables confirmation", async (context) => {
+    for (const [t, expected] of [
+      [messages.en, /Complete users, scope/],
+      [messages.zh, /确认 Product Baseline 前/],
+    ] as const) {
+      const bridge = {
+        query: async () => ({ view: awaitingProductDiscovery }),
+        runtime: {
+          departments: async () => [scriptedSoftwareRndDepartment],
+          runs: async () => [],
+          inspectAgentCatalog: async () => ({ agents: [] }),
+          artifacts: async () => [],
+          reviewTopics: async () => [],
+          interactions: async () => [consultationView],
+          inspectProductReview: async () => null,
+          inspectTechnicalReview: async () => null,
+        },
+      } as unknown as Window["sandcastle"];
+      const dom = new JSDOM("<!doctype html><html><body></body></html>");
+      Object.defineProperty(dom.window, "sandcastle", {
+        configurable: true,
+        value: bridge,
+      });
+      const domGlobals = {
+        window: dom.window,
+        document: dom.window.document,
+        HTMLElement: dom.window.HTMLElement,
+        Node: dom.window.Node,
+        MutationObserver: dom.window.MutationObserver,
+        IS_REACT_ACT_ENVIRONMENT: true,
+      } as const;
+      const previousGlobals = new Map(
+        Object.keys(domGlobals).map((key) => [
+          key,
+          Object.getOwnPropertyDescriptor(globalThis, key),
+        ]),
+      );
+      for (const [key, value] of Object.entries(domGlobals)) {
+        Object.defineProperty(globalThis, key, { configurable: true, value });
+      }
+      const container = dom.window.document.createElement("div");
+      dom.window.document.body.append(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(
+            <ProjectDetailView
+              initialTab="consultation"
+              onArchive={async () => consultationProject}
+              onBack={() => undefined}
+              onSave={async () => consultationProject}
+              project={consultationProject}
+              t={t}
+            />,
+          );
+        });
+        await act(async () => undefined);
+        const confirm = container.querySelector(
+          "[data-consultation-confirm]",
+        ) as HTMLButtonElement;
+        assert.equal(confirm.disabled, true);
+        assert.match(
+          container.querySelector("[data-product-baseline-incomplete]")
+            ?.textContent ?? "",
+          expected,
+        );
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+        for (const [key, descriptor] of previousGlobals) {
+          if (descriptor) {
+            Object.defineProperty(globalThis, key, descriptor);
+          } else {
+            Reflect.deleteProperty(globalThis, key);
+          }
+        }
+      }
+    }
+    context.diagnostic(
+      "English and Chinese feedback rendered through ProjectDetailView",
+    );
+  });
+
+  it("keeps the confirmed Run visible when consultation cleanup fails after scheduling", async (context) => {
+    const complete = {
+      ...awaitingProductDiscovery,
+      proposal: {
+        ...awaitingProductDiscovery.proposal,
+        currentRevision: {
+          ...awaitingProductDiscovery.proposal.currentRevision,
+          content: {
+            goal: "Ship",
+            users: ["Customers"],
+            scope: ["Checkout"],
+            nonGoals: [],
+            acceptanceCriteria: ["One order"],
+            constraints: ["Local-first"],
+            risks: ["Retries"],
+            openQuestions: [],
+          },
+        },
+      },
+    };
+    const formalRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        id: "formal-run-1",
+        projectId: consultationProject.id,
+        departmentId: scriptedSoftwareRndDepartment.id,
+      },
+    };
+    const confirmed = {
+      ...complete,
+      proposal: { ...complete.proposal, status: "confirmed" as const },
+      formalRuns: [
+        {
+          runId: formalRun.run.id,
+          productBaselineId: "baseline-1",
+          snapshotRevisionId: "snapshot-1",
+          parentRunId: null,
+          forkedFromSnapshotRevisionId: null,
+          status: "ready" as const,
+          createdAt: "2026-07-15T00:02:00.000Z",
+        },
+      ],
+    };
+    let confirmedActive = false;
+    const runtimeCalls: string[] = [];
+    const supervisionView = {
+      run: formalRun.run,
+      snapshot: {
+        id: formalRun.snapshot.id,
+        revision: formalRun.snapshot.revision,
+        hash: formalRun.snapshot.hash,
+      },
+      graph: { nodes: [], edges: [] },
+      timeline: [],
+      agentActivities: [],
+      interactions: [],
+      interventions: [],
+      allowedCommands: {
+        pause: false,
+        resume: false,
+        cancelAttemptIds: [],
+        cancelTurnIds: [],
+        decidePermissionIds: [],
+        interveneNodeRunIds: [],
+      },
+    };
+    const bridge = {
+      query: async (query: { readonly type: string }) =>
+        query.type === "work-packages.inspect"
+          ? {
+              view: {
+                projectId: consultationProject.id,
+                runId: formalRun.run.id,
+                technicalBaselineId: "technical-baseline-1",
+                packages: [],
+              },
+            }
+          : query.type === "code-reviews.inspect"
+            ? { view: [] }
+            : query.type === "run.supervision.inspect"
+              ? { view: supervisionView, asOfSequence: 1 }
+              : { view: confirmedActive ? confirmed : complete },
+      execute: async () => {
+        confirmedActive = true;
+        return { status: "succeeded", value: confirmed, effectIds: [] };
+      },
+      runtime: {
+        departments: async () => [scriptedSoftwareRndDepartment],
+        runs: async () => (confirmedActive ? [formalRun] : []),
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [consultationView],
+        inspectProductReview: async () => null,
+        inspectTechnicalReview: async () => null,
+        startRun: async () => {
+          runtimeCalls.push("run.start");
+          return { ...formalRun, nodes: [] };
+        },
+        executeReady: async () => {
+          runtimeCalls.push("run.execute-ready");
+          return formalRun;
+        },
+        closeInteractionSession: async () => {
+          throw Object.assign(new Error("cleanup failed"), {
+            code: "CONSULTATION_CLOSE_FAILED",
+          });
+        },
+      },
+      openEventStream: async () => ({
+        subscriptionId: "subscription-1",
+        subscriptionGeneration: 1,
+        barrierSequence: 1,
+      }),
+      closeEventStream: async () => undefined,
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    });
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          initialTab="consultation"
+          onArchive={async () => consultationProject}
+          onBack={() => undefined}
+          onSave={async () => consultationProject}
+          project={consultationProject}
+          t={messages.en}
+        />,
+      );
+    });
+    await act(async () => undefined);
+    await act(async () => {
+      (
+        container.querySelector(
+          "[data-consultation-confirm]",
+        ) as HTMLButtonElement
+      ).click();
+    });
+    assert.deepEqual(runtimeCalls, ["run.start", "run.execute-ready"]);
+    assert.match(container.innerHTML, /data-project-run-detail/);
+    assert.doesNotMatch(container.innerHTML, /data-consultation-confirm-error/);
+  });
+
+  it("refreshes Product Discovery and Runs after a failed formal Run resume", async (context) => {
+    const formalRun: DepartmentRunView = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        id: "formal-run-unstarted",
+        projectId: consultationProject.id,
+        departmentId: scriptedSoftwareRndDepartment.id,
+        status: "ready" as const,
+      },
+      nodes: [],
+    };
+    const discovery = {
+      ...awaitingProductDiscovery,
+      proposal: {
+        ...awaitingProductDiscovery.proposal,
+        status: "clarifying" as const,
+      },
+      formalRuns: [
+        {
+          runId: formalRun.run.id,
+          productBaselineId: "baseline-1",
+          snapshotRevisionId: "snapshot-1",
+          parentRunId: null,
+          forkedFromSnapshotRevisionId: null,
+          status: "ready" as const,
+          createdAt: "2026-07-15T00:02:00.000Z",
+        },
+      ],
+    };
+    let discoveryQueries = 0;
+    let runQueries = 0;
+    const bridge = {
+      query: async () => {
+        discoveryQueries += 1;
+        return { view: discovery };
+      },
+      runtime: {
+        departments: async () => [scriptedSoftwareRndDepartment],
+        runs: async () => {
+          runQueries += 1;
+          return [formalRun];
+        },
+        inspectAgentCatalog: async () => ({ agents: [] }),
+        artifacts: async () => [],
+        reviewTopics: async () => [],
+        interactions: async () => [consultationView],
+        inspectProductReview: async () => null,
+        inspectTechnicalReview: async () => null,
+        startRun: async () => {
+          throw Object.assign(new Error("start failed"), {
+            code: "RUN_START_FAILED",
+          });
+        },
+      },
+    } as unknown as Window["sandcastle"];
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    Object.defineProperty(dom.window, "sandcastle", {
+      configurable: true,
+      value: bridge,
+    });
+    const domGlobals = {
+      window: dom.window,
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      Node: dom.window.Node,
+      MutationObserver: dom.window.MutationObserver,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    } as const;
+    const previousGlobals = new Map(
+      Object.keys(domGlobals).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+      ]),
+    );
+    for (const [key, value] of Object.entries(domGlobals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.append(container);
+    const root = createRoot(container);
+    context.after(async () => {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of previousGlobals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    });
+    await act(async () => {
+      root.render(
+        <ProjectDetailView
+          initialTab="consultation"
+          onArchive={async () => consultationProject}
+          onBack={() => undefined}
+          onSave={async () => consultationProject}
+          project={consultationProject}
+          t={messages.en}
+        />,
+      );
+    });
+    await act(async () => undefined);
+    const initialDiscoveryQueries = discoveryQueries;
+    const initialRunQueries = runQueries;
+    const resume = container.querySelector(
+      "[data-consultation-resume-formal-run]",
+    ) as HTMLButtonElement;
+    assert.ok(resume);
+    await act(async () => resume.click());
+    assert.ok(discoveryQueries > initialDiscoveryQueries);
+    assert.ok(runQueries > initialRunQueries);
+    assert.match(
+      container.querySelector("[data-consultation-confirm-error]")
+        ?.textContent ?? "",
+      /RUN_START_FAILED: start failed/,
+    );
+  });
+
+  it("requires complete Product Proposal fields and truly empty openQuestions", () => {
+    const proposal = {
+      id: "proposal-1",
+      projectId: "project-1",
+      status: "awaiting-confirmation" as const,
+      revision: 1,
+      currentRevision: {
+        id: "proposal-r1",
+        revision: 1,
+        hash: "a".repeat(64),
+        content: {
+          goal: "Ship",
+          users: ["Customers"],
+          scope: ["Checkout"],
+          nonGoals: [],
+          acceptanceCriteria: ["One order"],
+          constraints: ["Local-first"],
+          risks: ["Retries"],
+          openQuestions: ["None."],
+        },
+        producer: {
+          aiMemberId: "member-1",
+          positionId: "position-1",
+          sessionId: "session-1",
+        },
+        editedBy: {
+          type: "human" as const,
+          id: "local-user",
+          authenticatedBy: "local-session" as const,
+        },
+        createdAt: "2026-07-15T00:00:00.000Z",
+      },
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z",
+    };
+
+    assert.equal(productProposalCanFormBaseline(proposal), false);
+    assert.deepEqual(productProposalCompleteness(proposal), {
+      users: true,
+      scope: true,
+      acceptanceCriteria: true,
+      constraints: true,
+      risks: true,
+      openQuestions: false,
+    });
+    assert.equal(
+      productProposalCanFormBaseline({
+        ...proposal,
+        currentRevision: {
+          ...proposal.currentRevision,
+          content: { ...proposal.currentRevision.content, openQuestions: [] },
+        },
+      }),
+      true,
+    );
+  });
+
+  it("finds a confirmed formal Run that still needs scheduling", () => {
+    const run = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        id: "run-confirm",
+        status: "ready" as const,
+      },
+      nodes: [],
+    };
+    const discovery = {
+      project: { id: "project-1", name: "Checkout", goal: "Ship", revision: 1 },
+      proposal: {
+        id: "proposal-1",
+        projectId: "project-1",
+        status: "confirmed" as const,
+        revision: 2,
+        currentRevision: {
+          id: "proposal-r1",
+          revision: 1,
+          hash: "a".repeat(64),
+          content: {
+            goal: "Ship",
+            users: ["Customers"],
+            scope: ["Checkout"],
+            nonGoals: [],
+            acceptanceCriteria: ["One order"],
+            constraints: ["Local-first"],
+            risks: ["Retries"],
+            openQuestions: [],
+          },
+          producer: {
+            aiMemberId: "member-1",
+            positionId: "position-1",
+            sessionId: "session-1",
+          },
+          editedBy: {
+            type: "human" as const,
+            id: "local-user",
+            authenticatedBy: "local-session" as const,
+          },
+          createdAt: "2026-07-15T00:00:00.000Z",
+        },
+        createdAt: "2026-07-15T00:00:00.000Z",
+        updatedAt: "2026-07-15T00:01:00.000Z",
+      },
+      baselines: [],
+      formalRuns: [
+        {
+          runId: "run-confirm",
+          productBaselineId: "baseline-1",
+          snapshotRevisionId: "snapshot-1",
+          parentRunId: null,
+          forkedFromSnapshotRevisionId: null,
+          status: "ready" as const,
+          createdAt: "2026-07-15T00:02:00.000Z",
+        },
+      ],
+    };
+
+    assert.equal(productDiscoveryUnstartedFormalRun(discovery, [run]), run);
+    assert.equal(
+      productDiscoveryUnstartedFormalRun(discovery, [
+        { ...run, nodes: scriptedDepartmentRun.nodes },
+      ]),
+      null,
+    );
+  });
+
   it("confirms the exact Runtime Product Proposal and re-queries authoritative Baseline/Run state", async () => {
     const awaiting = {
       project: { id: "project-1", name: "Checkout", goal: "Ship", revision: 1 },

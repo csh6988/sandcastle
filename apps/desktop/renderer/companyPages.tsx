@@ -895,6 +895,48 @@ export const confirmProjectProductBaseline = async (
   return inspectProjectProductDiscovery(bridge, projectId);
 };
 
+export const productProposalCompleteness = (
+  proposal: ProductDiscoveryView["proposal"] | undefined,
+): {
+  readonly users: boolean;
+  readonly scope: boolean;
+  readonly acceptanceCriteria: boolean;
+  readonly constraints: boolean;
+  readonly risks: boolean;
+  readonly openQuestions: boolean;
+} => ({
+  users: (proposal?.currentRevision.content.users.length ?? 0) > 0,
+  scope: (proposal?.currentRevision.content.scope.length ?? 0) > 0,
+  acceptanceCriteria:
+    (proposal?.currentRevision.content.acceptanceCriteria.length ?? 0) > 0,
+  constraints: (proposal?.currentRevision.content.constraints.length ?? 0) > 0,
+  risks: (proposal?.currentRevision.content.risks.length ?? 0) > 0,
+  openQuestions:
+    (proposal?.currentRevision.content.openQuestions.length ?? 0) === 0,
+});
+
+export const productProposalCanFormBaseline = (
+  proposal: ProductDiscoveryView["proposal"] | undefined,
+): boolean => {
+  const completeness = productProposalCompleteness(proposal);
+  return (
+    proposal?.status === "awaiting-confirmation" &&
+    Object.values(completeness).every(Boolean)
+  );
+};
+
+export const productDiscoveryUnstartedFormalRun = (
+  discovery: ProductDiscoveryView | null | undefined,
+  runs: readonly DepartmentRunView[],
+): DepartmentRunView | null => {
+  const formalRunId = discovery?.formalRuns.at(-1)?.runId;
+  if (!formalRunId) return null;
+  const formalRun = runs.find((run) => run.run.id === formalRunId);
+  return formalRun?.run.status === "ready" && formalRun.nodes.length === 0
+    ? formalRun
+    : null;
+};
+
 export function ProjectsPage({ t }: { readonly t: Messages }) {
   const [projects, setProjects] = useState<readonly CompanyProject[] | null>(
     null,
@@ -3270,6 +3312,10 @@ export function ProjectDetailView({
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runErrorCode, setRunErrorCode] = useState<string | null>(null);
+  const [consultationError, setConsultationError] = useState<{
+    readonly message: string;
+    readonly code: string | null;
+  } | null>(null);
   const [activeTab, setActiveTab] = useState<ProjectDetailTab>(initialTab);
   const [statisticsQueryDraft, setStatisticsQueryDraft] =
     useState<StatisticsInspectInput>(() => projectStatisticsQuery(project));
@@ -3743,16 +3789,18 @@ export function ProjectDetailView({
     selectedRun,
   ]);
 
-  const startRun = async (): Promise<DepartmentRunView | null> => {
-    if (!runDepartmentId) return null;
+  const startRunForDepartment = async (
+    departmentId: string,
+  ): Promise<DepartmentRunView | null> => {
     setRunBusy(true);
     setRunError(null);
     setRunErrorCode(null);
+    setConsultationError(null);
     try {
       const advanced = await startProjectDepartmentRun(
         window.sandcastle.runtime,
         project.id,
-        runDepartmentId,
+        departmentId,
         agentOverrideId || undefined,
       );
       setSelectedRun(advanced);
@@ -3761,12 +3809,19 @@ export function ProjectDetailView({
     } catch (nextError) {
       setRunError(errorMessage(nextError));
       setRunErrorCode(runtimeErrorCode(nextError));
-      void refreshRuns().catch(() => undefined);
+      setConsultationError({
+        message: errorMessage(nextError),
+        code: runtimeErrorCode(nextError),
+      });
+      await Promise.allSettled([refreshProductDiscovery(), refreshRuns()]);
     } finally {
       setRunBusy(false);
     }
     return null;
   };
+
+  const startRun = async (): Promise<DepartmentRunView | null> =>
+    runDepartmentId ? startRunForDepartment(runDepartmentId) : null;
 
   const startConsultation = async (): Promise<void> => {
     setInteractionBusy(true);
@@ -3825,6 +3880,7 @@ export function ProjectDetailView({
     if (!consultation) return;
     setRunBusy(true);
     setRunError(null);
+    setConsultationError(null);
     try {
       setProductDiscovery(
         await reviseProjectProductProposal(window.sandcastle, {
@@ -3844,6 +3900,7 @@ export function ProjectDetailView({
   const markProposalAwaiting = async (): Promise<void> => {
     setRunBusy(true);
     setRunError(null);
+    setConsultationError(null);
     try {
       setProductDiscovery(
         await markProjectProductProposalAwaiting(window.sandcastle, project.id),
@@ -3860,6 +3917,8 @@ export function ProjectDetailView({
     if (!runDepartmentId) return;
     setRunBusy(true);
     setRunError(null);
+    setRunErrorCode(null);
+    setConsultationError(null);
     try {
       const confirmed = await confirmProjectProductBaseline(
         window.sandcastle,
@@ -3877,30 +3936,55 @@ export function ProjectDetailView({
         },
       );
       setProductDiscovery(confirmed);
+      const advanced = await startProjectDepartmentRun(
+        window.sandcastle.runtime,
+        project.id,
+        runDepartmentId,
+        agentOverrideId || undefined,
+      );
       const nextRuns = await refreshRuns();
-      const formalRunId = confirmed.formalRuns.at(-1)?.runId;
       setSelectedRun(
-        nextRuns.find((run) => run.run.id === formalRunId) ??
-          nextRuns[0] ??
-          null,
+        nextRuns.find((run) => run.run.id === advanced.run.id) ?? advanced,
       );
       setActiveTab("runs");
       if (consultation?.session.status === "active") {
-        await window.sandcastle.runtime.closeInteractionSession(
-          consultation.session.id,
-        );
-        setConsultation(
-          await window.sandcastle.runtime.inspectInteraction(
+        try {
+          await window.sandcastle.runtime.closeInteractionSession(
             consultation.session.id,
-          ),
-        );
+          );
+          setConsultation(
+            await window.sandcastle.runtime.inspectInteraction(
+              consultation.session.id,
+            ),
+          );
+        } catch {
+          void window.sandcastle.runtime
+            .interactions(project.id)
+            .then((items) =>
+              setConsultation(
+                items.find((item) => item.session.mode === "consultation") ??
+                  null,
+              ),
+            )
+            .catch(() => undefined);
+        }
       }
     } catch (nextError) {
-      setRunError(errorMessage(nextError));
-      setRunErrorCode(runtimeErrorCode(nextError));
+      setConsultationError({
+        message: errorMessage(nextError),
+        code: runtimeErrorCode(nextError),
+      });
+      await Promise.allSettled([refreshProductDiscovery(), refreshRuns()]);
     } finally {
       setRunBusy(false);
     }
+  };
+
+  const resumeUnstartedFormalRun = async (
+    run: DepartmentRunView,
+  ): Promise<void> => {
+    const advanced = await startRunForDepartment(run.run.departmentId);
+    if (advanced) setActiveTab("runs");
   };
 
   const sendCollaborationMessage = async (content: string): Promise<void> => {
@@ -5253,7 +5337,7 @@ export function ProjectDetailView({
                 runBusy ||
                 runDepartmentId === "" ||
                 !consultation ||
-                productDiscovery?.proposal?.status !== "awaiting-confirmation"
+                !productProposalCanFormBaseline(productDiscovery?.proposal)
               }
               onClick={() => void confirmConsultation()}
               type="button"
@@ -5261,7 +5345,40 @@ export function ProjectDetailView({
               <Icon name="run" size={20} />
               Confirm Product Baseline
             </button>
+            {productDiscoveryUnstartedFormalRun(productDiscovery, runs) ? (
+              <button
+                className="secondary-button"
+                data-consultation-resume-formal-run
+                disabled={runBusy}
+                onClick={() =>
+                  void resumeUnstartedFormalRun(
+                    productDiscoveryUnstartedFormalRun(productDiscovery, runs)!,
+                  )
+                }
+                type="button"
+              >
+                <Icon name="run" size={20} />
+                {t.resumeFormalRun}
+              </button>
+            ) : null}
           </div>
+          {productDiscovery?.proposal?.status === "awaiting-confirmation" &&
+          !productProposalCanFormBaseline(productDiscovery.proposal) ? (
+            <div className="warn" data-product-baseline-incomplete role="alert">
+              {t.productBaselineIncomplete}
+            </div>
+          ) : null}
+          {consultationError ? (
+            <div
+              className="warn"
+              data-consultation-confirm-error
+              data-run-error-code={consultationError.code ?? undefined}
+              role="alert"
+            >
+              {consultationError.code ? `${consultationError.code}: ` : ""}
+              {consultationError.message}
+            </div>
+          ) : null}
         </section>
       ) : null}
       {collaboration && selectedRun && activeTab === "runs" ? (

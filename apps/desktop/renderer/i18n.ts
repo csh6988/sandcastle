@@ -173,6 +173,9 @@ export const messages = {
     repositoryPickerNotGit: "The selected directory is not a Git repository.",
     repositoryPickerGitUnavailable: "Git is not available on this computer.",
     repositoryPickerFailed: "The repository folder picker could not be opened.",
+    productBaselineIncomplete:
+      "Complete users, scope, acceptanceCriteria, constraints, and risks, then clear openQuestions before confirming the Product Baseline.",
+    resumeFormalRun: "Continue formal Run",
     addRepositoryReference: "Add repository reference",
     removeRepositoryReference: "Remove repository reference",
     saveProject: "Save project",
@@ -768,6 +771,9 @@ export const messages = {
     repositoryPickerNotGit: "所选文件夹不是 Git 仓库。",
     repositoryPickerGitUnavailable: "此计算机上无法使用 Git。",
     repositoryPickerFailed: "无法打开仓库文件夹选择器。",
+    productBaselineIncomplete:
+      "确认 Product Baseline 前，请填写 users、scope、acceptanceCriteria、constraints 和 risks，并清空 openQuestions。",
+    resumeFormalRun: "继续正式运行",
     addRepositoryReference: "添加仓库引用",
     removeRepositoryReference: "删除仓库引用",
     saveProject: "保存项目",
