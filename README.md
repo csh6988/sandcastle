@@ -66,13 +66,14 @@ set `SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER=production` only when you
 intend to run configured Agents and Sandbox providers.
 
 Project Settings supports two kinds of repository references. Use the native
-**Select folder** action to choose a local Git repository; selecting a nested
-directory resolves to the repository's real worktree root. The picker validates
-that the directory is accessible and is a Git repository, while canceling or
-rejecting a selection leaves the draft unchanged. Manual Repository references
-remain supported for non-local or otherwise custom references. Picking a folder
-only fills the draft input: it does not add a reference or save the Project
-until those actions are explicitly confirmed.
+**Select folder** action to choose a local folder. Existing Git repositories,
+including nested selections, resolve to their real worktree root. For a regular
+folder, Desktop asks before running local `git init`; confirmation creates no
+remote and no initial commit, while cancellation leaves both the folder and the
+draft unchanged. Manual Repository references remain supported for non-local or
+otherwise custom references. Picking or initializing a folder only fills the
+draft input: it does not add a reference or save the Project until those actions
+are explicitly confirmed.
 
 Product discovery is an informal consultation until a human confirms a complete
 Product Proposal. Confirm is enabled only when users, scope, acceptance

@@ -81,6 +81,15 @@ const runtimeIpc = registerRuntimeIpc(ipcMain, () => runtimeSupervisor, {
             title: options.title,
             properties: [...options.properties],
           }),
+        showMessageBox: (options) => {
+          const confirmation = {
+            ...options,
+            buttons: [...options.buttons],
+          };
+          return window
+            ? dialog.showMessageBox(window, confirmation)
+            : dialog.showMessageBox(confirmation);
+        },
       },
     }),
 });

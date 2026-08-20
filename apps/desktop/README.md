@@ -38,11 +38,13 @@ Responsibilities (and nothing more):
   references, optimistic revision updates, and archive behavior without a
   fixed PRD/Design/R&D/Review stage machine. Repository references can be
   entered manually or selected with the native Electron **Select folder**
-  action. The picker accepts accessible Git repositories, resolves nested
-  selections to the real worktree root, and reports clear inline errors for
-  inaccessible or non-Git directories. Canceling or rejecting a selection keeps
-  the draft input unchanged; selecting a folder never adds a reference or saves
-  the Project by itself. Project detail can start and inspect Department Runs.
+  action. The picker resolves an existing repository or nested selection to its
+  real worktree root. When an accessible regular folder is selected, Desktop
+  asks before running local `git init`; confirmation creates neither a remote
+  nor an initial commit, and cancellation leaves the folder and draft input
+  unchanged. Initialization failures are shown inline in English or Chinese.
+  Selecting or initializing a folder never adds a reference or saves the
+  Project by itself. Project detail can start and inspect Department Runs.
   Starting a Run creates an immutable, canonical
   SHA-256 Run Snapshot r1 from the active published Pipeline Version and the
   resolved Project, Department, Position, AI Member, Skill Flow, Execution

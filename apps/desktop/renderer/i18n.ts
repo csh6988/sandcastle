@@ -171,6 +171,8 @@ export const messages = {
     selectRepositoryFolder: "Select folder",
     repositoryPickerNotAccessible: "The selected directory is not accessible.",
     repositoryPickerNotGit: "The selected directory is not a Git repository.",
+    repositoryPickerGitInitFailed:
+      "Git could not be initialized in the selected directory.",
     repositoryPickerGitUnavailable: "Git is not available on this computer.",
     repositoryPickerFailed: "The repository folder picker could not be opened.",
     productBaselineIncomplete:
@@ -769,6 +771,7 @@ export const messages = {
     selectRepositoryFolder: "选择文件夹",
     repositoryPickerNotAccessible: "无法访问所选文件夹。",
     repositoryPickerNotGit: "所选文件夹不是 Git 仓库。",
+    repositoryPickerGitInitFailed: "无法在所选文件夹中初始化 Git。",
     repositoryPickerGitUnavailable: "此计算机上无法使用 Git。",
     repositoryPickerFailed: "无法打开仓库文件夹选择器。",
     productBaselineIncomplete:

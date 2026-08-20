@@ -102,7 +102,35 @@ export interface RepositoryDirectoryPickerDialog {
     readonly canceled: boolean;
     readonly filePaths: readonly string[];
   }>;
+  showMessageBox?(options: {
+    readonly type: "question";
+    readonly title: string;
+    readonly message: string;
+    readonly detail: string;
+    readonly buttons: readonly [string, string];
+    readonly defaultId: 0;
+    readonly cancelId: 1;
+    readonly noLink: true;
+  }): Promise<{ readonly response: number }>;
 }
+
+const initializeGitRepository = async (
+  directoryPath: string,
+): Promise<void> => {
+  await runFile("git", ["init", "--", directoryPath]);
+};
+
+const initializeRepositoryConfirmation = {
+  type: "question",
+  title: "Initialize local Git repository / 初始化本地 Git 仓库",
+  message: "This folder is not a Git repository.",
+  detail:
+    "Initialize Git here so Sandcastle can use commits and isolated worktrees? No remote or initial commit will be created.\n\n该文件夹不是 Git 仓库。是否在此初始化 Git，以便 Sandcastle 使用提交和隔离 Worktree？不会创建远程仓库或初始提交。",
+  buttons: ["Initialize Git / 初始化 Git", "Cancel / 取消"],
+  defaultId: 0,
+  cancelId: 1,
+  noLink: true,
+} as const;
 
 const pickerErrorMessage = (code: PickerErrorCode): string => {
   if (code === "DIRECTORY_NOT_ACCESSIBLE") {
@@ -110,6 +138,9 @@ const pickerErrorMessage = (code: PickerErrorCode): string => {
   }
   if (code === "NOT_GIT_REPOSITORY") {
     return "The selected directory is not a Git repository.";
+  }
+  if (code === "GIT_INIT_FAILED") {
+    return "Git could not be initialized in the selected directory.";
   }
   if (code === "GIT_UNAVAILABLE") {
     return "Git is not available on this computer.";
@@ -154,6 +185,44 @@ export const createRepositoryDirectoryPicker = async (options: {
         error.code === "GIT_UNAVAILABLE")
         ? error.code
         : "PICKER_FAILED";
+    if (code === "NOT_GIT_REPOSITORY" && options.dialog.showMessageBox) {
+      let response: number;
+      try {
+        ({ response } = await options.dialog.showMessageBox(
+          initializeRepositoryConfirmation,
+        ));
+      } catch {
+        return {
+          status: "error",
+          code: "PICKER_FAILED",
+          message: pickerErrorMessage("PICKER_FAILED"),
+        };
+      }
+      if (response !== initializeRepositoryConfirmation.defaultId) {
+        return { status: "canceled" };
+      }
+      try {
+        await initializeGitRepository(selection.filePaths[0]);
+      } catch {
+        return {
+          status: "error",
+          code: "GIT_INIT_FAILED",
+          message: pickerErrorMessage("GIT_INIT_FAILED"),
+        };
+      }
+      try {
+        const repositoryRoot = await (
+          options.resolveRepositoryRoot ?? resolveGitRepositoryRoot
+        )(selection.filePaths[0]);
+        return { status: "selected", path: repositoryRoot };
+      } catch {
+        return {
+          status: "error",
+          code: "GIT_INIT_FAILED",
+          message: pickerErrorMessage("GIT_INIT_FAILED"),
+        };
+      }
+    }
     return { status: "error", code, message: pickerErrorMessage(code) };
   }
 };

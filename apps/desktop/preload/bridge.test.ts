@@ -327,6 +327,17 @@ describe("Sandcastle preload bridge", () => {
       status: "canceled",
     });
 
+    const initFailed = createSandcastleBridge(async () => ({
+      status: "error",
+      code: "GIT_INIT_FAILED",
+      message: "Git could not be initialized in the selected directory.",
+    }));
+    assert.deepEqual(await initFailed.desktop.pickRepositoryDirectory(), {
+      status: "error",
+      code: "GIT_INIT_FAILED",
+      message: "Git could not be initialized in the selected directory.",
+    });
+
     const malformed = createSandcastleBridge(async () => ({
       status: "selected",
       path: "",

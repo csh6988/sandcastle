@@ -4552,9 +4552,11 @@ export function ProjectDetailView({
             ? t.repositoryPickerNotAccessible
             : result.code === "NOT_GIT_REPOSITORY"
               ? t.repositoryPickerNotGit
-              : result.code === "GIT_UNAVAILABLE"
-                ? t.repositoryPickerGitUnavailable
-                : t.repositoryPickerFailed;
+              : result.code === "GIT_INIT_FAILED"
+                ? t.repositoryPickerGitInitFailed
+                : result.code === "GIT_UNAVAILABLE"
+                  ? t.repositoryPickerGitUnavailable
+                  : t.repositoryPickerFailed;
         setRepositoryPickerError(message);
       }
     } catch {

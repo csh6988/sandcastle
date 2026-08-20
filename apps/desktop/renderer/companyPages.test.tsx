@@ -2106,6 +2106,11 @@ describe("Project detail", () => {
         code: "NOT_GIT_REPOSITORY" as const,
         message: "The selected directory is not a Git repository.",
       },
+      {
+        status: "error" as const,
+        code: "GIT_INIT_FAILED" as const,
+        message: "Git could not be initialized in the selected directory.",
+      },
     ];
     const saves: unknown[] = [];
     const bridge = {
@@ -2206,6 +2211,15 @@ describe("Project detail", () => {
         container.querySelector("[data-project-repository-picker-error]")
           ?.textContent ?? "",
         /not a Git repository/i,
+      );
+      assert.equal(saves.length, 0);
+
+      await act(async () => picker.click());
+      assert.equal(repositoryInput().value, "/repo");
+      assert.match(
+        container.querySelector("[data-project-repository-picker-error]")
+          ?.textContent ?? "",
+        /could not be initialized/i,
       );
       assert.equal(saves.length, 0);
 

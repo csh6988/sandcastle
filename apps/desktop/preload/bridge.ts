@@ -228,6 +228,7 @@ export const RepositoryDirectoryPickerResultSchema = z.discriminatedUnion(
         code: z.enum([
           "DIRECTORY_NOT_ACCESSIBLE",
           "NOT_GIT_REPOSITORY",
+          "GIT_INIT_FAILED",
           "GIT_UNAVAILABLE",
           "PICKER_FAILED",
         ]),
