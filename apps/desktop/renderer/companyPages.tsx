@@ -784,6 +784,15 @@ export const startProjectDepartmentRun = async (
   }
 };
 
+export const resumeProjectDepartmentRun = async (
+  runtime: Pick<ProjectDepartmentRunRuntime, "executeReady">,
+  run: DepartmentRunView,
+): Promise<DepartmentRunView> =>
+  runtime.executeReady({
+    runId: run.run.id,
+    expectedRevision: run.run.revision,
+  });
+
 type ProductDiscoveryBridge = Pick<
   typeof window.sandcastle,
   "execute" | "query"
@@ -3983,8 +3992,29 @@ export function ProjectDetailView({
   const resumeUnstartedFormalRun = async (
     run: DepartmentRunView,
   ): Promise<void> => {
-    const advanced = await startRunForDepartment(run.run.departmentId);
-    if (advanced) setActiveTab("runs");
+    setRunBusy(true);
+    setRunError(null);
+    setRunErrorCode(null);
+    setConsultationError(null);
+    try {
+      const advanced = await resumeProjectDepartmentRun(
+        window.sandcastle.runtime,
+        run,
+      );
+      setSelectedRun(advanced);
+      await refreshRuns();
+      setActiveTab("runs");
+    } catch (nextError) {
+      setRunError(errorMessage(nextError));
+      setRunErrorCode(runtimeErrorCode(nextError));
+      setConsultationError({
+        message: errorMessage(nextError),
+        code: runtimeErrorCode(nextError),
+      });
+      await Promise.allSettled([refreshProductDiscovery(), refreshRuns()]);
+    } finally {
+      setRunBusy(false);
+    }
   };
 
   const sendCollaborationMessage = async (content: string): Promise<void> => {

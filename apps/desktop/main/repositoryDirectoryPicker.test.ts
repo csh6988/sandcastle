@@ -47,8 +47,14 @@ describe("repository directory picker", () => {
 
   it("returns canceled without resolving or changing anything", async () => {
     let resolved = false;
+    let dialogOptions:
+      | Parameters<RepositoryDirectoryPickerDialog["showOpenDialog"]>[0]
+      | undefined;
     const dialog: RepositoryDirectoryPickerDialog = {
-      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      showOpenDialog: async (options) => {
+        dialogOptions = options;
+        return { canceled: true, filePaths: [] };
+      },
     };
 
     const result = await createRepositoryDirectoryPicker({
@@ -61,6 +67,10 @@ describe("repository directory picker", () => {
 
     assert.deepEqual(result, { status: "canceled" });
     assert.equal(resolved, false);
+    assert.deepEqual(dialogOptions, {
+      title: "Select Git repository folder / 选择 Git 仓库文件夹",
+      properties: ["openDirectory"],
+    });
   });
 
   it("resolves a selected repository and nested directory to its Git root", async () => {

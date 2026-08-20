@@ -36,8 +36,14 @@ Responsibilities (and nothing more):
   using the historical JSON stores. Departments can be copied or archived.
   Projects expose Runtime-backed name, goal, shared context, repository
   references, optimistic revision updates, and archive behavior without a
-  fixed PRD/Design/R&D/Review stage machine. Project detail can start and
-  inspect Department Runs. Starting a Run creates an immutable, canonical
+  fixed PRD/Design/R&D/Review stage machine. Repository references can be
+  entered manually or selected with the native Electron **Select folder**
+  action. The picker accepts accessible Git repositories, resolves nested
+  selections to the real worktree root, and reports clear inline errors for
+  inaccessible or non-Git directories. Canceling or rejecting a selection keeps
+  the draft input unchanged; selecting a folder never adds a reference or saves
+  the Project by itself. Project detail can start and inspect Department Runs.
+  Starting a Run creates an immutable, canonical
   SHA-256 Run Snapshot r1 from the active published Pipeline Version and the
   resolved Project, Department, Position, AI Member, Skill Flow, Execution
   Profile, Secret Reference IDs, Artifact Contracts, limits, and node
@@ -100,6 +106,17 @@ Responsibilities (and nothing more):
   and the new `recovery` Attempt binds to r2 without consuming the normal Retry
   allowance; goal, Pipeline Version, inputs, and Approval history are not part
   of the Recovery command.
+
+  Product discovery is an informal consultation until a human confirms a
+  complete Product Proposal. Confirm stays disabled until users, scope,
+  acceptance criteria, constraints, and risks are populated and
+  `openQuestions` is empty; `['None.']` is not treated as complete. Successful
+  confirmation preserves the `run.start` → `run.execute-ready` scheduling
+  sequence. A confirmed formal Run that is still `ready` with zero nodes is
+  resumed through `run.execute-ready`, so Desktop does not create a duplicate
+  Run. A post-scheduling cleanup failure does not turn an otherwise successful
+  confirmation into a false failure, while confirm/resume failures refresh the
+  authoritative Product Discovery and Runs views.
 
 Desktop v1 has no Copilot sidebar, assistant entry point, CopilotKit runtime,
 default model, or LLM key loading path. Opening the Company Directory and

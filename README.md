@@ -65,6 +65,26 @@ Scripted Execution Adapter is deterministic and does not invoke a real Agent;
 set `SANDCASTLE_COMPANY_RUNTIME_EXECUTION_ADAPTER=production` only when you
 intend to run configured Agents and Sandbox providers.
 
+Project Settings supports two kinds of repository references. Use the native
+**Select folder** action to choose a local Git repository; selecting a nested
+directory resolves to the repository's real worktree root. The picker validates
+that the directory is accessible and is a Git repository, while canceling or
+rejecting a selection leaves the draft unchanged. Manual Repository references
+remain supported for non-local or otherwise custom references. Picking a folder
+only fills the draft input: it does not add a reference or save the Project
+until those actions are explicitly confirmed.
+
+Product discovery is an informal consultation until a human confirms a complete
+Product Proposal. Confirm is enabled only when users, scope, acceptance
+criteria, constraints, and risks are present and `openQuestions` is truly empty
+(`['None.']` is still incomplete). A successful confirmation follows the
+existing `run.start` → `run.execute-ready` scheduling flow. If a confirmed
+formal Run already exists in `ready` state with zero nodes, Desktop resumes that
+Run with `run.execute-ready` instead of creating a duplicate. Refresh and cleanup
+failures are reported separately from a successfully scheduled Run, and failed
+confirm/resume actions refresh the authoritative Product Discovery and Runs
+views.
+
 Useful Desktop commands:
 
 ```bash

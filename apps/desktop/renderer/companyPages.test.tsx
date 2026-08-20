@@ -53,6 +53,7 @@ import {
   productProposalCanFormBaseline,
   productProposalCompleteness,
   productDiscoveryUnstartedFormalRun,
+  resumeProjectDepartmentRun,
 } from "./companyPages.js";
 import { Icon, IconButton } from "./icons.js";
 import { messages } from "./i18n.js";
@@ -3596,9 +3597,9 @@ describe("Agent Interaction workspace", () => {
         interactions: async () => [consultationView],
         inspectProductReview: async () => null,
         inspectTechnicalReview: async () => null,
-        startRun: async () => {
-          throw Object.assign(new Error("start failed"), {
-            code: "RUN_START_FAILED",
+        executeReady: async () => {
+          throw Object.assign(new Error("execute-ready failed"), {
+            code: "RUN_EXECUTE_READY_FAILED",
           });
         },
       },
@@ -3661,7 +3662,7 @@ describe("Agent Interaction workspace", () => {
     assert.match(
       container.querySelector("[data-consultation-confirm-error]")
         ?.textContent ?? "",
-      /RUN_START_FAILED: start failed/,
+      /RUN_EXECUTE_READY_FAILED: execute-ready failed/,
     );
   });
 
@@ -3789,6 +3790,34 @@ describe("Agent Interaction workspace", () => {
       ]),
       null,
     );
+  });
+
+  it("resumes the existing ready formal Run without creating a duplicate Run", async () => {
+    const run = {
+      ...scriptedDepartmentRun,
+      run: {
+        ...scriptedDepartmentRun.run,
+        id: "run-confirm",
+        status: "ready" as const,
+        revision: 7,
+      },
+      nodes: [],
+    };
+    const calls: unknown[] = [];
+    const runtime = {
+      executeReady: async (input: unknown) => {
+        calls.push(input);
+        return run;
+      },
+      startRun: async () => {
+        throw new Error("resume must not create a new Run");
+      },
+    } as unknown as Parameters<typeof resumeProjectDepartmentRun>[0];
+
+    const resumed = await resumeProjectDepartmentRun(runtime, run);
+
+    assert.equal(resumed, run);
+    assert.deepEqual(calls, [{ runId: "run-confirm", expectedRevision: 7 }]);
   });
 
   it("confirms the exact Runtime Product Proposal and re-queries authoritative Baseline/Run state", async () => {
